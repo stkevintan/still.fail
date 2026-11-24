@@ -61,7 +61,7 @@ export const READER_MODES = {
   },
   "usage-check": {
     allowShadow: false,
-    pionImplemented: false,
+    pionImplemented: true,
     sideEffect: "read-with-side-effects",
     note: "Historical usage coverage checker: attaches SQLite/shell_dir (--builder usage-check)",
   },
@@ -109,7 +109,7 @@ export const READER_MODES = {
   },
   "vault-uses": {
     allowShadow: false,
-    pionImplemented: false,
+    pionImplemented: true,
     sideEffect: "write-db",
     note: "Vault use-index writes (--builder vault-uses)",
   },
@@ -181,13 +181,13 @@ export const READER_MODES = {
   },
   "legacy-edits": {
     allowShadow: false,
-    pionImplemented: false,
+    pionImplemented: true,
     sideEffect: "write-db",
     note: "Legacy edits migration builder (--builder legacy-edits)",
   },
   "legacy-said": {
     allowShadow: false,
-    pionImplemented: false,
+    pionImplemented: true,
     sideEffect: "write-db",
     note: "Legacy said migration builder (--builder legacy-said)",
   },
@@ -199,7 +199,7 @@ export const READER_MODES = {
   },
   "session-backfill": {
     allowShadow: false,
-    pionImplemented: false,
+    pionImplemented: true,
     sideEffect: "write-db",
     note: "Session activity/recovery backfill builder (--builder session-backfill)",
   },
@@ -229,7 +229,7 @@ export const READER_MODES = {
   },
   said: {
     allowShadow: false,
-    pionImplemented: false,
+    pionImplemented: true,
     sideEffect: "write-db",
     note: "Sidebar said-state builder (--builder said)",
   },
@@ -241,19 +241,19 @@ export const READER_MODES = {
   },
   "recent-chat": {
     allowShadow: false,
-    pionImplemented: false,
+    pionImplemented: true,
     sideEffect: "write-db",
     note: "Recent chat preparation builder (--builder recent-chat)",
   },
   "cc-index": {
     allowShadow: false,
-    pionImplemented: false,
+    pionImplemented: true,
     sideEffect: "write-db",
     note: "Copy destinations and chat order builder (--builder cc-index)",
   },
   "turn-counts": {
     allowShadow: false,
-    pionImplemented: false,
+    pionImplemented: true,
     sideEffect: "write-db",
     note: "Session turn-counts builder (--builder turn-counts)",
   },

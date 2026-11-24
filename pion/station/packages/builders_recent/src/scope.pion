@@ -1,0 +1,1363 @@
+// A named workspace's rows, 1:1 aligned with `station/mb/src/recent/scope.mbt`.
+// All outer write transactions use `db.tx_err(...)` and nested contribution rollbacks use
+// `db.savepoint_err("recent_scope_contribution", ...)` (never raw transaction SQL).
+
+import "base_codec"
+import "builders_core"
+import "sql_db"
+
+struct Threads {
+  threads : Array[base_codec::Json]
+  members : Array[base_codec::Json]
+  visited : Int
+  phase : String
+  after : base_codec::Json
+}
+
+/// One batch of `session`'s chats from `phase`/`after` (`recentScopeSessionThreadsStep`).
+fn session_threads(
+  db : sql_db::Db,
+  session : String,
+  phase : String,
+  after : base_codec::Json,
+  limit : Int,
+) -> Result[Threads, builders_core::StepError] {
+  let s = text(session)
+  let lim = num(limit)
+  if phase == "done" {
+    return Ok(Threads::{ threads: [], members: [], visited: 0, phase: phase, after: after })
+  }
+  if phase == "home" {
+    let found = if is_json_null(after) {
+      match db.all(
+        "SELECT CAST(id AS TEXT) AS tid FROM threads INDEXED BY threads_home WHERE home = ?1 ORDER BY id LIMIT ?2",
+        [s, lim],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+    } else {
+      match db.all(
+        "SELECT CAST(id AS TEXT) AS tid FROM threads INDEXED BY threads_home WHERE home = ?1 AND id > CAST(?2 AS INTEGER) ORDER BY id LIMIT ?3",
+        [s, after, lim],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+    }
+    let threads : Array[base_codec::Json] = []
+    for i in 0..<found.length() {
+      threads.push(sql_db::row_val(found[i], "tid"))
+    }
+    if found.length() == limit {
+      return Ok(
+        Threads::{
+          threads: threads,
+          members: [],
+          visited: found.length(),
+          phase: "home",
+          after: threads[threads.length() - 1],
+        },
+      )
+    }
+    return Ok(
+      Threads::{
+        threads: threads,
+        members: [],
+        visited: found.length(),
+        phase: "members",
+        after: base_codec::json_null(),
+      },
+    )
+  }
+  let found = if is_json_null(after) {
+    match db.all(
+      "SELECT CAST(rowid AS TEXT) AS r, CAST(thread AS TEXT) AS tid FROM thread_sessions INDEXED BY thread_sessions_session WHERE session = ?1 ORDER BY rowid LIMIT ?2",
+      [s, lim],
+    ) {
+      Ok(r) => r
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  } else {
+    match db.all(
+      "SELECT CAST(rowid AS TEXT) AS r, CAST(thread AS TEXT) AS tid FROM thread_sessions INDEXED BY thread_sessions_session WHERE session = ?1 AND rowid > CAST(?2 AS INTEGER) ORDER BY rowid LIMIT ?3",
+      [s, after, lim],
+    ) {
+      Ok(r) => r
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  }
+  let members : Array[base_codec::Json] = []
+  let threads : Array[base_codec::Json] = []
+  for i in 0..<found.length() {
+    let m = sql_db::row_val(found[i], "tid")
+    members.push(m)
+    let is_shared = match exists(
+      db,
+      "SELECT 1 FROM threads WHERE id = CAST(? AS INTEGER) AND home IS NULL",
+      [m],
+    ) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+    if is_shared {
+      threads.push(m)
+    }
+  }
+  if found.length() == limit {
+    Ok(
+      Threads::{
+        threads: threads,
+        members: members,
+        visited: found.length(),
+        phase: "members",
+        after: sql_db::row_val(found[found.length() - 1], "r"),
+      },
+    )
+  } else {
+    Ok(
+      Threads::{
+        threads: threads,
+        members: members,
+        visited: found.length(),
+        phase: "done",
+        after: base_codec::json_null(),
+      },
+    )
+  }
+}
+
+struct WorkspaceSessionsResult {
+  sessions : Array[Map[String, base_codec::Json]]
+  next_connect : base_codec::Json
+  next_after : base_codec::Json
+  finished : Bool
+}
+
+/// One connection's sessions in workspace `ws` (at most `limit`, rowids up to `through`) after `connect`/`after`.
+fn workspace_sessions(
+  db : sql_db::Db,
+  ws : String,
+  connect_in : base_codec::Json,
+  after : base_codec::Json,
+  limit : Int,
+  through : base_codec::Json,
+) -> Result[WorkspaceSessionsResult, builders_core::StepError] {
+  let connect = if is_json_null(connect_in) {
+    match db.first(
+      "SELECT connect FROM sessions INDEXED BY sessions_by_connect ORDER BY connect LIMIT 1",
+      [],
+    ) {
+      Ok(Some(r)) => sql_db::row_val(r, "connect")
+      Ok(None) => base_codec::json_null()
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  } else {
+    connect_in
+  }
+  if is_json_null(connect) {
+    return Ok(
+      WorkspaceSessionsResult::{
+        sessions: [],
+        next_connect: base_codec::json_null(),
+        next_after: base_codec::json_null(),
+        finished: true,
+      },
+    )
+  }
+  let sessions = if is_json_null(after) {
+    match db.all(
+      "SELECT CAST(rowid AS TEXT) AS r, key FROM sessions INDEXED BY sessions_by_connect WHERE connect = ?1 AND ws = ?2 AND rowid <= CAST(?3 AS INTEGER) ORDER BY rowid LIMIT ?4",
+      [connect, text(ws), through, num(limit)],
+    ) {
+      Ok(r) => r
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  } else {
+    match db.all(
+      "SELECT CAST(rowid AS TEXT) AS r, key FROM sessions INDEXED BY sessions_by_connect WHERE connect = ?1 AND ws = ?2 AND rowid > CAST(?3 AS INTEGER) AND rowid <= CAST(?4 AS INTEGER) ORDER BY rowid LIMIT ?5",
+      [connect, text(ws), after, through, num(limit)],
+    ) {
+      Ok(r) => r
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  }
+  if sessions.length() == limit {
+    return Ok(
+      WorkspaceSessionsResult::{
+        sessions: sessions,
+        next_connect: connect,
+        next_after: sql_db::row_val(sessions[sessions.length() - 1], "r"),
+        finished: false,
+      },
+    )
+  }
+  let next = match db.first(
+    "SELECT connect FROM sessions INDEXED BY sessions_by_connect WHERE connect > ? ORDER BY connect LIMIT 1",
+    [connect],
+  ) {
+    Ok(Some(r)) => sql_db::row_val(r, "connect")
+    Ok(None) => base_codec::json_null()
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  Ok(
+    WorkspaceSessionsResult::{
+      sessions: sessions,
+      next_connect: next,
+      next_after: base_codec::json_null(),
+      finished: is_json_null(next),
+    },
+  )
+}
+
+// Contributions (chat-list-scope-rows.ts).
+
+fn contribution[T](
+  db : sql_db::Db,
+  f : (sql_db::Db) -> Result[T, builders_core::StepError],
+) -> Result[T, builders_core::StepError] {
+  db.savepoint_err("recent_scope_contribution", f, map_sql)
+}
+
+fn tracked(db : sql_db::Db, ws : base_codec::Json) -> Result[Bool, builders_core::StepError] {
+  exists(db, "SELECT 1 FROM recent_scope_tracked WHERE kind = 1 AND ws = ?", [ws])
+}
+
+/// One session's contribution added or refreshed (`putRecentScopeSource`); a chat counts once in a workspace.
+fn put_source(
+  db : sql_db::Db,
+  ws : base_codec::Json,
+  thread : base_codec::Json,
+  session : base_codec::Json,
+) -> Result[Unit, builders_core::StepError] {
+  contribution(
+    db,
+    fn(sp_db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      match tracked(sp_db, ws) {
+        Ok(true) => ()
+        Ok(false) => return Err(builders_core::StepError::App("recent scope is not tracked"))
+        Err(e) => return Err(e)
+      }
+      match chat_exists(sp_db, thread) {
+        Ok(true) => ()
+        Ok(false) => return Ok(())
+        Err(e) => return Err(e)
+      }
+      let had = match exists(
+        sp_db,
+        "SELECT 1 FROM recent_scope_rows WHERE ws = ? AND thread = CAST(? AS INTEGER)",
+        [ws, thread],
+      ) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      match sp_db.run(
+        "INSERT INTO recent_scope_sources(ws, thread, session) SELECT ?1, CAST(?2 AS INTEGER), ?3 WHERE NOT EXISTS (SELECT 1 FROM recent_scope_sources WHERE ws = ?1 AND thread = CAST(?2 AS INTEGER) AND session = ?3)",
+        [ws, thread, session],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      match sp_db.run(
+        "INSERT INTO recent_scope_rows(ws, thread, at, said_at, created_at) SELECT ?1, thread, at, said_at, created_at FROM (" +
+        current("?2") +
+        ") WHERE true ON CONFLICT(ws, thread) DO UPDATE SET at = excluded.at, said_at = excluded.said_at, created_at = excluded.created_at WHERE at IS NOT excluded.at OR said_at IS NOT excluded.said_at OR created_at IS NOT excluded.created_at",
+        [ws, thread],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if !had {
+        match sp_db.run(
+          "UPDATE recent_scope_tracked SET total = total + 1 WHERE kind = 1 AND ws = ?",
+          [ws],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(())
+    },
+  )
+}
+
+/// One source removed; the chat stays until its last source in the workspace is gone (`removeRecentScopeSource`).
+fn remove_source(
+  db : sql_db::Db,
+  ws : base_codec::Json,
+  thread : base_codec::Json,
+  session : base_codec::Json,
+) -> Result[Unit, builders_core::StepError] {
+  contribution(
+    db,
+    fn(sp_db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      let removed = match sp_db.run(
+        "DELETE FROM recent_scope_sources WHERE ws = ? AND thread = CAST(? AS INTEGER) AND session = ?",
+        [ws, thread, session],
+      ) {
+        Ok(n) => n
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if removed == 0 {
+        return Ok(())
+      }
+      let still_has = match exists(
+        sp_db,
+        "SELECT 1 FROM recent_scope_sources WHERE ws = ? AND thread = CAST(? AS INTEGER) LIMIT 1",
+        [ws, thread],
+      ) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      if still_has {
+        return Ok(())
+      }
+      let del_rows = match sp_db.run(
+        "DELETE FROM recent_scope_rows WHERE ws = ? AND thread = CAST(? AS INTEGER)",
+        [ws, thread],
+      ) {
+        Ok(n) => n
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if del_rows != 0 {
+        match sp_db.run(
+          "UPDATE recent_scope_tracked SET total = total - 1 WHERE kind = 1 AND ws = ?",
+          [ws],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(())
+    },
+  )
+}
+
+fn put_candidate(
+  db : sql_db::Db,
+  ws : base_codec::Json,
+  thread : base_codec::Json,
+  session : base_codec::Json,
+) -> Result[Unit, builders_core::StepError] {
+  match db.run(
+    "INSERT INTO recent_scope_candidates(ws, thread, session) SELECT ?1, CAST(?2 AS INTEGER), ?3 WHERE NOT EXISTS (SELECT 1 FROM recent_scope_candidates WHERE ws = ?1 AND thread = CAST(?2 AS INTEGER) AND session = ?3)",
+    [ws, thread, session],
+  ) {
+    Ok(_) => Ok(())
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn remove_candidate_row(
+  db : sql_db::Db,
+  ws : base_codec::Json,
+  thread : base_codec::Json,
+  session : base_codec::Json,
+) -> Result[Unit, builders_core::StepError] {
+  match db.run(
+    "DELETE FROM recent_scope_candidates WHERE ws = ? AND thread = CAST(? AS INTEGER) AND session = ?",
+    [ws, thread, session],
+  ) {
+    Ok(_) => Ok(())
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+let VISIBILITY_PENDING : String = "SELECT COUNT(*) AS n, MAX(d.ambiguous) AS ambiguous, MAX(COALESCE(d.home_ws = ?1, 0) OR EXISTS (SELECT 1 FROM recent_scope_rows r WHERE r.ws = ?1 AND r.thread = d.thread)) AS affects FROM (SELECT thread, home_ws, ambiguous FROM recent_scope_visibility_dirty ORDER BY thread LIMIT 65) d"
+
+let VISIBILITY_AMBIGUOUS : String = "SELECT MAX(EXISTS (SELECT 1 FROM recent_scope_candidates c WHERE c.ws = ?1 AND c.thread = d.thread)) AS affects FROM (SELECT thread, ambiguous FROM recent_scope_visibility_dirty ORDER BY thread LIMIT 65) d WHERE d.ambiguous"
+
+let VISIBILITY_ROWS_SMALL : String = "SELECT COUNT(*) AS n, MAX(EXISTS (SELECT 1 FROM recent_scope_visibility_dirty d WHERE d.thread = r.thread)) AS affects FROM (SELECT thread FROM recent_scope_rows WHERE ws = ?1 ORDER BY thread LIMIT 65) r"
+
+let VISIBILITY_MEMBERS_SMALL : String = "SELECT COUNT(*) AS n, MAX(EXISTS (SELECT 1 FROM recent_scope_visibility_dirty d WHERE d.thread = c.thread AND d.ambiguous = 1)) AS affects FROM (SELECT thread FROM recent_scope_candidates WHERE ws = ?1 ORDER BY thread, session LIMIT 65) c"
+
+let ORDER_PENDING : String = "SELECT COUNT(*) AS n, MAX(EXISTS (SELECT 1 FROM recent_scope_rows r WHERE r.ws = ?1 AND r.thread = d.thread)) AS affects FROM (SELECT thread FROM recent_scope_order_dispatch ORDER BY thread LIMIT 65) d"
+
+let ORDER_SMALL : String = "SELECT COUNT(*) AS n, MAX(EXISTS (SELECT 1 FROM recent_scope_order_dispatch d WHERE d.thread = r.thread)) AS affects FROM (SELECT thread FROM recent_scope_rows WHERE ws = ?1 ORDER BY thread LIMIT 65) r"
+
+/// The workspace's count can be read (`preparedRecentWorkspaceTotal` gives one).
+fn workspace_total_ready(db : sql_db::Db, ws : String) -> Result[Bool, builders_core::StepError] {
+  match installed(db, "scope") {
+    Ok(true) => ()
+    Ok(false) => return Ok(false)
+    Err(e) => return Err(e)
+  }
+  let w = [text(ws)]
+  let meta = match db.first(
+    "SELECT complete, scan_done, scan_session FROM recent_scope_tracked WHERE kind = 1 AND ws = ?",
+    w,
+  ) {
+    Ok(Some(m)) => m
+    Ok(None) => return Ok(false)
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if sql_db::row_int(meta, "complete") != 1 {
+    return Ok(false)
+  }
+  match exists(db, "SELECT 1 FROM recent_scope_session_dirty WHERE kind = 1 AND ws = ? LIMIT 1", w) {
+    Ok(true) => return Ok(false)
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  match exists(db, "SELECT 1 FROM recent_scope_member_dirty WHERE ws = ? LIMIT 1", w) {
+    Ok(true) => return Ok(false)
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  match exists(db, "SELECT 1 FROM recent_scope_order_dirty WHERE ws = ? LIMIT 1", w) {
+    Ok(true) => return Ok(false)
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  let scanned = sql_db::row_int(meta, "scan_done") == 1 && is_json_null(sql_db::row_val(meta, "scan_session"))
+  let visibility = match one(db, VISIBILITY_PENDING, w) {
+    Ok(r) => r
+    Err(e) => return Err(e)
+  }
+  if sql_db::row_int(visibility, "affects") == 1 {
+    return Ok(false)
+  }
+  if sql_db::row_int(visibility, "n") > 64 {
+    if !scanned {
+      return Ok(false)
+    }
+    match exists(db, "SELECT 1 FROM recent_scope_visibility_dirty WHERE home_ws = ? LIMIT 1", w) {
+      Ok(true) => return Ok(false)
+      Ok(false) => ()
+      Err(e) => return Err(e)
+    }
+    let small_queries = [VISIBILITY_ROWS_SMALL, VISIBILITY_MEMBERS_SMALL]
+    for i in 0..<small_queries.length() {
+      let small = match one(db, small_queries[i], w) {
+        Ok(r) => r
+        Err(e) => return Err(e)
+      }
+      if sql_db::row_int(small, "n") > 64 || sql_db::row_int(small, "affects") == 1 {
+        return Ok(false)
+      }
+    }
+  } else if sql_db::row_int(visibility, "ambiguous") == 1 {
+    if !scanned {
+      return Ok(false)
+    }
+    let amb = match one(db, VISIBILITY_AMBIGUOUS, w) {
+      Ok(r) => r
+      Err(e) => return Err(e)
+    }
+    if sql_db::row_int(amb, "affects") == 1 {
+      return Ok(false)
+    }
+  }
+  let pending = match one(db, ORDER_PENDING, w) {
+    Ok(r) => r
+    Err(e) => return Err(e)
+  }
+  if sql_db::row_int(pending, "affects") == 1 {
+    return Ok(false)
+  }
+  if sql_db::row_int(pending, "n") > 64 {
+    let small = match one(db, ORDER_SMALL, w) {
+      Ok(r) => r
+      Err(e) => return Err(e)
+    }
+    if sql_db::row_int(small, "n") > 64 || sql_db::row_int(small, "affects") == 1 {
+      return Ok(false)
+    }
+  }
+  Ok(true)
+}
+
+fn workspace_ready(db : sql_db::Db, ws : String) -> Result[Bool, builders_core::StepError] {
+  snapshot(
+    db,
+    "recent_scope_page",
+    fn(snap_db : sql_db::Db) -> Result[Bool, builders_core::StepError] { workspace_total_ready(snap_db, ws) },
+  )
+}
+
+// The initial scan and the journals settled (chat-list-scope-build.ts).
+
+fn scan_workspace(db : sql_db::Db, ws : String, limit : Int) -> Result[Int, builders_core::StepError] {
+  let w = text(ws)
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      let row = match tx_db.first(
+        "SELECT scan_connect, CAST(scan_after AS TEXT) AS scan_after, scan_done, scan_session, scan_phase, CAST(scan_thread_after AS TEXT) AS scan_thread_after, CAST(scan_high AS TEXT) AS scan_high, scan_connections, scan_rowids FROM recent_scope_tracked WHERE kind = 1 AND ws = ?",
+        [w],
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Err(builders_core::StepError::App("recent scope is not tracked"))
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let mut connect = sql_db::row_val(row, "scan_connect")
+      let mut after = sql_db::row_val(row, "scan_after")
+      let mut done = sql_db::row_int(row, "scan_done")
+      let mut session = sql_db::row_val(row, "scan_session")
+      let mut phase = sql_db::row_val(row, "scan_phase")
+      let mut thread_after = sql_db::row_val(row, "scan_thread_after")
+      let high = sql_db::row_val(row, "scan_high")
+      let mut connections = sql_db::row_int(row, "scan_connections")
+      let mut by_rowid = sql_db::row_int(row, "scan_rowids")
+      let mut visited = 0
+      while visited < limit {
+        match session {
+          base_codec::Json::Str(key) => {
+            let from = match phase {
+              base_codec::Json::Str(p) => p
+              _ => "home"
+            }
+            let batch = match session_threads(tx_db, key, from, thread_after, limit - visited) {
+              Ok(b) => b
+              Err(e) => return Err(e)
+            }
+            for i in 0..<batch.members.length() {
+              match put_candidate(tx_db, w, batch.members[i], session) {
+                Ok(_) => ()
+                Err(e) => return Err(e)
+              }
+            }
+            for i in 0..<batch.threads.length() {
+              match put_source(tx_db, w, batch.threads[i], session) {
+                Ok(_) => ()
+                Err(e) => return Err(e)
+              }
+            }
+            visited = visited + (if batch.visited > 1 { batch.visited } else { 1 })
+            if batch.phase == "done" {
+              session = base_codec::json_null()
+              phase = base_codec::json_null()
+              thread_after = base_codec::json_null()
+            } else {
+              phase = text(batch.phase)
+              thread_after = batch.after
+            }
+          }
+          _ => {
+            if done == 1 {
+              break
+            }
+            if is_json_null(high) {
+              return Err(builders_core::StepError::App("recent workspace scan has no starting boundary"))
+            }
+            if by_rowid == 1 {
+              let found = if is_json_null(after) {
+                match tx_db.first(
+                  "SELECT CAST(rowid AS TEXT) AS r, key, ws FROM sessions WHERE rowid <= CAST(?1 AS INTEGER) ORDER BY rowid LIMIT 1",
+                  [high],
+                ) {
+                  Ok(r) => r
+                  Err(e) => return Err(builders_core::StepError::Sql(e))
+                }
+              } else {
+                match tx_db.first(
+                  "SELECT CAST(rowid AS TEXT) AS r, key, ws FROM sessions WHERE rowid > CAST(?1 AS INTEGER) AND rowid <= CAST(?2 AS INTEGER) ORDER BY rowid LIMIT 1",
+                  [after, high],
+                ) {
+                  Ok(r) => r
+                  Err(e) => return Err(builders_core::StepError::Sql(e))
+                }
+              }
+              match found {
+                None => {
+                  done = 1
+                  session = base_codec::json_null()
+                }
+                Some(s) => {
+                  done = 0
+                  after = sql_db::row_val(s, "r")
+                  session = if base_codec::json_eq(sql_db::row_val(s, "ws"), w) {
+                    sql_db::row_val(s, "key")
+                  } else {
+                    base_codec::json_null()
+                  }
+                }
+              }
+            } else {
+              let previous = connect
+              let ws_res = match workspace_sessions(tx_db, ws, connect, after, 1, high) {
+                Ok(r) => r
+                Err(e) => return Err(e)
+              }
+              connect = ws_res.next_connect
+              after = ws_res.next_after
+              done = if ws_res.finished { 1 } else { 0 }
+              session = if ws_res.sessions.length() > 0 {
+                sql_db::row_val(ws_res.sessions[0], "key")
+              } else {
+                base_codec::json_null()
+              }
+              if !base_codec::json_eq(connect, previous) {
+                connections = connections + 1
+              }
+              if done == 0 && connections >= 64 {
+                by_rowid = 1
+                after = base_codec::json_null()
+              }
+            }
+            phase = if is_json_null(session) { base_codec::json_null() } else { text("home") }
+            thread_after = base_codec::json_null()
+            visited = visited + 1
+          }
+        }
+      }
+      if visited != 0 {
+        match tx_db.run(
+          "UPDATE recent_scope_tracked SET scan_connect = ?, scan_after = CAST(? AS INTEGER), scan_done = ?, scan_session = ?, scan_phase = ?, scan_thread_after = CAST(? AS INTEGER), scan_connections = ?, scan_rowids = ? WHERE kind = 1 AND ws = ?",
+          [
+            connect,
+            after,
+            num(done),
+            session,
+            phase,
+            thread_after,
+            num(connections),
+            num(by_rowid),
+            w,
+          ],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(visited)
+    },
+    map_sql,
+  )
+}
+
+fn scan_finished(db : sql_db::Db, ws : base_codec::Json) -> Result[Unit, builders_core::StepError] {
+  let p = match db.first(
+    "SELECT scan_done, scan_session FROM recent_scope_tracked WHERE kind = 1 AND ws = ?",
+    [ws],
+  ) {
+    Ok(Some(r)) => r
+    Ok(None) => return Err(builders_core::StepError::App("recent scope is not tracked"))
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if sql_db::row_int(p, "scan_done") != 1 || !is_json_null(sql_db::row_val(p, "scan_session")) {
+    return Err(builders_core::StepError::App("recent scope source scan is unfinished"))
+  }
+  Ok(())
+}
+
+/// Only the revision accounted is cleared: a session changed again between batches stays pending.
+fn acknowledge(
+  db : sql_db::Db,
+  kind : Int,
+  ws : base_codec::Json,
+  session : base_codec::Json,
+  revision : base_codec::Json,
+) -> Result[Unit, builders_core::StepError] {
+  match db.run(
+    "DELETE FROM recent_scope_session_dirty WHERE kind = ? AND ws = ? AND session = ? AND revision = CAST(? AS INTEGER)",
+    [num(kind), ws, session, revision],
+  ) {
+    Ok(_) => Ok(())
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+/// One batch of a changed session's sources for the workspace, removed then found again.
+fn settle_workspace_session(
+  db : sql_db::Db,
+  ws : String,
+  limit : Int,
+) -> Result[Int, builders_core::StepError] {
+  let w = text(ws)
+  let lim = num(limit)
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      match scan_finished(tx_db, w) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      let pending = match tx_db.first(
+        "SELECT session, CAST(revision AS TEXT) AS revision FROM recent_scope_session_dirty WHERE kind = 1 AND ws = ? ORDER BY session LIMIT 1",
+        [w],
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Ok(0)
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let session = sql_db::row_val(pending, "session")
+      let revision = sql_db::row_val(pending, "revision")
+      let work = match tx_db.first(
+        "SELECT CAST(revision AS TEXT) AS revision, phase, CAST(after AS TEXT) AS after FROM recent_scope_session_work WHERE ws = ? AND session = ?",
+        [w, session],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let mut phase = text("remove")
+      let mut after = base_codec::json_null()
+      let mut matched_work = false
+      match work {
+        Some(k) => {
+          if base_codec::json_eq(sql_db::row_val(k, "revision"), revision) {
+            phase = sql_db::row_val(k, "phase")
+            after = sql_db::row_val(k, "after")
+            matched_work = true
+          }
+        }
+        None => ()
+      }
+      if !matched_work {
+        match tx_db.run(
+          "INSERT INTO recent_scope_session_work(ws, session, revision, phase, after) VALUES (?, ?, CAST(? AS INTEGER), 'remove', NULL) ON CONFLICT(ws, session) DO UPDATE SET revision = excluded.revision, phase = 'remove', after = NULL",
+          [w, session, revision],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let cleanups = [
+        (
+          "remove",
+          "candidates",
+          "SELECT CAST(thread AS TEXT) AS tid FROM recent_scope_sources INDEXED BY recent_scope_sources_session WHERE ws = ?1 AND session = ?2 ORDER BY thread LIMIT ?3",
+          "SELECT CAST(thread AS TEXT) AS tid FROM recent_scope_sources INDEXED BY recent_scope_sources_session WHERE ws = ?1 AND session = ?2 AND thread > CAST(?3 AS INTEGER) ORDER BY thread LIMIT ?4",
+        ),
+        (
+          "candidates",
+          "home",
+          "SELECT CAST(thread AS TEXT) AS tid FROM recent_scope_candidates INDEXED BY recent_scope_candidates_session WHERE ws = ?1 AND session = ?2 ORDER BY thread LIMIT ?3",
+          "SELECT CAST(thread AS TEXT) AS tid FROM recent_scope_candidates INDEXED BY recent_scope_candidates_session WHERE ws = ?1 AND session = ?2 AND thread > CAST(?3 AS INTEGER) ORDER BY thread LIMIT ?4",
+        ),
+      ]
+      for c in 0..<cleanups.length() {
+        let (name, next, from_start, from_after) = cleanups[c]
+        if !base_codec::json_eq(phase, text(name)) {
+          continue
+        }
+        let found = if is_json_null(after) {
+          match tx_db.all(from_start, [w, session, lim]) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        } else {
+          match tx_db.all(from_after, [w, session, after, lim]) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        for i in 0..<found.length() {
+          if name == "remove" {
+            match remove_source(tx_db, w, sql_db::row_val(found[i], "tid"), session) {
+              Ok(_) => ()
+              Err(e) => return Err(e)
+            }
+          } else {
+            match remove_candidate_row(tx_db, w, sql_db::row_val(found[i], "tid"), session) {
+              Ok(_) => ()
+              Err(e) => return Err(e)
+            }
+          }
+        }
+        if found.length() == limit {
+          match tx_db.run(
+            "UPDATE recent_scope_session_work SET after = CAST(? AS INTEGER) WHERE ws = ? AND session = ?",
+            [sql_db::row_val(found[found.length() - 1], "tid"), w, session],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        } else {
+          match tx_db.run(
+            "UPDATE recent_scope_session_work SET phase = ?, after = NULL WHERE ws = ? AND session = ?",
+            [text(next), w, session],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        if found.length() != 0 {
+          return Ok(found.length())
+        }
+        phase = text(next)
+        after = base_codec::json_null()
+      }
+      let now = match tx_db.first("SELECT ws FROM sessions WHERE key = ?", [session]) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let same_ws = match now {
+        Some(s) => base_codec::json_eq(sql_db::row_val(s, "ws"), w)
+        None => false
+      }
+      if !same_ws {
+        match tx_db.run(
+          "DELETE FROM recent_scope_session_work WHERE ws = ? AND session = ?",
+          [w, session],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match acknowledge(tx_db, 1, w, session, revision) {
+          Ok(_) => return Ok(0)
+          Err(e) => return Err(e)
+        }
+      }
+      let p = match phase {
+        base_codec::Json::Str(s) => s
+        _ => return Err(builders_core::StepError::App("recent workspace session cleanup is unfinished"))
+      }
+      let key = match session {
+        base_codec::Json::Str(s) => s
+        _ => return Err(builders_core::StepError::App("recent workspace session cleanup is unfinished"))
+      }
+      if p != "home" && p != "members" {
+        return Err(builders_core::StepError::App("recent workspace session cleanup is unfinished"))
+      }
+      let batch = match session_threads(tx_db, key, p, after, limit) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      for i in 0..<batch.members.length() {
+        match put_candidate(tx_db, w, batch.members[i], session) {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+      }
+      for i in 0..<batch.threads.length() {
+        match put_source(tx_db, w, batch.threads[i], session) {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+      }
+      if batch.phase == "done" {
+        match tx_db.run(
+          "DELETE FROM recent_scope_session_work WHERE ws = ? AND session = ?",
+          [w, session],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match acknowledge(tx_db, 1, w, session, revision) {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+      } else {
+        match tx_db.run(
+          "UPDATE recent_scope_session_work SET phase = ?, after = CAST(? AS INTEGER) WHERE ws = ? AND session = ?",
+          [text(batch.phase), batch.after, w, session],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(batch.visited)
+    },
+    map_sql,
+  )
+}
+
+/// Changed memberships reconciled, at most `limit` (`settleRecentWorkspaceMemberStep`).
+fn settle_workspace_members(
+  db : sql_db::Db,
+  ws : String,
+  limit : Int,
+) -> Result[Int, builders_core::StepError] {
+  let w = text(ws)
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      match scan_finished(tx_db, w) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      let changed = match tx_db.all(
+        "SELECT CAST(thread AS TEXT) AS tid, session, CAST(revision AS TEXT) AS revision FROM recent_scope_member_dirty WHERE ws = ? ORDER BY thread, session LIMIT ?",
+        [w, num(limit)],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      for i in 0..<changed.length() {
+        let row = changed[i]
+        let thread = sql_db::row_val(row, "tid")
+        let session = sql_db::row_val(row, "session")
+        let is_cand = match exists(
+          tx_db,
+          "SELECT 1 FROM sessions s JOIN thread_sessions m ON m.session = s.key WHERE m.thread = CAST(?1 AS INTEGER) AND s.key = ?2 AND s.ws = ?3",
+          [thread, session, w],
+        ) {
+          Ok(b) => b
+          Err(e) => return Err(e)
+        }
+        if is_cand {
+          match put_candidate(tx_db, w, thread, session) {
+            Ok(_) => ()
+            Err(e) => return Err(e)
+          }
+        } else {
+          match remove_candidate_row(tx_db, w, thread, session) {
+            Ok(_) => ()
+            Err(e) => return Err(e)
+          }
+        }
+        let is_src = match exists(
+          tx_db,
+          "SELECT 1 FROM threads t JOIN sessions s ON s.key = ?2 WHERE t.id = CAST(?1 AS INTEGER) AND s.ws = ?3 AND (t.home = s.key OR (t.home IS NULL AND EXISTS (SELECT 1 FROM thread_sessions m WHERE m.thread = t.id AND m.session = s.key)))",
+          [thread, session, w],
+        ) {
+          Ok(b) => b
+          Err(e) => return Err(e)
+        }
+        if is_src {
+          match put_source(tx_db, w, thread, session) {
+            Ok(_) => ()
+            Err(e) => return Err(e)
+          }
+        } else {
+          match remove_source(tx_db, w, thread, session) {
+            Ok(_) => ()
+            Err(e) => return Err(e)
+          }
+        }
+        match tx_db.run(
+          "DELETE FROM recent_scope_member_dirty WHERE ws = ? AND thread = CAST(? AS INTEGER) AND session = ? AND revision = CAST(? AS INTEGER)",
+          [w, thread, session, sql_db::row_val(row, "revision")],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(changed.length())
+    },
+    map_sql,
+  )
+}
+
+// Order changes (chat-list-scope-order.ts) and visibility (chat-list-scope-visibility.ts).
+
+fn next_in_turn(
+  db : sql_db::Db,
+  table : String,
+  turn : String,
+  columns : String,
+) -> Result[Option[Map[String, base_codec::Json]], builders_core::StepError] {
+  let progress = match one(
+    db,
+    "SELECT CAST(after_thread AS TEXT) AS after_thread, CAST(through_thread AS TEXT) AS through_thread FROM " +
+    turn +
+    " WHERE id = 1",
+    [],
+  ) {
+    Ok(r) => r
+    Err(e) => return Err(e)
+  }
+  let pick = "SELECT CAST(thread AS TEXT) AS tid, " + columns + " FROM " + table
+  let mut through = sql_db::row_val(progress, "through_thread")
+  let after = sql_db::row_val(progress, "after_thread")
+  let mut pending : Option[Map[String, base_codec::Json]] = if is_json_null(through) {
+    None
+  } else if is_json_null(after) {
+    match db.first(pick + " WHERE thread <= CAST(? AS INTEGER) ORDER BY thread LIMIT 1", [through]) {
+      Ok(r) => r
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  } else {
+    match db.first(
+      pick + " WHERE thread > CAST(? AS INTEGER) AND thread <= CAST(? AS INTEGER) ORDER BY thread LIMIT 1",
+      [after, through],
+    ) {
+      Ok(r) => r
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  }
+  match pending {
+    None => {
+      let max_row = match one(db, "SELECT CAST(MAX(thread) AS TEXT) AS tid FROM " + table, []) {
+        Ok(r) => r
+        Err(e) => return Err(e)
+      }
+      through = sql_db::row_val(max_row, "tid")
+      if is_json_null(through) {
+        return Ok(None)
+      }
+      pending = match db.first(pick + " WHERE thread <= CAST(? AS INTEGER) ORDER BY thread LIMIT 1", [through]) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+    }
+    Some(_) => ()
+  }
+  let p = match pending {
+    Some(r) => r
+    None => return Err(builders_core::StepError::App("recent scope turn lost its pending chat"))
+  }
+  match db.run(
+    "UPDATE " + turn + " SET after_thread = CAST(? AS INTEGER), through_thread = CAST(? AS INTEGER) WHERE id = 1",
+    [sql_db::row_val(p, "tid"), through],
+  ) {
+    Ok(_) => Ok(Some(p))
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+/// One highly shared chat's order change moved to at most `limit` of its workspaces (`dispatchRecentScopeOrderStep`).
+fn dispatch_order(db : sql_db::Db, limit : Int) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      let pending = match next_in_turn(
+        tx_db,
+        "recent_scope_order_dispatch",
+        "recent_scope_order_turn",
+        "after_ws",
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Ok(0)
+        Err(e) => return Err(e)
+      }
+      let thread = sql_db::row_val(pending, "tid")
+      let after = sql_db::row_val(pending, "after_ws")
+      let found = if is_json_null(after) {
+        match tx_db.all(
+          "SELECT ws FROM recent_scope_rows INDEXED BY recent_scope_rows_thread WHERE thread = CAST(?1 AS INTEGER) ORDER BY ws LIMIT ?2",
+          [thread, num(limit)],
+        ) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx_db.all(
+          "SELECT ws FROM recent_scope_rows INDEXED BY recent_scope_rows_thread WHERE thread = CAST(?1 AS INTEGER) AND ws > ?2 ORDER BY ws LIMIT ?3",
+          [thread, after, num(limit)],
+        ) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      for i in 0..<found.length() {
+        match tx_db.run(
+          "INSERT INTO recent_scope_order_dirty(ws, thread) SELECT ?1, CAST(?2 AS INTEGER) WHERE NOT EXISTS (SELECT 1 FROM recent_scope_order_dirty WHERE ws = ?1 AND thread = CAST(?2 AS INTEGER))",
+          [sql_db::row_val(found[i], "ws"), thread],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      if found.length() == limit {
+        match tx_db.run(
+          "UPDATE recent_scope_order_dispatch SET after_ws = ? WHERE thread = CAST(? AS INTEGER)",
+          [sql_db::row_val(found[found.length() - 1], "ws"), thread],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx_db.run(
+          "DELETE FROM recent_scope_order_dispatch WHERE thread = CAST(? AS INTEGER)",
+          [thread],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(found.length())
+    },
+    map_sql,
+  )
+}
+
+/// One dirty chat's order in the workspace recalculated, or a gone chat's sources removed in batches.
+fn settle_workspace_order(
+  db : sql_db::Db,
+  ws : String,
+  limit : Int,
+) -> Result[Int, builders_core::StepError] {
+  let w = text(ws)
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      match tracked(tx_db, w) {
+        Ok(true) => ()
+        Ok(false) => return Err(builders_core::StepError::App("recent scope is not tracked"))
+        Err(e) => return Err(e)
+      }
+      let pending = match tx_db.first(
+        "SELECT CAST(thread AS TEXT) AS tid FROM recent_scope_order_dirty WHERE ws = ? ORDER BY thread LIMIT 1",
+        [w],
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Ok(0)
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let thread = sql_db::row_val(pending, "tid")
+      match exists(
+        tx_db,
+        "SELECT 1 FROM recent_scope_order_dispatch WHERE thread = CAST(? AS INTEGER)",
+        [thread],
+      ) {
+        Ok(true) => return Ok(0)
+        Ok(false) => ()
+        Err(e) => return Err(e)
+      }
+      let mut visited = 1
+      let chat_ok = match chat_exists(tx_db, thread) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      if chat_ok {
+        match tx_db.run(
+          "UPDATE recent_scope_rows SET at = c.at, said_at = c.said_at, created_at = c.created_at FROM (" +
+          current("?2") +
+          ") c WHERE recent_scope_rows.ws = ?1 AND recent_scope_rows.thread = c.thread AND (recent_scope_rows.at IS NOT c.at OR recent_scope_rows.said_at IS NOT c.said_at OR recent_scope_rows.created_at IS NOT c.created_at)",
+          [w, thread],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        let sources = match tx_db.all(
+          "SELECT session FROM recent_scope_sources WHERE ws = ? AND thread = CAST(? AS INTEGER) ORDER BY session LIMIT ?",
+          [w, thread, num(limit)],
+        ) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        for i in 0..<sources.length() {
+          match remove_source(tx_db, w, thread, sql_db::row_val(sources[i], "session")) {
+            Ok(_) => ()
+            Err(e) => return Err(e)
+          }
+        }
+        visited = if sources.length() > 1 { sources.length() } else { 1 }
+        if sources.length() == limit {
+          return Ok(visited)
+        }
+        let del_rows = match tx_db.run(
+          "DELETE FROM recent_scope_rows WHERE ws = ? AND thread = CAST(? AS INTEGER)",
+          [w, thread],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        if del_rows != 0 {
+          match tx_db.run(
+            "UPDATE recent_scope_tracked SET total = total - 1 WHERE kind = 1 AND ws = ?",
+            [w],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+      }
+      match tx_db.run(
+        "DELETE FROM recent_scope_order_dirty WHERE ws = ? AND thread = CAST(? AS INTEGER)",
+        [w, thread],
+      ) {
+        Ok(_) => Ok(visited)
+        Err(e) => Err(builders_core::StepError::Sql(e))
+      }
+    },
+    map_sql,
+  )
+}
+
+/// One batch of a chat's workspace contributions rebuilt after its home changed (`settleRecentScopeVisibilityStep`).
+fn settle_visibility(db : sql_db::Db, limit : Int) -> Result[Int, builders_core::StepError] {
+  let lim = num(limit)
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      let pending = match next_in_turn(
+        tx_db,
+        "recent_scope_visibility_dirty",
+        "recent_scope_visibility_turn",
+        "CAST(revision AS TEXT) AS revision",
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Ok(0)
+        Err(e) => return Err(e)
+      }
+      let thread = sql_db::row_val(pending, "tid")
+      let revision = sql_db::row_val(pending, "revision")
+      match tx_db.run(
+        "UPDATE recent_scope_visibility_dirty SET home_ws = (SELECT s.ws FROM threads t JOIN sessions s ON s.key = t.home WHERE t.id = CAST(?1 AS INTEGER)), ambiguous = EXISTS (SELECT 1 FROM threads t WHERE t.id = CAST(?1 AS INTEGER) AND t.home IS NULL AND EXISTS (SELECT 1 FROM thread_sessions m WHERE m.thread = t.id LIMIT 1)) WHERE thread = CAST(?1 AS INTEGER)",
+        [thread],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let work = match tx_db.first(
+        "SELECT CAST(revision AS TEXT) AS revision, phase, after_ws, after_session FROM recent_scope_visibility_work WHERE thread = CAST(? AS INTEGER)",
+        [thread],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let mut phase = text("remove")
+      let mut after_ws = base_codec::json_null()
+      let mut after_session = base_codec::json_null()
+      let mut matched_work = false
+      match work {
+        Some(k) => {
+          if base_codec::json_eq(sql_db::row_val(k, "revision"), revision) {
+            phase = sql_db::row_val(k, "phase")
+            after_ws = sql_db::row_val(k, "after_ws")
+            after_session = sql_db::row_val(k, "after_session")
+            matched_work = true
+          }
+        }
+        None => ()
+      }
+      if !matched_work {
+        match tx_db.run(
+          "INSERT INTO recent_scope_visibility_work(thread, revision, phase, after_ws, after_session) VALUES (CAST(? AS INTEGER), CAST(? AS INTEGER), 'remove', NULL, NULL) ON CONFLICT(thread) DO UPDATE SET revision = excluded.revision, phase = 'remove', after_ws = NULL, after_session = NULL",
+          [thread, revision],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      if base_codec::json_eq(phase, text("remove")) {
+        let sources = if is_json_null(after_ws) {
+          match tx_db.all(
+            "SELECT ws, session FROM recent_scope_sources INDEXED BY recent_scope_sources_thread WHERE thread = CAST(?1 AS INTEGER) ORDER BY ws, session LIMIT ?2",
+            [thread, lim],
+          ) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        } else {
+          match tx_db.all(
+            "SELECT ws, session FROM recent_scope_sources INDEXED BY recent_scope_sources_thread WHERE thread = CAST(?1 AS INTEGER) AND (ws, session) > (?2, ?3) ORDER BY ws, session LIMIT ?4",
+            [thread, after_ws, after_session, lim],
+          ) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        for i in 0..<sources.length() {
+          match remove_source(
+            tx_db,
+            sql_db::row_val(sources[i], "ws"),
+            thread,
+            sql_db::row_val(sources[i], "session"),
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(e)
+          }
+        }
+        if sources.length() == limit {
+          let last = sources[sources.length() - 1]
+          match tx_db.run(
+            "UPDATE recent_scope_visibility_work SET after_ws = ?, after_session = ? WHERE thread = CAST(? AS INTEGER)",
+            [sql_db::row_val(last, "ws"), sql_db::row_val(last, "session"), thread],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        } else {
+          match tx_db.run(
+            "UPDATE recent_scope_visibility_work SET phase = 'add', after_ws = NULL, after_session = NULL WHERE thread = CAST(? AS INTEGER)",
+            [thread],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        return Ok(sources.length())
+      }
+      let chat = match tx_db.first(
+        "SELECT home FROM threads WHERE id = CAST(? AS INTEGER)",
+        [thread],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let mut visited = 0
+      match chat {
+        Some(c) => {
+          let home = sql_db::row_val(c, "home")
+          if !is_json_null(home) {
+            match tx_db.first("SELECT ws FROM sessions WHERE key = ?", [home]) {
+              Ok(Some(s)) => {
+                let sws = sql_db::row_val(s, "ws")
+                if is_json_str(sws) {
+                  let is_tr = match tracked(tx_db, sws) {
+                    Ok(b) => b
+                    Err(e) => return Err(e)
+                  }
+                  if is_tr {
+                    match put_source(tx_db, sws, thread, home) {
+                      Ok(_) => ()
+                      Err(e) => return Err(e)
+                    }
+                  }
+                }
+              }
+              Ok(None) => ()
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+            visited = 1
+          } else {
+            let members = if is_json_null(after_session) {
+              match tx_db.all(
+                "SELECT session FROM thread_sessions WHERE thread = CAST(?1 AS INTEGER) ORDER BY session LIMIT ?2",
+                [thread, lim],
+              ) {
+                Ok(r) => r
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+            } else {
+              match tx_db.all(
+                "SELECT session FROM thread_sessions WHERE thread = CAST(?1 AS INTEGER) AND session > ?2 ORDER BY session LIMIT ?3",
+                [thread, after_session, lim],
+              ) {
+                Ok(r) => r
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+            }
+            for i in 0..<members.length() {
+              let session = sql_db::row_val(members[i], "session")
+              match tx_db.first("SELECT ws FROM sessions WHERE key = ?", [session]) {
+                Ok(Some(s)) => {
+                  let sws = sql_db::row_val(s, "ws")
+                  if is_json_str(sws) {
+                    let is_tr = match tracked(tx_db, sws) {
+                      Ok(b) => b
+                      Err(e) => return Err(e)
+                    }
+                    if is_tr {
+                      match put_source(tx_db, sws, thread, session) {
+                        Ok(_) => ()
+                        Err(e) => return Err(e)
+                      }
+                    }
+                  }
+                }
+                Ok(None) => ()
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+            }
+            visited = members.length()
+            if members.length() == limit {
+              match tx_db.run(
+                "UPDATE recent_scope_visibility_work SET after_session = ? WHERE thread = CAST(? AS INTEGER)",
+                [sql_db::row_val(members[members.length() - 1], "session"), thread],
+              ) {
+                Ok(_) => return Ok(visited)
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+            }
+          }
+        }
+        None => ()
+      }
+      match tx_db.run(
+        "DELETE FROM recent_scope_visibility_work WHERE thread = CAST(? AS INTEGER)",
+        [thread],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      match tx_db.run(
+        "DELETE FROM recent_scope_visibility_dirty WHERE thread = CAST(? AS INTEGER) AND revision = CAST(? AS INTEGER)",
+        [thread, revision],
+      ) {
+        Ok(_) => Ok(visited)
+        Err(e) => Err(builders_core::StepError::Sql(e))
+      }
+    },
+    map_sql,
+  )
+}

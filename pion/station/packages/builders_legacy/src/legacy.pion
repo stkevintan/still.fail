@@ -1,0 +1,1475 @@
+// 1:1 port of `station/mb/src/legacy/legacy.mbt`:
+// Whole-store legacy lookups (`legacy-edits`, `legacy-said`, `legacy-policy`,
+// `legacy-decision-time`, `legacy-decision-session`, `legacy-decision-session-repair`,
+// `legacy-agent`, `legacy-login`) and read-side helpers (`merged_read_ready`,
+// `merged_needs_repair`, `bounded_edit_key`).
+//
+// Invariants:
+// - All write transactions go exclusively through `db.tx_err(...)` (zero raw tx SQL).
+// - Only `edits_step` raises `StepError::Fallback` (when the merged view or widget trigger
+//   must be repaired by the station writer first).
+// - `login_cards_step` persists UTF-16 code-unit offsets into `login_card_meta.offset`
+//   via `js_json::utf16_units` (never UTF-8 byte offsets).
+
+import "base_codec"
+import "builders_core"
+import "js_json"
+import "sql_db"
+
+let LEGACY_VERSION : Int = 1
+
+let LEGACY_BATCH : Int = 64
+
+// ── Shared scan helpers ──
+
+fn legacy_meta(
+  db : sql_db::Db,
+  table : String,
+) -> Result[Map[String, base_codec::Json], builders_core::StepError] {
+  match db.first(
+    "SELECT version,scanned,CAST(cursor_thread AS TEXT) cursor_thread,CAST(cursor_n AS TEXT) cursor_n,CAST(end_thread AS TEXT) end_thread,CAST(end_n AS TEXT) end_n FROM " +
+    table +
+    " WHERE id=1",
+    [],
+  ) {
+    Ok(Some(m)) => Ok(m)
+    Ok(None) => Err(builders_core::StepError::App(table + " has no row"))
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn scan_keys(
+  db : sql_db::Db,
+  m : Map[String, base_codec::Json],
+  limit : Int,
+) -> Result[Array[Map[String, base_codec::Json]], builders_core::StepError] {
+  let columns = "CAST(e.thread AS TEXT) thread,CAST(e.n AS TEXT) n"
+  let cursor_thread = sql_db::row_val(m, "cursor_thread")
+  let cursor_n = sql_db::row_val(m, "cursor_n")
+  let end_thread = sql_db::row_val(m, "end_thread")
+  let end_n = sql_db::row_val(m, "end_n")
+  let rows : Array[Map[String, base_codec::Json]] = []
+  if is_json_null(end_thread) {
+    return Ok(rows)
+  }
+  if !is_json_null(cursor_thread) {
+    let part = if base_codec::json_eq(cursor_thread, end_thread) {
+      match db.all(
+        "SELECT " +
+        columns +
+        " FROM entries e WHERE e.thread=CAST(?1 AS INTEGER) AND e.n>CAST(?2 AS INTEGER) AND e.n<=CAST(?3 AS INTEGER) ORDER BY e.n LIMIT ?4",
+        [cursor_thread, cursor_n, end_n, base_codec::json_num(limit.to_double())],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+    } else {
+      match db.all(
+        "SELECT " +
+        columns +
+        " FROM entries e WHERE e.thread=CAST(?1 AS INTEGER) AND e.n>CAST(?2 AS INTEGER) ORDER BY e.n LIMIT ?3",
+        [cursor_thread, cursor_n, base_codec::json_num(limit.to_double())],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+    }
+    for i in 0..<part.length() {
+      rows.push(part[i])
+    }
+  }
+  if rows.length() < limit && !base_codec::json_eq(cursor_thread, end_thread) {
+    let rem1 = limit - rows.length()
+    let part1 = if is_json_null(cursor_thread) {
+      match db.all(
+        "SELECT " +
+        columns +
+        " FROM entries e WHERE e.thread<CAST(?1 AS INTEGER) ORDER BY e.thread,e.n LIMIT ?2",
+        [end_thread, base_codec::json_num(rem1.to_double())],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+    } else {
+      match db.all(
+        "SELECT " +
+        columns +
+        " FROM entries e WHERE e.thread<CAST(?1 AS INTEGER) AND e.thread>CAST(?2 AS INTEGER) ORDER BY e.thread,e.n LIMIT ?3",
+        [end_thread, cursor_thread, base_codec::json_num(rem1.to_double())],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+    }
+    for i in 0..<part1.length() {
+      rows.push(part1[i])
+    }
+    if rows.length() < limit {
+      let rem2 = limit - rows.length()
+      let part2 = match db.all(
+        "SELECT " +
+        columns +
+        " FROM entries e WHERE e.thread=CAST(?1 AS INTEGER) AND e.n<=CAST(?2 AS INTEGER) ORDER BY e.n LIMIT ?3",
+        [end_thread, end_n, base_codec::json_num(rem2.to_double())],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      for i in 0..<part2.length() {
+        rows.push(part2[i])
+      }
+    }
+  }
+  Ok(rows)
+}
+
+fn scan_step(
+  db : sql_db::Db,
+  table : String,
+  put : String,
+  incompatible : (base_codec::Json) -> String,
+) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      let m = match legacy_meta(tx_db, table) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if sql_db::row_int(m, "version") != LEGACY_VERSION {
+        return Err(builders_core::StepError::App(incompatible(sql_db::row_val(m, "version"))))
+      }
+      if sql_db::row_int(m, "scanned") == 1 {
+        return Ok(0)
+      }
+      let rows = match scan_keys(tx_db, m, LEGACY_BATCH) {
+        Ok(r) => r
+        Err(e) => return Err(e)
+      }
+      for i in 0..<rows.length() {
+        let row = rows[i]
+        match tx_db.run(put, [sql_db::row_val(row, "thread"), sql_db::row_val(row, "n")]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let (thread, n) = if rows.length() > 0 {
+        let last = rows[rows.length() - 1]
+        (sql_db::row_val(last, "thread"), sql_db::row_val(last, "n"))
+      } else {
+        (sql_db::row_val(m, "cursor_thread"), sql_db::row_val(m, "cursor_n"))
+      }
+      match tx_db.run(
+        "UPDATE " +
+        table +
+        " SET scanned=?,cursor_thread=CAST(? AS INTEGER),cursor_n=CAST(? AS INTEGER) WHERE id=1",
+        [json_flag(rows.length() < LEGACY_BATCH), thread, n],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      Ok(rows.length())
+    },
+    map_sql,
+  )
+}
+
+// ── The edit lookup ──
+
+fn has_legacy_edits(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let has_tbl = match db.has_schema("table", "legacy_edit_meta") {
+    Ok(b) => b
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !has_tbl {
+    return Ok(false)
+  }
+  let m = match db.first("SELECT version,scanned,old_index FROM legacy_edit_meta WHERE id=1", []) {
+    Ok(Some(r)) => r
+    Ok(None) => return Err(builders_core::StepError::App("legacy edit lookup has an unsupported version"))
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ver = sql_db::row_int(m, "version")
+  let scanned = sql_db::row_int(m, "scanned")
+  let old_index = sql_db::row_int(m, "old_index")
+  if ver != LEGACY_VERSION || (scanned != 0 && scanned != 1) || (old_index != 0 && old_index != 1) {
+    return Err(builders_core::StepError::App("legacy edit lookup has an unsupported version"))
+  }
+  Ok(true)
+}
+
+fn has_old_edit_index(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let columns = match db.all(
+    "SELECT name,coll FROM pragma_index_xinfo('entries_target') WHERE \"key\"=1 ORDER BY seqno",
+    [],
+  ) {
+    Ok(r) => r
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if columns.length() != 2 {
+    return Ok(false)
+  }
+  let a = columns[0]
+  let b = columns[1]
+  if !base_codec::json_eq(sql_db::row_val(a, "name"), base_codec::json_str("thread")) ||
+  !base_codec::json_eq(sql_db::row_val(a, "coll"), base_codec::json_str("BINARY")) ||
+  !base_codec::json_eq(sql_db::row_val(b, "name"), base_codec::json_str("target")) ||
+  !base_codec::json_eq(sql_db::row_val(b, "coll"), base_codec::json_str("BINARY")) {
+    return Ok(false)
+  }
+  match db.all(
+    "EXPLAIN QUERY PLAN SELECT MAX(n) FROM entries INDEXED BY entries_target WHERE thread=? AND target=?",
+    [base_codec::json_num(0.0), base_codec::json_num(0.0)],
+  ) {
+    Ok(_) => Ok(true)
+    Err(_) => Ok(false)
+  }
+}
+
+fn uses_legacy_edits(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let has_idx = match db.has_schema("index", "entries_edits") {
+    Ok(b) => b
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if has_idx {
+    return Ok(false)
+  }
+  has_legacy_edits(db)
+}
+
+fn edits_ready_now(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let view = match db.sqlite_master_sql("view", "merged") {
+    Ok(Some(s)) => s
+    Ok(None) => ""
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let legacy = str_contains(view, "legacy_edit_meta")
+  let old_index = legacy && str_contains(view, "INDEXED BY entries_target")
+  if old_index {
+    let has_old = match has_old_edit_index(db) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+    if !has_old {
+      return Ok(false)
+    }
+  }
+  if !legacy {
+    return match db.has_schema("index", "entries_edits") {
+      Ok(b) => Ok(b)
+      Err(e) => Err(builders_core::StepError::Sql(e))
+    }
+  }
+  match db.first(
+    "SELECT scanned=1 AND NOT EXISTS (SELECT 1 FROM legacy_edit_dirty LIMIT 1 OFFSET 64) AS ready FROM legacy_edit_meta WHERE id=1",
+    [],
+  ) {
+    Ok(Some(r)) => Ok(sql_db::row_int(r, "ready") == 1)
+    Ok(None) => Err(builders_core::StepError::App("legacy edit lookup metadata is missing"))
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+// Recompute every time outside a transaction (never caches across writer `repair()`).
+fn edits_ready(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  edits_ready_now(db)
+}
+
+fn needs_repair(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let view = match db.sqlite_master_sql("view", "merged") {
+    Ok(Some(s)) => s
+    Ok(None) => ""
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let view_broken = if str_contains(view, "legacy_edit_meta") {
+    if str_contains(view, "INDEXED BY entries_target") {
+      let has_old = match has_old_edit_index(db) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      !has_old
+    } else {
+      false
+    }
+  } else {
+    let has_idx = match db.has_schema("index", "entries_edits") {
+      Ok(b) => b
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+    !has_idx
+  }
+  if view_broken {
+    return Ok(true)
+  }
+  let add = match db.sqlite_master_sql("trigger", "widget_source_before_add") {
+    Ok(Some(s)) => s
+    Ok(None) => return Ok(false)
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let gated = str_contains(add, "widget_source_before_gate")
+  let gate = match db.has_schema("view", "widget_source_before_gate") {
+    Ok(b) => b
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let run = match db.sqlite_master_sql("trigger", "widget_source_before_gate_run") {
+    Ok(opt) => opt
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let legacy = match uses_legacy_edits(db) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  let old_index = if legacy {
+    match db.first("SELECT old_index FROM legacy_edit_meta WHERE id=1", []) {
+      Ok(Some(r)) => sql_db::row_int(r, "old_index") == 1
+      Ok(None) => false
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  } else {
+    false
+  }
+  let has_run = match run {
+    Some(_) => true
+    None => false
+  }
+  let run_mismatch = match run {
+    Some(r) => legacy && (str_contains(r, "INDEXED BY entries_target") != old_index)
+    None => false
+  }
+  Ok(
+    gated != legacy ||
+    gate != legacy ||
+    has_run != legacy ||
+    (!gated && str_contains(add, "FROM entries x INDEXED BY entries_target")) ||
+    run_mismatch,
+  )
+}
+
+fn edits_drain(db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      let m = match legacy_meta(tx_db, "legacy_edit_meta") {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if sql_db::row_int(m, "version") != LEGACY_VERSION {
+        return Err(builders_core::StepError::App("unsupported legacy edit preparation"))
+      }
+      if sql_db::row_int(m, "scanned") != 1 {
+        return Ok(0)
+      }
+      let mut visited = 0
+      while visited < LEGACY_BATCH {
+        let key = match tx_db.first(
+          "SELECT CAST(d.thread AS TEXT) thread,CAST(d.n AS TEXT) n FROM legacy_edit_dirty d ORDER BY d.thread,d.n LIMIT 1",
+          [],
+        ) {
+          Ok(Some(r)) => r
+          Ok(None) => break
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let k0 = sql_db::row_val(key, "thread")
+        let k1 = sql_db::row_val(key, "n")
+        let rem = LEGACY_BATCH - visited
+        let deleted = match tx_db.run(
+          "DELETE FROM legacy_edit_targets WHERE thread=CAST(?1 AS INTEGER) AND n=CAST(?2 AS INTEGER) AND target IN (SELECT target FROM legacy_edit_targets INDEXED BY legacy_edit_targets_by_key WHERE thread=CAST(?1 AS INTEGER) AND n=CAST(?2 AS INTEGER) AND target IS NOT (SELECT target FROM entries WHERE thread=CAST(?1 AS INTEGER) AND n=CAST(?2 AS INTEGER)) ORDER BY target LIMIT ?3)",
+          [k0, k1, base_codec::json_num(rem.to_double())],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        visited = visited + deleted
+        if visited == LEGACY_BATCH {
+          break
+        }
+        match tx_db.run(
+          "DELETE FROM legacy_edit_build WHERE thread=CAST(?1 AS INTEGER) AND n=CAST(?2 AS INTEGER) AND target IS (SELECT old_target FROM legacy_edit_dirty WHERE thread=CAST(?1 AS INTEGER) AND n=CAST(?2 AS INTEGER))",
+          [k0, k1],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx_db.run(
+          "INSERT INTO legacy_edit_build(thread,target,n) SELECT thread,target,n FROM entries WHERE thread=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER) AND target IS NOT NULL ON CONFLICT(thread,target,n) DO NOTHING",
+          [k0, k1],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx_db.run(
+          "DELETE FROM legacy_edit_targets WHERE thread=CAST(?1 AS INTEGER) AND n=CAST(?2 AS INTEGER) AND target IS (SELECT target FROM entries WHERE thread=CAST(?1 AS INTEGER) AND n=CAST(?2 AS INTEGER))",
+          [k0, k1],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx_db.run(
+          "DELETE FROM legacy_edit_dirty WHERE thread=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER)",
+          [k0, k1],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        visited = visited + 1
+      }
+      Ok(visited)
+    },
+    map_sql,
+  )
+}
+
+pub fn edits_maintenance(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match has_legacy_edits(db) {
+    Ok(false) => return Ok(true)
+    Ok(true) => ()
+    Err(e) => return Err(e)
+  }
+  let m = match legacy_meta(db, "legacy_edit_meta") {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if sql_db::row_int(m, "scanned") != 1 {
+    match scan_step(
+      db,
+      "legacy_edit_meta",
+      "INSERT INTO legacy_edit_build(thread,target,n) SELECT e.thread,e.target,e.n FROM entries e WHERE e.thread=CAST(?1 AS INTEGER) AND e.n=CAST(?2 AS INTEGER) AND e.target IS NOT NULL AND NOT EXISTS (SELECT 1 FROM legacy_edit_dirty d WHERE d.thread=e.thread AND d.n=e.n) ON CONFLICT(thread,target,n) DO NOTHING",
+      fn(_v : base_codec::Json) -> String { "unsupported legacy edit preparation" },
+    ) {
+      Ok(_) => return Ok(false)
+      Err(e) => return Err(e)
+    }
+  }
+  match edits_drain(db) {
+    Ok(n) => Ok(n < LEGACY_BATCH)
+    Err(e) => Err(e)
+  }
+}
+
+pub fn edits_step(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match edits_ready(db) {
+    Ok(true) => return Ok(true)
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  match needs_repair(db) {
+    Ok(true) => return Err(builders_core::StepError::Fallback)
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  match edits_maintenance(db) {
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  edits_ready(db)
+}
+
+// ── The said lookup ──
+
+fn has_legacy_said(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let has_view = match db.has_schema("view", "legacy_said") {
+    Ok(b) => b
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !has_view {
+    return Ok(false)
+  }
+  let has_meta = match db.has_schema("table", "legacy_said_meta") {
+    Ok(b) => b
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !has_meta {
+    return Err(builders_core::StepError::App("legacy said view has no metadata"))
+  }
+  let m = match db.first("SELECT version,scanned FROM legacy_said_meta WHERE id=1", []) {
+    Ok(Some(r)) => r
+    Ok(None) => return Err(builders_core::StepError::App("legacy said view has an unsupported version"))
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ver = sql_db::row_int(m, "version")
+  let scanned = sql_db::row_int(m, "scanned")
+  if ver != LEGACY_VERSION || (scanned != 0 && scanned != 1) {
+    return Err(builders_core::StepError::App("legacy said view has an unsupported version"))
+  }
+  Ok(true)
+}
+
+fn said_scanned(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let m = match db.first("SELECT version,scanned FROM legacy_said_meta WHERE id=1", []) {
+    Ok(Some(r)) => r
+    Ok(None) => return Err(builders_core::StepError::App("legacy said lookup metadata is missing or invalid"))
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ver = sql_db::row_int(m, "version")
+  let scanned = sql_db::row_int(m, "scanned")
+  if ver != LEGACY_VERSION || (scanned != 0 && scanned != 1) {
+    return Err(builders_core::StepError::App("legacy said lookup metadata is missing or invalid"))
+  }
+  Ok(scanned == 1)
+}
+
+fn said_incompatible(v : base_codec::Json) -> String {
+  "legacy said version " + sql_db::stringify_json(v) + " is incompatible with " + LEGACY_VERSION.to_string()
+}
+
+fn said_scan(db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+  scan_step(
+    db,
+    "legacy_said_meta",
+    "INSERT INTO legacy_said_build(thread,n,author_kind,author) SELECT thread,n,author_kind,author FROM entries WHERE thread=CAST(?1 AS INTEGER) AND n=CAST(?2 AS INTEGER) AND kind='message' AND letter IS NULL ON CONFLICT(thread,n) DO UPDATE SET author_kind=excluded.author_kind,author=excluded.author",
+    said_incompatible,
+  )
+}
+
+pub fn said_step(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let has1 = match has_legacy_said(db) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  if has1 {
+    let sc = match said_scanned(db) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+    if !sc {
+      match said_scan(db) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+    }
+  }
+  let has2 = match has_legacy_said(db) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  if !has2 {
+    return Ok(true)
+  }
+  said_scanned(db)
+}
+
+fn said_drain(db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      let m = match legacy_meta(tx_db, "legacy_said_meta") {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if sql_db::row_int(m, "version") != LEGACY_VERSION {
+        return Err(builders_core::StepError::App(said_incompatible(sql_db::row_val(m, "version"))))
+      }
+      let keys = match tx_db.all(
+        "SELECT CAST(d.thread AS TEXT) thread,CAST(d.n AS TEXT) n FROM legacy_said_dirty d ORDER BY d.thread,d.n LIMIT ?",
+        [base_codec::json_num(LEGACY_BATCH.to_double())],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      for i in 0..<keys.length() {
+        let key = keys[i]
+        let k = [sql_db::row_val(key, "thread"), sql_db::row_val(key, "n")]
+        match tx_db.run("DELETE FROM legacy_said_build WHERE thread=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER)", k) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx_db.run(
+          "INSERT INTO legacy_said_build(thread,n,author_kind,author) SELECT thread,n,author_kind,author FROM entries WHERE thread=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER) AND kind='message' AND letter IS NULL",
+          k,
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx_db.run("DELETE FROM legacy_said_dirty WHERE thread=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER)", k) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(keys.length())
+    },
+    map_sql,
+  )
+}
+
+pub fn said_maintenance(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match has_legacy_said(db) {
+    Ok(false) => return Ok(true)
+    Ok(true) => ()
+    Err(e) => return Err(e)
+  }
+  match said_scanned(db) {
+    Ok(false) => {
+      match said_scan(db) {
+        Ok(_) => return Ok(false)
+        Err(e) => return Err(e)
+      }
+    }
+    Ok(true) => ()
+    Err(e) => return Err(e)
+  }
+  match said_drain(db) {
+    Ok(n) => Ok(n < LEGACY_BATCH)
+    Err(e) => Err(e)
+  }
+}
+
+// ── Id-keyed lookups (archive_policy, decision_time, decision_session, decision_session_repair) ──
+
+fn checked_state(
+  db : sql_db::Db,
+  table : String,
+  unsupported : String,
+  two : Bool = false,
+) -> Result[Int, builders_core::StepError] {
+  let m = match db.first("SELECT version,complete FROM " + table + " WHERE id=1", []) {
+    Ok(Some(r)) => r
+    Ok(None) => return Err(builders_core::StepError::App(unsupported))
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ver = sql_db::row_int(m, "version")
+  let comp = sql_db::row_int(m, "complete")
+  if ver != LEGACY_VERSION || (comp != 0 && comp != 1 && !(two && comp == 2)) {
+    return Err(builders_core::StepError::App(unsupported))
+  }
+  Ok(comp)
+}
+
+fn has_policy(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let has = match db.has_schema("table", "archive_policy_lookup_meta") {
+    Ok(b) => b
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !has {
+    return Ok(false)
+  }
+  match checked_state(db, "archive_policy_lookup_meta", "archive policy lookup has an unsupported version") {
+    Ok(_) => Ok(true)
+    Err(e) => Err(e)
+  }
+}
+
+fn has_decision_time(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let has_meta = match db.has_schema("table", "legacy_decision_time_meta") {
+    Ok(b) => b
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !has_meta {
+    return Ok(false)
+  }
+  let has_tbl = match db.has_schema("table", "legacy_decision_time") {
+    Ok(b) => b
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !has_tbl {
+    return Err(builders_core::StepError::App("legacy decision-time metadata has no lookup"))
+  }
+  match checked_state(db, "legacy_decision_time_meta", "legacy decision-time lookup has an unsupported version") {
+    Ok(_) => Ok(true)
+    Err(e) => Err(e)
+  }
+}
+
+fn session_state(db : sql_db::Db, table : String) -> Result[Option[Int], builders_core::StepError] {
+  let has_meta = match db.has_schema("table", table + "_meta") {
+    Ok(b) => b
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !has_meta {
+    return Ok(None)
+  }
+  let has_tbl = match db.has_schema("table", table) {
+    Ok(b) => b
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !has_tbl {
+    return Err(builders_core::StepError::App("legacy decision-session metadata has no lookup"))
+  }
+  match checked_state(
+    db,
+    table + "_meta",
+    "legacy decision-session lookup has an unsupported version",
+    two=table == "legacy_decision_session_repair",
+  ) {
+    Ok(s) => Ok(Some(s))
+    Err(e) => Err(e)
+  }
+}
+
+fn has_session_lookup(db : sql_db::Db, table : String) -> Result[Bool, builders_core::StepError] {
+  match session_state(db, table) {
+    Ok(Some(s)) => {
+      if s != 2 {
+        match db.has_schema("index", table + "_by_session") {
+          Ok(b) => Ok(b)
+          Err(e) => Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        Ok(false)
+      }
+    }
+    Ok(None) => Ok(false)
+    Err(e) => Err(e)
+  }
+}
+
+fn copy_ids(
+  db : sql_db::Db,
+  meta_table : String,
+  source : String,
+  put : String,
+  incompatible : String,
+  limit : Int,
+  gate : (sql_db::Db) -> Result[Bool, builders_core::StepError],
+) -> Result[Bool, builders_core::StepError] {
+  match gate(db) {
+    Ok(false) => return Ok(true)
+    Ok(true) => ()
+    Err(e) => return Err(e)
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      match gate(tx_db) {
+        Ok(false) => return Ok(true)
+        Ok(true) => ()
+        Err(e) => return Err(e)
+      }
+      let m = match tx_db.first(
+        "SELECT version,complete,CAST(cursor AS TEXT) cursor,CAST(end_id AS TEXT) end_id FROM " +
+        meta_table +
+        " WHERE id=1",
+        [],
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Err(builders_core::StepError::App(incompatible))
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if sql_db::row_int(m, "version") != LEGACY_VERSION {
+        return Err(builders_core::StepError::App(incompatible))
+      }
+      if sql_db::row_int(m, "complete") == 1 {
+        return Ok(true)
+      }
+      let cursor = sql_db::row_val(m, "cursor")
+      let end = sql_db::row_val(m, "end_id")
+      let lim = base_codec::json_num(limit.to_double())
+      let rows = if is_json_null(end) {
+        []
+      } else if is_json_null(cursor) {
+        match tx_db.all(
+          "SELECT CAST(id AS TEXT) AS id FROM " +
+          source +
+          " WHERE id<=CAST(?1 AS INTEGER) ORDER BY " +
+          source +
+          ".id LIMIT ?2",
+          [end, lim],
+        ) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx_db.all(
+          "SELECT CAST(id AS TEXT) AS id FROM " +
+          source +
+          " WHERE id>CAST(?1 AS INTEGER) AND id<=CAST(?2 AS INTEGER) ORDER BY " +
+          source +
+          ".id LIMIT ?3",
+          [cursor, end, lim],
+        ) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      for i in 0..<rows.length() {
+        match tx_db.run(put, [sql_db::row_val(rows[i], "id")]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let done = rows.length() < limit
+      let reached = if rows.length() > 0 {
+        sql_db::row_val(rows[rows.length() - 1], "id")
+      } else {
+        cursor
+      }
+      match tx_db.run(
+        "UPDATE " + meta_table + " SET cursor=CAST(? AS INTEGER),complete=? WHERE id=1",
+        [reached, json_flag(done)],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      Ok(done)
+    },
+    map_sql,
+  )
+}
+
+pub fn policy_step(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  copy_ids(
+    db,
+    "archive_policy_lookup_meta",
+    "archive_policy",
+    "INSERT INTO archive_policy_lookup(id,ws) SELECT p.id,p.ws FROM archive_policy p WHERE p.id=CAST(?1 AS INTEGER) AND NOT EXISTS (SELECT 1 FROM archive_policy_lookup k WHERE k.id=p.id)",
+    "unsupported archive policy preparation",
+    LEGACY_BATCH,
+    has_policy,
+  )
+}
+
+pub fn decision_time_step(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  copy_ids(
+    db,
+    "legacy_decision_time_meta",
+    "decision_checks",
+    "INSERT INTO legacy_decision_time(id,created_at,session) SELECT id,created_at,session FROM decision_checks d WHERE d.id=CAST(?1 AS INTEGER) AND NOT EXISTS (SELECT 1 FROM legacy_decision_time l WHERE l.id=d.id)",
+    "unsupported legacy decision-time preparation",
+    LEGACY_BATCH,
+    has_decision_time,
+  )
+}
+
+fn session_put(table : String) -> String {
+  "INSERT INTO " +
+  table +
+  "(id,session) SELECT id,session FROM decision_checks d WHERE d.id=CAST(?1 AS INTEGER) AND NOT EXISTS (SELECT 1 FROM " +
+  table +
+  " l WHERE l.id=d.id)"
+}
+
+pub fn decision_session_step(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let table = "legacy_decision_session"
+  copy_ids(
+    db,
+    table + "_meta",
+    "decision_checks",
+    session_put(table),
+    "unsupported legacy decision-session preparation",
+    LEGACY_BATCH,
+    fn(d : sql_db::Db) -> Result[Bool, builders_core::StepError] { has_session_lookup(d, table) },
+  )
+}
+
+let REPAIR_TABLE : String = "legacy_decision_session_repair"
+
+fn repair_ddl_stmts() -> Array[String] {
+  [
+    "CREATE INDEX legacy_decision_session_repair_by_session ON legacy_decision_session_repair(session);",
+    "CREATE TRIGGER legacy_decision_session_repair_insert AFTER INSERT ON decision_checks BEGIN INSERT INTO legacy_decision_session_repair(id,session) SELECT id,session FROM decision_checks WHERE id=NEW.id ON CONFLICT(id) DO UPDATE SET session=excluded.session; END;",
+    "CREATE TRIGGER legacy_decision_session_repair_update AFTER UPDATE OF id,session ON decision_checks WHEN OLD.id IS NOT NEW.id OR OLD.session IS NOT NEW.session BEGIN DELETE FROM legacy_decision_session_repair WHERE id IN (OLD.id,NEW.id); INSERT INTO legacy_decision_session_repair(id,session) SELECT id,session FROM decision_checks WHERE id IN (OLD.id,NEW.id); END;",
+    "CREATE TRIGGER legacy_decision_session_repair_delete AFTER DELETE ON decision_checks BEGIN DELETE FROM legacy_decision_session_repair WHERE id IN (OLD.id); INSERT INTO legacy_decision_session_repair(id,session) SELECT id,session FROM decision_checks WHERE id IN (OLD.id); END;",
+  ]
+}
+
+fn repair_needs_work(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match session_state(db, REPAIR_TABLE) {
+    Ok(Some(2)) => Ok(true)
+    Ok(Some(0)) => has_session_lookup(db, REPAIR_TABLE)
+    Ok(_) => Ok(false)
+    Err(e) => Err(e)
+  }
+}
+
+pub fn decision_session_repair_step(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match repair_needs_work(db) {
+    Ok(false) => return Ok(true)
+    Ok(true) => ()
+    Err(e) => return Err(e)
+  }
+  let st = match session_state(db, REPAIR_TABLE) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  match st {
+    Some(2) => {
+      match db.tx_err(
+        fn(tx_db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+          match session_state(tx_db, REPAIR_TABLE) {
+            Ok(Some(2)) => {
+              match tx_db.run(
+                "DELETE FROM legacy_decision_session_repair WHERE id IN (SELECT id FROM legacy_decision_session_repair ORDER BY id LIMIT ?)",
+                [base_codec::json_num(LEGACY_BATCH.to_double())],
+              ) {
+                Ok(_) => ()
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+              let rem = match tx_db.first("SELECT 1 FROM legacy_decision_session_repair LIMIT 1", []) {
+                Ok(v) => v
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+              match rem {
+                None => {
+                  let stmts = repair_ddl_stmts()
+                  for i in 0..<stmts.length() {
+                    match tx_db.exec(stmts[i]) {
+                      Ok(_) => ()
+                      Err(e) => return Err(builders_core::StepError::Sql(e))
+                    }
+                  }
+                  match tx_db.exec(
+                    "UPDATE legacy_decision_session_repair_meta SET complete=0,cursor=NULL,end_id=(SELECT MAX(id) FROM decision_checks) WHERE id=1",
+                  ) {
+                    Ok(_) => ()
+                    Err(e) => return Err(builders_core::StepError::Sql(e))
+                  }
+                }
+                Some(_) => ()
+              }
+            }
+            Ok(_) => ()
+            Err(e) => return Err(e)
+          }
+          Ok(())
+        },
+        map_sql,
+      ) {
+        Ok(_) => return Ok(false)
+        Err(e) => return Err(e)
+      }
+    }
+    _ => ()
+  }
+  copy_ids(
+    db,
+    REPAIR_TABLE + "_meta",
+    "decision_checks",
+    session_put(REPAIR_TABLE),
+    "unsupported legacy decision-session preparation",
+    LEGACY_BATCH,
+    fn(d : sql_db::Db) -> Result[Bool, builders_core::StepError] { has_session_lookup(d, REPAIR_TABLE) },
+  )
+}
+
+// ── The agent-message time lookup ──
+
+pub fn has_legacy_agent(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let has = match db.has_schema("table", "legacy_agent_meta") {
+    Ok(b) => b
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !has {
+    return Ok(false)
+  }
+  let m = match db.first("SELECT version,scanned FROM legacy_agent_meta WHERE id=1", []) {
+    Ok(Some(r)) => r
+    Ok(None) => return Err(builders_core::StepError::App("legacy agent lookup has an unsupported version"))
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ver = sql_db::row_int(m, "version")
+  let scanned = sql_db::row_int(m, "scanned")
+  if ver != LEGACY_VERSION || (scanned != 0 && scanned != 1) {
+    return Err(builders_core::StepError::App("legacy agent lookup has an unsupported version"))
+  }
+  Ok(true)
+}
+
+fn agent_incompatible(v : base_codec::Json) -> String {
+  "legacy agent version " + sql_db::stringify_json(v) + " is incompatible with " + LEGACY_VERSION.to_string()
+}
+
+fn agent_drain(db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      let m = match legacy_meta(tx_db, "legacy_agent_meta") {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if sql_db::row_int(m, "version") != LEGACY_VERSION {
+        return Err(builders_core::StepError::App(agent_incompatible(sql_db::row_val(m, "version"))))
+      }
+      if sql_db::row_int(m, "scanned") != 1 {
+        return Ok(0)
+      }
+      let mut visited = 0
+      while visited < LEGACY_BATCH {
+        let key = match tx_db.first(
+          "SELECT CAST(d.thread AS TEXT) thread,CAST(d.n AS TEXT) n,CAST(d.old_at AS TEXT) old_at FROM legacy_agent_dirty d ORDER BY d.thread,d.n LIMIT 1",
+          [],
+        ) {
+          Ok(Some(r)) => r
+          Ok(None) => break
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let k0 = sql_db::row_val(key, "thread")
+        let k1 = sql_db::row_val(key, "n")
+        let now = match tx_db.first(
+          "SELECT CAST(at AS TEXT) at FROM entries WHERE thread=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER) AND kind='message' AND author_kind='agent'",
+          [k0, k1],
+        ) {
+          Ok(Some(r)) => sql_db::row_val(r, "at")
+          Ok(None) => base_codec::json_null()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let rem = LEGACY_BATCH - visited
+        let deleted = match tx_db.run(
+          "DELETE FROM legacy_agent_times WHERE thread=CAST(?1 AS INTEGER) AND n=CAST(?2 AS INTEGER) AND at IN (SELECT at FROM legacy_agent_times INDEXED BY legacy_agent_times_by_key WHERE thread=CAST(?1 AS INTEGER) AND n=CAST(?2 AS INTEGER) AND (?3 IS NULL OR at != CAST(?3 AS INTEGER)) ORDER BY legacy_agent_times.at LIMIT ?4)",
+          [k0, k1, now, base_codec::json_num(rem.to_double())],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        visited = visited + deleted
+        if visited == LEGACY_BATCH {
+          break
+        }
+        let old_at = sql_db::row_val(key, "old_at")
+        if !is_json_null(old_at) {
+          match tx_db.run(
+            "DELETE FROM legacy_agent_build WHERE thread=CAST(? AS INTEGER) AND at=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER)",
+            [k0, old_at, k1],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        match tx_db.run(
+          "INSERT INTO legacy_agent_build(thread,at,n) SELECT thread,at,n FROM entries WHERE thread=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER) AND kind='message' AND author_kind='agent' ON CONFLICT(thread,at,n) DO NOTHING",
+          [k0, k1],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        if !is_json_null(now) {
+          match tx_db.run(
+            "DELETE FROM legacy_agent_times WHERE thread=CAST(? AS INTEGER) AND at=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER)",
+            [k0, now, k1],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        match tx_db.run(
+          "DELETE FROM legacy_agent_dirty WHERE thread=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER)",
+          [k0, k1],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        visited = visited + 1
+      }
+      Ok(visited)
+    },
+    map_sql,
+  )
+}
+
+pub fn agent_maintenance(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match has_legacy_agent(db) {
+    Ok(false) => return Ok(true)
+    Ok(true) => ()
+    Err(e) => return Err(e)
+  }
+  let m = match legacy_meta(db, "legacy_agent_meta") {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if sql_db::row_int(m, "scanned") != 1 {
+    match scan_step(
+      db,
+      "legacy_agent_meta",
+      "INSERT INTO legacy_agent_build(thread,at,n) SELECT e.thread,CAST(CAST(e.at AS TEXT) AS INTEGER),e.n FROM entries e WHERE e.thread=CAST(?1 AS INTEGER) AND e.n=CAST(?2 AS INTEGER) AND e.kind='message' AND e.author_kind='agent' AND NOT EXISTS (SELECT 1 FROM legacy_agent_dirty WHERE thread=e.thread AND n=e.n) ON CONFLICT(thread,at,n) DO NOTHING",
+      agent_incompatible,
+    ) {
+      Ok(_) => return Ok(false)
+      Err(e) => return Err(e)
+    }
+  }
+  match agent_drain(db) {
+    Ok(n) => Ok(n < LEGACY_BATCH)
+    Err(e) => Err(e)
+  }
+}
+
+// ── The login-card lookup (UTF-16 code-unit offsets) ──
+
+fn has_login_cards(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let has = match db.has_schema("table", "login_card_meta") {
+    Ok(b) => b
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !has {
+    return Ok(false)
+  }
+  let m = match db.first("SELECT version,scanned FROM login_card_meta WHERE id=1", []) {
+    Ok(Some(r)) => r
+    Ok(None) => return Err(builders_core::StepError::App("legacy login-card lookup has an unsupported version"))
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ver = sql_db::row_int(m, "version")
+  let scanned = sql_db::row_int(m, "scanned")
+  if ver != LEGACY_VERSION || (scanned != 0 && scanned != 1) {
+    return Err(builders_core::StepError::App("legacy login-card lookup has an unsupported version"))
+  }
+  Ok(true)
+}
+
+/// A card's text as SQLite's LIKE sees it, in UTF-16 code units:
+/// ASCII A-Z folded to a-z, and cut at the first NUL (0x0000).
+pub fn like_text_utf16(card : String) -> Array[Int] {
+  let src = js_json::utf16_units(card)
+  let out : Array[Int] = []
+  for i in 0..<src.length() {
+    let c = src[i]
+    if c == 0 {
+      break
+    }
+    if c >= 0x41 && c <= 0x5A {
+      out.push(c + 32)
+    } else {
+      out.push(c)
+    }
+  }
+  out
+}
+
+/// Find `needle` (UTF-16 code units) in `haystack` (UTF-16 code units) starting at UTF-16 index `from`.
+pub fn utf16_units_find_from(haystack : Array[Int], needle : Array[Int], from : Int) -> Option[Int] {
+  let hlen = haystack.length()
+  let nlen = needle.length()
+  if from < 0 || from > hlen {
+    return None
+  }
+  if nlen == 0 {
+    return Some(from)
+  }
+  if from + nlen > hlen {
+    return None
+  }
+  let last = hlen - nlen
+  for i in from..<(last + 1) {
+    let mut matched = true
+    for j in 0..<nlen {
+      if haystack[i + j] != needle[j] {
+        matched = false
+        break
+      }
+    }
+    if matched {
+      return Some(i)
+    }
+  }
+  None
+}
+
+/// Check if `units[start..end)` is a valid login token (1..=40 ASCII lowercase alnum) and return it.
+pub fn extract_login_ok(units : Array[Int], start : Int, end : Int) -> Option[String] {
+  let len = end - start
+  if len < 1 || len > 40 {
+    return None
+  }
+  let sb = StringBuilder::new()
+  for i in start..<end {
+    let c = units[i]
+    let ok = (c >= 0x30 && c <= 0x39) || (c >= 0x61 && c <= 0x7A)
+    if !ok {
+      return None
+    }
+    sb.write_byte(c as Byte)
+  }
+  Some(sb.to_string())
+}
+
+fn login_cards_step(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let prefix_units = js_json::utf16_units("\"login\":\"")
+  let quote_units = js_json::utf16_units("\"")
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      let m = match tx_db.first(
+        "SELECT version,scanned,CAST(end_thread AS TEXT) end_thread,CAST(end_n AS TEXT) end_n,CAST(cursor_thread AS TEXT) cursor_thread,CAST(cursor_n AS TEXT) cursor_n,offset FROM login_card_meta WHERE id=1",
+        [],
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Err(builders_core::StepError::App("unsupported login card preparation"))
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let ver = sql_db::row_int(m, "version")
+      let scanned = sql_db::row_int(m, "scanned")
+      if ver != LEGACY_VERSION || (scanned != 0 && scanned != 1) {
+        return Err(builders_core::StepError::App("unsupported login card preparation"))
+      }
+      if scanned == 1 {
+        return Ok(true)
+      }
+      let fields = "CAST(thread AS TEXT) thread,CAST(n AS TEXT) n,CAST(rowid AS TEXT) entry_rowid,ts,kind,author_kind,CASE WHEN card LIKE '%\"login\"%' THEN CAST(card AS TEXT) END AS card"
+      let has_idx = match tx_db.has_schema("index", "entries_login_cards") {
+        Ok(b) => b
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let from = if has_idx {
+        "FROM entries INDEXED BY entries_login_cards WHERE card LIKE '%\"login\"%'"
+      } else {
+        "FROM entries WHERE 1"
+      }
+      let end_thread = sql_db::row_val(m, "end_thread")
+      let end_n = sql_db::row_val(m, "end_n")
+      let mut cursor_thread = sql_db::row_val(m, "cursor_thread")
+      let mut cursor_n = sql_db::row_val(m, "cursor_n")
+      let mut offset : Option[Int] = match sql_db::row_val(m, "offset") {
+        base_codec::Json::Num(o, _) => Some(o.to_int())
+        _ => None
+      }
+      let mut visited = 0
+      let mut tokens = 0
+      let mut ready = is_json_null(end_thread)
+      while !ready && visited < LEGACY_BATCH && tokens < LEGACY_BATCH {
+        let row = match offset {
+          Some(_) => {
+            match tx_db.first(
+              "SELECT " + fields + " FROM entries WHERE thread=CAST(?1 AS INTEGER) AND n=CAST(?2 AS INTEGER)",
+              [cursor_thread, cursor_n],
+            ) {
+              Ok(Some(r)) => r
+              Ok(None) => {
+                offset = None
+                continue
+              }
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+          None => {
+            let mut found = if is_json_null(cursor_thread) {
+              match tx_db.first(
+                "SELECT " +
+                fields +
+                " " +
+                from +
+                " AND thread<=CAST(?1 AS INTEGER) ORDER BY entries.thread,entries.n LIMIT 1",
+                [end_thread],
+              ) {
+                Ok(r) => r
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+            } else {
+              match tx_db.first(
+                "SELECT " +
+                fields +
+                " " +
+                from +
+                " AND thread=CAST(?1 AS INTEGER) AND n>CAST(?2 AS INTEGER) ORDER BY entries.n LIMIT 1",
+                [cursor_thread, cursor_n],
+              ) {
+                Ok(r) => r
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+            }
+            match found {
+              None => {
+                if !is_json_null(cursor_thread) {
+                  found = match tx_db.first(
+                    "SELECT " +
+                    fields +
+                    " " +
+                    from +
+                    " AND thread>CAST(?1 AS INTEGER) AND thread<=CAST(?2 AS INTEGER) ORDER BY entries.thread,entries.n LIMIT 1",
+                    [cursor_thread, end_thread],
+                  ) {
+                    Ok(r) => r
+                    Err(e) => return Err(builders_core::StepError::Sql(e))
+                  }
+                }
+              }
+              Some(_) => ()
+            }
+            match found {
+              None => {
+                ready = true
+                break
+              }
+              Some(r) => {
+                let beyond = match tx_db.first(
+                  "SELECT CAST(?1 AS INTEGER)>CAST(?2 AS INTEGER) OR (CAST(?1 AS INTEGER)=CAST(?2 AS INTEGER) AND CAST(?3 AS INTEGER)>CAST(?4 AS INTEGER)) AS beyond",
+                  [sql_db::row_val(r, "thread"), end_thread, sql_db::row_val(r, "n"), end_n],
+                ) {
+                  Ok(Some(br)) => sql_db::row_int(br, "beyond")
+                  Ok(None) => 1
+                  Err(e) => return Err(builders_core::StepError::Sql(e))
+                }
+                if beyond != 0 {
+                  ready = true
+                  break
+                }
+                cursor_thread = sql_db::row_val(r, "thread")
+                cursor_n = sql_db::row_val(r, "n")
+                offset = Some(0)
+                r
+              }
+            }
+          }
+        }
+        visited = visited + 1
+        let is_agent_msg = base_codec::json_eq(sql_db::row_val(row, "kind"), base_codec::json_str("message")) &&
+        base_codec::json_eq(sql_db::row_val(row, "author_kind"), base_codec::json_str("agent"))
+        let card = match sql_db::row_val(row, "card") {
+          base_codec::Json::Str(s) => if is_agent_msg { Some(s) } else { None }
+          _ => None
+        }
+        let card_text = match card {
+          Some(c) => c
+          None => {
+            offset = None
+            continue
+          }
+        }
+        let text_units = like_text_utf16(card_text)
+        let mut at = match offset {
+          Some(o) => o
+          None => 0
+        }
+        while tokens < LEGACY_BATCH {
+          let start = match utf16_units_find_from(text_units, prefix_units, at) {
+            Some(pos) => pos
+            None => {
+              offset = None
+              break
+            }
+          }
+          at = start + prefix_units.length()
+          match utf16_units_find_from(text_units, quote_units, at) {
+            Some(end) => {
+              match extract_login_ok(text_units, at, end) {
+                Some(login) => {
+                  match tx_db.run(
+                    "INSERT INTO login_card_keys(login,thread,n,entry_rowid,ts) SELECT ?1,CAST(?2 AS INTEGER),CAST(?3 AS INTEGER),CAST(?4 AS INTEGER),?5 WHERE NOT EXISTS (SELECT 1 FROM login_card_keys WHERE login=?1 AND thread=CAST(?2 AS INTEGER) AND n=CAST(?3 AS INTEGER))",
+                    [
+                      base_codec::json_str(login),
+                      sql_db::row_val(row, "thread"),
+                      sql_db::row_val(row, "n"),
+                      sql_db::row_val(row, "entry_rowid"),
+                      sql_db::row_val(row, "ts"),
+                    ],
+                  ) {
+                    Ok(_) => ()
+                    Err(e) => return Err(builders_core::StepError::Sql(e))
+                  }
+                }
+                None => ()
+              }
+            }
+            None => ()
+          }
+          tokens = tokens + 1
+          offset = Some(at)
+        }
+      }
+      let off_val = match offset {
+        Some(o) => base_codec::json_num(o.to_double())
+        None => base_codec::json_null()
+      }
+      match tx_db.run(
+        "UPDATE login_card_meta SET scanned=?,cursor_thread=CAST(? AS INTEGER),cursor_n=CAST(? AS INTEGER),offset=? WHERE id=1",
+        [json_flag(ready), cursor_thread, cursor_n, off_val],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      Ok(ready)
+    },
+    map_sql,
+  )
+}
+
+pub fn login_cards_maintenance(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match has_login_cards(db) {
+    Ok(false) => return Ok(true)
+    Ok(true) => ()
+    Err(e) => return Err(e)
+  }
+  login_cards_step(db)
+}
+
+// ── Read-side helpers (ported 1:1 from legacy.mbt) ──
+
+pub fn merged_read_ready(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  edits_ready(db)
+}
+
+pub fn merged_needs_repair(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let view = match db.sqlite_master_sql("view", "merged") {
+    Ok(Some(s)) => s
+    Ok(None) => ""
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if str_contains(view, "legacy_edit_meta") {
+    if str_contains(view, "INDEXED BY entries_target") {
+      match has_old_edit_index(db) {
+        Ok(b) => Ok(!b)
+        Err(e) => Err(e)
+      }
+    } else {
+      Ok(false)
+    }
+  } else {
+    match db.has_schema("index", "entries_edits") {
+      Ok(b) => Ok(!b)
+      Err(e) => Err(builders_core::StepError::Sql(e))
+    }
+  }
+}
+
+pub fn bounded_edit_key(
+  db : sql_db::Db,
+  thread : base_codec::Json,
+  n : base_codec::Json,
+) -> Result[Option[String], builders_core::StepError] {
+  let mut edit = match db.first(
+    "WITH tail AS MATERIALIZED (\n    SELECT n,target FROM entries WHERE thread=?1 ORDER BY n DESC LIMIT 65\n  ) SELECT (SELECT CAST(n AS TEXT) FROM tail WHERE target=CAST(?2 AS INTEGER) ORDER BY n DESC LIMIT 1) AS n,\n    (SELECT COUNT(*) FROM tail) AS count",
+    [thread, n],
+  ) {
+    Ok(r) => r
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let get_count = fn(e : Option[Map[String, base_codec::Json]]) -> Int {
+    match e {
+      Some(r) => sql_db::row_int(r, "count")
+      None => 0
+    }
+  }
+  let get_key = fn(e : Option[Map[String, base_codec::Json]]) -> Option[String] {
+    match e {
+      Some(r) =>
+      match sql_db::row_val(r, "n") {
+        base_codec::Json::Str(s) => Some(s)
+        _ => None
+      }
+      None => None
+    }
+  }
+  let no_key = match get_key(edit) {
+    None => true
+    Some(_) => false
+  }
+  if no_key && get_count(edit) == 65 {
+    let has_leg = match has_legacy_edits(db) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+    let meta = if has_leg {
+      match db.first("SELECT scanned,old_index FROM legacy_edit_meta WHERE id=1", []) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+    } else {
+      None
+    }
+    match meta {
+      Some(m) => {
+        if sql_db::row_int(m, "scanned") == 0 && sql_db::row_int(m, "old_index") == 1 {
+          let has_old = match has_old_edit_index(db) {
+            Ok(b) => b
+            Err(e) => return Err(e)
+          }
+          if has_old {
+            edit = match db.first(
+              "WITH edits AS MATERIALIZED (\n    SELECT x.n FROM entries x INDEXED BY entries_target WHERE x.thread=?1 AND x.target=CAST(?2 AS INTEGER)\n      ORDER BY x.rowid DESC LIMIT 65\n  ) SELECT CAST(MAX(n) AS TEXT) AS n,COUNT(*) AS count FROM edits",
+              [thread, n],
+            ) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+        }
+      }
+      None => ()
+    }
+    if get_count(edit) == 65 {
+      return Err(builders_core::StepError::App("legacy edits pending"))
+    }
+  }
+  Ok(get_key(edit))
+}

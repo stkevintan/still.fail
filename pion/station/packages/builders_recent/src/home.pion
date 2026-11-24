@@ -1,0 +1,619 @@
+// Home: its default part and its intersection with the named workspace, 1:1 aligned with
+// `station/mb/src/recent/home.mbt`.
+// All write transactions go exclusively through `db.tx_err(...)` (never raw transaction SQL).
+
+import "base_codec"
+import "builders_core"
+import "sql_db"
+
+struct HomeChatResult {
+  decided : Option[Bool]
+  after : base_codec::Json
+  seen : Bool
+  visited : Int
+}
+
+/// Whether a chat belongs to the default part of home, in bounded member batches (`recentHomeChatStep`).
+fn home_chat(
+  db : sql_db::Db,
+  thread : base_codec::Json,
+  after_in : base_codec::Json,
+  seen_in : Bool,
+  limit : Int,
+) -> Result[HomeChatResult, builders_core::StepError] {
+  let chat = match db.first("SELECT home FROM threads WHERE id = CAST(? AS INTEGER)", [thread]) {
+    Ok(Some(c)) => c
+    Ok(None) => {
+      return Ok(HomeChatResult::{ decided: Some(false), after: after_in, seen: seen_in, visited: 0 })
+    }
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let home = sql_db::row_val(chat, "home")
+  if !is_json_null(home) {
+    let inc = match db.first("SELECT ws FROM sessions WHERE key = ?", [home]) {
+      Ok(None) => true
+      Ok(Some(s)) => is_json_null(sql_db::row_val(s, "ws"))
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+    return Ok(HomeChatResult::{ decided: Some(inc), after: after_in, seen: seen_in, visited: 1 })
+  }
+  let members = if is_json_null(after_in) {
+    match db.all(
+      "SELECT session FROM thread_sessions WHERE thread = CAST(?1 AS INTEGER) ORDER BY session LIMIT ?2",
+      [thread, num(limit)],
+    ) {
+      Ok(r) => r
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  } else {
+    match db.all(
+      "SELECT session FROM thread_sessions WHERE thread = CAST(?1 AS INTEGER) AND session > ?2 ORDER BY session LIMIT ?3",
+      [thread, after_in, num(limit)],
+    ) {
+      Ok(r) => r
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  }
+  let visited = members.length()
+  for i in 0..<members.length() {
+    match db.first("SELECT ws FROM sessions WHERE key = ?", [sql_db::row_val(members[i], "session")]) {
+      Ok(None) => {
+        return Ok(HomeChatResult::{ decided: Some(true), after: after_in, seen: seen_in, visited: visited })
+      }
+      Ok(Some(s)) => {
+        if is_json_null(sql_db::row_val(s, "ws")) {
+          return Ok(HomeChatResult::{ decided: Some(true), after: after_in, seen: seen_in, visited: visited })
+        }
+      }
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  }
+  if members.length() < limit {
+    return Ok(
+      HomeChatResult::{
+        decided: Some(!seen_in && members.length() == 0),
+        after: after_in,
+        seen: seen_in,
+        visited: visited,
+      },
+    )
+  }
+  Ok(
+    HomeChatResult::{
+      decided: None,
+      after: sql_db::row_val(members[members.length() - 1], "session"),
+      seen: true,
+      visited: visited,
+    },
+  )
+}
+
+fn mark_home_dirty(db : sql_db::Db, thread : base_codec::Json) -> Result[Unit, builders_core::StepError] {
+  match db.run(
+    "UPDATE recent_home_dirty SET revision = revision + 1 WHERE thread = CAST(? AS INTEGER)",
+    [thread],
+  ) {
+    Ok(_) => ()
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  match db.run(
+    "INSERT INTO recent_home_dirty(thread, revision) SELECT CAST(?1 AS INTEGER), 1 WHERE NOT EXISTS (SELECT 1 FROM recent_home_dirty WHERE thread = CAST(?1 AS INTEGER))",
+    [thread],
+  ) {
+    Ok(_) => Ok(())
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+/// A session's chats journaled for the default part (`settleRecentHomeSessionStep`).
+fn settle_home_session(db : sql_db::Db, limit : Int) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      let pending = match tx_db.first(
+        "SELECT session, CAST(revision AS TEXT) AS revision FROM recent_scope_session_dirty WHERE kind = 0 AND ws = '' ORDER BY session LIMIT 1",
+        [],
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Ok(0)
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let session = sql_db::row_val(pending, "session")
+      let revision = sql_db::row_val(pending, "revision")
+      let work = match tx_db.first(
+        "SELECT CAST(revision AS TEXT) AS revision, phase, CAST(after AS TEXT) AS after FROM recent_home_session_work WHERE session = ?",
+        [session],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let mut phase = text("home")
+      let mut after = base_codec::json_null()
+      let mut matched_work = false
+      match work {
+        Some(k) => {
+          if base_codec::json_eq(sql_db::row_val(k, "revision"), revision) {
+            phase = sql_db::row_val(k, "phase")
+            after = sql_db::row_val(k, "after")
+            matched_work = true
+          }
+        }
+        None => ()
+      }
+      if !matched_work {
+        match tx_db.run(
+          "INSERT INTO recent_home_session_work(session, revision, phase, after) VALUES (?, CAST(? AS INTEGER), 'home', NULL) ON CONFLICT(session) DO UPDATE SET revision = excluded.revision, phase = 'home', after = NULL",
+          [session, revision],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let key = match session {
+        base_codec::Json::Str(s) => s
+        _ => return Err(builders_core::StepError::App("recent home session work is malformed"))
+      }
+      let p = match phase {
+        base_codec::Json::Str(s) => s
+        _ => return Err(builders_core::StepError::App("recent home session work is malformed"))
+      }
+      let batch = match session_threads(tx_db, key, p, after, limit) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      for i in 0..<batch.threads.length() {
+        match mark_home_dirty(tx_db, batch.threads[i]) {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+      }
+      if batch.phase == "done" {
+        match tx_db.run("DELETE FROM recent_home_session_work WHERE session = ?", [session]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match acknowledge(tx_db, 0, text(""), session, revision) {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+      } else {
+        match tx_db.run(
+          "UPDATE recent_home_session_work SET phase = ?, after = CAST(? AS INTEGER) WHERE session = ?",
+          [text(batch.phase), batch.after, session],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(batch.visited)
+    },
+    map_sql,
+  )
+}
+
+/// At most `limit` old chats of `table` (`column`) up to the meta's boundary added to `dirty`.
+fn scan_into(
+  db : sql_db::Db,
+  meta : String,
+  table : String,
+  column : String,
+  dirty : String,
+  limit : Int,
+) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      let m = match one(
+        tx_db,
+        "SELECT CAST(cursor AS TEXT) AS cursor, CAST(through AS TEXT) AS through, scan_done FROM " +
+        meta +
+        " WHERE id = 1",
+        [],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(e)
+      }
+      let cursor = sql_db::row_val(m, "cursor")
+      let through = sql_db::row_val(m, "through")
+      if sql_db::row_int(m, "scan_done") == 1 || is_json_null(through) {
+        return Ok(0)
+      }
+      let found = if is_json_null(cursor) {
+        match tx_db.all(
+          "SELECT CAST(" + column + " AS TEXT) AS tid FROM " + table + " WHERE " + column + " <= CAST(?1 AS INTEGER) ORDER BY " + column + " LIMIT ?2",
+          [through, num(limit)],
+        ) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx_db.all(
+          "SELECT CAST(" + column + " AS TEXT) AS tid FROM " + table + " WHERE " + column + " > CAST(?1 AS INTEGER) AND " + column + " <= CAST(?2 AS INTEGER) ORDER BY " + column + " LIMIT ?3",
+          [cursor, through, num(limit)],
+        ) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      for i in 0..<found.length() {
+        match tx_db.run(
+          "INSERT INTO " + dirty + "(thread, revision) SELECT CAST(?1 AS INTEGER), 1 WHERE NOT EXISTS (SELECT 1 FROM " + dirty + " WHERE thread = CAST(?1 AS INTEGER))",
+          [sql_db::row_val(found[i], "tid")],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let reached = if found.length() > 0 {
+        sql_db::row_val(found[found.length() - 1], "tid")
+      } else {
+        cursor
+      }
+      match tx_db.run(
+        "UPDATE " + meta + " SET cursor = CAST(? AS INTEGER), scan_done = ? WHERE id = 1",
+        [reached, num(if found.length() < limit { 1 } else { 0 })],
+      ) {
+        Ok(_) => Ok(found.length())
+        Err(e) => Err(builders_core::StepError::Sql(e))
+      }
+    },
+    map_sql,
+  )
+}
+
+/// Changed chats accounted for the default part, in bounded member batches (`settleRecentHomeChatStep`).
+fn settle_home_chats(db : sql_db::Db, limit : Int) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      let mut visited = 0
+      while visited < limit {
+        let pending = match tx_db.first(
+          "SELECT CAST(thread AS TEXT) AS tid, CAST(revision AS TEXT) AS revision FROM recent_home_dirty ORDER BY thread LIMIT 1",
+          [],
+        ) {
+          Ok(Some(r)) => r
+          Ok(None) => break
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let thread = sql_db::row_val(pending, "tid")
+        let revision = sql_db::row_val(pending, "revision")
+        let mut after = base_codec::json_null()
+        let mut seen = false
+        let work = match tx_db.first(
+          "SELECT CAST(revision AS TEXT) AS revision, after_session, seen FROM recent_home_work WHERE thread = CAST(? AS INTEGER)",
+          [thread],
+        ) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let mut matched_work = false
+        match work {
+          Some(k) => {
+            if base_codec::json_eq(sql_db::row_val(k, "revision"), revision) {
+              after = sql_db::row_val(k, "after_session")
+              seen = sql_db::row_int(k, "seen") == 1
+              matched_work = true
+            }
+          }
+          None => ()
+        }
+        if !matched_work {
+          match tx_db.run(
+            "INSERT INTO recent_home_work(thread, revision, after_session, seen) VALUES (CAST(? AS INTEGER), CAST(? AS INTEGER), NULL, 0) ON CONFLICT(thread) DO UPDATE SET revision = excluded.revision, after_session = NULL, seen = 0",
+            [thread, revision],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        let hc = match home_chat(tx_db, thread, after, seen, limit - visited) {
+          Ok(r) => r
+          Err(e) => return Err(e)
+        }
+        visited = visited + (if hc.visited > 1 { hc.visited } else { 1 })
+        let included = match hc.decided {
+          Some(b) => b
+          None => {
+            match tx_db.run(
+              "UPDATE recent_home_work SET after_session = ?, seen = ? WHERE thread = CAST(? AS INTEGER)",
+              [hc.after, num(if hc.seen { 1 } else { 0 }), thread],
+            ) {
+              Ok(_) => ()
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+            break
+          }
+        }
+        let had = match exists(
+          tx_db,
+          "SELECT 1 FROM recent_home_rows WHERE thread = CAST(? AS INTEGER)",
+          [thread],
+        ) {
+          Ok(b) => b
+          Err(e) => return Err(e)
+        }
+        if included {
+          let put = match tx_db.run(
+            "INSERT INTO recent_home_rows(thread, at, said_at, created_at) SELECT thread, at, said_at, created_at FROM (" +
+            current("?1") +
+            ") WHERE true ON CONFLICT(thread) DO UPDATE SET at = excluded.at, said_at = excluded.said_at, created_at = excluded.created_at",
+            [thread],
+          ) {
+            Ok(n) => n
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          if put == 0 {
+            return Err(builders_core::StepError::App("recent home chat disappeared inside a write transaction"))
+          }
+          if !had {
+            match tx_db.run("UPDATE recent_home_meta SET total = total + 1 WHERE id = 1", []) {
+              Ok(_) => ()
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+        } else if had {
+          match tx_db.run(
+            "DELETE FROM recent_home_rows WHERE thread = CAST(? AS INTEGER)",
+            [thread],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          match tx_db.run("UPDATE recent_home_meta SET total = total - 1 WHERE id = 1", []) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        match tx_db.run("DELETE FROM recent_home_work WHERE thread = CAST(? AS INTEGER)", [thread]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx_db.run(
+          "DELETE FROM recent_home_dirty WHERE thread = CAST(? AS INTEGER) AND revision = CAST(? AS INTEGER)",
+          [thread, revision],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx_db.run("DELETE FROM recent_home_order_dirty WHERE thread = CAST(? AS INTEGER)", [thread]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(visited)
+    },
+    map_sql,
+  )
+}
+
+/// The order of at most `limit` default-home chats brought up to date (`settleRecentHomeOrderStep`).
+fn settle_home_order(db : sql_db::Db, limit : Int) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      let changed = match tx_db.all(
+        "SELECT CAST(thread AS TEXT) AS tid FROM recent_home_order_dirty ORDER BY thread LIMIT ?",
+        [num(limit)],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      for i in 0..<changed.length() {
+        let thread = sql_db::row_val(changed[i], "tid")
+        match tx_db.run(
+          "UPDATE recent_home_rows SET at = c.at, said_at = c.said_at, created_at = c.created_at FROM (" +
+          current("?1") +
+          ") c WHERE recent_home_rows.thread = c.thread AND (recent_home_rows.at IS NOT c.at OR recent_home_rows.said_at IS NOT c.said_at OR recent_home_rows.created_at IS NOT c.created_at)",
+          [thread],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx_db.run(
+          "DELETE FROM recent_home_order_dirty WHERE thread = CAST(? AS INTEGER)",
+          [thread],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(changed.length())
+    },
+    map_sql,
+  )
+}
+
+/// Default chats' workspace intersections brought up to date in bounded batches (`settleRecentHomeOverlapStep`).
+fn settle_overlap(db : sql_db::Db, limit : Int) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      let mut visited = 0
+      while visited < limit {
+        let pending = match tx_db.first(
+          "SELECT CAST(thread AS TEXT) AS tid, CAST(revision AS TEXT) AS revision FROM recent_home_overlap_dirty ORDER BY thread LIMIT 1",
+          [],
+        ) {
+          Ok(Some(r)) => r
+          Ok(None) => break
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let thread = sql_db::row_val(pending, "tid")
+        let revision = sql_db::row_val(pending, "revision")
+        let work = match tx_db.first(
+          "SELECT CAST(revision AS TEXT) AS revision, after_ws FROM recent_home_overlap_work WHERE thread = CAST(? AS INTEGER)",
+          [thread],
+        ) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let mut after = base_codec::json_null()
+        let mut matched_work = false
+        match work {
+          Some(k) => {
+            if base_codec::json_eq(sql_db::row_val(k, "revision"), revision) {
+              after = sql_db::row_val(k, "after_ws")
+              matched_work = true
+            }
+          }
+          None => ()
+        }
+        if !matched_work {
+          match tx_db.run(
+            "INSERT INTO recent_home_overlap_work(thread, revision, after_ws) VALUES (CAST(? AS INTEGER), CAST(? AS INTEGER), NULL) ON CONFLICT(thread) DO UPDATE SET revision = excluded.revision, after_ws = NULL",
+            [thread, revision],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        let included = match exists(
+          tx_db,
+          "SELECT 1 FROM recent_home_rows WHERE thread = CAST(? AS INTEGER)",
+          [thread],
+        ) {
+          Ok(b) => b
+          Err(e) => return Err(e)
+        }
+        let table = if included {
+          "recent_scope_rows INDEXED BY recent_scope_rows_thread"
+        } else {
+          "recent_home_overlap_rows INDEXED BY recent_home_overlap_by_thread"
+        }
+        let remaining = limit - visited
+        let found = if is_json_null(after) {
+          match tx_db.all(
+            "SELECT ws FROM " + table + " WHERE thread = CAST(?1 AS INTEGER) ORDER BY ws LIMIT ?2",
+            [thread, num(remaining)],
+          ) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        } else {
+          match tx_db.all(
+            "SELECT ws FROM " + table + " WHERE thread = CAST(?1 AS INTEGER) AND ws > ?2 ORDER BY ws LIMIT ?3",
+            [thread, after, num(remaining)],
+          ) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        for i in 0..<found.length() {
+          if included {
+            match tx_db.run(
+              "INSERT INTO recent_home_overlap_rows(ws, thread) SELECT ?1, CAST(?2 AS INTEGER) WHERE NOT EXISTS (SELECT 1 FROM recent_home_overlap_rows WHERE ws = ?1 AND thread = CAST(?2 AS INTEGER))",
+              [sql_db::row_val(found[i], "ws"), thread],
+            ) {
+              Ok(_) => ()
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          } else {
+            match tx_db.run(
+              "DELETE FROM recent_home_overlap_rows WHERE ws = ? AND thread = CAST(? AS INTEGER)",
+              [sql_db::row_val(found[i], "ws"), thread],
+            ) {
+              Ok(_) => ()
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+        }
+        visited = visited + (if found.length() > 1 { found.length() } else { 1 })
+        if found.length() == remaining {
+          match tx_db.run(
+            "UPDATE recent_home_overlap_work SET after_ws = ? WHERE thread = CAST(? AS INTEGER)",
+            [sql_db::row_val(found[found.length() - 1], "ws"), thread],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          break
+        }
+        match tx_db.run(
+          "DELETE FROM recent_home_overlap_work WHERE thread = CAST(? AS INTEGER)",
+          [thread],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx_db.run(
+          "DELETE FROM recent_home_overlap_dirty WHERE thread = CAST(? AS INTEGER) AND revision = CAST(? AS INTEGER)",
+          [thread, revision],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(visited)
+    },
+    map_sql,
+  )
+}
+
+/// The default part's count can be read (`preparedDefaultHomeTotal` gives one).
+fn default_home_ready(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match installed(db, "home") {
+    Ok(true) => ()
+    Ok(false) => return Ok(false)
+    Err(e) => return Err(e)
+  }
+  match installed(db, "scope") {
+    Ok(true) => ()
+    Ok(false) => return Ok(false)
+    Err(e) => return Err(e)
+  }
+  let meta = match one(db, "SELECT scan_done FROM recent_home_meta WHERE id = 1", []) {
+    Ok(r) => r
+    Err(e) => return Err(e)
+  }
+  if sql_db::row_int(meta, "scan_done") != 1 {
+    return Ok(false)
+  }
+  match exists(db, "SELECT 1 FROM recent_home_dirty LIMIT 1", []) {
+    Ok(true) => return Ok(false)
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  match exists(db, "SELECT 1 FROM recent_home_order_dirty LIMIT 1", []) {
+    Ok(true) => return Ok(false)
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  let sess_dirty = match exists(
+    db,
+    "SELECT 1 FROM recent_scope_session_dirty WHERE kind = 0 AND ws = '' LIMIT 1",
+    [],
+  ) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  Ok(!sess_dirty)
+}
+
+/// Home's page can be read (`readPreparedRecentHome` gives one): its default part, the workspace and their overlap.
+fn home_ready(db : sql_db::Db, home : String) -> Result[Bool, builders_core::StepError] {
+  snapshot(
+    db,
+    "recent_home_union",
+    fn(snap_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      match installed(snap_db, "overlap") {
+        Ok(true) => ()
+        Ok(false) => return Ok(false)
+        Err(e) => return Err(e)
+      }
+      let meta = match one(snap_db, "SELECT scan_done FROM recent_home_overlap_meta WHERE id = 1", []) {
+        Ok(r) => r
+        Err(e) => return Err(e)
+      }
+      if sql_db::row_int(meta, "scan_done") != 1 {
+        return Ok(false)
+      }
+      match exists(snap_db, "SELECT 1 FROM recent_home_overlap_dirty LIMIT 1", []) {
+        Ok(true) => return Ok(false)
+        Ok(false) => ()
+        Err(e) => return Err(e)
+      }
+      match default_home_ready(snap_db) {
+        Ok(true) => ()
+        Ok(false) => return Ok(false)
+        Err(e) => return Err(e)
+      }
+      workspace_total_ready(snap_db, home)
+    },
+  )
+}

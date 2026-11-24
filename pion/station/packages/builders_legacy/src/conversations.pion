@@ -1,0 +1,696 @@
+// 1:1 port of `station/mb/src/sql/conversations.mbt` for `conversation-backfill`:
+// `backfill_conversations_step`, `birth_threads_of`, `settle_conversation_in_tx`.
+//
+// Invariants:
+// - All write transactions go exclusively through `db.tx_err(...)` (zero raw tx SQL).
+// - Uses `sessions_conv_todo` partial index and converges by writing `conv = key` on lone/orphaned rows.
+
+import "base_codec"
+import "builders_core"
+import "js_json"
+import "sql_db"
+
+let OWNED_WS_SQL : String = "(ws IS NULL OR (ws NOT LIKE 'handed:%' AND ws NOT LIKE 'coming:%'))"
+
+let CONV_MEMBER_JOIN_SQL : String = "INSERT INTO thread_sessions (thread, session, connect, joined_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (thread, session) DO UPDATE SET left_at = NULL WHERE thread_sessions.left_at IS NOT NULL"
+
+pub fn is_owned_ws(ws : base_codec::Json) -> Bool {
+  match ws {
+    base_codec::Json::Str(w) => !str_has_prefix(w, "handed:") && !str_has_prefix(w, "coming:")
+    _ => true
+  }
+}
+
+struct ConvMember {
+  key : String
+  mut conv : Option[String]
+  created_at : Double
+  mut archived_at : Option[Double]
+  mut archived_by : Option[String]
+}
+
+struct ConvHome {
+  id : base_codec::Json
+  mut hidden_at : Option[Double]
+  mut hidden_by : Option[String]
+}
+
+struct ConvGroup {
+  anchor : String
+  mut members : Array[ConvMember]
+  home : Option[ConvHome]
+  has_share : Bool
+  is_born : Bool
+  is_manual : Bool
+  earliest_at : Double
+  earliest_key : String
+}
+
+fn conv_num(v : base_codec::Json) -> Option[Double] {
+  match v {
+    base_codec::Json::Num(n, _) => Some(n)
+    _ => None
+  }
+}
+
+fn conv_str(v : base_codec::Json) -> Option[String] {
+  match v {
+    base_codec::Json::Str(s) => Some(s)
+    _ => None
+  }
+}
+
+fn opt_str_eq(a : Option[String], b : Option[String]) -> Bool {
+  match (a, b) {
+    (Some(x), Some(y)) => x == y
+    (None, None) => true
+    _ => false
+  }
+}
+
+fn opt_double_eq(a : Option[Double], b : Option[Double]) -> Bool {
+  match (a, b) {
+    (Some(x), Some(y)) => x == y
+    (None, None) => true
+    _ => false
+  }
+}
+
+fn is_some_double(a : Option[Double]) -> Bool {
+  match a {
+    Some(_) => true
+    None => false
+  }
+}
+
+fn is_some_str(a : Option[String]) -> Bool {
+  match a {
+    Some(_) => true
+    None => false
+  }
+}
+
+fn cmp_utf16(a : String, b : String) -> Int {
+  let ua = js_json::utf16_units(a)
+  let ub = js_json::utf16_units(b)
+  let na = ua.length()
+  let nb = ub.length()
+  let n = if na < nb { na } else { nb }
+  for i in 0..<n {
+    if ua[i] < ub[i] {
+      return -1
+    }
+    if ua[i] > ub[i] {
+      return 1
+    }
+  }
+  if na < nb { -1 } else if na > nb { 1 } else { 0 }
+}
+
+/// Compare `(created_at, key)` for earliest-member selection; tie-breaks by UTF-16 code-unit
+/// order matching JS `<` in TS source-of-truth `station/src/store/conversations.ts:52-55`.
+pub fn conv_cmp_earliest(a_at : Double, a_key : String, b_at : Double, b_key : String) -> Int {
+  if a_at != b_at {
+    if a_at < b_at { -1 } else { 1 }
+  } else {
+    cmp_utf16(a_key, b_key)
+  }
+}
+
+fn conv_push_unique_str(arr : Array[String], s : String) -> Unit {
+  for i in 0..<arr.length() {
+    if arr[i] == s {
+      return
+    }
+  }
+  arr.push(s)
+}
+
+fn conv_push_unique_json(arr : Array[base_codec::Json], v : base_codec::Json) -> Unit {
+  for i in 0..<arr.length() {
+    if base_codec::json_eq(arr[i], v) {
+      return
+    }
+  }
+  arr.push(v)
+}
+
+fn conv_contains_json(arr : Array[base_codec::Json], v : base_codec::Json) -> Bool {
+  for i in 0..<arr.length() {
+    if base_codec::json_eq(arr[i], v) {
+      return true
+    }
+  }
+  false
+}
+
+fn conv_load_group_members(
+  db : sql_db::Db,
+  anchor : String,
+) -> Result[Array[ConvMember], builders_core::StepError] {
+  let rows = match db.all(
+    "SELECT key, conv, created_at, archived_at, archived_by FROM sessions WHERE conv = ?1 AND " +
+    OWNED_WS_SQL +
+    " UNION SELECT key, conv, created_at, archived_at, archived_by FROM sessions WHERE key = ?1 AND " +
+    OWNED_WS_SQL,
+    [base_codec::json_str(anchor)],
+  ) {
+    Ok(r) => r
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let out : Array[ConvMember] = []
+  for i in 0..<rows.length() {
+    let r = rows[i]
+    match sql_db::row_val(r, "key") {
+      base_codec::Json::Str(k) => {
+        let conv_opt = match conv_str(sql_db::row_val(r, "conv")) {
+          Some(c) => if c == "" { None } else { Some(c) }
+          None => None
+        }
+        let created = match conv_num(sql_db::row_val(r, "created_at")) {
+          Some(v) => v
+          None => 0.0
+        }
+        out.push(
+          ConvMember::{
+            key: k,
+            conv: conv_opt,
+            created_at: created,
+            archived_at: conv_num(sql_db::row_val(r, "archived_at")),
+            archived_by: conv_str(sql_db::row_val(r, "archived_by")),
+          },
+        )
+      }
+      _ => ()
+    }
+  }
+  Ok(out)
+}
+
+/// Extracts `(channel, thread_ts)` from a `scope = 'thread'` session key (`<connect>:<channel>:<thread_ts>`).
+pub fn split_session_thread(key : String) -> Option[(String, String)] {
+  let b = key.to_bytes()
+  let n = b.length()
+  let mut last = -1
+  let mut i = n - 1
+  while i >= 0 {
+    if b[i].to_int() == 58 {
+      last = i
+      break
+    }
+    i = i - 1
+  }
+  if last <= 0 || last + 1 >= n {
+    return None
+  }
+  let mut prev = -1
+  let mut j = last - 1
+  while j >= 0 {
+    if b[j].to_int() == 58 {
+      prev = j
+      break
+    }
+    j = j - 1
+  }
+  if prev < 0 || prev + 1 >= last {
+    return None
+  }
+  Some((slice_bytes_str(b, prev + 1, last), slice_bytes_str(b, last + 1, n)))
+}
+
+/// Birth thread id(s) of a `scope = 'thread'` session, looked up in O(1) via `threads_at (channel, thread_ts)`
+/// and `thread_sessions (thread, session)` primary key (`LIMIT 8`).
+pub fn birth_threads_of(
+  db : sql_db::Db,
+  key : String,
+) -> Result[Array[base_codec::Json], builders_core::StepError] {
+  let ses = match db.first("SELECT scope, ws FROM sessions WHERE key = ?", [base_codec::json_str(key)]) {
+    Ok(Some(s)) => s
+    Ok(None) => return Ok([])
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !opt_str_eq(conv_str(sql_db::row_val(ses, "scope")), Some("thread")) || !is_owned_ws(sql_db::row_val(ses, "ws")) {
+    return Ok([])
+  }
+  let (ch, ts) = match split_session_thread(key) {
+    Some(pair) => pair
+    None => return Ok([])
+  }
+  let rows = match db.all(
+    "SELECT t.id FROM threads t INDEXED BY threads_at JOIN thread_sessions ts ON ts.thread = t.id AND ts.session = ?1 WHERE t.channel = ?2 AND t.thread_ts = ?3 LIMIT 8",
+    [base_codec::json_str(key), base_codec::json_str(ch), base_codec::json_str(ts)],
+  ) {
+    Ok(r) => r
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let out : Array[base_codec::Json] = []
+  for i in 0..<rows.length() {
+    out.push(sql_db::row_val(rows[i], "id"))
+  }
+  Ok(out)
+}
+
+/// Idempotent grouping entry point (`settle(thread)`). Must be called inside a write transaction.
+/// Returns `(touched_sessions, touched_threads)`.
+pub fn settle_conversation_in_tx(
+  db : sql_db::Db,
+  thread_id : base_codec::Json,
+  now : base_codec::Json,
+  born : Option[String] = None,
+) -> Result[(Array[String], Array[base_codec::Json]), builders_core::StepError] {
+  let thread = match db.first("SELECT id, surface, channel, thread_ts FROM threads WHERE id = ?", [thread_id]) {
+    Ok(Some(r)) => r
+    Ok(None) => return Ok(([], []))
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let channel = match conv_str(sql_db::row_val(thread, "channel")) {
+    Some(s) => s
+    None => ""
+  }
+  let thread_ts = match conv_str(sql_db::row_val(thread, "thread_ts")) {
+    Some(s) => s
+    None => ""
+  }
+  let suffix = ":" + channel + ":" + thread_ts
+  let raw = match db.all(
+    "SELECT s.key, s.conv, s.scope, s.created_at, s.archived_at, s.archived_by, s.ws, ts.left_at FROM thread_sessions ts JOIN sessions s ON s.key = ts.session WHERE ts.thread = ?",
+    [thread_id],
+  ) {
+    Ok(r) => r
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let left_by_key : Map[String, Bool] = Map::new()
+  let anchors : Array[String] = []
+  let mut birth_count = 0
+  let mut sole_key = ""
+  let mut sole_conv_null = false
+  for i in 0..<raw.length() {
+    let r = raw[i]
+    if !opt_str_eq(conv_str(sql_db::row_val(r, "scope")), Some("thread")) {
+      continue
+    }
+    if !is_owned_ws(sql_db::row_val(r, "ws")) {
+      continue
+    }
+    let key = match conv_str(sql_db::row_val(r, "key")) {
+      Some(k) => if str_has_suffix(k, suffix) { k } else { continue }
+      None => continue
+    }
+    birth_count = birth_count + 1
+    sole_key = key
+    sole_conv_null = is_json_null(sql_db::row_val(r, "conv"))
+    let is_left = !is_json_null(sql_db::row_val(r, "left_at"))
+    left_by_key.set(key, is_left)
+    let anchor = match conv_str(sql_db::row_val(r, "conv")) {
+      Some(c) => if c != "" { c } else { key }
+      None => key
+    }
+    conv_push_unique_str(anchors, anchor)
+  }
+  if birth_count < 2 {
+    if birth_count == 1 && sole_conv_null {
+      match db.run("UPDATE sessions SET conv = key WHERE key = ? AND conv IS NULL", [base_codec::json_str(sole_key)]) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+    }
+    return Ok(([], []))
+  }
+
+  let groups : Array[ConvGroup] = []
+  for i in 0..<anchors.length() {
+    let anchor = anchors[i]
+    let members = match conv_load_group_members(db, anchor) {
+      Ok(ms) => ms
+      Err(e) => return Err(e)
+    }
+    if members.length() == 0 {
+      continue
+    }
+    let mut earliest_at = members[0].created_at
+    let mut earliest_key = members[0].key
+    let mut has_share = false
+    let mut is_manual = false
+    for j in 0..<members.length() {
+      let m = members[j]
+      if conv_cmp_earliest(m.created_at, m.key, earliest_at, earliest_key) < 0 {
+        earliest_at = m.created_at
+        earliest_key = m.key
+      }
+      if !has_share {
+        match db.first("SELECT 1 FROM chat_shares WHERE session = ? LIMIT 1", [base_codec::json_str(m.key)]) {
+          Ok(Some(_)) => has_share = true
+          Ok(None) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      if is_some_double(m.archived_at) && opt_str_eq(m.archived_by, Some("manual")) {
+        is_manual = true
+      }
+    }
+    let home = match db.first("SELECT id, hidden_at, hidden_by FROM threads WHERE home = ? ORDER BY id LIMIT 1", [base_codec::json_str(anchor)]) {
+      Ok(Some(h)) =>
+      Some(
+        ConvHome::{
+          id: sql_db::row_val(h, "id"),
+          hidden_at: conv_num(sql_db::row_val(h, "hidden_at")),
+          hidden_by: conv_str(sql_db::row_val(h, "hidden_by")),
+        },
+      )
+      Ok(None) => None
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+    let is_born = match born {
+      Some(b) => members.length() == 1 && members[0].key == b && !has_share
+      None => false
+    }
+    groups.push(
+      ConvGroup::{
+        anchor: anchor,
+        members: members,
+        home: home,
+        has_share: has_share,
+        is_born: is_born,
+        is_manual: is_manual,
+        earliest_at: earliest_at,
+        earliest_key: earliest_key,
+      },
+    )
+  }
+
+  let touched_sessions : Array[String] = []
+  let touched_threads : Array[base_codec::Json] = []
+  let final_groups : Array[ConvGroup] = []
+  let buckets = [true, false]
+
+  for bi in 0..<buckets.length() {
+    let manual_bucket = buckets[bi]
+    let bucket : Array[ConvGroup] = []
+    for i in 0..<groups.length() {
+      if groups[i].is_manual == manual_bucket {
+        bucket.push(groups[i])
+      }
+    }
+    if bucket.length() < 2 {
+      for i in 0..<bucket.length() {
+        final_groups.push(bucket[i])
+      }
+      continue
+    }
+    let home_groups : Array[ConvGroup] = []
+    for i in 0..<bucket.length() {
+      match bucket[i].home {
+        Some(_) => home_groups.push(bucket[i])
+        None => ()
+      }
+    }
+    let target = if home_groups.length() == 1 {
+      home_groups[0]
+    } else {
+      let mut best = bucket[0]
+      for i in 1..<bucket.length() {
+        let g = bucket[i]
+        if conv_cmp_earliest(g.earliest_at, g.earliest_key, best.earliest_at, best.earliest_key) < 0 {
+          best = g
+        }
+      }
+      best
+    }
+
+    let accepted : Array[ConvGroup] = []
+    let kept : Array[ConvGroup] = []
+    for i in 0..<bucket.length() {
+      let g = bucket[i]
+      if g.anchor == target.anchor {
+        continue
+      }
+      let g_has_home = match g.home {
+        Some(_) => true
+        None => false
+      }
+      if g_has_home {
+        kept.push(g)
+        continue
+      }
+      if (target.has_share || g.has_share) && !g.is_born {
+        kept.push(g)
+        continue
+      }
+      accepted.push(g)
+    }
+
+    if accepted.length() > 0 {
+      let merged : Array[ConvMember] = []
+      for i in 0..<target.members.length() {
+        merged.push(target.members[i])
+      }
+      for i in 0..<accepted.length() {
+        let g = accepted[i]
+        for j in 0..<g.members.length() {
+          let m = g.members[j]
+          let mut found = false
+          for k in 0..<merged.length() {
+            if merged[k].key == m.key {
+              found = true
+              break
+            }
+          }
+          if !found {
+            merged.push(m)
+          }
+        }
+      }
+      let anchor = target.anchor
+      for i in 0..<merged.length() {
+        let m = merged[i]
+        if !opt_str_eq(m.conv, Some(anchor)) {
+          match db.run("UPDATE sessions SET conv = ? WHERE key = ?", [base_codec::json_str(anchor), base_codec::json_str(m.key)]) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          m.conv = Some(anchor)
+          conv_push_unique_str(touched_sessions, m.key)
+        }
+      }
+      if manual_bucket {
+        let mut max_at = 0.0
+        for i in 0..<merged.length() {
+          match merged[i].archived_at {
+            Some(a) => if a > max_at { max_at = a }
+            None => ()
+          }
+        }
+        for i in 0..<merged.length() {
+          let m = merged[i]
+          if !opt_double_eq(m.archived_at, Some(max_at)) || !opt_str_eq(m.archived_by, Some("manual")) {
+            match db.run(
+              "UPDATE sessions SET archived_at = ?, archived_by = ? WHERE key = ?",
+              [base_codec::json_num(max_at), base_codec::json_str("manual"), base_codec::json_str(m.key)],
+            ) {
+              Ok(_) => ()
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+            m.archived_at = Some(max_at)
+            m.archived_by = Some("manual")
+            conv_push_unique_str(touched_sessions, m.key)
+          }
+        }
+        match target.home {
+          Some(h) => {
+            if !opt_double_eq(h.hidden_at, Some(max_at)) || !opt_str_eq(h.hidden_by, Some("manual")) {
+              match db.run(
+                "UPDATE threads SET hidden_at = ?, hidden_by = ? WHERE id = ?",
+                [base_codec::json_num(max_at), base_codec::json_str("manual"), h.id],
+              ) {
+                Ok(_) => ()
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+              h.hidden_at = Some(max_at)
+              h.hidden_by = Some("manual")
+              conv_push_unique_json(touched_threads, h.id)
+            }
+          }
+          None => ()
+        }
+      } else {
+        let mut any_live = false
+        for i in 0..<merged.length() {
+          if !is_some_double(merged[i].archived_at) {
+            any_live = true
+            break
+          }
+        }
+        if any_live {
+          for i in 0..<merged.length() {
+            let m = merged[i]
+            if is_some_double(m.archived_at) || is_some_str(m.archived_by) {
+              match db.run("UPDATE sessions SET archived_at = NULL, archived_by = NULL WHERE key = ?", [base_codec::json_str(m.key)]) {
+                Ok(_) => ()
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+              m.archived_at = None
+              m.archived_by = None
+              conv_push_unique_str(touched_sessions, m.key)
+            }
+          }
+          match target.home {
+            Some(h) => {
+              if is_some_double(h.hidden_at) || is_some_str(h.hidden_by) {
+                match db.run("UPDATE threads SET hidden_at = NULL, hidden_by = NULL WHERE id = ?", [h.id]) {
+                  Ok(_) => ()
+                  Err(e) => return Err(builders_core::StepError::Sql(e))
+                }
+                h.hidden_at = None
+                h.hidden_by = None
+                conv_push_unique_json(touched_threads, h.id)
+              }
+            }
+            None => ()
+          }
+        } else {
+          let mut max_at = 0.0
+          for i in 0..<merged.length() {
+            match merged[i].archived_at {
+              Some(a) => if a > max_at { max_at = a }
+              None => ()
+            }
+          }
+          for i in 0..<merged.length() {
+            let m = merged[i]
+            if !opt_double_eq(m.archived_at, Some(max_at)) || !opt_str_eq(m.archived_by, Some("auto")) {
+              match db.run(
+                "UPDATE sessions SET archived_at = ?, archived_by = ? WHERE key = ?",
+                [base_codec::json_num(max_at), base_codec::json_str("auto"), base_codec::json_str(m.key)],
+              ) {
+                Ok(_) => ()
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+              m.archived_at = Some(max_at)
+              m.archived_by = Some("auto")
+              conv_push_unique_str(touched_sessions, m.key)
+            }
+          }
+          match target.home {
+            Some(h) => {
+              if !opt_double_eq(h.hidden_at, Some(max_at)) || !opt_str_eq(h.hidden_by, Some("auto")) {
+                match db.run(
+                  "UPDATE threads SET hidden_at = ?, hidden_by = ? WHERE id = ?",
+                  [base_codec::json_num(max_at), base_codec::json_str("auto"), h.id],
+                ) {
+                  Ok(_) => ()
+                  Err(e) => return Err(builders_core::StepError::Sql(e))
+                }
+                h.hidden_at = Some(max_at)
+                h.hidden_by = Some("auto")
+                conv_push_unique_json(touched_threads, h.id)
+              }
+            }
+            None => ()
+          }
+        }
+      }
+      target.members = merged
+    }
+
+    final_groups.push(target)
+    for i in 0..<kept.length() {
+      final_groups.push(kept[i])
+    }
+  }
+
+  for i in 0..<final_groups.length() {
+    let g = final_groups[i]
+    let h = match g.home {
+      Some(hv) => hv
+      None => continue
+    }
+    let mut any_conv = false
+    for j in 0..<g.members.length() {
+      if is_some_str(g.members[j].conv) {
+        any_conv = true
+        break
+      }
+    }
+    if g.members.length() < 2 && !any_conv {
+      continue
+    }
+    for j in 0..<g.members.length() {
+      let m = g.members[j]
+      let not_left = match left_by_key.get(m.key) {
+        Some(false) => true
+        _ => false
+      }
+      if !not_left {
+        continue
+      }
+      let changed = match db.run(CONV_MEMBER_JOIN_SQL, [h.id, base_codec::json_str(m.key), base_codec::json_str("chat"), now]) {
+        Ok(n) => n
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if changed > 0 {
+        conv_push_unique_str(touched_sessions, m.key)
+        conv_push_unique_json(touched_threads, h.id)
+      }
+    }
+  }
+
+  if touched_sessions.length() > 0 || touched_threads.length() > 0 {
+    conv_push_unique_json(touched_threads, thread_id)
+  }
+  Ok((touched_sessions, touched_threads))
+}
+
+/// One bounded batch of background conversation backfill (`conversation-backfill`).
+/// Uses `sessions_conv_todo` partial index and converges by writing `conv = key` on lone/orphaned rows.
+pub fn backfill_conversations_step(
+  db : sql_db::Db,
+  now : base_codec::Json,
+  limit : Int = 32,
+) -> Result[Bool, builders_core::StepError] {
+  let rows = match db.all(
+    "SELECT key FROM sessions INDEXED BY sessions_conv_todo WHERE scope = 'thread' AND conv IS NULL AND " +
+    OWNED_WS_SQL +
+    " ORDER BY key LIMIT ?",
+    [base_codec::json_num(limit.to_double())],
+  ) {
+    Ok(r) => r
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if rows.length() == 0 {
+    return Ok(true)
+  }
+  let settled : Array[base_codec::Json] = []
+  match db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      for i in 0..<rows.length() {
+        let key = match conv_str(sql_db::row_val(rows[i], "key")) {
+          Some(k) => k
+          None => continue
+        }
+        let tids = match birth_threads_of(tx_db, key) {
+          Ok(ts) => ts
+          Err(e) => return Err(e)
+        }
+        for j in 0..<tids.length() {
+          let tid = tids[j]
+          if !conv_contains_json(settled, tid) {
+            settled.push(tid)
+            match settle_conversation_in_tx(tx_db, tid, now) {
+              Ok(_) => ()
+              Err(e) => return Err(e)
+            }
+          }
+        }
+        match tx_db.run("UPDATE sessions SET conv = key WHERE key = ? AND conv IS NULL", [base_codec::json_str(key)]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(())
+    },
+    map_sql,
+  ) {
+    Ok(_) => Ok(rows.length() < limit)
+    Err(e) => Err(e)
+  }
+}

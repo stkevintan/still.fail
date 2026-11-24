@@ -1,0 +1,325 @@
+// Entry points and request dispatch for the 3 W5-C SQLite builder modes:
+//   --builder legacy-edits --db <file>
+//   --builder legacy-said --db <file>
+//   --builder session-backfill --db <file> (all 19 kinds)
+//
+// Invariants:
+// - `legacy-edits` and `legacy-said` validate `thread` is a JSON number (value unused).
+// - Only `legacy-edits` may return `StepError::Fallback` -> `{"fallback":true}`.
+// - `legacy-said` and `session-backfill` NEVER return `StepError::Fallback`.
+// - `session-backfill` dispatches all 19 exact `kind` strings; unknown string `kind` -> `Ok(None)`
+//   ("invalid session backfill preparation request"); missing/non-string `kind` or non-object -> `activity`.
+// - `page-letter-gc` lazily creates and reuses a single `builders_stateful::Letters` instance per process.
+
+import "base_codec"
+import "builders_core"
+import "builders_stateful"
+import "host_shim"
+import "sql_db"
+
+/// Canonical list of all 19 supported `session-backfill` kinds.
+pub fn session_backfill_kinds() -> Array[String] {
+  [
+    "activity",
+    "recovery",
+    "awake",
+    "legacy-said",
+    "legacy-edits",
+    "legacy-policy",
+    "directory",
+    "chat-share",
+    "sandbox",
+    "sandbox-off",
+    "active-jobs",
+    "process-jobs",
+    "legacy-agent",
+    "legacy-login",
+    "page-letter-gc",
+    "legacy-decision-time",
+    "legacy-decision-session",
+    "legacy-decision-session-repair",
+    "conversation-backfill",
+  ]
+}
+
+/// Pure classification of a `session-backfill` request JSON into its effective kind string,
+/// or `None` when `kind` is an unknown string (which maps to `"invalid session backfill preparation request"`).
+pub fn classify_session_backfill_kind(ask : base_codec::Json) -> Option[String] {
+  match builders_core::json_get_last(ask, "kind") {
+    Some(base_codec::Json::Str(k)) => {
+      let kinds = session_backfill_kinds()
+      for i in 0..<kinds.length() {
+        if kinds[i] == k {
+          return Some(k)
+        }
+      }
+      None
+    }
+    _ => Some("activity")
+  }
+}
+
+pub struct LettersCell {
+  mut state : Option[builders_stateful::Letters]
+}
+
+pub fn LettersCell::new() -> LettersCell {
+  LettersCell::{ state: None }
+}
+
+pub fn dispatch_legacy_edits(
+  db : sql_db::Db,
+  ask : base_codec::Json,
+) -> Result[Option[Bool], builders_core::StepError] {
+  match builders_core::json_get_last(ask, "thread") {
+    Some(base_codec::Json::Num(_, _)) => {
+      match edits_step(db) {
+        Ok(done) => Ok(Some(done))
+        Err(e) => Err(e)
+      }
+    }
+    _ => Ok(None)
+  }
+}
+
+pub fn dispatch_legacy_said(
+  db : sql_db::Db,
+  ask : base_codec::Json,
+) -> Result[Option[Bool], builders_core::StepError] {
+  match builders_core::json_get_last(ask, "thread") {
+    Some(base_codec::Json::Num(_, _)) => {
+      match said_step(db) {
+        Ok(done) => Ok(Some(done))
+        Err(e) => Err(e)
+      }
+    }
+    _ => Ok(None)
+  }
+}
+
+pub fn dispatch_session_backfill(
+  db : sql_db::Db,
+  letters_cell : LettersCell,
+  ask : base_codec::Json,
+  now_ms : Int64,
+) -> Result[Option[Bool], builders_core::StepError] {
+  let kind = match classify_session_backfill_kind(ask) {
+    Some(k) => k
+    None => return Ok(None)
+  }
+  if kind == "activity" {
+    match activity_step(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "recovery" {
+    match recovery_step(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "awake" {
+    match awake_step(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "legacy-said" {
+    match said_maintenance(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "legacy-edits" {
+    match edits_maintenance(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "legacy-policy" {
+    match policy_step(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "directory" {
+    match directory_install(db) {
+      Ok(_) => ()
+      Err(e) => return Err(e)
+    }
+    match directory_step(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "chat-share" {
+    match share_install(db) {
+      Ok(_) => ()
+      Err(e) => return Err(e)
+    }
+    match share_step(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "sandbox" {
+    match sandbox_enable(db) {
+      Ok(_) => ()
+      Err(e) => return Err(e)
+    }
+    match sandbox_step(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "sandbox-off" {
+    match sandbox_disable(db) {
+      Ok(_) => Ok(Some(true))
+      Err(e) => Err(e)
+    }
+  } else if kind == "active-jobs" {
+    match active_step(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "process-jobs" {
+    match process_jobs_install(db) {
+      Ok(_) => ()
+      Err(e) => return Err(e)
+    }
+    match process_jobs_step(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "legacy-agent" {
+    match agent_maintenance(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "legacy-login" {
+    match login_cards_maintenance(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "page-letter-gc" {
+    let l = match letters_cell.state {
+      Some(existing) => existing
+      None => {
+        let created = builders_stateful::Letters::new(db)
+        letters_cell.state = Some(created)
+        created
+      }
+    }
+    match l.gc_step() {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "legacy-decision-time" {
+    match decision_time_step(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "legacy-decision-session" {
+    match decision_session_step(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "legacy-decision-session-repair" {
+    match decision_session_repair_step(db) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else if kind == "conversation-backfill" {
+    match backfill_conversations_step(db, base_codec::json_num(now_ms.to_double())) {
+      Ok(done) => Ok(Some(done))
+      Err(e) => Err(e)
+    }
+  } else {
+    Ok(None)
+  }
+}
+
+pub fn run_legacy_edits(db_path : String) -> Int {
+  builders_core::builder_loop(db_path, "legacy edits", dispatch_legacy_edits)
+}
+
+pub fn run_legacy_said(db_path : String) -> Int {
+  builders_core::builder_loop(db_path, "legacy said", dispatch_legacy_said)
+}
+
+pub fn run_session_backfill(db_path : String) -> Int {
+  let letters_cell = LettersCell::new()
+  builders_core::builder_loop(
+    db_path,
+    "session backfill",
+    fn(db : sql_db::Db, ask : base_codec::Json) -> Result[Option[Bool], builders_core::StepError] {
+      dispatch_session_backfill(db, letters_cell, ask, host_shim::wall_ms())
+    },
+  )
+}
+
+/// Real-SQLite fixed-clock self-test for `conversation-backfill` (invoked from `--smoke-sql-db`).
+pub fn run_conversation_backfill_selftest() -> Result[Unit, String] {
+  let db = match sql_db::Db::create(":memory:", wait_ms=250) {
+    Ok(d) => d
+    Err(e) => return Err("conv selftest create db: " + e.message)
+  }
+  let schema = "CREATE TABLE threads (id INTEGER PRIMARY KEY, surface TEXT, channel TEXT, thread_ts TEXT, home TEXT, hidden_at INTEGER, hidden_by TEXT);" +
+  "CREATE INDEX threads_at ON threads(channel, thread_ts);" +
+  "CREATE TABLE sessions (key TEXT PRIMARY KEY, conv TEXT, scope TEXT, created_at INTEGER, archived_at INTEGER, archived_by TEXT, ws TEXT);" +
+  "CREATE INDEX sessions_conv_todo ON sessions(key) WHERE scope = 'thread' AND conv IS NULL;" +
+  "CREATE TABLE thread_sessions (thread INTEGER, session TEXT, connect TEXT, joined_at INTEGER, left_at INTEGER, PRIMARY KEY (thread, session));" +
+  "CREATE TABLE chat_shares (session TEXT PRIMARY KEY, shared TEXT, at INTEGER);"
+  match db.exec(schema) {
+    Ok(_) => ()
+    Err(e) => { db.close(); return Err("conv selftest schema: " + e.message) }
+  }
+  // Seed a multi-session birth thread (s1 earlier than s2) + a lone session s3 + a home thread for s1.
+  let seed = "INSERT INTO threads(id, surface, channel, thread_ts, home) VALUES (10, 'slack', 'C1', '100.1', NULL), (20, 'chat', 'CHAT', 'h1', 'slack:C1:100.1');" +
+  "INSERT INTO sessions(key, conv, scope, created_at, archived_at, archived_by, ws) VALUES " +
+  "('slack:C1:100.1', NULL, 'thread', 1000, NULL, NULL, 'W1')," +
+  "('bot2:C1:100.1', NULL, 'thread', 2000, NULL, NULL, 'W1')," +
+  "('lone:C2:200.2', NULL, 'thread', 3000, NULL, NULL, 'W1');" +
+  "INSERT INTO thread_sessions(thread, session, connect, joined_at, left_at) VALUES " +
+  "(10, 'slack:C1:100.1', 'slack', 1000, NULL)," +
+  "(10, 'bot2:C1:100.1', 'slack', 2000, NULL)," +
+  "(20, 'slack:C1:100.1', 'chat', 1000, NULL);"
+  match db.exec(seed) {
+    Ok(_) => ()
+    Err(e) => { db.close(); return Err("conv selftest seed: " + e.message) }
+  }
+  let fixed_now = base_codec::json_num(1700000000123.0)
+  match backfill_conversations_step(db, fixed_now, limit=32) {
+    Ok(true) => ()
+    Ok(false) => { db.close(); return Err("conv selftest expected done=true") }
+    Err(builders_core::StepError::Sql(e)) => { db.close(); return Err("conv selftest sql: " + e.message) }
+    Err(builders_core::StepError::App(m)) => { db.close(); return Err("conv selftest app: " + m) }
+    Err(builders_core::StepError::Fallback) => { db.close(); return Err("conv selftest unexpected fallback") }
+  }
+  // Verify bot2 grouped into slack:C1:100.1, joined home thread 20 with exact fixed_now, and lone got conv=key.
+  match db.first("SELECT conv FROM sessions WHERE key = 'bot2:C1:100.1'", []) {
+    Ok(Some(r)) => {
+      if !base_codec::json_eq(sql_db::row_val(r, "conv"), base_codec::json_str("slack:C1:100.1")) {
+        db.close()
+        return Err("conv selftest bot2 conv mismatch")
+      }
+    }
+    _ => { db.close(); return Err("conv selftest bot2 missing") }
+  }
+  match db.first("SELECT joined_at FROM thread_sessions WHERE thread = 20 AND session = 'bot2:C1:100.1'", []) {
+    Ok(Some(r)) => {
+      if !base_codec::json_eq(sql_db::row_val(r, "joined_at"), fixed_now) {
+        db.close()
+        return Err("conv selftest home joined_at mismatch")
+      }
+    }
+    _ => { db.close(); return Err("conv selftest bot2 not joined to home thread") }
+  }
+  match db.first("SELECT conv FROM sessions WHERE key = 'lone:C2:200.2'", []) {
+    Ok(Some(r)) => {
+      if !base_codec::json_eq(sql_db::row_val(r, "conv"), base_codec::json_str("lone:C2:200.2")) {
+        db.close()
+        return Err("conv selftest lone conv mismatch")
+      }
+    }
+    _ => { db.close(); return Err("conv selftest lone missing") }
+  }
+  if !db.autocommit() {
+    db.close()
+    return Err("conv selftest left tx open")
+  }
+  db.close()
+  Ok(())
+}

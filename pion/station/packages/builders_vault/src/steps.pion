@@ -1,0 +1,573 @@
+// Decided vault uses backfill and read queries, 1:1 aligned with `station/mb/src/vaultuses/steps.mbt`.
+// All write transactions go exclusively through `db.tx_err(...)` and nestable read snapshots go
+// exclusively through `db.savepoint_swallow_err("vault_use_page", ...)`.
+
+import "base_codec"
+import "js_json"
+import "sql_db"
+
+pub enum VaultError {
+  Sql(sql_db::SqlError)
+  App(String)
+}
+
+fn map_sql(e : sql_db::SqlError) -> VaultError {
+  VaultError::Sql(e)
+}
+
+fn is_num_one(v : base_codec::Json) -> Bool {
+  match v {
+    base_codec::Json::Num(n, _) => n == 1.0
+    _ => false
+  }
+}
+
+fn is_num_zero(v : base_codec::Json) -> Bool {
+  match v {
+    base_codec::Json::Num(n, _) => n == 0.0
+    _ => false
+  }
+}
+
+fn is_json_null(v : base_codec::Json) -> Bool {
+  match v {
+    base_codec::Json::Null => true
+    _ => false
+  }
+}
+
+fn done_of(db : sql_db::Db, sql : String, params : Array[base_codec::Json]) -> Result[Bool, VaultError] {
+  match db.first(sql, params) {
+    Ok(Some(r)) => Ok(is_num_one(sql_db::row_val(r, "done")))
+    Ok(None) => Ok(false)
+    Err(e) => Err(VaultError::Sql(e))
+  }
+}
+
+fn flag(b : Bool) -> base_codec::Json {
+  base_codec::json_num(if b { 1.0 } else { 0.0 })
+}
+
+fn tx_bool(db : sql_db::Db, f : (sql_db::Db) -> Result[Bool, VaultError]) -> Result[Bool, VaultError] {
+  db.tx_err(f, map_sql)
+}
+
+/// A cursor's next `limit` ids of `ws`'s rows in `table`.
+fn ids_after(
+  db : sql_db::Db,
+  table : String,
+  ws : base_codec::Json,
+  after : base_codec::Json,
+  limit : Int,
+) -> Result[Array[Map[String, base_codec::Json]], VaultError] {
+  let lim = base_codec::json_num(limit.to_double())
+  let res = if is_json_null(after) {
+    db.all("SELECT id FROM " + table + " WHERE ws = ? ORDER BY id LIMIT ?", [ws, lim])
+  } else {
+    db.all("SELECT id FROM " + table + " WHERE ws = ? AND id > ? ORDER BY id LIMIT ?", [ws, after, lim])
+  }
+  match res {
+    Ok(rows) => Ok(rows)
+    Err(e) => Err(VaultError::Sql(e))
+  }
+}
+
+fn last_id(
+  rows : Array[Map[String, base_codec::Json]],
+  otherwise : base_codec::Json,
+) -> base_codec::Json {
+  let n = rows.length()
+  if n > 0 {
+    sql_db::row_val(rows[n - 1], "id")
+  } else {
+    otherwise
+  }
+}
+
+// ── Decided uses (`use-index.ts`) ──
+
+fn ambiguous_use(body : String) -> String {
+  "CASE WHEN json_valid(" +
+  body +
+  ") THEN (instr(" +
+  body +
+  ", '\\ud') > 0 OR instr(" +
+  body +
+  ", '\\uD') > 0 OR (instr(" +
+  body +
+  ", '\\u0000') > 0 AND EXISTS (SELECT 1 FROM json_each(" +
+  body +
+  ") WHERE instr(key, char(0)) > 0)) OR EXISTS (SELECT 1 FROM json_each(" +
+  body +
+  ") WHERE key IN ('vault','owner','save','at') GROUP BY key HAVING count(*) > 1)) ELSE 0 END"
+}
+
+fn use_index_complete(db : sql_db::Db, ws : base_codec::Json) -> Result[Bool, VaultError] {
+  done_of(db, "SELECT done FROM vault_use_backfill WHERE ws = ?", [ws])
+}
+
+fn use_audit_complete(db : sql_db::Db, ws : base_codec::Json) -> Result[Bool, VaultError] {
+  done_of(db, "SELECT done FROM vault_use_ambiguous_audit_v2 WHERE ws = ?", [ws])
+}
+
+fn use_state(
+  db : sql_db::Db,
+  ws : base_codec::Json,
+) -> Result[Option[Map[String, base_codec::Json]], VaultError] {
+  match db.first(
+    "SELECT b.done, a.done AS audited, EXISTS (SELECT 1 FROM vault_use_ambiguous_v2 WHERE ws = b.ws AND dirty = 1 LIMIT 1) AS dirty, EXISTS (SELECT 1 FROM vault_use_ambiguous_v2 WHERE ws = b.ws LIMIT 1) AS ambiguous FROM vault_use_backfill b LEFT JOIN vault_use_ambiguous_audit_v2 a ON a.ws = b.ws WHERE b.ws = ?",
+    [ws],
+  ) {
+    Ok(r) => Ok(r)
+    Err(e) => Err(VaultError::Sql(e))
+  }
+}
+
+fn ready_state(s : Option[Map[String, base_codec::Json]]) -> Bool {
+  match s {
+    Some(r) =>
+    is_num_one(sql_db::row_val(r, "done")) &&
+    is_num_one(sql_db::row_val(r, "audited")) &&
+    is_num_zero(sql_db::row_val(r, "dirty"))
+    None => false
+  }
+}
+
+fn use_ready(db : sql_db::Db, ws : base_codec::Json) -> Result[Bool, VaultError] {
+  match use_state(db, ws) {
+    Ok(s) => Ok(ready_state(s))
+    Err(e) => Err(e)
+  }
+}
+
+fn audit_use_rows(
+  db : sql_db::Db,
+  ws : base_codec::Json,
+  rows : Array[Map[String, base_codec::Json]],
+) -> Result[Unit, VaultError] {
+  let sql = "INSERT OR IGNORE INTO vault_use_ambiguous_v2 (ws,id,dirty,is_use) SELECT ws, id, 1, 0 FROM vault_requests WHERE ws = ? AND id = ? AND status IN ('granted','denied') AND (" +
+  ambiguous_use("body") +
+  ") = 1"
+  for i in 0..<rows.length() {
+    match db.run(sql, [ws, sql_db::row_val(rows[i], "id")]) {
+      Ok(_) => ()
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+  }
+  Ok(())
+}
+
+fn backfill_use_audit(db : sql_db::Db, ws : base_codec::Json, limit : Int = 32) -> Result[Bool, VaultError] {
+  tx_bool(db, fn(tx_db : sql_db::Db) -> Result[Bool, VaultError] {
+    match tx_db.run(
+      "INSERT OR IGNORE INTO vault_use_ambiguous_audit_v2 (ws,after_id,done) VALUES (?,NULL,0)",
+      [ws],
+    ) {
+      Ok(_) => ()
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    let audit = match tx_db.first(
+      "SELECT after_id, done FROM vault_use_ambiguous_audit_v2 WHERE ws = ?",
+      [ws],
+    ) {
+      Ok(Some(r)) => r
+      Ok(None) => return Err(VaultError::App("vault_use_ambiguous_audit_v2 row missing"))
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    if is_num_one(sql_db::row_val(audit, "done")) {
+      return Ok(true)
+    }
+    let rows = match ids_after(tx_db, "vault_requests", ws, sql_db::row_val(audit, "after_id"), limit) {
+      Ok(r) => r
+      Err(e) => return Err(e)
+    }
+    match audit_use_rows(tx_db, ws, rows) {
+      Ok(_) => ()
+      Err(e) => return Err(e)
+    }
+    let done = rows.length() < limit
+    match tx_db.run(
+      "UPDATE vault_use_ambiguous_audit_v2 SET after_id = ?, done = ? WHERE ws = ?",
+      [last_id(rows, sql_db::row_val(audit, "after_id")), flag(done), ws],
+    ) {
+      Ok(_) => Ok(done)
+      Err(e) => Err(VaultError::Sql(e))
+    }
+  })
+}
+
+/// Pure-Pion core of `use_time` with caller-supplied finite-number formatter (enables pure-Pion unit tests).
+pub fn use_time_with_num(
+  v : Option[js_json::JValue],
+  fmt_num : (Double) -> String,
+) -> base_codec::Json {
+  match v {
+    None => base_codec::json_null()
+    Some(js_json::JValue::Null) => base_codec::json_null()
+    Some(js_json::JValue::Bool(b)) => flag(b)
+    Some(js_json::JValue::Num(d)) => base_codec::json_num(d)
+    Some(js_json::JValue::Str(s)) => base_codec::json_str(js_json::sanitize_str(s))
+    Some(other) => base_codec::json_str(js_json::stringify_with_num(other, fmt_num))
+  }
+}
+
+/// What `useTime` binds of a body's `at`: null, a flag as 1 or 0, a number, a string, else its JSON.
+pub fn use_time(v : Option[js_json::JValue]) -> base_codec::Json {
+  match v {
+    None => base_codec::json_null()
+    Some(js_json::JValue::Null) => base_codec::json_null()
+    Some(js_json::JValue::Bool(b)) => flag(b)
+    Some(js_json::JValue::Num(d)) => base_codec::json_num(d)
+    Some(js_json::JValue::Str(s)) => base_codec::json_str(js_json::sanitize_str(s))
+    Some(other) => base_codec::json_str(js_json::stringify(other))
+  }
+}
+
+pub fn utf16_blob(units : Array[Int]) -> base_codec::Json {
+  let raw = js_json::utf16le_bytes(units)
+  let out : Array[base_codec::Json] = []
+  for i in 0..<raw.length() {
+    out.push(base_codec::json_int(raw[i].to_int() & 0xFF))
+  }
+  base_codec::json_arr(out)
+}
+
+/// At most `limit` exceptional bodies read as JavaScript reads them (`repairAmbiguousUses`).
+fn repair_ambiguous(db : sql_db::Db, ws : base_codec::Json, limit : Int = 32) -> Result[Bool, VaultError] {
+  tx_bool(db, fn(tx_db : sql_db::Db) -> Result[Bool, VaultError] {
+    let rows = match tx_db.all(
+      "SELECT a.id, r.body, r.status FROM vault_use_ambiguous_v2 a LEFT JOIN vault_requests r ON r.ws = a.ws AND r.id = a.id WHERE a.ws = ? AND a.dirty = 1 ORDER BY a.id LIMIT ?",
+      [ws, base_codec::json_num(limit.to_double())],
+    ) {
+      Ok(r) => r
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    for i in 0..<rows.length() {
+      let row = rows[i]
+      let id = sql_db::row_val(row, "id")
+      let status = sql_db::row_val(row, "status")
+      let body_opt = match sql_db::row_val(row, "body") {
+        base_codec::Json::Str(s) => Some(s)
+        _ => None
+      }
+      let status_ok = match status {
+        base_codec::Json::Str(s) => s == "granted" || s == "denied"
+        _ => false
+      }
+      let mut body = ""
+      let mut drop_row = !status_ok
+      match body_opt {
+        Some(b) => body = b
+        None => drop_row = true
+      }
+      if drop_row {
+        match tx_db.run("DELETE FROM vault_use_ambiguous_v2 WHERE ws = ? AND id = ?", [ws, id]) {
+          Ok(_) => continue
+          Err(e) => return Err(VaultError::Sql(e))
+        }
+      }
+      let request = match js_json::parse(body) {
+        Ok(jv) => jv
+        Err(m) => return Err(VaultError::App("JSON.parse: " + m))
+      }
+      let vault : Option[Array[Int]] = match request.get("vault") {
+        Some(js_json::JValue::Str(s)) => Some(s)
+        _ => None
+      }
+      let owner : Option[Array[Int]] = match request.get("owner") {
+        Some(js_json::JValue::Str(s)) => Some(s)
+        _ => None
+      }
+      let no_save = match request.get("save") {
+        None => true
+        Some(js_json::JValue::Null) => true
+        _ => false
+      }
+      let is_use = match vault {
+        Some(_) => no_save
+        None => false
+      }
+      let vault_param = match vault {
+        Some(v) => utf16_blob(v)
+        None => base_codec::json_null()
+      }
+      let owner_param = match owner {
+        Some(o) => utf16_blob(o)
+        None => base_codec::json_null()
+      }
+      match tx_db.run(
+        "UPDATE vault_use_ambiguous_v2 SET dirty = 0, is_use = ?, vault = ?, owner = ?, at = ? WHERE ws = ? AND id = ?",
+        [flag(is_use), vault_param, owner_param, use_time(request.get("at")), ws, id],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    Ok(rows.length() < limit)
+  })
+}
+
+fn backfill_use_index(db : sql_db::Db, ws : base_codec::Json, limit : Int = 32) -> Result[Bool, VaultError] {
+  tx_bool(db, fn(tx_db : sql_db::Db) -> Result[Bool, VaultError] {
+    match tx_db.run("INSERT OR IGNORE INTO vault_use_backfill (ws, after_id, done) VALUES (?, NULL, 0)", [ws]) {
+      Ok(_) => ()
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    match tx_db.run(
+      "INSERT OR IGNORE INTO vault_use_ambiguous_audit_v2 (ws, after_id, done) VALUES (?, NULL, 0)",
+      [ws],
+    ) {
+      Ok(_) => ()
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    let state = match tx_db.first("SELECT after_id, done FROM vault_use_backfill WHERE ws = ?", [ws]) {
+      Ok(Some(r)) => r
+      Ok(None) => return Err(VaultError::App("vault_use_backfill row missing"))
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    let audit = match tx_db.first(
+      "SELECT after_id, done FROM vault_use_ambiguous_audit_v2 WHERE ws = ?",
+      [ws],
+    ) {
+      Ok(Some(r)) => r
+      Ok(None) => return Err(VaultError::App("vault_use_ambiguous_audit_v2 row missing"))
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    if is_num_one(sql_db::row_val(state, "done")) {
+      return Ok(true)
+    }
+    let state_after = sql_db::row_val(state, "after_id")
+    let rows = match ids_after(tx_db, "vault_requests", ws, state_after, limit) {
+      Ok(r) => r
+      Err(e) => return Err(e)
+    }
+    for i in 0..<rows.length() {
+      match tx_db.run(
+        "INSERT OR IGNORE INTO vault_use_lookup SELECT ws, id, json_extract(body, '$.vault'), json_extract(body, '$.owner'), json_extract(body, '$.at') FROM vault_requests WHERE ws = ? AND id = ? AND status IN ('granted', 'denied') AND json_extract(body, '$.save') IS NULL",
+        [ws, sql_db::row_val(rows[i], "id")],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    let done = rows.length() < limit
+    let audit_after = sql_db::row_val(audit, "after_id")
+    if !is_num_one(sql_db::row_val(audit, "done")) && base_codec::json_eq(audit_after, state_after) {
+      match audit_use_rows(tx_db, ws, rows) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      match tx_db.run(
+        "UPDATE vault_use_ambiguous_audit_v2 SET after_id = ?, done = ? WHERE ws = ?",
+        [last_id(rows, audit_after), flag(done), ws],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    match tx_db.run(
+      "UPDATE vault_use_backfill SET after_id = ?, done = ? WHERE ws = ?",
+      [last_id(rows, state_after), flag(done), ws],
+    ) {
+      Ok(_) => Ok(done)
+      Err(e) => Err(VaultError::Sql(e))
+    }
+  })
+}
+
+/// One bounded step toward a complete use page (`backfillUsePreparation`).
+pub fn backfill_use_preparation(db : sql_db::Db, ws : base_codec::Json) -> Result[Bool, VaultError] {
+  let idx_done = match use_index_complete(db, ws) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  if !idx_done {
+    let step_done = match backfill_use_index(db, ws) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+    if !step_done {
+      return Ok(false)
+    }
+    return use_ready(db, ws)
+  }
+  let aud_done = match use_audit_complete(db, ws) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  if !aud_done {
+    let step_done = match backfill_use_audit(db, ws) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+    if !step_done {
+      return Ok(false)
+    }
+    return use_ready(db, ws)
+  }
+  let rep_done = match repair_ambiguous(db, ws) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  if !rep_done {
+    return Ok(false)
+  }
+  use_ready(db, ws)
+}
+
+/// One batch of the background preparation, a workspace at a time (`backfillNextWorkspace`); whether all are done.
+pub fn backfill_next_workspace(db : sql_db::Db) -> Result[Bool, VaultError] {
+  let state = match db.first("SELECT after_ws, done FROM vault_use_backfill_all WHERE id = 1", []) {
+    Ok(Some(r)) => r
+    Ok(None) => return Err(VaultError::App("vault_use_backfill_all row missing"))
+    Err(e) => return Err(VaultError::Sql(e))
+  }
+  if is_num_one(sql_db::row_val(state, "done")) {
+    return Ok(true)
+  }
+  let after = sql_db::row_val(state, "after_ws")
+  let next_res = if is_json_null(after) {
+    db.first("SELECT ws FROM vault_requests ORDER BY ws LIMIT 1", [])
+  } else {
+    db.first("SELECT ws FROM vault_requests WHERE ws > ? ORDER BY ws LIMIT 1", [after])
+  }
+  let next_row = match next_res {
+    Ok(Some(n)) => n
+    Ok(None) => {
+      match db.run("UPDATE vault_use_backfill_all SET done = 1 WHERE id = 1 AND after_ws IS ?", [after]) {
+        Ok(_) => return done_of(db, "SELECT done FROM vault_use_backfill_all WHERE id = 1", [])
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    Err(e) => return Err(VaultError::Sql(e))
+  }
+  let ws = sql_db::row_val(next_row, "ws")
+  let ready = match use_ready(db, ws) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  let done_ws = if ready {
+    true
+  } else {
+    match backfill_use_preparation(db, ws) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+  }
+  if done_ws {
+    match db.run(
+      "UPDATE vault_use_backfill_all SET after_ws = ? WHERE id = 1 AND after_ws IS ? AND done = 0",
+      [ws, after],
+    ) {
+      Ok(_) => ()
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+  }
+  Ok(false)
+}
+
+/// A read of a vault's (or an owner's) decided uses: its workspace, vault, owner (UTF-16 code units) and limit.
+pub struct UseRead {
+  pub ws : base_codec::Json
+  pub vault : Array[Int]
+  pub owner : Option[Array[Int]]
+  pub limit : base_codec::Json
+}
+
+pub fn well_formed_utf16(s : Array[Int]) -> Bool {
+  let n = s.length()
+  let mut i = 0
+  while i < n {
+    let c = s[i]
+    if c >= 0xD800 && c <= 0xDBFF {
+      if i + 1 < n && s[i + 1] >= 0xDC00 && s[i + 1] <= 0xDFFF {
+        i = i + 2
+        continue
+      }
+      return false
+    }
+    if c >= 0xDC00 && c <= 0xDFFF {
+      return false
+    }
+    i = i + 1
+  }
+  true
+}
+
+/// The page, once the workspace's uses are prepared (`tryReadUses`); None before.
+pub fn try_read_uses(
+  db : sql_db::Db,
+  q : UseRead,
+) -> Result[Option[Array[base_codec::Json]], VaultError] {
+  db.savepoint_swallow_err(
+    "vault_use_page",
+    fn(sp_db : sql_db::Db) -> Result[Option[Array[base_codec::Json]], VaultError] {
+      let state = match use_state(sp_db, q.ws) {
+        Ok(s) => s
+        Err(e) => return Err(e)
+      }
+      if !ready_state(state) {
+        return Ok(None)
+      }
+      let state_row = match state {
+        Some(r) => r
+        None => return Ok(None)
+      }
+      let ambiguous = !is_num_zero(sql_db::row_val(state_row, "ambiguous"))
+      let owner_wf = match q.owner {
+        Some(o) => well_formed_utf16(o)
+        None => true
+      }
+      let normal = well_formed_utf16(q.vault) && owner_wf
+      if !ambiguous && !normal {
+        return Ok(Some([]))
+      }
+      let vault = base_codec::json_str(js_json::text(q.vault))
+      let rows_res = if !ambiguous {
+        match q.owner {
+          None =>
+          sp_db.all(
+            "SELECT r.body FROM vault_use_lookup u INDEXED BY vault_use_lookup_vault JOIN vault_requests r ON r.ws = u.ws AND r.id = u.id WHERE u.ws = ?1 AND u.vault = ?2 ORDER BY u.at DESC, u.id DESC LIMIT ?3",
+            [q.ws, vault, q.limit],
+          )
+          Some(o) =>
+          sp_db.all(
+            "SELECT r.body FROM vault_use_lookup u INDEXED BY vault_use_lookup_owner JOIN vault_requests r ON r.ws = u.ws AND r.id = u.id WHERE u.ws = ?1 AND u.vault = ?2 AND u.owner = ?3 ORDER BY u.at DESC, u.id DESC LIMIT ?4",
+            [q.ws, vault, base_codec::json_str(js_json::text(o)), q.limit],
+          )
+        }
+      } else {
+        match q.owner {
+          None =>
+          sp_db.all(
+            "SELECT r.body AS body, u.at AS at, u.id AS id FROM vault_use_lookup u INDEXED BY vault_use_lookup_vault JOIN vault_requests r ON r.ws = u.ws AND r.id = u.id WHERE ?4 AND u.ws = ?1 AND u.vault = ?2 AND NOT EXISTS (SELECT 1 FROM vault_use_ambiguous_v2 a WHERE a.ws = u.ws AND a.id = u.id) UNION ALL SELECT r.body, a.at, a.id FROM vault_use_ambiguous_v2 a INDEXED BY vault_use_ambiguous_vault_v2 JOIN vault_requests r ON r.ws = a.ws AND r.id = a.id WHERE a.ws = ?1 AND a.vault = ?3 AND a.dirty = 0 AND a.is_use = 1 ORDER BY at DESC, id DESC LIMIT ?5",
+            [q.ws, vault, utf16_blob(q.vault), flag(normal), q.limit],
+          )
+          Some(o) =>
+          sp_db.all(
+            "SELECT r.body AS body, u.at AS at, u.id AS id FROM vault_use_lookup u INDEXED BY vault_use_lookup_owner JOIN vault_requests r ON r.ws = u.ws AND r.id = u.id WHERE ?6 AND u.ws = ?1 AND u.vault = ?2 AND u.owner = ?3 AND NOT EXISTS (SELECT 1 FROM vault_use_ambiguous_v2 a WHERE a.ws = u.ws AND a.id = u.id) UNION ALL SELECT r.body, a.at, a.id FROM vault_use_ambiguous_v2 a INDEXED BY vault_use_ambiguous_owner_v2 JOIN vault_requests r ON r.ws = a.ws AND r.id = a.id WHERE a.ws = ?1 AND a.vault = ?4 AND a.owner = ?5 AND a.dirty = 0 AND a.is_use = 1 ORDER BY at DESC, id DESC LIMIT ?7",
+            [
+              q.ws,
+              vault,
+              base_codec::json_str(js_json::text(o)),
+              utf16_blob(q.vault),
+              utf16_blob(o),
+              flag(normal),
+              q.limit,
+            ],
+          )
+        }
+      }
+      let rows = match rows_res {
+        Ok(r) => r
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+      let bodies : Array[base_codec::Json] = []
+      for i in 0..<rows.length() {
+        bodies.push(sql_db::row_val(rows[i], "body"))
+      }
+      Ok(Some(bodies))
+    },
+    map_sql,
+  )
+}

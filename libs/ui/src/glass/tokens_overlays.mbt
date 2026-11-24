@@ -176,10 +176,15 @@ pub fn liquid_capsule_glass(solid? : Int64 = clear) -> @paint.Glass {
 }
 
 ///|
-/// Progressive blur soft scroll-edge backdrop (iOS 26 `UIScrollEdgeEffect.soft`): blurs and veils scrolled content
-/// progressively across the host node's `View::fades` band (`blur=8.5`, 50% `bg` veil, `saturation=1.25`,
-/// `progressive=true`), degrading to a solid `bg` alpha fade under `MBUI_GLASS=solid`.
-pub fn liquid_scroll_edge_glass(bg? : Int64 = clear) -> @paint.Glass {
+/// Progressive blur soft scroll-edge backdrop (iOS 26 `UIScrollEdgeEffect.soft`): progressive variable blur
+/// across the host node's `View::fades` band (`blur=8.5`, `progressive=true`),
+/// degrading to a solid `bg` alpha fade under `MBUI_GLASS=solid`.
+///
+/// When `pure=true` (full-bleed media viewers), emits zero tint (`tint=clear`, `saturation=1.0`) so dark
+/// photos/videos are never washed out by a light-mode scrim. Otherwise (`pure=false`, default for bare-title
+/// chat/settings bars), applies a 50% `bg` tint veil (`alpha(resolved, 0.50)`, `saturation=1.25`) to preserve
+/// bare-text readability over scrolled content.
+pub fn liquid_scroll_edge_glass(bg? : Int64 = clear, pure? : Bool = false) -> @paint.Glass {
   let resolved = if bg != clear {
     bg
   } else if is_dark() {
@@ -189,9 +194,9 @@ pub fn liquid_scroll_edge_glass(bg? : Int64 = clear) -> @paint.Glass {
   }
   @paint.Glass::frosted(
     blur=8.5,
-    tint=alpha(resolved, 0.50),
+    tint=if pure { clear } else { alpha(resolved, 0.50) },
     solid=resolved,
-    saturation=1.25,
+    saturation=if pure { 1.0 } else { 1.25 },
     progressive=true,
   )
 }

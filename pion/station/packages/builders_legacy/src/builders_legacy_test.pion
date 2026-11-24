@@ -1,0 +1,197 @@
+import "base_codec"
+import "js_json"
+
+fn expect(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+test "UTF-16 login_card like_text_utf16 and utf16_units_find_from handle CJK, emoji surrogate pairs, ASCII fold, and NUL cut" {
+  // "你好" = 2 UTF-16 units (6 UTF-8 bytes), "🚀" = 2 UTF-16 units (4 UTF-8 bytes)
+  // Prefix before "\"login\":\"abc\"": 2 + 2 + 1 = 5 UTF-16 units (vs 11 UTF-8 bytes).
+  let card = "你好🚀:{\"LOGIN\":\"Abc123\",\"login\":\"next9\"}\u{0000}\"login\":\"after\""
+  let units = like_text_utf16(card)
+  let prefix = js_json::utf16_units("\"login\":\"")
+  let quote = js_json::utf16_units("\"")
+
+  // First match must be at UTF-16 offset 6 (你好=2, 🚀=2, ':'=1, '{'=1 -> 6), NOT UTF-8 byte offset 12.
+  let pos1 = match utf16_units_find_from(units, prefix, 0) {
+    Some(p) => p
+    None => {
+      panic("expected first login match")
+      0
+    }
+  }
+  expect(pos1 == 6, "first match UTF-16 offset must be 6, got " + pos1.to_string())
+  let at1 = pos1 + prefix.length()
+  let end1 = match utf16_units_find_from(units, quote, at1) {
+    Some(p) => p
+    None => {
+      panic("expected closing quote 1")
+      0
+    }
+  }
+  match extract_login_ok(units, at1, end1) {
+    Some(tok) => expect(tok == "abc123", "folded login token must be abc123, got " + tok)
+    None => panic("expected valid login token abc123")
+  }
+
+  // Second match resumes from at1 and finds next9; third match after NUL must NOT be found.
+  let pos2 = match utf16_units_find_from(units, prefix, at1) {
+    Some(p) => p
+    None => {
+      panic("expected second login match")
+      0
+    }
+  }
+  let at2 = pos2 + prefix.length()
+  let end2 = match utf16_units_find_from(units, quote, at2) {
+    Some(p) => p
+    None => {
+      panic("expected closing quote 2")
+      0
+    }
+  }
+  match extract_login_ok(units, at2, end2) {
+    Some(tok) => expect(tok == "next9", "second login token must be next9, got " + tok)
+    None => panic("expected valid login token next9")
+  }
+  match utf16_units_find_from(units, prefix, at2) {
+    None => ()
+    Some(_) => panic("token after NUL must be cut off")
+  }
+}
+
+test "UTF-16 key_part 24-unit truncation and sandbox_name Kelvin/İ/emoji parity" {
+  // Plain <= 24 chars returns unchanged without hash.
+  expect(key_part("plain_key-01") == "plain_key-01", "plain key unchanged")
+
+  // 23 ASCII 'a' + 1 emoji '😀' (2 UTF-16 units) -> 24 UTF-16 units: 23 'a' + 1 '_' + "-" + 10-hex hash.
+  let k_boundary = "aaaaaaaaaaaaaaaaaaaaaaa😀"
+  let kp = key_part(k_boundary)
+  expect(kp.length() == 24 + 1 + 10, "boundary key_part len must be 35, got " + kp.length().to_string())
+  expect(str_has_prefix(kp, "aaaaaaaaaaaaaaaaaaaaaaa_-"), "boundary key_part prefix: " + kp)
+
+  // Emoji inside first 24 units counts as 2 UTF-16 code units -> two '_' chars.
+  let kp_emoji = key_part("a😀b")
+  expect(str_has_prefix(kp_emoji, "a__b-"), "emoji occupies 2 UTF-16 units -> two underscores: " + kp_emoji)
+
+  // Kelvin sign (U+212A) -> 'k', Turkish dotted I (U+0130) -> 'i' + combining dot (dropped to '-').
+  let sn = sandbox_name("K1İ")
+  expect(str_has_prefix(sn, "s-k1i-"), "Kelvin/İ sandbox_name: " + sn)
+
+  // Non-alnum only -> "s-<hash10>"
+  let sn_empty = sandbox_name("😀😀")
+  expect(str_has_prefix(sn_empty, "s-") && sn_empty.length() == 12, "empty clean sandbox_name: " + sn_empty)
+}
+
+test "share_values enforces 16384 UTF-16 code-unit limit and safe integer bounds for used and used+idle_ms" {
+  // 8192 emoji '😀' = 16384 UTF-16 units (32768 UTF-8 bytes) -> within 16384 UTF-16 limit.
+  // Wrap in valid JSON array: "[{\"workspace\":\"" (15) + body + "\"}]" (3) = 18 + body_units.
+  let sb_ok = StringBuilder::new()
+  sb_ok.write_string("[{\"workspace\":\"")
+  for _ in 0..<8183 {
+    sb_ok.write_string("😀")
+  }
+  sb_ok.write_string("\"}]")
+  let ok_json = sb_ok.to_string()
+  expect(js_json::utf16_len(ok_json) == 16384, "ok_json must be exactly 16384 UTF-16 units")
+  match parse_share_values(ok_json, Some(1000.0)) {
+    Some(vals) => expect(vals.length() == 1, "16384 UTF-16 units must be accepted")
+    None => panic("16384 UTF-16 units should not be rejected")
+  }
+
+  // 16385 UTF-16 units -> rejected (None).
+  let sb_over = StringBuilder::new()
+  sb_over.write_string("[{\"workspace\":\"a")
+  for _ in 0..<8183 {
+    sb_over.write_string("😀")
+  }
+  sb_over.write_string("\"}]")
+  let over_json = sb_over.to_string()
+  expect(js_json::utf16_len(over_json) == 16385, "over_json must be 16385 UTF-16 units")
+  match parse_share_values(over_json, Some(1000.0)) {
+    None => ()
+    Some(_) => panic("16385 UTF-16 units must be rejected as uncertain")
+  }
+
+  // used is safe integer (MAX_SAFE_INTEGER), but used + 21600000 overflows safe integer -> None.
+  let near_max = "[{\"workspace\":\"W1\",\"used\":9007199254740991}]"
+  match parse_share_values(near_max, Some(0.0)) {
+    None => ()
+    Some(_) => panic("used + idle_ms > MAX_SAFE_INTEGER must return None")
+  }
+  // used = MAX_SAFE_INTEGER - 21600000 -> exact boundary accepted.
+  let exact_max = "[{\"workspace\":\"W1\",\"used\":9007199233140991}]"
+  match parse_share_values(exact_max, Some(0.0)) {
+    Some(vals) => expect(vals.length() == 1, "exact MAX_SAFE_INTEGER - idle_ms accepted")
+    None => panic("exact MAX_SAFE_INTEGER - idle_ms should be accepted")
+  }
+  // Lone UTF-16 surrogate escapes reject the whole JSON document as empty targets (matching MB @json.parse).
+  match parse_share_values("[{\"note\":\"\\uD800\",\"workspace\":\"W1\"}]", Some(1000.0)) {
+    Some(vals) => expect(vals.length() == 0, "lone surrogate in note must yield 0 targets")
+    None => panic("lone surrogate in note must return Some([]), not uncertain")
+  }
+  match parse_share_values("[{\"workspace\":\"\\uD800\"}]", Some(1000.0)) {
+    Some(vals) => expect(vals.length() == 0, "lone surrogate in workspace must yield 0 targets")
+    None => panic("lone surrogate in workspace must return Some([]), not uncertain")
+  }
+  // Overflow number 1e400 -> Infinity -> not safe integer -> None (uncertain).
+  match parse_share_values("[{\"workspace\":\"W1\",\"used\":1e400}]", Some(1000.0)) {
+    None => ()
+    Some(_) => panic("1e400 overflow must return None (uncertain)")
+  }
+}
+
+test "all 19 session-backfill kinds classify accurately, unknown string returns None, non-string/missing defaults to activity" {
+  let kinds = session_backfill_kinds()
+  expect(kinds.length() == 19, "must have exactly 19 session-backfill kinds")
+  for i in 0..<kinds.length() {
+    let k = kinds[i]
+    let ask = base_codec::json_obj([("kind", base_codec::json_str(k))])
+    match classify_session_backfill_kind(ask) {
+      Some(got) => expect(got == k, "kind mismatch for " + k)
+      None => panic("known kind rejected: " + k)
+    }
+  }
+  // Unknown string -> None ("invalid session backfill preparation request")
+  match classify_session_backfill_kind(base_codec::json_obj([("kind", base_codec::json_str("unknown-kind"))])) {
+    None => ()
+    Some(k) => panic("unknown string kind should return None, got " + k)
+  }
+  // Non-string kind, missing kind, non-object, Null (bad JSON) -> "activity"
+  let fallback_asks = [
+    base_codec::json_obj([("kind", base_codec::json_int(1))]),
+    base_codec::json_obj([("kind", base_codec::json_null())]),
+    base_codec::json_obj([]),
+    base_codec::json_arr([]),
+    base_codec::json_null(),
+  ]
+  for i in 0..<fallback_asks.length() {
+    match classify_session_backfill_kind(fallback_asks[i]) {
+      Some("activity") => ()
+      _ => panic("non-string/missing kind must route to activity")
+    }
+  }
+}
+
+test "split_session_thread and conv_cmp_earliest (lexicographical tie-break per TS conversations.ts)" {
+  match split_session_thread("slack:C123:1700.1") {
+    Some((ch, ts)) => expect(ch == "C123" && ts == "1700.1", "basic split")
+    None => panic("expected Some")
+  }
+  match split_session_thread("no-colons") {
+    None => ()
+    Some(_) => panic("expected None")
+  }
+  match split_session_thread(":C1:t1") {
+    Some((ch, ts)) => expect(ch == "C1" && ts == "t1", "leading colon split")
+    None => panic("expected Some for leading colon")
+  }
+  expect(conv_cmp_earliest(100.0, "b", 200.0, "a") < 0, "earlier timestamp wins")
+  expect(conv_cmp_earliest(100.0, "a", 100.0, "b") < 0, "tie breaks lexicographically by key")
+  expect(conv_cmp_earliest(100.0, "b", 100.0, "aa") > 0, "UTF-16 tie-break: 'b' > 'aa' per TS conversations.ts")
+  expect(conv_cmp_earliest(100.0, "😀:C:T", 100.0, "\u{E000}:C:T") < 0, "UTF-16 code-unit order: U+1F600 (0xD83D) < U+E000 (0xE000)")
+  expect(conv_cmp_earliest(100.0, "a", 100.0, "a") == 0, "equal")
+}

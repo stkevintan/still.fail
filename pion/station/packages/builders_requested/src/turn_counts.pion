@@ -1,0 +1,403 @@
+// Session turn-counts builder (`--builder turn-counts`), 1:1 aligned with
+// `station/mb/src/turns/turns.mbt` and `station/mb/src/reader/main.mbt:346-397`.
+// All write transactions go exclusively through `db.tx_err(...)` (never raw transaction SQL).
+// `may_write()` is always invoked outside any SQLite transaction.
+
+import "base_codec"
+import "builders_core"
+import "host_shim"
+import "sql_db"
+
+pub let TURN_BATCH : Int = 64
+
+let TURN_FIRST : String = "SELECT started_at, rowid AS rid FROM turns INDEXED BY turns_by_session WHERE session_key = ?1 AND started_at = ?2 AND rowid <= ?3 ORDER BY rowid DESC LIMIT ?4"
+
+let TURN_AFTER : String = "SELECT started_at, rowid AS rid FROM turns INDEXED BY turns_by_session WHERE session_key = ?1 AND started_at = ?2 AND rowid < ?3 ORDER BY rowid DESC LIMIT ?4"
+
+let TURN_EARLIER : String = "SELECT started_at, rowid AS rid FROM turns INDEXED BY turns_by_session WHERE session_key = ?1 AND started_at < ?2 ORDER BY started_at DESC, rowid DESC LIMIT ?3"
+
+let TURN_TAIL_SAME : String = "SELECT started_at, rowid AS rid FROM turns INDEXED BY turns_by_session WHERE session_key = ?1 AND started_at = ?2 AND rowid > ?3 ORDER BY rowid LIMIT ?4"
+
+let TURN_TAIL_NEWER : String = "SELECT started_at, rowid AS rid FROM turns INDEXED BY turns_by_session WHERE session_key = ?1 AND started_at > ?2 ORDER BY started_at, rowid LIMIT ?3"
+
+struct TurnPosition {
+  at : base_codec::Json
+  rid : base_codec::Json
+}
+
+fn turn_position(row : Map[String, base_codec::Json]) -> TurnPosition {
+  TurnPosition::{
+    at: sql_db::row_val(row, "started_at"),
+    rid: sql_db::row_val(row, "rid"),
+  }
+}
+
+pub struct TurnScan {
+  session : String
+  token : String
+  mut n : Int
+  mut boundary : TurnPosition
+  mut after : Option[TurnPosition]
+  mut finished : Bool
+}
+
+pub fn TurnScan::token(self : TurnScan) -> String {
+  self.token
+}
+
+fn turn_counted(db : sql_db::Db, s : base_codec::Json) -> Result[Bool, builders_core::StepError] {
+  match db.all("SELECT 1 FROM session_turns WHERE session = ?", [s]) {
+    Ok(rows) => Ok(rows.length() > 0)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn turn_has_turns(db : sql_db::Db, s : base_codec::Json) -> Result[Bool, builders_core::StepError] {
+  match db.all("SELECT 1 FROM turns INDEXED BY turns_by_session WHERE session_key = ? LIMIT 1", [s]) {
+    Ok(rows) => Ok(rows.length() > 0)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn turn_guarded(
+  db : sql_db::Db,
+  s : base_codec::Json,
+  token : String,
+) -> Result[Bool, builders_core::StepError] {
+  match db.all("SELECT token FROM session_turns_guard WHERE session = ?", [s]) {
+    Ok(rows) => {
+      if rows.length() == 0 {
+        return Ok(false)
+      }
+      match rows[0].get("token") {
+        Some(base_codec::Json::Str(got)) => Ok(got == token)
+        _ => Ok(false)
+      }
+    }
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+enum TurnPublishResult {
+  LostGuard
+  Advanced(Int, TurnPosition)
+  Completed
+}
+
+pub fn turn_counts_step(
+  db : sql_db::Db,
+  session : String,
+  scan_opt : Option[TurnScan],
+  make_token : () -> String,
+  may_write : () -> Bool,
+  limit : Int = TURN_BATCH,
+) -> Result[(Bool, Option[TurnScan]), builders_core::StepError] {
+  if limit < 1 || limit > TURN_BATCH {
+    return Err(builders_core::StepError::App("turn count batch must be between 1 and 64"))
+  }
+  let s = base_codec::json_str(session)
+  let scan = match scan_opt {
+    Some(sc) => sc
+    None => {
+      let is_counted = match turn_counted(db, s) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if is_counted {
+        return Ok((true, None))
+      }
+      let any_turns = match turn_has_turns(db, s) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if !any_turns {
+        return Ok((true, None))
+      }
+      if !may_write() {
+        return Ok((false, None))
+      }
+      return db.tx_err(
+        fn(tx : sql_db::Db) -> Result[(Bool, Option[TurnScan]), builders_core::StepError] {
+          let c2 = match turn_counted(tx, s) {
+            Ok(v) => v
+            Err(e) => return Err(e)
+          }
+          if c2 {
+            return Ok((true, None))
+          }
+          let h2 = match turn_has_turns(tx, s) {
+            Ok(v) => v
+            Err(e) => return Err(e)
+          }
+          if !h2 {
+            return Ok((true, None))
+          }
+          let tok = make_token()
+          let latest_rows = match tx.all(
+            "SELECT started_at, rowid AS rid FROM turns INDEXED BY turns_by_session WHERE session_key = ? ORDER BY started_at DESC, rowid DESC LIMIT 1",
+            [s],
+          ) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          if latest_rows.length() == 0 {
+            return Err(builders_core::StepError::App("turn count found no turn"))
+          }
+          let boundary = turn_position(latest_rows[0])
+          match tx.run(
+            "INSERT INTO session_turns_guard(session, token, boundary_at, boundary_rowid) VALUES (?, ?, ?, ?) ON CONFLICT(session) DO UPDATE SET token = excluded.token, boundary_at = excluded.boundary_at, boundary_rowid = excluded.boundary_rowid",
+            [s, base_codec::json_str(tok), boundary.at, boundary.rid],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          Ok(
+            (
+              false,
+              Some(
+                TurnScan::{
+                  session: session,
+                  token: tok,
+                  n: 0,
+                  boundary: boundary,
+                  after: None,
+                  finished: false,
+                },
+              ),
+            ),
+          )
+        },
+        fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+      )
+    }
+  }
+
+  if scan.session != session {
+    return Err(builders_core::StepError::App("turn count belongs to another session"))
+  }
+  let is_guarded = match turn_guarded(db, s, scan.token) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if !is_guarded {
+    return Ok((false, None))
+  }
+
+  let mut visited = 0
+  if !scan.finished {
+    let (before, query_sql) = match scan.after {
+      Some(p) => (p, TURN_AFTER)
+      None => (scan.boundary, TURN_FIRST)
+    }
+    let rows = match db.all(query_sql, [s, before.at, before.rid, base_codec::json_int(limit)]) {
+      Ok(r) => r
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+    if rows.length() < limit {
+      let rem = limit - rows.length()
+      let extra = match db.all(TURN_EARLIER, [s, before.at, base_codec::json_int(rem)]) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      for i in 0..<extra.length() {
+        rows.push(extra[i])
+      }
+    }
+    visited = rows.length()
+    scan.n = scan.n + visited
+    if rows.length() > 0 {
+      scan.after = Some(turn_position(rows[rows.length() - 1]))
+    }
+    scan.finished = rows.length() < limit
+  }
+
+  if !scan.finished || visited > 0 || !may_write() {
+    return Ok((false, Some(scan)))
+  }
+
+  let scan_n = scan.n
+  let scan_boundary = scan.boundary
+  let scan_token = scan.token
+  let pub_res = match db.tx_err(
+    fn(tx : sql_db::Db) -> Result[TurnPublishResult, builders_core::StepError] {
+      let g2 = match turn_guarded(tx, s, scan_token) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if !g2 {
+        return Ok(TurnPublishResult::LostGuard)
+      }
+      let tail = match tx.all(
+        TURN_TAIL_SAME,
+        [s, scan_boundary.at, scan_boundary.rid, base_codec::json_int(limit)],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if tail.length() < limit {
+        let rem = limit - tail.length()
+        let extra = match tx.all(TURN_TAIL_NEWER, [s, scan_boundary.at, base_codec::json_int(rem)]) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        for i in 0..<extra.length() {
+          tail.push(extra[i])
+        }
+      }
+      let count = scan_n + tail.length()
+      if tail.length() == limit {
+        let new_boundary = turn_position(tail[tail.length() - 1])
+        match tx.run(
+          "UPDATE session_turns_guard SET boundary_at=?, boundary_rowid=? WHERE session=? AND token=?",
+          [new_boundary.at, new_boundary.rid, s, base_codec::json_str(scan_token)],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        return Ok(TurnPublishResult::Advanced(count, new_boundary))
+      }
+      if count > 0 {
+        match tx.run("INSERT INTO session_turns (session, n) VALUES (?, ?)", [s, base_codec::json_int(count)]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      match tx.run("DELETE FROM session_turns_guard WHERE session = ? AND token = ?", [s, base_codec::json_str(scan_token)]) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      Ok(TurnPublishResult::Completed)
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  ) {
+    Ok(r) => r
+    Err(e) => return Err(e)
+  }
+
+  match pub_res {
+    TurnPublishResult::LostGuard => Ok((false, None))
+    TurnPublishResult::Advanced(count, new_boundary) => {
+      scan.n = count
+      scan.boundary = new_boundary
+      Ok((false, Some(scan)))
+    }
+    TurnPublishResult::Completed => Ok((true, None))
+  }
+}
+
+pub fn turn_counts_is_mode_request(ask : base_codec::Json) -> Bool {
+  builders_core::json_has_key(ask, "session") || builders_core::json_has_key(ask, "cancel")
+}
+
+pub fn format_guard_token(wall_ms : Int64, seq : Int, pid : Int) -> String {
+  wall_ms.to_string() + "-" + seq.to_string() + "-" + pid.to_string()
+}
+
+pub fn run_turn_counts(db_path : String) -> Int {
+  let db = match sql_db::Db::attach(db_path, wait_ms=250) {
+    Ok(d) => d
+    Err(e) => {
+      let _ = host_shim::write_stderr_line(e.message)
+      return 1
+    }
+  }
+  match db.exec("PRAGMA synchronous = NORMAL") {
+    Ok(_) => ()
+    Err(e) => {
+      db.close()
+      let _ = host_shim::write_stderr_line(e.message)
+      return 1
+    }
+  }
+  if !host_shim::start("", true) {
+    db.close()
+    let _ = host_shim::write_stderr_line("builder turn-counts: failed to start stdin loop")
+    return 1
+  }
+
+  let queue = builders_core::LineQueue::new()
+  let permit = builders_core::Permit::new(queue, turn_counts_is_mode_request)
+  let counts : Map[String, TurnScan] = Map::new()
+  let mut tokens = 0
+  let mut write_failed = false
+
+  while true {
+    let line = match permit.next_line() {
+      Some(l) => l
+      None => break
+    }
+    if line.length() == 0 {
+      continue
+    }
+    let ask = builders_core::parse_ask_line(line)
+    let session = match builders_core::json_get_last(ask, "session") {
+      Some(base_codec::Json::Str(s)) => s
+      _ => {
+        let out = builders_core::format_step_response("old turn counts", Ok(None))
+        if !host_shim::write_stdout_line(out) {
+          write_failed = true
+          break
+        }
+        continue
+      }
+    }
+    if builders_core::is_cancel_ask(ask) {
+      match counts.get(session) {
+        Some(scan) => {
+          let _ = counts.remove(session)
+          if permit.take() {
+            let _ = db.run(
+              "DELETE FROM session_turns_guard WHERE session=? AND token=?",
+              [base_codec::json_str(session), base_codec::json_str(scan.token())],
+            )
+            permit.give()
+          }
+        }
+        None => ()
+      }
+      continue
+    }
+    let res = match turn_counts_step(
+      db,
+      session,
+      counts.get(session),
+      fn() -> String {
+        tokens = tokens + 1
+        format_guard_token(host_shim::wall_ms(), tokens, host_shim::pid())
+      },
+      fn() -> Bool { permit.take() },
+    ) {
+      Ok((done, next_scan)) => {
+        match next_scan {
+          Some(sc) => counts.set(session, sc)
+          None => {
+            let _ = counts.remove(session)
+          }
+        }
+        Ok(Some(done))
+      }
+      Err(e) => Err(e)
+    }
+    match db.rollback_if_in_tx() {
+      Ok(_) => ()
+      Err(e) => {
+        db.close()
+        let _ = host_shim::write_stderr_line(
+          "builder turn-counts: transaction remained open after ROLLBACK: " + e.message,
+        )
+        host_shim::stop()
+        return 1
+      }
+    }
+    permit.release_implicit()
+    let out = builders_core::format_step_response("old turn counts", res)
+    if !host_shim::write_stdout_line(out) {
+      write_failed = true
+      break
+    }
+  }
+
+  db.close()
+  host_shim::stop()
+  if write_failed { 1 } else { 0 }
+}

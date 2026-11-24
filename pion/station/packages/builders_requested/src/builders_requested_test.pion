@@ -1,0 +1,102 @@
+fn expect(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+test "guard token format matches <wall_ms>-<seq>-<pid>" {
+  let ts : Int64 = 1795533.to_int64() * 1000000.to_int64() + 413541.to_int64()
+  let tok = format_guard_token(ts, 7, 4242)
+  expect(tok == "1795533413541-7-4242", "unexpected guard token: " + tok)
+}
+
+test "turn-counts and said mode-request classification for Permit" {
+  let tc_sess = builders_core::parse_ask_line("{\"session\":\"s1\"}")
+  let tc_null = builders_core::parse_ask_line("{\"session\":null}")
+  let tc_cancel = builders_core::parse_ask_line("{\"cancel\":true}")
+  let foreign = builders_core::parse_ask_line("{\"foo\":1}")
+  expect(turn_counts_is_mode_request(tc_sess), "turn-counts session key")
+  expect(turn_counts_is_mode_request(tc_null), "turn-counts null session key")
+  expect(turn_counts_is_mode_request(tc_cancel), "turn-counts cancel key")
+  expect(!turn_counts_is_mode_request(foreign), "turn-counts foreign object")
+
+  let said_th = builders_core::parse_ask_line("{\"thread\":42}")
+  let said_null = builders_core::parse_ask_line("{\"thread\":null}")
+  expect(said_is_mode_request(said_th), "said thread key")
+  expect(said_is_mode_request(said_null), "said null thread key")
+  expect(said_is_mode_request(tc_cancel), "said cancel key")
+  expect(!said_is_mode_request(foreign), "said foreign object")
+}
+
+test "usage_viewer treats only literal false as home=false" {
+  let v_false = builders_core::parse_ask_line("{\"workspace\":\"A\",\"home\":false}")
+  match usage_viewer(v_false) {
+    Some((ws, home)) => expect(ws == "A" && !home, "expected (A, false)")
+    None => panic("expected Some for home=false")
+  }
+  let v_true = builders_core::parse_ask_line("{\"workspace\":\"A\",\"home\":true}")
+  match usage_viewer(v_true) {
+    Some((ws, home)) => expect(ws == "A" && home, "expected (A, true)")
+    None => panic("expected Some for home=true")
+  }
+  let v_missing = builders_core::parse_ask_line("{\"workspace\":\"B\"}")
+  match usage_viewer(v_missing) {
+    Some((ws, home)) => expect(ws == "B" && home, "expected (B, true)")
+    None => panic("expected Some for missing home")
+  }
+  let v_zero = builders_core::parse_ask_line("{\"workspace\":\"C\",\"home\":0}")
+  match usage_viewer(v_zero) {
+    Some((ws, home)) => expect(ws == "C" && home, "expected (C, true) for home=0")
+    None => panic("expected Some for home=0")
+  }
+  let v_null = builders_core::parse_ask_line("{\"workspace\":\"D\",\"home\":null}")
+  match usage_viewer(v_null) {
+    Some((ws, home)) => expect(ws == "D" && home, "expected (D, true) for home=null")
+    None => panic("expected Some for home=null")
+  }
+  let v_str = builders_core::parse_ask_line("{\"workspace\":\"E\",\"home\":\"false\"}")
+  match usage_viewer(v_str) {
+    Some((ws, home)) => expect(ws == "E" && home, "expected (E, true) for home=\"false\"")
+    None => panic("expected Some for home=\"false\"")
+  }
+  let v_none = builders_core::parse_ask_line("null")
+  match usage_viewer(v_none) {
+    None => ()
+    Some(_) => panic("expected None for null viewer")
+  }
+}
+
+test "usage-check id extraction preserves exact numeric repr and null fallback" {
+  let ask_big = builders_core::parse_ask_line("{\"id\":9007199254740993,\"remote\":true}")
+  match builders_core::json_get_last(ask_big, "id") {
+    Some(base_codec::Json::Num(_, repr)) => expect(repr == "9007199254740993", "big int repr: " + repr)
+    _ => panic("expected Num with repr for 9007199254740993")
+  }
+
+  let ask_huge = builders_core::parse_ask_line("{\"id\":9223372036854775808,\"chats\":null}")
+  match builders_core::json_get_last(ask_huge, "id") {
+    Some(base_codec::Json::Num(_, repr)) => expect(repr == "9223372036854775808", "huge int repr: " + repr)
+    _ => panic("expected Num with repr for 9223372036854775808")
+  }
+
+  let ask_missing = builders_core::parse_ask_line("{\"chats\":null}")
+  match builders_core::json_get_last(ask_missing, "id") {
+    None => ()
+    Some(_) => panic("expected None for missing id")
+  }
+}
+
+test "cc_index cancel clears per-session turn state and bool flag parsing" {
+  let cc = Cc::new()
+  cc.turns.set("s1", 2)
+  cc.cancel("s1")
+  match cc.turns.get("s1") {
+    None => ()
+    Some(_) => panic("expected turn cleared after cancel")
+  }
+
+  let ask = builders_core::parse_ask_line("{\"session\":\"s1\",\"name\":true,\"latest\":true}")
+  expect(is_bool_true_field(ask, "name"), "name=true")
+  expect(is_bool_true_field(ask, "latest"), "latest=true")
+  expect(!is_bool_true_field(ask, "cancel"), "cancel absent")
+}

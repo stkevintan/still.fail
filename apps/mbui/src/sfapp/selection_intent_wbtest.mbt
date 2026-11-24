@@ -152,7 +152,7 @@ test "戳一下 on a station that predates it: says to update the station, no ra
 }
 
 ///|
-test "大屏, 戳一下 open beside the words picked with the mouse: the wheel over the chat scrolls it, the answer staying open" {
+test "大屏, 戳一下 kept on the words picked: they stay lit, its answer a note in the margin at the right of their message, the column narrowed for it; 关闭 takes both off" {
   new_run()
   @sf.presenters_reset()
   let src = fixture("chat")
@@ -162,10 +162,85 @@ test "大屏, 戳一下 open beside the words picked with the mouse: the wheel o
   t.run_for(@ui.move_most_ms)
   exp_set(t, src, ["selectionIntent"], true)
   let (px, py, pw, ph) = quote_nodes_words(t, "高度先按 90 估")
+  // (the right of the line its words are in, the message's whole line: as far right as the column reaches)
+  let line_right = fn() {
+    match t.words().filter(fn(w) { w.0.has_prefix("高度先按 90 估，") }).last() {
+      Some(w) => w.1 + w.3
+      None => 0.0
+    }
+  }
+  let column_right = line_right()
   t.drag(px + 1.0, py + ph / 2.0, px + pw - 1.0, py + ph / 2.0)
   t.run_for(@ui.move_most_ms)
   t.click(Button, label="戳一下")
   t.run_for(@ui.move_most_ms)
+  let notes = @sfbase.intent_notes_for("ws1/st1:s-c1")
+  assert_eq(notes.length(), 1, msg="one note")
+  assert_eq(notes[0].selection, "高度先按 90 估")
+  assert_false(@sf.presented_drawn(), msg="no panel opened")
+  guard t.words().filter(fn(w) { w.0.contains("轻量模型结合当前对话上下文") }).last() is Some(answer) else {
+    fail("the answer not drawn")
+  }
+  let (nx, ny) = (answer.1, answer.2)
+  guard t.run_rects("高度先按 90 估") is [(wx, wy, _, _), ..] else { fail("the words not drawn") }
+  let narrowed = line_right()
+  assert_true(narrowed < column_right, msg="the column narrowed: \{column_right} to \{narrowed}")
+  assert_true(nx > narrowed, msg="the note at the column's right: \{nx} past \{narrowed}")
+  assert_true(ny >= wy - 40.0 && ny < wy + 120.0, msg="the note by its message: \{ny} by \{wy}")
+  assert_true(wx > 0.0)
+  t.click(Button, label="关闭")
+  t.run_for(@ui.move_most_ms)
+  assert_eq(@sfbase.intent_notes_for("ws1/st1:s-c1").length(), 0, msg="taken off")
+  assert_true(t.words().filter(fn(w) { w.0.contains("轻量模型结合当前对话上下文") }).is_empty(), msg="the note gone")
+}
+
+///|
+test "大屏, two 戳一下 on words of one message: each a note of its own, one under the other beside it" {
+  new_run()
+  @sf.presenters_reset()
+  let src = fixture("chat")
+  open_chat({ station: "ws1/st1", session: "s-c1", title: "整理发布清单", station_name: "Willow" })
+  let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=1280.0, h=800.0, platform=0, corners_held=false)
+  t.check_looks(false)
+  t.run_for(@ui.move_most_ms)
+  exp_set(t, src, ["selectionIntent"], true)
+  let poke = fn(words : String) raise {
+    let (px, py, pw, ph) = quote_nodes_words(t, words)
+    t.drag(px + 1.0, py + ph / 2.0, px + pw - 1.0, py + ph / 2.0)
+    t.run_for(@ui.move_most_ms)
+    t.click(Button, label="戳一下")
+    t.run_for(@ui.move_most_ms)
+  }
+  poke("高度先按 90 估")
+  poke("深色模式我一起看")
+  let notes = @sfbase.intent_notes_for("ws1/st1:s-c1")
+  assert_eq(notes.map(fn(n) { n.selection }), ["高度先按 90 估", "深色模式我一起看"])
+  assert_eq(notes[0].row, notes[1].row, msg="both of one message")
+  // (each passage on its ground, as a quote's flash lights one: two grounds drawn)
+  let ground = @sf.alpha(@sf.theme().p.accent, @sfbase.picked_alpha)
+  assert_eq(t.drawn_rects().filter(fn(r) { r.4 == ground }).length(), 2, msg="both lit")
+  let answers = t.words().filter(fn(w) { w.0.contains("轻量模型结合当前对话上下文") })
+  assert_eq(answers.length(), 2, msg="two cards")
+  assert_true(answers[0].2 != answers[1].2, msg="one under the other")
+}
+
+///|
+test "戳一下 open beside the words picked with the mouse, the list too narrow for notes: the wheel over the chat scrolls it, the answer staying open" {
+  new_run()
+  @sf.presenters_reset()
+  let src = fixture("chat")
+  open_chat({ station: "ws1/st1", session: "s-c1", title: "整理发布清单", station_name: "Willow" })
+  // (a window whose chat list is narrower than notes need (intent_notes_fit): 戳一下 opens in its popover)
+  let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=1000.0, h=800.0, platform=0)
+  t.check_looks(false)
+  t.run_for(@ui.move_most_ms)
+  exp_set(t, src, ["selectionIntent"], true)
+  let (px, py, pw, ph) = quote_nodes_words(t, "高度先按 90 估")
+  t.drag(px + 1.0, py + ph / 2.0, px + pw - 1.0, py + ph / 2.0)
+  t.run_for(@ui.move_most_ms)
+  t.click(Button, label="戳一下")
+  t.run_for(@ui.move_most_ms)
+  assert_true(@sf.presented_drawn(), msg="the popover opened")
   assert_true(t.find("轻量模型结合当前对话上下文") is Some(_), msg="the answer shown")
   // (over the words picked, clear of the panel under them: the chat moves under the pointer)
   t.wheel(px + 1.0, py + ph / 2.0, -40.0)

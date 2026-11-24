@@ -540,6 +540,37 @@
     float bgL = vs_backdrop_luma_rect(ac, vec2(max(fallback_r, 1.0)));
     return vec2(1.0 - smoothstep(0.30, 0.42, bgL), bgL);
   }
+  float vs_srgb_to_lin(float c) {
+    return c <= 0.04045 ? (c / 12.92) : pow(max((c + 0.055) / 1.055, 0.0), 2.4);
+  }
+  float vs_lin_to_srgb(float y) {
+    y = clamp(y, 0.0, 1.0);
+    return y <= 0.0031308 ? (12.92 * y) : (1.055 * pow(max(y, 0.0), 1.0 / 2.4) - 0.055);
+  }
+  vec3 vs_bare_adaptive_ink_at(vec3 rgb, vec2 ac, float hr) {
+    float ch = max(max(rgb.r, rgb.g), rgb.b) - min(min(rgb.r, rgb.g), rgb.b);
+    if (ch > 0.08) return rgb;
+    float origL = vs_luma(rgb);
+    float bgL = vs_backdrop_luma_rect(ac, vec2(max(hr, 1.0)));
+    float c_bg = sqrt(max(bgL, 0.0));
+    float Lbg = vs_srgb_to_lin(c_bg);
+    float target = 4.65;
+    float out_c;
+    if (Lbg >= 0.1792) {
+      float pref = origL < 0.5 ? origL : clamp(1.0 - origL, 0.02, 0.45);
+      float y_pref = vs_srgb_to_lin(pref);
+      float y_max = max(0.0, (Lbg + 0.05) / target - 0.05);
+      if (origL < 0.5 && y_pref <= y_max) return rgb;
+      out_c = vs_lin_to_srgb(min(y_pref, y_max));
+    } else {
+      float pref = origL >= 0.5 ? origL : clamp(1.06 - origL, 0.55, 0.98);
+      float y_pref = vs_srgb_to_lin(pref);
+      float y_min = min(1.0, target * (Lbg + 0.05) - 0.05);
+      if (origL >= 0.5 && y_pref >= y_min) return rgb;
+      out_c = vs_lin_to_srgb(max(y_pref, y_min));
+    }
+    return vec3(out_c);
+  }
   vec3 vs_adaptive_ink_at(vec3 rgb, vec2 ac, float fallback_r, vec4 rect, vec2 sample_off, bool is_icon) {
     float ch = max(max(rgb.r, rgb.g), rgb.b) - min(min(rgb.r, rgb.g), rgb.b);
     float origL = vs_luma(rgb);
@@ -607,7 +638,9 @@
     v_pos = pos; v_cpos = a_rot.w > 0.5 ? at : pos; v_rect = a_rect; v_p = a_p; v_color = a_color; v_c2 = a_c2; v_clip = a_clip; v_pad = a_pad; v_rc = a_rc; v_rs = a_rs; v_rr = a_rr;
     #if MB_VS_ADAPTIVE
     if (kind == 7) {
-      v_color.rgb = vs_adaptive_ink_at(a_color.rgb, a_pad.yz, a_pad.w * 0.5, a_rect, a_p.zw, false);
+      v_color.rgb = a_pad.w < 0.0
+        ? vs_bare_adaptive_ink_at(a_color.rgb, a_pad.yz, -a_pad.w * 0.5)
+        : vs_adaptive_ink_at(a_color.rgb, a_pad.yz, a_pad.w * 0.5, a_rect, a_p.zw, false);
     } else if ((kind == 10 || kind == 11) && a_pad.w > 0.0) {
       v_color.rgb = vs_adaptive_ink_at(a_color.rgb, a_pad.yz, a_pad.w * 0.5, a_rect, kind == 10 ? vec2(0.0) : a_p.zw, true);
     } else if (kind == 0 && a_pad.w < 0.0) {
@@ -1867,8 +1900,8 @@
       float ps = prog_glass ? fr_s : 1.0;
       float ts = prog_glass ? fr_s : 1.0;
       float sat = prog_glass ? mix(1.0, v_p.z, ps) : v_p.z;
-      float bg_diff = prog_glass ? smoothstep(0.22, 0.72, abs(luma(col.rgb) - luma(g3))) : 0.0;
-      float base_a = prog_glass ? mix(col.a, min(0.86, col.a + 0.34), bg_diff) : col.a;
+      float bg_diff = (prog_glass && col.a > 0.001) ? smoothstep(0.22, 0.72, abs(luma(col.rgb) - luma(g3))) : 0.0;
+      float base_a = (prog_glass && col.a > 0.001) ? mix(col.a, min(0.86, col.a + 0.34), bg_diff) : col.a;
       float ta = prog_glass ? (base_a * ts) : col.a;
       g3 = max(mix(vec3(luma(g3)), g3, sat), 0.0);
       g3 = g3 * (1.0 - ta) + col.rgb * ta;
@@ -2750,6 +2783,18 @@
       } else {
         x0 = Math.min(x0, Math.max(f32[b], f32[b + 16])); y0 = Math.min(y0, Math.max(f32[b + 1], f32[b + 17]));
         x1 = Math.max(x1, Math.min(f32[b] + f32[b + 2], f32[b + 18])); y1 = Math.max(y1, Math.min(f32[b + 1] + f32[b + 3], f32[b + 19]));
+      }
+    }
+    if (kind === 5 || unmergedLiquid) {
+      for (let i = end; i < count; i++) {
+        const b = i * INST;
+        const bk = Math.round(f32[b + 5]);
+        if ((bk === 5 || bk === 6) && f32[b + 20] < 0 && f32[b + 20] !== f32[a + 20]) break;
+        if (bk === 7 && f32[b + 23] < 0) {
+          const hr = -f32[b + 23] * 0.5;
+          x0 = Math.min(x0, f32[b + 21] - hr); y0 = Math.min(y0, f32[b + 22] - hr);
+          x1 = Math.max(x1, f32[b + 21] + hr); y1 = Math.max(y1, f32[b + 22] + hr);
+        }
       }
     }
     const W = canvas.width, Hh = canvas.height, sc = dpr;

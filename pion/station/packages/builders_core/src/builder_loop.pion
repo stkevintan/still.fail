@@ -386,7 +386,7 @@ pub fn Permit::next_line_with(self : Permit, read_line : () -> Option[String]) -
 }
 
 /// Testable permit acquisition:
-/// 1. JSON object with `"permit"` key (parsed via `sql_db::parse_json`, without lone-surrogate rejection):
+/// 1. JSON object with `"permit"` key (parsed via `parse_ask_line`, rejecting lone surrogates as MB `@json.parse` does):
 ///    only literal `true` grants; any other value rejects immediately.
 /// 2. JSON object matching `is_mode_request(obj)`: deferred into FIFO queue while continuing to wait.
 /// 3. Any other line (empty `""`, unparseable JSON, non-object JSON, or object lacking `"permit"` and

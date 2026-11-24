@@ -177,6 +177,8 @@ export class StationsSync {
   readonly #usageReading = new Map<string, { link: Link; fiber: Fiber.Fiber<void, never> | null }>();
   /// Whether the device is on a cellular network and spares live events for chats not currently shown.
   #sparing = false;
+  /// The stations whose history is to be swept as they are next reached (`roomAgain`).
+  readonly #sweepOwed = new Set<string>();
   /// What the station topics want of a stream beyond what the sync wants (host samples, logs, logins, open sessions, rates).
   wanted: (address: string) => { host: boolean; logs: [string, number][]; logins?: string[]; open?: string[]; rates?: boolean } = () => ({ host: false, logs: [] });
   /// What a station holds beyond the records (link, live views, host, logs), as its readers see it change.
@@ -333,6 +335,16 @@ export class StationsSync {
     }
   }
 
+  /// A database has room again (data.ts `onRoomAgain`): the transcripts of the stations kept in it that were left as
+  /// they were while it had none are read again, as on leaving a cellular network.
+  roomAgain(kept: (station: string) => boolean): void {
+    for (const link of this.#links.values()) {
+      if (!kept(link.address)) continue;
+      if (this.reachable(link.address)) this.#historyStart(link.address);
+      else this.#sweepOwed.add(link.address);
+    }
+  }
+
   #transcriptSpared(address: string, key: string): boolean {
     return this.#sparing && !this.#core.store.inUse({ topic: "live", station: address, key });
   }
@@ -382,7 +394,9 @@ export class StationsSync {
         this.#enqueue(address, "shared", Priority.shown, this.#sharedWhole(address));
       }
     }
-    if (how.restored) this.#historyStart(address);
+    // (owed since its database had room again while it was not reached: `roomAgain`)
+    const owed = this.#sweepOwed.delete(address);
+    if (how.restored || owed) this.#historyStart(address);
   }
 
   // ── reading what a station holds ──
@@ -2796,7 +2810,10 @@ export class StationsSync {
         view.told = start + entries.length;
       }
       if (kind === "timeline" && this.#transcriptLetGo(address, key)) {
-        // Let go for room or spared on cellular: its items are read when opened or when leaving cellular.
+        // Let go for room, no room for it, or spared on cellular: its items are read when opened, when there is room
+        // again, or when leaving cellular. How far it goes is kept, so that reading finds what it lacks where the
+        // session's summary does not say it yet.
+        if (view.told !== undefined && view.told > 0) core.data.raiseTranscript(address, key, view.told - 1);
       } else if (kind === "timeline") {
         const start = u64(get(message, "start")) ?? 0;
         const entries = (get(message, "entries") as unknown[] | undefined) ?? [];

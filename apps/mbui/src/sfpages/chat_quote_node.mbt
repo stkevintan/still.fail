@@ -97,13 +97,20 @@ fn chat_intent_of(
   p : @ui.WordsPicked,
   m : Message,
   from : @sf.Anchor,
+  width : Double,
   whole? : Bool = false,
 ) -> Unit {
   let text = chat_picked_words(p, m, whole).trim(chars=" \n\t").to_owned()
   if text != "" {
     let author = if m.mine { @sf.t("web-main.chat.you") } else { m.by.name }
     let role = if !m.mine && m.author_kind == "agent" { "agent" } else { "person" }
-    open_selection_intent(src, r, thread, draft, text, m.ts, author, role, from~)
+    // (where the list has the room for a margin beside its column: kept on the words picked, lit there, its answer a
+    // note in the margin beside their message (intent_note_room); else in a panel beside where it was pressed)
+    if intent_notes_fit(width) && p.of.length() == 1 {
+      @sfbase.intent_note_ask(src, draft, p.of[0], r.station, thread, text, m.ts, author) |> ignore
+    } else {
+      open_selection_intent(src, r, thread, draft, text, m.ts, author, role, from~)
+    }
   }
   @ui.picked_let_go()
 }
@@ -122,7 +129,7 @@ fn chat_intent_take(
   guard @signals.untracked(fn() { (chat_picked_message(v, rows), (here.view)().thread) }) is (Some((p, m)), Some(thread)) else {
     return
   }
-  chat_intent_of(src, r, thread, draft, p, m, from)
+  chat_intent_of(src, r, thread, draft, p, m, from, @signals.untracked(here.width))
 }
 
 ///|
@@ -230,7 +237,7 @@ fn chat_quote_node(
               label: @sf.t("web-main.chat.inferIntent"),
               icon: "poke",
               mark: false,
-              press: fn() { chat_intent_of(src, r, thread, draft, p, m, @sf.Anchor::Node(end), whole~) },
+              press: fn() { chat_intent_of(src, r, thread, draft, p, m, @sf.Anchor::Node(end), @signals.untracked(here.width), whole~) },
             })
           None => ()
         }

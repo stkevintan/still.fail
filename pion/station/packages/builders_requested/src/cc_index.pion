@@ -1,0 +1,869 @@
+// Copy destinations, chat names order, and latest conversation builder (`--builder cc-index`),
+// 1:1 aligned with `station/mb/src/cc/cc.mbt` and `station/mb/src/reader/main.mbt:460-498`.
+// All write transactions go exclusively through `db.tx_err(...)` (never raw transaction SQL).
+
+import "base_codec"
+import "builders_core"
+import "host_shim"
+import "sql_db"
+
+let CC_VERSION : Int = 1
+
+let CC_NAME_REFRESH_SQL : String = "UPDATE cc_session_rows SET name_present=(EXISTS (SELECT 1 FROM thread_sessions m JOIN threads t ON t.id=m.thread WHERE m.session=?1 AND m.thread=CAST(?2 AS INTEGER))), name_has_last=CASE WHEN (EXISTS (SELECT 1 FROM thread_sessions m JOIN threads t ON t.id=m.thread WHERE m.session=?1 AND m.thread=CAST(?2 AS INTEGER))) THEN ((SELECT at FROM entries WHERE thread=CAST(?2 AS INTEGER) ORDER BY n DESC LIMIT 1) IS NOT NULL) END, name_last_at=CASE WHEN (EXISTS (SELECT 1 FROM thread_sessions m JOIN threads t ON t.id=m.thread WHERE m.session=?1 AND m.thread=CAST(?2 AS INTEGER))) THEN COALESCE((SELECT at FROM entries WHERE thread=CAST(?2 AS INTEGER) ORDER BY n DESC LIMIT 1),0) END, name_created_at=(SELECT created_at FROM threads WHERE id=CAST(?2 AS INTEGER)) WHERE session=?1 AND thread=CAST(?2 AS INTEGER) AND EXISTS (SELECT 1 FROM session_chat_scopes WHERE session=?1) AND (name_present IS NOT (EXISTS (SELECT 1 FROM thread_sessions m JOIN threads t ON t.id=m.thread WHERE m.session=?1 AND m.thread=CAST(?2 AS INTEGER))) OR ((EXISTS (SELECT 1 FROM thread_sessions m JOIN threads t ON t.id=m.thread WHERE m.session=?1 AND m.thread=CAST(?2 AS INTEGER))) AND (name_has_last IS NOT ((SELECT at FROM entries WHERE thread=CAST(?2 AS INTEGER) ORDER BY n DESC LIMIT 1) IS NOT NULL) OR name_last_at IS NOT COALESCE((SELECT at FROM entries WHERE thread=CAST(?2 AS INTEGER) ORDER BY n DESC LIMIT 1),0) OR name_created_at IS NOT (SELECT created_at FROM threads WHERE id=CAST(?2 AS INTEGER)))))"
+
+let CC_NAME_ENSURE_SQL : String = "INSERT OR IGNORE INTO session_chat_rows(session,has_last,last_at,created_at,thread) SELECT session,name_has_last,name_last_at,name_created_at,thread FROM cc_session_rows WHERE session=?1 AND thread=CAST(?2 AS INTEGER) AND name_present=1 AND EXISTS (SELECT 1 FROM session_chat_scopes WHERE session=?1)"
+
+let CC_CANDIDATE_SQL : String = "SELECT m.session,m.thread,m.rowid AS member_rowid,m.joined_at, (SELECT d.rowid FROM deliveries d INDEXED BY deliveries_session WHERE d.session=m.session AND d.thread=m.thread ORDER BY d.rowid DESC LIMIT 1) AS last_delivery FROM thread_sessions m JOIN threads t ON t.id=m.thread WHERE m.session=?1 AND m.rowid=CAST(?2 AS INTEGER)"
+
+let CC_ADD_CANDIDATE_SQL : String = "INSERT INTO latest_thread_rows(session,has_last,last_delivery,joined_at,member_rowid,thread) SELECT c.session,c.last_delivery IS NOT NULL,COALESCE(c.last_delivery,0),c.joined_at,c.member_rowid,c.thread FROM (" + CC_CANDIDATE_SQL + ") c WHERE NOT EXISTS (SELECT 1 FROM latest_thread_rows r WHERE r.session=c.session AND r.has_last=(c.last_delivery IS NOT NULL) AND r.last_delivery=COALESCE(c.last_delivery,0) AND r.joined_at IS c.joined_at AND r.member_rowid=c.member_rowid)"
+
+let CC_ADD_MEMBER_SQL : String = "INSERT INTO latest_thread_members(thread,session) SELECT m.thread,m.session FROM thread_sessions m WHERE m.session=?1 AND m.rowid=CAST(?2 AS INTEGER) AND NOT EXISTS (SELECT 1 FROM latest_thread_members r WHERE r.thread=m.thread AND r.session=m.session)"
+
+fn cc_exists(
+  db : sql_db::Db,
+  sql : String,
+  params : Array[base_codec::Json],
+) -> Result[Bool, builders_core::StepError] {
+  match db.all(sql, params) {
+    Ok(rows) => Ok(rows.length() > 0)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn cc_is_one(v : base_codec::Json) -> Bool {
+  match v {
+    base_codec::Json::Num(n, _) => n == 1.0
+    _ => false
+  }
+}
+
+fn cc_is_zero(v : base_codec::Json) -> Bool {
+  match v {
+    base_codec::Json::Num(n, _) => n == 0.0
+    _ => false
+  }
+}
+
+fn cc_is_null(v : base_codec::Json) -> Bool {
+  match v {
+    base_codec::Json::Null => true
+    _ => false
+  }
+}
+
+fn cc_check_version(
+  db : sql_db::Db,
+  table : String,
+  what : String,
+) -> Result[Unit, builders_core::StepError] {
+  match db.first("SELECT version FROM " + table + " WHERE id=1", []) {
+    Ok(Some(r)) => {
+      let v = sql_db::row_val(r, "version")
+      match v {
+        base_codec::Json::Num(n, _) => {
+          if n.to_int() == CC_VERSION {
+            Ok(())
+          } else {
+            Err(
+              builders_core::StepError::App(
+                what + " version " + sql_db::stringify_json(v) + " is incompatible with " + CC_VERSION.to_string(),
+              ),
+            )
+          }
+        }
+        _ =>
+        Err(
+          builders_core::StepError::App(
+            what + " version " + sql_db::stringify_json(v) + " is incompatible with " + CC_VERSION.to_string(),
+          ),
+        )
+      }
+    }
+    Ok(None) =>
+    Err(builders_core::StepError::App(what + " version missing is incompatible with " + CC_VERSION.to_string()))
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn cc_check(db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+  cc_check_version(db, "cc_index_meta", "copy destination index")
+}
+
+fn cc_track(
+  db : sql_db::Db,
+  session : base_codec::Json,
+  existing : Bool,
+) -> Result[Unit, builders_core::StepError] {
+  match cc_check(db) {
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  db.tx_err(
+    fn(tx : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      match tx.run(
+        "INSERT INTO cc_sessions(session,scan_end) SELECT ?1,(SELECT rowid FROM thread_sessions INDEXED BY thread_sessions_session WHERE session=?1 ORDER BY rowid DESC LIMIT 1) WHERE NOT EXISTS (SELECT 1 FROM cc_sessions WHERE session=?1) AND (?2=0 OR EXISTS (SELECT 1 FROM sessions WHERE key=?1))",
+        [session, base_codec::json_int(if existing { 1 } else { 0 })],
+      ) {
+        Ok(_) => Ok(())
+        Err(e) => Err(builders_core::StepError::Sql(e))
+      }
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+fn cc_reconcile(
+  db : sql_db::Db,
+  session : base_codec::Json,
+  thread : base_codec::Json,
+) -> Result[Unit, builders_core::StepError] {
+  match db.run(
+    "DELETE FROM cc_session_rows WHERE session=?1 AND thread=CAST(?2 AS INTEGER) AND NOT EXISTS (SELECT 1 FROM thread_sessions WHERE session=?1 AND thread=CAST(?2 AS INTEGER))",
+    [session, thread],
+  ) {
+    Ok(_) => ()
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  match db.run(
+    "INSERT INTO cc_session_rows(session,thread,surface,created_at,last_at) SELECT m.session,m.thread,t.surface,t.created_at,e.at FROM thread_sessions m LEFT JOIN threads t ON t.id=m.thread LEFT JOIN thread_state st ON st.thread=t.id LEFT JOIN entries e ON e.thread=st.thread AND e.n=st.last_n WHERE m.session=?1 AND m.thread=CAST(?2 AS INTEGER) ON CONFLICT(session,thread) DO UPDATE SET surface=excluded.surface, created_at=excluded.created_at,last_at=excluded.last_at WHERE surface IS NOT excluded.surface OR created_at IS NOT excluded.created_at OR last_at IS NOT excluded.last_at",
+    [session, thread],
+  ) {
+    Ok(_) => Ok(())
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn cc_scan_step(
+  db : sql_db::Db,
+  session : base_codec::Json,
+  limit : Int,
+) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      match cc_check(tx) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      let sc_row = match tx.first(
+        "SELECT CAST(scan_after AS TEXT) AS scan_after,CAST(scan_end AS TEXT) AS scan_end,complete FROM cc_sessions WHERE session=?",
+        [session],
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Err(builders_core::StepError::App("copy destination session is not tracked"))
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if cc_is_one(sql_db::row_val(sc_row, "complete")) {
+        return Ok(0)
+      }
+      let after = sql_db::row_val(sc_row, "scan_after")
+      let scan_end = sql_db::row_val(sc_row, "scan_end")
+      let lim = base_codec::json_int(limit)
+      let rows = if cc_is_null(after) {
+        match tx.all(
+          "SELECT CAST(rowid AS TEXT) AS rowid,CAST(thread AS TEXT) AS thread FROM thread_sessions INDEXED BY thread_sessions_session WHERE session=?1 AND rowid<=CAST(?2 AS INTEGER) ORDER BY thread_sessions.rowid LIMIT ?3",
+          [session, scan_end, lim],
+        ) {
+          Ok(rs) => rs
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx.all(
+          "SELECT CAST(rowid AS TEXT) AS rowid,CAST(thread AS TEXT) AS thread FROM thread_sessions INDEXED BY thread_sessions_session WHERE session=?1 AND rowid>CAST(?2 AS INTEGER) AND rowid<=CAST(?3 AS INTEGER) ORDER BY thread_sessions.rowid LIMIT ?4",
+          [session, after, scan_end, lim],
+        ) {
+          Ok(rs) => rs
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      for i in 0..<rows.length() {
+        match cc_reconcile(tx, session, sql_db::row_val(rows[i], "thread")) {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+      }
+      let reached = if rows.length() > 0 {
+        sql_db::row_val(rows[rows.length() - 1], "rowid")
+      } else {
+        after
+      }
+      match tx.run(
+        "UPDATE cc_sessions SET scan_after=CAST(? AS INTEGER),complete=? WHERE session=?",
+        [reached, base_codec::json_int(if rows.length() < limit { 1 } else { 0 }), session],
+      ) {
+        Ok(_) => Ok(rows.length())
+        Err(e) => Err(builders_core::StepError::Sql(e))
+      }
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+fn cc_dispatch_step(db : sql_db::Db, limit : Int) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      match cc_check(tx) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      let progress = match tx.first(
+        "SELECT CAST(after_thread AS TEXT) AS after_thread,CAST(through_thread AS TEXT) AS through_thread FROM cc_order_turn WHERE id=1",
+        [],
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Err(builders_core::StepError::App("copy destination turn is missing"))
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let pick = "SELECT CAST(thread AS TEXT) AS thread,after_session,through_session FROM cc_order_dispatch"
+      let mut through = sql_db::row_val(progress, "through_thread")
+      let after_thread = sql_db::row_val(progress, "after_thread")
+      let mut pending = if cc_is_null(through) {
+        None
+      } else if cc_is_null(after_thread) {
+        match tx.first(pick + " WHERE thread<=CAST(? AS INTEGER) ORDER BY cc_order_dispatch.thread LIMIT 1", [through]) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx.first(
+          pick + " WHERE thread>CAST(? AS INTEGER) AND thread<=CAST(? AS INTEGER) ORDER BY cc_order_dispatch.thread LIMIT 1",
+          [after_thread, through],
+        ) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      match pending {
+        None => {
+          through = match tx.first("SELECT CAST(MAX(thread) AS TEXT) AS thread FROM cc_order_dispatch", []) {
+            Ok(Some(r)) => sql_db::row_val(r, "thread")
+            Ok(None) => base_codec::json_null()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          if cc_is_null(through) {
+            return Ok(0)
+          }
+          pending = match tx.first(
+            pick + " WHERE thread<=CAST(? AS INTEGER) ORDER BY cc_order_dispatch.thread LIMIT 1",
+            [through],
+          ) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        Some(_) => ()
+      }
+      let p = match pending {
+        Some(r) => r
+        None => return Err(builders_core::StepError::App("copy destination dispatch disappeared"))
+      }
+      let thread = sql_db::row_val(p, "thread")
+      match tx.run(
+        "UPDATE cc_order_turn SET after_thread=CAST(? AS INTEGER),through_thread=CAST(? AS INTEGER) WHERE id=1",
+        [thread, through],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let lim = base_codec::json_int(limit)
+      let after_sess = sql_db::row_val(p, "after_session")
+      let through_sess = sql_db::row_val(p, "through_session")
+      let rows = if cc_is_null(after_sess) {
+        match tx.all(
+          "SELECT session FROM cc_session_rows INDEXED BY cc_rows_thread WHERE thread=CAST(?1 AS INTEGER) AND session<=?2 ORDER BY session LIMIT ?3",
+          [thread, through_sess, lim],
+        ) {
+          Ok(rs) => rs
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx.all(
+          "SELECT session FROM cc_session_rows INDEXED BY cc_rows_thread WHERE thread=CAST(?1 AS INTEGER) AND session>?2 AND session<=?3 ORDER BY session LIMIT ?4",
+          [thread, after_sess, through_sess, lim],
+        ) {
+          Ok(rs) => rs
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      for i in 0..<rows.length() {
+        match tx.run(
+          "INSERT INTO cc_session_dirty(session,thread) SELECT ?1,CAST(?2 AS INTEGER) WHERE NOT EXISTS (SELECT 1 FROM cc_session_dirty WHERE session=?1 AND thread=CAST(?2 AS INTEGER))",
+          [sql_db::row_val(rows[i], "session"), thread],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      if rows.length() == limit {
+        match tx.run(
+          "UPDATE cc_order_dispatch SET after_session=? WHERE thread=CAST(? AS INTEGER)",
+          [sql_db::row_val(rows[rows.length() - 1], "session"), thread],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx.run("DELETE FROM cc_order_dispatch WHERE thread=CAST(? AS INTEGER)", [thread]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(rows.length())
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+fn cc_settle_step(db : sql_db::Db, session : base_codec::Json) -> Result[Int, builders_core::StepError] {
+  db.tx_err(
+    fn(tx : sql_db::Db) -> Result[Int, builders_core::StepError] {
+      match cc_check(tx) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      let tracked = match cc_exists(tx, "SELECT 1 FROM cc_sessions WHERE session=?", [session]) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if !tracked {
+        return Err(builders_core::StepError::App("copy destination session is not tracked"))
+      }
+      let row = match tx.first(
+        "SELECT CAST(thread AS TEXT) AS thread FROM cc_session_dirty WHERE session=? ORDER BY cc_session_dirty.thread LIMIT 1",
+        [session],
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Ok(0)
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let thread = sql_db::row_val(row, "thread")
+      let still_dispatching = match cc_exists(
+        tx,
+        "SELECT 1 FROM cc_order_dispatch WHERE thread=CAST(? AS INTEGER)",
+        [thread],
+      ) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if still_dispatching {
+        return Ok(0)
+      }
+      match cc_reconcile(tx, session, thread) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      match tx.run("DELETE FROM cc_session_dirty WHERE session=? AND thread=CAST(? AS INTEGER)", [session, thread]) {
+        Ok(_) => Ok(1)
+        Err(e) => Err(builders_core::StepError::Sql(e))
+      }
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+pub fn cc_ready(db : sql_db::Db, session : base_codec::Json) -> Result[Bool, builders_core::StepError] {
+  match cc_check(db) {
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  let sc_row = match db.first("SELECT complete FROM cc_sessions WHERE session=?", [session]) {
+    Ok(Some(r)) => r
+    Ok(None) => return Ok(false)
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !cc_is_one(sql_db::row_val(sc_row, "complete")) {
+    return Ok(false)
+  }
+  let dirty = match cc_exists(db, "SELECT 1 FROM cc_session_dirty WHERE session=? LIMIT 1", [session]) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if dirty {
+    return Ok(false)
+  }
+  let dispatch = match db.first(
+    "SELECT COUNT(*) AS n, MAX(EXISTS (SELECT 1 FROM cc_session_rows r WHERE r.session=?1 AND r.thread=d.thread)) AS affects FROM (SELECT thread FROM cc_order_dispatch ORDER BY thread LIMIT 65) d",
+    [session],
+  ) {
+    Ok(Some(r)) => r
+    Ok(None) => return Ok(false)
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if cc_is_one(sql_db::row_val(dispatch, "affects")) {
+    return Ok(false)
+  }
+  match sql_db::row_val(dispatch, "n") {
+    base_codec::Json::Num(n, _) => {
+      if n <= 64.0 {
+        return Ok(true)
+      }
+    }
+    _ => ()
+  }
+  let rows = match db.first(
+    "SELECT COUNT(*) AS n, MAX(EXISTS (SELECT 1 FROM cc_order_dispatch d WHERE d.thread=r.thread)) AS affects FROM (SELECT thread FROM cc_session_rows WHERE session=?1 ORDER BY thread LIMIT 65) r",
+    [session],
+  ) {
+    Ok(Some(r)) => r
+    Ok(None) => return Ok(false)
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  match sql_db::row_val(rows, "n") {
+    base_codec::Json::Num(n, _) => Ok(n <= 64.0 && !cc_is_one(sql_db::row_val(rows, "affects")))
+    _ => Ok(false)
+  }
+}
+
+pub struct Cc {
+  turns : Map[String, Int]
+}
+
+pub fn Cc::new() -> Cc {
+  Cc::{ turns: Map::new() }
+}
+
+pub fn Cc::cancel(self : Cc, session : String) -> Unit {
+  let _ = self.turns.remove(session)
+}
+
+pub fn Cc::step(
+  self : Cc,
+  db : sql_db::Db,
+  session : String,
+  existing : Bool = true,
+  limit : Int = 64,
+) -> Result[Bool, builders_core::StepError] {
+  let s = base_codec::json_str(session)
+  match cc_check(db) {
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  if existing {
+    let has_sess = match cc_exists(db, "SELECT 1 FROM sessions WHERE key=?", [s]) {
+      Ok(v) => v
+      Err(e) => return Err(e)
+    }
+    if !has_sess {
+      let _ = self.turns.remove(session)
+      return Ok(true)
+    }
+  }
+  let mut sc_row = match db.first("SELECT complete FROM cc_sessions WHERE session=?", [s]) {
+    Ok(r) => r
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  match sc_row {
+    None => {
+      match cc_track(db, s, existing) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      sc_row = match db.first("SELECT complete FROM cc_sessions WHERE session=?", [s]) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      match sc_row {
+        None => {
+          let _ = self.turns.remove(session)
+          return Ok(true)
+        }
+        Some(_) => ()
+      }
+    }
+    Some(_) => ()
+  }
+  let is_ready = match cc_ready(db, s) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if is_ready {
+    let _ = self.turns.remove(session)
+    return Ok(true)
+  }
+  let scanning = match sc_row {
+    Some(sc) => cc_is_zero(sql_db::row_val(sc, "complete"))
+    None => false
+  }
+  let turn = match self.turns.get(session) {
+    Some(t) => t
+    None => 0
+  }
+  for n in 0..<3 {
+    let at = (turn + n) % 3
+    let is_pending = if at == 0 {
+      scanning
+    } else if at == 1 {
+      match cc_exists(db, "SELECT 1 FROM cc_order_dispatch LIMIT 1", []) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+    } else {
+      match cc_exists(db, "SELECT 1 FROM cc_session_dirty WHERE session=? LIMIT 1", [s]) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+    }
+    if !is_pending {
+      continue
+    }
+    self.turns.set(session, (at + 1) % 3)
+    if at == 0 {
+      match cc_scan_step(db, s, limit) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+    } else if at == 1 {
+      match cc_dispatch_step(db, limit) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+    } else {
+      match cc_settle_step(db, s) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+    }
+    let done = match cc_ready(db, s) {
+      Ok(v) => v
+      Err(e) => return Err(e)
+    }
+    if done {
+      let _ = self.turns.remove(session)
+    }
+    return Ok(done)
+  }
+  let final_ready = match cc_ready(db, s) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if final_ready {
+    let _ = self.turns.remove(session)
+    return Ok(true)
+  }
+  Err(builders_core::StepError::App("copy destination preparation has no runnable work"))
+}
+
+pub fn Cc::names_step(
+  self : Cc,
+  db : sql_db::Db,
+  session : String,
+  existing : Bool = true,
+  limit : Int = 64,
+) -> Result[Bool, builders_core::StepError] {
+  let s = base_codec::json_str(session)
+  match cc_check_version(db, "session_chat_meta", "session chat index") {
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  if existing {
+    let has_sess = match cc_exists(db, "SELECT 1 FROM sessions WHERE key=?", [s]) {
+      Ok(v) => v
+      Err(e) => return Err(e)
+    }
+    if !has_sess {
+      return Ok(true)
+    }
+  }
+  let rdy = match cc_ready(db, s) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if !rdy {
+    match self.step(db, session, existing=existing, limit=limit) {
+      Ok(_) => return Ok(false)
+      Err(e) => return Err(e)
+    }
+  }
+  db.tx_err(
+    fn(tx : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      match cc_check_version(tx, "session_chat_meta", "session chat index") {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      if existing {
+        let has_sess2 = match cc_exists(tx, "SELECT 1 FROM sessions WHERE key=?", [s]) {
+          Ok(v) => v
+          Err(e) => return Err(e)
+        }
+        if !has_sess2 {
+          return Ok(true)
+        }
+      }
+      let rdy2 = match cc_ready(tx, s) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if !rdy2 {
+        return Ok(false)
+      }
+      match tx.run(
+        "INSERT INTO session_chat_scopes(session,scan_end) SELECT ?1,(SELECT thread FROM cc_session_rows WHERE session=?1 ORDER BY thread DESC LIMIT 1) WHERE NOT EXISTS (SELECT 1 FROM session_chat_scopes WHERE session=?1)",
+        [s],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let sc_row = match tx.first(
+        "SELECT CAST(scan_after AS TEXT) AS scan_after,CAST(scan_end AS TEXT) AS scan_end,complete FROM session_chat_scopes WHERE session=?",
+        [s],
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Err(builders_core::StepError::App("session chat scope is missing"))
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if cc_is_one(sql_db::row_val(sc_row, "complete")) {
+        return Ok(true)
+      }
+      let after = sql_db::row_val(sc_row, "scan_after")
+      let scan_end = sql_db::row_val(sc_row, "scan_end")
+      let lim = base_codec::json_int(limit)
+      let rows = if cc_is_null(after) {
+        match tx.all(
+          "SELECT CAST(thread AS TEXT) AS thread FROM cc_session_rows WHERE session=?1 AND thread<=CAST(?2 AS INTEGER) ORDER BY cc_session_rows.thread LIMIT ?3",
+          [s, scan_end, lim],
+        ) {
+          Ok(rs) => rs
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx.all(
+          "SELECT CAST(thread AS TEXT) AS thread FROM cc_session_rows WHERE session=?1 AND thread>CAST(?2 AS INTEGER) AND thread<=CAST(?3 AS INTEGER) ORDER BY cc_session_rows.thread LIMIT ?4",
+          [s, after, scan_end, lim],
+        ) {
+          Ok(rs) => rs
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      for i in 0..<rows.length() {
+        let th = sql_db::row_val(rows[i], "thread")
+        match tx.run(CC_NAME_REFRESH_SQL, [s, th]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx.run(CC_NAME_ENSURE_SQL, [s, th]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let done = rows.length() < limit
+      let reached = if rows.length() > 0 {
+        sql_db::row_val(rows[rows.length() - 1], "thread")
+      } else {
+        after
+      }
+      match tx.run(
+        "UPDATE session_chat_scopes SET scan_after=CAST(? AS INTEGER),complete=? WHERE session=?",
+        [reached, base_codec::json_int(if done { 1 } else { 0 }), s],
+      ) {
+        Ok(_) => Ok(done)
+        Err(e) => Err(builders_core::StepError::Sql(e))
+      }
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+pub fn cc_latest_step(
+  db : sql_db::Db,
+  session : String,
+  existing : Bool = true,
+  limit : Int = 64,
+) -> Result[Bool, builders_core::StepError] {
+  let s = base_codec::json_str(session)
+  db.tx_err(
+    fn(tx : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      match cc_check_version(tx, "latest_thread_meta", "latest thread index") {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      if existing {
+        let has_sess = match cc_exists(tx, "SELECT 1 FROM sessions WHERE key=?", [s]) {
+          Ok(v) => v
+          Err(e) => return Err(e)
+        }
+        if !has_sess {
+          return Ok(true)
+        }
+      }
+      match tx.run(
+        "INSERT INTO latest_thread_scopes(session,scan_end) SELECT ?1,(SELECT rowid FROM thread_sessions INDEXED BY thread_sessions_session WHERE session=?1 ORDER BY rowid DESC LIMIT 1) WHERE NOT EXISTS (SELECT 1 FROM latest_thread_scopes WHERE session=?1)",
+        [s],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let sc_row = match tx.first(
+        "SELECT CAST(scan_after AS TEXT) AS scan_after,CAST(scan_end AS TEXT) AS scan_end,complete FROM latest_thread_scopes WHERE session=?",
+        [s],
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) => return Err(builders_core::StepError::App("latest thread scope is missing"))
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if cc_is_one(sql_db::row_val(sc_row, "complete")) {
+        return Ok(true)
+      }
+      let after = sql_db::row_val(sc_row, "scan_after")
+      let scan_end = sql_db::row_val(sc_row, "scan_end")
+      let lim = base_codec::json_int(limit)
+      let rows = if cc_is_null(after) {
+        match tx.all(
+          "SELECT CAST(rowid AS TEXT) AS rowid FROM thread_sessions INDEXED BY thread_sessions_session WHERE session=?1 AND rowid<=CAST(?2 AS INTEGER) ORDER BY thread_sessions.rowid LIMIT ?3",
+          [s, scan_end, lim],
+        ) {
+          Ok(rs) => rs
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx.all(
+          "SELECT CAST(rowid AS TEXT) AS rowid FROM thread_sessions INDEXED BY thread_sessions_session WHERE session=?1 AND rowid>CAST(?2 AS INTEGER) AND rowid<=CAST(?3 AS INTEGER) ORDER BY thread_sessions.rowid LIMIT ?4",
+          [s, after, scan_end, lim],
+        ) {
+          Ok(rs) => rs
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      for i in 0..<rows.length() {
+        let rid = sql_db::row_val(rows[i], "rowid")
+        match tx.run(CC_ADD_MEMBER_SQL, [s, rid]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx.run(CC_ADD_CANDIDATE_SQL, [s, rid]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let done = rows.length() < limit
+      let reached = if rows.length() > 0 {
+        sql_db::row_val(rows[rows.length() - 1], "rowid")
+      } else {
+        after
+      }
+      match tx.run(
+        "UPDATE latest_thread_scopes SET scan_after=CAST(? AS INTEGER),complete=? WHERE session=?",
+        [reached, base_codec::json_int(if done { 1 } else { 0 }), s],
+      ) {
+        Ok(_) => Ok(done)
+        Err(e) => Err(builders_core::StepError::Sql(e))
+      }
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+fn is_bool_true_field(ask : base_codec::Json, key : String) -> Bool {
+  match builders_core::json_get_last(ask, key) {
+    Some(base_codec::Json::Bool(true)) => true
+    _ => false
+  }
+}
+
+pub fn run_cc_index(db_path : String) -> Int {
+  let db = match sql_db::Db::attach(db_path, wait_ms=250) {
+    Ok(d) => d
+    Err(e) => {
+      let _ = host_shim::write_stderr_line(e.message)
+      return 1
+    }
+  }
+  match db.exec("PRAGMA synchronous = NORMAL") {
+    Ok(_) => ()
+    Err(e) => {
+      db.close()
+      let _ = host_shim::write_stderr_line(e.message)
+      return 1
+    }
+  }
+  if !host_shim::start("", true) {
+    db.close()
+    let _ = host_shim::write_stderr_line("builder cc-index: failed to start stdin loop")
+    return 1
+  }
+
+  let cc = Cc::new()
+  let names = Cc::new()
+  let queue = builders_core::LineQueue::new()
+  let mut running = true
+  let mut write_failed = false
+
+  while running {
+    while running {
+      match queue.pop_line() {
+        None => break
+        Some(line) => {
+          if line.length() == 0 {
+            continue
+          }
+          let ask = builders_core::parse_ask_line(line)
+          let session = match builders_core::json_get_last(ask, "session") {
+            Some(base_codec::Json::Str(s)) => s
+            _ => {
+              let out = builders_core::format_step_response("session conversation", Ok(None))
+              if !host_shim::write_stdout_line(out) {
+                write_failed = true
+                running = false
+              }
+              continue
+            }
+          }
+          let named = is_bool_true_field(ask, "name")
+          let latest = is_bool_true_field(ask, "latest")
+          if builders_core::is_cancel_ask(ask) {
+            if !latest {
+              if named {
+                names.cancel(session)
+              } else {
+                cc.cancel(session)
+              }
+            }
+            continue
+          }
+          let step_res = if latest {
+            cc_latest_step(db, session)
+          } else if named {
+            names.names_step(db, session)
+          } else {
+            // (as the worker asks it: a session not there is tracked all the same)
+            cc.step(db, session, existing=false)
+          }
+          match db.rollback_if_in_tx() {
+            Ok(_) => ()
+            Err(e) => {
+              db.close()
+              let _ = host_shim::write_stderr_line(
+                "builder cc-index: transaction remained open after ROLLBACK: " + e.message,
+              )
+              host_shim::stop()
+              return 1
+            }
+          }
+          let formatted = match step_res {
+            Ok(done) => builders_core::format_step_response("session conversation", Ok(Some(done)))
+            Err(e) => builders_core::format_step_response("session conversation", Err(e))
+          }
+          if !host_shim::write_stdout_line(formatted) {
+            write_failed = true
+            running = false
+          }
+        }
+      }
+    }
+    if !running {
+      break
+    }
+    if queue.stdin_eof {
+      running = false
+      break
+    }
+    match host_shim::wait((-1).to_int64()) {
+      None => ()
+      Some(host_shim::HostEvent::StdinData(chunk)) => queue.enqueue_chunk(chunk)
+      Some(host_shim::HostEvent::StdinEof) => queue.stdin_eof = true
+      Some(_) => ()
+    }
+  }
+
+  db.close()
+  host_shim::stop()
+  if write_failed { 1 } else { 0 }
+}

@@ -114,6 +114,8 @@ pub(all) struct Look {
   /// View::corners
   mut corners : (Double, Double, Double, Double)?
   mut glass : @paint.Glass?
+  /// whether bare text in this subtree adapts its ink luminance to the backdrop behind it without a glass capsule: View::adaptive_ink
+  mut adaptive_ink : Bool
   /// foreground optical lens applied to this node's children (offscreen Gaussian defocus + spherical bevel refraction +
   /// SDF clipping; none when resting): View::content_lens
   mut content_lens : @paint.ContentLens
@@ -219,6 +221,8 @@ pub(all) struct Content {
   /// where in it its picture lies and the matte round it (View::image_in)
   image_in : ((Double, Double, Double, Double), Int64)?
   glass : @paint.Glass?
+  /// whether bare text in this subtree adapts its ink luminance to the backdrop behind it (View::adaptive_ink)
+  adaptive_ink : Bool
   /// drawn by what hosts it (View::hosted: the old view, built its own way, in its place)
   hosted : Bool
   /// what it holds cut to it, its corners round as its own (View::clips)
@@ -347,6 +351,8 @@ pub(all) struct Drawn {
   /// where in it its picture lies and the matte round it (View::image_in)
   image_in : ((Double, Double, Double, Double), Int64)?
   glass : @paint.Glass?
+  /// whether bare text in this subtree adapts its ink luminance to the backdrop behind it (View::adaptive_ink)
+  adaptive_ink : Bool
   /// drawn by what hosts it (View::hosted: the old view, built its own way, in its place)
   hosted : Bool
   /// what it holds cut to it, its corners round as its own (View::clips)
@@ -2035,6 +2041,7 @@ fn Tree::made(self : Tree, parent : Int, words_as_said? : Bool = false, loc? : S
       n.look.image_fade = false
       n.look.image_in = None
       n.look.glass = None
+      n.look.adaptive_ink = false
       n.look.words_look = words_plain
       n.look.shadow = (0.0, 0.0, 0L)
       n.look.halo = (0.0, 0L)
@@ -2251,7 +2258,7 @@ fn Tree::made(self : Tree, parent : Int, words_as_said? : Bool = false, loc? : S
         gen: 0,
         live: true,
         flex: @flex.Node::new(),
-        look: { ground: 0L, ground_over: 0L, ink: 0L, words: "", words_drawn: None, words_look: words_plain, runs: [], runs_look: runs_plain, runs_pressed: -1, runs_picked: (0, 0), runs_marks: [], shadow: (0.0, 0.0, 0L), halo: (0.0, 0L), rects: [], shapes: [], tint: 0L, lines: [], edge: (0.0, 0L), ring: (0.0, 0.0, 0L), focus_ring: None, image: None, image_for: (0.0, 0.0), image_cover: false, image_contain: false, image_cover_at: None, image_fade: false, stretch: 0.0, image_in: None, radius: 0.0, corners: None, glass: None, content_lens: @paint.ContentLens::none(), alpha: 1.0, dx: 0.0, dy: 0.0, sx: 0.0, sy: 0.0, scale: 1.0, pivot: At(0.5, 0.5), scale_shift: 0.0, scale_peak: 0.0, turn: 0.0, turn_drawn: false, fades: (0.0, 0.0, 0.0, 0.0), drawn_off: (0.0, 0.0), drawn_exact: false, ground_drawn: ground_as_laid, cut_soft: false, drawn_as: "", clips: false, clips_past: 0.0, words_center: false, words_breaks: false, words_optical: false, words_tabular: None, glyphs_said: 0, ellipsis_past: false, picture: None },
+        look: { ground: 0L, ground_over: 0L, ink: 0L, words: "", words_drawn: None, words_look: words_plain, runs: [], runs_look: runs_plain, runs_pressed: -1, runs_picked: (0, 0), runs_marks: [], shadow: (0.0, 0.0, 0L), halo: (0.0, 0L), rects: [], shapes: [], tint: 0L, lines: [], edge: (0.0, 0L), ring: (0.0, 0.0, 0L), focus_ring: None, image: None, image_for: (0.0, 0.0), image_cover: false, image_contain: false, image_cover_at: None, image_fade: false, stretch: 0.0, image_in: None, radius: 0.0, corners: None, glass: None, adaptive_ink: false, content_lens: @paint.ContentLens::none(), alpha: 1.0, dx: 0.0, dy: 0.0, sx: 0.0, sy: 0.0, scale: 1.0, pivot: At(0.5, 0.5), scale_shift: 0.0, scale_peak: 0.0, turn: 0.0, turn_drawn: false, fades: (0.0, 0.0, 0.0, 0.0), drawn_off: (0.0, 0.0), drawn_exact: false, ground_drawn: ground_as_laid, cut_soft: false, drawn_as: "", clips: false, clips_past: 0.0, words_center: false, words_breaks: false, words_optical: false, words_tabular: None, glyphs_said: 0, ellipsis_past: false, picture: None },
         parent,
         allow_ellipsis: false,
         words_as_said,
@@ -4100,6 +4107,7 @@ priv enum Prop {
   Tint
   Radius
   Glass
+  AdaptiveInk
   Says
   Hides
   Focusable
@@ -4219,6 +4227,7 @@ impl Show for Prop with output(self, logger) {
       Tint => "Tint"
       Radius => "Radius"
       Glass => "Glass"
+      AdaptiveInk => "AdaptiveInk"
       Says => "Says"
       Hides => "Hides"
       Focusable => "Focusable"
@@ -4450,6 +4459,7 @@ fn Prop::ord(self : Prop) -> Int {
     WordsOptical => 106
     WordsTabular => 107
     ContentLens => 108
+    AdaptiveInk => 109
   }
 }
 
@@ -5939,6 +5949,17 @@ pub fn View::image_in(self : View, at : Live[((Double, Double, Double, Double), 
 #callsite(autofill(loc))
 pub fn View::glass(self : View, g : Live[@paint.Glass?], loc~ : SourceLoc) -> View {
   self.bind(loc~, Glass, g, Paint, fn(g) { self.tree.nodes[self.at].look.glass = g })
+  self
+}
+
+///|
+/// Whether bare text in this subtree adapts its ink luminance to the backdrop behind it without a glass capsule.
+/// Bare adaptive ink only adapts text (`kind == 7`); it does not adapt icons (`kind == 10/11`) or fills (`kind == 0`).
+/// Backdrop capture automatically expands for bare adaptive text emitted after `kind == 5` (frosted/progressive) or
+/// unmerged `kind == 6` glass, and does not span across `merged_liquid` groups.
+#callsite(autofill(loc))
+pub fn View::adaptive_ink(self : View, on : Live[Bool], loc~ : SourceLoc) -> View {
+  self.bind(loc~, AdaptiveInk, on, Paint, fn(on) { self.tree.nodes[self.at].look.adaptive_ink = on })
   self
 }
 
@@ -9657,6 +9678,7 @@ fn Node::let_go_held(self : Node) -> Unit {
   look.image = None
   look.picture = None
   look.glass = None
+  look.adaptive_ink = false
   look.drawn_as = ""
   if self.shorter.length() > 0 {
     self.shorter = []
@@ -14537,6 +14559,7 @@ fn Tree::made_again(self : Tree, at : Int) -> Unit {
     image_fade: n.look.image_fade,
     image_in: n.look.image_in,
     glass: n.look.glass,
+    adaptive_ink: n.look.adaptive_ink,
     words_look: n.look.words_look,
     runs: n.look.runs,
     runs_look: n.look.runs_look,
@@ -15467,6 +15490,7 @@ fn unfolded(c : Content, x : Double, y : Double, a : Double, s : Double) -> Draw
     image_fade: c.image_fade,
     image_in: c.image_in,
     glass: c.glass,
+    adaptive_ink: c.adaptive_ink,
     words_look: c.words_look,
     runs: c.runs,
     runs_look: c.runs_look,

@@ -61,9 +61,12 @@ pub fn seg_node(
       Array::make(labels().length(), col())
     }
   }
+  let in_viewer_pill = parent.lent(viewer_tools_pill_lent).unwrap_or(false)
+  let seg_pad = if in_viewer_pill { 2.0 } else { segmented_pad }
+  let seg_base_h = if in_viewer_pill { tool_side - 2.0 * seg_pad } else { segmented_h }
   let gaps = fn() { segmented_gap * (labels().length() - 1).to_double() }
   // (as wide as its columns, its track round them: what it is laid out before it gives way)
-  let whole = fn() { cols().fold(init=0.0, fn(a, c) { a + c }) + gaps() + 2.0 * segmented_pad }
+  let whole = fn() { cols().fold(init=0.0, fn(a, c) { a + c }) + gaps() + 2.0 * seg_pad }
   // (a line of its own round its track, whatever way `parent` lays out what it holds: the track's basis its width
   // there; it gives way as the track does, down to nothing)
   parent.box(made_for=loc, fn(line) {
@@ -71,7 +74,7 @@ pub fn seg_node(
     line.box(fn(track) {
       let opt_h = fn() {
         track.words_redone() |> ignore
-        dmax(segmented_h, node_sp(track, theme().t.ui * @ui.tree_theme().text_line).ceil() + 2.0 * 2.0)
+        dmax(seg_base_h, node_sp(track, theme().t.ui * @ui.tree_theme().text_line).ceil() + 2.0 * 2.0)
       }
       // (its pad round its options inside what it holds: what is said of it as a group (View::by_room's) out to its edges)
       track
@@ -80,7 +83,7 @@ pub fn seg_node(
       // fitted to it)
       .basis(By(fn() { Some(whole()) }))
       // (as high as its options with its pad round them: not stretched to its line's height)
-      .height(By(fn() { Some(opt_h() + 2.0 * segmented_pad) }))
+      .height(By(fn() { Some(opt_h() + 2.0 * seg_pad) }))
       .shrink(Is(1.0))
       .min_width(Is(Some(0.0)))
       |> ignore
@@ -91,7 +94,7 @@ pub fn seg_node(
           let room = given.width()
           if room < whole() - 0.5 {
             inner.words_redone() |> ignore
-            Some(node_fitted(inner, labels(), room - 2.0 * segmented_pad - gaps(), theme().t.ui, 500, segmented_in, segmented_least))
+            Some(node_fitted(inner, labels(), room - 2.0 * seg_pad - gaps(), theme().t.ui, 500, segmented_in, segmented_least))
           } else {
             None
           }
@@ -117,10 +120,10 @@ pub fn seg_node(
           chosen,
           choose,
           glass_track=false,
-          pad=segmented_pad,
+          pad=seg_pad,
           gap=segmented_gap,
           widths~,
-          height_by=fn() { opt_h() + 2.0 * segmented_pad },
+          height_by=fn() { opt_h() + 2.0 * seg_pad },
           text_size=fn() { theme().t.ui * smaller() },
           kind=Radio,
           said~,
@@ -134,9 +137,9 @@ pub fn seg_node(
           menu_track
           .row(Is(true))
           .laid_nowhere(By(fn() { !menu() }))
-          .padding(Is((segmented_pad, segmented_pad, segmented_pad, segmented_pad)))
-          .height(By(fn() { Some(opt_h() + 2.0 * segmented_pad) }))
-          .radius(By(fn() { opt_h() / 2.0 + segmented_pad }))
+          .padding(Is((seg_pad, seg_pad, seg_pad, seg_pad)))
+          .height(By(fn() { Some(opt_h() + 2.0 * seg_pad) }))
+          .radius(By(fn() { opt_h() / 2.0 + seg_pad }))
           .ground(By(fn() { alpha(theme().p.text, 0.06) }))
           |> ignore
           let words = fn() { labels().get(chosen()).unwrap_or("") }

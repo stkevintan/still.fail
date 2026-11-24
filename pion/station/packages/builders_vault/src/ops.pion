@@ -1,0 +1,375 @@
+// Vault-uses request dispatcher and stdio process loop (`--builder vault-uses --db <file>`),
+// 1:1 aligned with `station/mb/src/vaultuses/ops.mbt` and `station/mb/src/reader/main.mbt:632-644`.
+
+import "base_codec"
+import "builders_core"
+import "host_shim"
+import "js_json"
+import "sql_db"
+
+fn text_of(v : Option[js_json::JValue]) -> base_codec::Json {
+  match v {
+    Some(js_json::JValue::Str(s)) => base_codec::json_str(js_json::sanitize_str(s))
+    _ => base_codec::json_null()
+  }
+}
+
+fn units_of(v : Option[js_json::JValue]) -> Option[Array[Int]] {
+  match v {
+    Some(js_json::JValue::Str(s)) => Some(s)
+    _ => None
+  }
+}
+
+fn bool_of(v : Option[js_json::JValue]) -> Bool {
+  match v {
+    Some(js_json::JValue::Bool(true)) => true
+    _ => false
+  }
+}
+
+fn read_of(q : js_json::JValue) -> UseRead {
+  let vault = match units_of(q.get("vault")) {
+    Some(u) => u
+    None => []
+  }
+  let limit = match q.get("limit") {
+    Some(js_json::JValue::Num(n)) => base_codec::json_num(n)
+    _ => base_codec::json_num(0.0)
+  }
+  UseRead::{
+    ws: text_of(q.get("ws")),
+    vault: vault,
+    owner: units_of(q.get("owner")),
+    limit: limit,
+  }
+}
+
+fn id_of(q : js_json::JValue) -> base_codec::Json {
+  match q.get("id") {
+    Some(js_json::JValue::Num(n)) => base_codec::json_num(n)
+    _ => base_codec::json_null()
+  }
+}
+
+fn is_pending_req(q : js_json::JValue) -> Bool {
+  match q.get("kind") {
+    Some(js_json::JValue::Str(_)) => true
+    _ => false
+  }
+}
+
+/// One operation's answer (matches `@vaultuses.operate`).
+pub fn operate(db : sql_db::Db, line : String) -> Result[base_codec::Json, VaultError] {
+  let ask = match js_json::parse(line) {
+    Ok(jv) => jv
+    Err(m) => return Err(VaultError::App("unreadable request: " + m))
+  }
+  let op = match ask.get("op") {
+    Some(js_json::JValue::Str(s)) => js_json::sanitize_str(s)
+    _ => ""
+  }
+  let q = match ask.get("q") {
+    Some(v) => v
+    None => js_json::JValue::Null
+  }
+  if op == "ready" {
+    let id = id_of(q)
+    if is_pending_req(q) {
+      let ws = text_of(q.get("ws"))
+      match pending_preparation_complete(db, ws, bool_of(q.get("members")), bool_of(q.get("audit"))) {
+        Ok(true) =>
+        Ok(
+          base_codec::json_obj([
+            (
+              "answered",
+              base_codec::json_obj([
+                ("id", id),
+                ("ready", base_codec::json_bool(true)),
+              ]),
+            ),
+          ]),
+        )
+        Ok(false) => Ok(base_codec::json_obj([("unready", base_codec::json_bool(true))]))
+        Err(e) => Err(e)
+      }
+    } else {
+      match try_read_uses(db, read_of(q)) {
+        Ok(Some(bodies)) =>
+        Ok(
+          base_codec::json_obj([
+            (
+              "answered",
+              base_codec::json_obj([
+                ("id", id),
+                ("bodies", base_codec::json_arr(bodies)),
+              ]),
+            ),
+          ]),
+        )
+        Ok(None) => Ok(base_codec::json_obj([("unready", base_codec::json_bool(true))]))
+        Err(e) => Err(e)
+      }
+    }
+  } else if op == "prepare" {
+    if is_pending_req(q) {
+      let ws = text_of(q.get("ws"))
+      match backfill_pending_preparation(db, ws, bool_of(q.get("members")), bool_of(q.get("audit"))) {
+        Ok(done) => Ok(base_codec::json_obj([("complete", base_codec::json_bool(done))]))
+        Err(e) => Err(e)
+      }
+    } else {
+      let r = read_of(q)
+      let prep_done = match backfill_use_preparation(db, r.ws) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      if prep_done {
+        match try_read_uses(db, r) {
+          Ok(Some(bodies)) =>
+          Ok(
+            base_codec::json_obj([
+              ("complete", base_codec::json_bool(true)),
+              ("bodies", base_codec::json_arr(bodies)),
+            ]),
+          )
+          Ok(None) => Ok(base_codec::json_obj([("complete", base_codec::json_bool(false))]))
+          Err(e) => Err(e)
+        }
+      } else {
+        Ok(base_codec::json_obj([("complete", base_codec::json_bool(false))]))
+      }
+    }
+  } else if op == "rebox" {
+    match backfill_rebox(db) {
+      Ok(done) => Ok(base_codec::json_obj([("done", base_codec::json_bool(done))]))
+      Err(e) => Err(e)
+    }
+  } else if op == "uses" {
+    match backfill_next_workspace(db) {
+      Ok(done) => Ok(base_codec::json_obj([("done", base_codec::json_bool(done))]))
+      Err(e) => Err(e)
+    }
+  } else {
+    Err(VaultError::App("unknown vault use operation " + op))
+  }
+}
+
+/// Pure-Pion core of `format_vault_response` with caller-supplied JSON stringifier (enables unit tests).
+pub fn format_vault_response_with(
+  res : Result[base_codec::Json, VaultError],
+  stringify_fn : (base_codec::Json) -> String,
+) -> String {
+  let answer = match res {
+    Ok(j) => j
+    Err(VaultError::Sql(e)) => {
+      if sql_db::is_busy(e) {
+        base_codec::json_obj([("busy", base_codec::json_bool(true))])
+      } else {
+        base_codec::json_obj([("error", base_codec::json_str(e.message))])
+      }
+    }
+    Err(VaultError::App(msg)) => base_codec::json_obj([("error", base_codec::json_str(msg))])
+  }
+  builders_core::escape_line_separators(stringify_fn(answer))
+}
+
+/// Format a `vault-uses` operation result as a JSON line:
+/// - `sql_db::is_busy(e)` -> `{"busy":true}` (no `id`)
+/// - other errors -> `{"error":...}` (no `id`)
+pub fn format_vault_response(res : Result[base_codec::Json, VaultError]) -> String {
+  format_vault_response_with(res, sql_db::stringify_json)
+}
+
+/// Run `--builder vault-uses --db <db_path>`.
+/// Matches `station/mb/src/reader/main.mbt:632-644`: `wait=100`, `PRAGMA synchronous = NORMAL`,
+/// empty lines skipped, request lines decoded via WHATWG lossy UTF-8 (`LineQueue`) and parsed
+/// directly with `js_json::parse` (preserving lone surrogates and UTF-16 error offsets).
+pub fn run_vault_uses(db_path : String) -> Int {
+  let db = match sql_db::Db::attach(db_path, wait_ms=100) {
+    Ok(d) => d
+    Err(e) => {
+      let _ = host_shim::write_stderr_line(e.message)
+      return 1
+    }
+  }
+  if !host_shim::start("", true) {
+    db.close()
+    let _ = host_shim::write_stderr_line("builder vault-uses: failed to start stdin loop")
+    return 1
+  }
+
+  let queue = builders_core::LineQueue::new()
+  let mut stdin_eof = false
+  let mut running = true
+  let mut write_failed = false
+
+  while running {
+    while running {
+      match queue.pop_line() {
+        None => break
+        Some(line) => {
+          if line.length() == 0 {
+            continue
+          }
+          let res = operate(db, line)
+          match db.rollback_if_in_tx() {
+            Ok(_) => ()
+            Err(e) => {
+              db.close()
+              let _ = host_shim::write_stderr_line(
+                "builder vault-uses: transaction remained open after ROLLBACK: " + e.message,
+              )
+              host_shim::stop()
+              return 1
+            }
+          }
+          let out = format_vault_response(res)
+          if !host_shim::write_stdout_line(out) {
+            write_failed = true
+            running = false
+          }
+        }
+      }
+    }
+    if !running {
+      break
+    }
+    if stdin_eof {
+      running = false
+      break
+    }
+    match host_shim::wait((-1).to_int64()) {
+      None => ()
+      Some(host_shim::HostEvent::StdinData(chunk)) => queue.enqueue_chunk(chunk)
+      Some(host_shim::HostEvent::StdinEof) => stdin_eof = true
+      Some(_) => ()
+    }
+  }
+
+  db.close()
+  host_shim::stop()
+  if write_failed { 1 } else { 0 }
+}
+
+/// Real-SQLite self-test (invoked from `stillfail-pion --smoke-sql-db`) verifying that
+/// `try_read_uses` (`savepoint_swallow_err("vault_use_page", ...)`) nested inside an active
+/// outer transaction leaves the outer transaction under the caller's control (can continue
+/// writing and roll back cleanly).
+pub fn run_selftest(temp_db_path : String) -> Result[Unit, String] {
+  let db_path = temp_db_path + ".vault-selftest.db"
+  let db = match sql_db::Db::create(db_path, wait_ms=100) {
+    Ok(d) => d
+    Err(e) => return Err("builders_vault selftest open failed: " + e.message)
+  }
+  let setup_sql = [
+    "CREATE TABLE IF NOT EXISTS vault_requests (ws TEXT NOT NULL, id TEXT NOT NULL, session TEXT NOT NULL, status TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (ws,id))",
+    "CREATE TABLE IF NOT EXISTS vault_use_lookup (ws TEXT NOT NULL, id TEXT NOT NULL, vault TEXT, owner TEXT, at INTEGER, PRIMARY KEY (ws,id)) WITHOUT ROWID",
+    "CREATE INDEX IF NOT EXISTS vault_use_lookup_vault ON vault_use_lookup (ws, vault, at DESC, id DESC)",
+    "CREATE INDEX IF NOT EXISTS vault_use_lookup_owner ON vault_use_lookup (ws, vault, owner, at DESC, id DESC)",
+    "CREATE TABLE IF NOT EXISTS vault_use_backfill (ws TEXT PRIMARY KEY, after_id TEXT, done INTEGER NOT NULL) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS vault_use_ambiguous_v2 (ws TEXT NOT NULL, id TEXT NOT NULL, dirty INTEGER NOT NULL, is_use INTEGER NOT NULL, vault BLOB, owner BLOB, at INTEGER, PRIMARY KEY (ws,id)) WITHOUT ROWID",
+    "CREATE INDEX IF NOT EXISTS vault_use_ambiguous_vault_v2 ON vault_use_ambiguous_v2 (ws, vault, at DESC, id DESC) WHERE dirty = 0 AND is_use = 1",
+    "CREATE INDEX IF NOT EXISTS vault_use_ambiguous_owner_v2 ON vault_use_ambiguous_v2 (ws, vault, owner, at DESC, id DESC) WHERE dirty = 0 AND is_use = 1",
+    "CREATE TABLE IF NOT EXISTS vault_use_ambiguous_audit_v2 (ws TEXT PRIMARY KEY, after_id TEXT, done INTEGER NOT NULL) WITHOUT ROWID",
+    "DELETE FROM vault_requests; DELETE FROM vault_use_lookup; DELETE FROM vault_use_backfill; DELETE FROM vault_use_ambiguous_v2; DELETE FROM vault_use_ambiguous_audit_v2",
+    "INSERT INTO vault_requests VALUES ('w', 'r1', 's', 'granted', '{\"item\":\"r1\",\"vault\":\"wrong\",\"vault\":\"v\",\"at\":1}')",
+  ]
+  for i in 0..<setup_sql.length() {
+    match db.exec(setup_sql[i]) {
+      Ok(_) => ()
+      Err(e) => {
+        db.close()
+        return Err("builders_vault selftest setup failed: " + e.message)
+      }
+    }
+  }
+  // Prepare workspace w (backfill + audit + repair).
+  let mut prepared = false
+  for _ in 0..<10 {
+    match backfill_use_preparation(db, base_codec::json_str("w")) {
+      Ok(true) => {
+        prepared = true
+        break
+      }
+      Ok(false) => ()
+      Err(VaultError::Sql(e)) => {
+        db.close()
+        return Err("builders_vault selftest prepare sql failed: " + e.message)
+      }
+      Err(VaultError::App(m)) => {
+        db.close()
+        return Err("builders_vault selftest prepare app failed: " + m)
+      }
+    }
+  }
+  if !prepared {
+    db.close()
+    return Err("builders_vault selftest prepare did not complete")
+  }
+  let q = UseRead::{
+    ws: base_codec::json_str("w"),
+    vault: js_json::utf16_units("v"),
+    owner: None,
+    limit: base_codec::json_num(10.0),
+  }
+  // Run try_read_uses inside an outer tx, then delete the row and abort the outer tx to verify rollback.
+  let outer_res : Result[Unit, String] = db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Unit, String] {
+      match try_read_uses(tx_db, q) {
+        Ok(Some(bodies)) => {
+          if bodies.length() != 1 {
+            return Err("nested try_read_uses expected 1 body, got " + bodies.length().to_string())
+          }
+        }
+        Ok(None) => return Err("nested try_read_uses returned None")
+        Err(VaultError::Sql(e)) => return Err("nested try_read_uses sql err: " + e.message)
+        Err(VaultError::App(m)) => return Err("nested try_read_uses app err: " + m)
+      }
+      if tx_db.autocommit() {
+        return Err("nested try_read_uses prematurely ended outer transaction")
+      }
+      match tx_db.run("DELETE FROM vault_requests WHERE ws = 'w' AND id = 'r1'", []) {
+        Ok(_) => ()
+        Err(e) => return Err("outer delete failed: " + e.message)
+      }
+      Err("intentional-rollback")
+    },
+    fn(e : sql_db::SqlError) -> String { "outer tx sql err: " + e.message },
+  )
+  match outer_res {
+    Err(m) => {
+      if m != "intentional-rollback" {
+        db.close()
+        return Err(m)
+      }
+    }
+    Ok(_) => {
+      db.close()
+      return Err("outer tx unexpectedly committed")
+    }
+  }
+  // After outer rollback, row r1 must still be readable.
+  match try_read_uses(db, q) {
+    Ok(Some(bodies)) => {
+      if bodies.length() != 1 {
+        db.close()
+        return Err("post-rollback try_read_uses expected 1 body, got " + bodies.length().to_string())
+      }
+    }
+    Ok(None) => {
+      db.close()
+      return Err("post-rollback try_read_uses returned None")
+    }
+    Err(VaultError::Sql(e)) => {
+      db.close()
+      return Err("post-rollback try_read_uses sql err: " + e.message)
+    }
+    Err(VaultError::App(m)) => {
+      db.close()
+      return Err("post-rollback try_read_uses app err: " + m)
+    }
+  }
+  db.close()
+  Ok(())
+}

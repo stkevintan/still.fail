@@ -1,0 +1,100 @@
+// Shared internal helpers for `builders_legacy`.
+
+import "base_codec"
+import "builders_core"
+import "sql_db"
+
+fn map_sql(e : sql_db::SqlError) -> builders_core::StepError {
+  builders_core::StepError::Sql(e)
+}
+
+fn is_json_null(j : base_codec::Json) -> Bool {
+  match j {
+    base_codec::Json::Null => true
+    _ => false
+  }
+}
+
+fn json_flag(b : Bool) -> base_codec::Json {
+  base_codec::json_num(if b { 1.0 } else { 0.0 })
+}
+
+fn json_is_one(v : base_codec::Json) -> Bool {
+  match v {
+    base_codec::Json::Num(n, _) => n == 1.0
+    _ => false
+  }
+}
+
+fn str_contains(haystack : String, needle : String) -> Bool {
+  let h = haystack.to_bytes()
+  let n = needle.to_bytes()
+  if n.length() == 0 {
+    return true
+  }
+  if n.length() > h.length() {
+    return false
+  }
+  let last = h.length() - n.length()
+  for i in 0..<(last + 1) {
+    let mut matched = true
+    for j in 0..<n.length() {
+      if h[i + j] != n[j] {
+        matched = false
+        break
+      }
+    }
+    if matched {
+      return true
+    }
+  }
+  false
+}
+
+fn str_has_prefix(s : String, prefix : String) -> Bool {
+  let sb = s.to_bytes()
+  let pb = prefix.to_bytes()
+  if pb.length() > sb.length() {
+    return false
+  }
+  for i in 0..<pb.length() {
+    if sb[i] != pb[i] {
+      return false
+    }
+  }
+  true
+}
+
+fn str_has_suffix(s : String, suffix : String) -> Bool {
+  let sb = s.to_bytes()
+  let pb = suffix.to_bytes()
+  if pb.length() > sb.length() {
+    return false
+  }
+  let off = sb.length() - pb.length()
+  for i in 0..<pb.length() {
+    if sb[off + i] != pb[i] {
+      return false
+    }
+  }
+  true
+}
+
+fn join_strings(parts : Array[String], sep : String) -> String {
+  let sb = StringBuilder::new()
+  for i in 0..<parts.length() {
+    if i > 0 {
+      sb.write_string(sep)
+    }
+    sb.write_string(parts[i])
+  }
+  sb.to_string()
+}
+
+fn slice_bytes_str(b : Bytes, start : Int, end : Int) -> String {
+  let sb = StringBuilder::new()
+  for i in start..<end {
+    sb.write_byte(b[i])
+  }
+  sb.to_string()
+}

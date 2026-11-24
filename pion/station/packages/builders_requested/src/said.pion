@@ -1,0 +1,663 @@
+// Sidebar said-state builder (`--builder said`), 1:1 aligned with
+// `station/mb/src/said/said.mbt`, `station/mb/src/readops/{shared_sql,pages,chatparts}.mbt`,
+// and `station/mb/src/reader/main.mbt:402-454`.
+// All write transactions use `db.tx_err(...)` and all read snapshots use `db.savepoint_swallow_err("said_scan", ...)`.
+
+import "base_codec"
+import "builders_core"
+import "host_shim"
+import "sql_db"
+
+pub let SAID_BATCH : Int = 64
+
+// All 8 SQL statements from `station/mb/src/readops/shared_sql.mbt`.
+let SAID_LATEST_SQL : String = "SELECT n, author_kind, author FROM entries INDEXED BY entries_said WHERE thread = ?1 AND kind = 'message' AND letter IS NULL ORDER BY n DESC LIMIT 1"
+
+let SAID_STATE_SQL : String = "SELECT s.said_n, s.said_other_n, s.said_other_known,\n    g.author AS guard_author, g.other_n AS guard_other_n, g.ready AS guard_ready\n  FROM thread_state s LEFT JOIN said_state_guard g ON g.thread = s.thread WHERE s.thread = ?1\n  UNION ALL SELECT NULL, NULL, NULL, g.author, g.other_n, g.ready FROM said_state_guard g\n    WHERE g.thread = ?1 AND NOT EXISTS (SELECT 1 FROM thread_state s WHERE s.thread = ?1) LIMIT 1"
+
+let SAID_SCAN_SQL : String = "SELECT n, author_kind, author FROM entries INDEXED BY entries_said\n  WHERE thread = ?1 AND kind = 'message' AND letter IS NULL AND n < ?2 ORDER BY n DESC LIMIT ?3"
+
+let LEGACY_SAID_LATEST_SQL : String = "WITH dirty_latest AS MATERIALIZED (\n    SELECT e.n,e.author_kind,e.author FROM legacy_said_meta m CROSS JOIN legacy_said_dirty d\n      CROSS JOIN entries e ON e.thread=d.thread AND e.n=d.n\n    WHERE m.id=1 AND m.scanned=1 AND d.thread=?1 AND e.kind='message' AND e.letter IS NULL\n    ORDER BY d.n DESC LIMIT 1\n  )\n  SELECT n,author_kind,author FROM dirty_latest\n  UNION ALL\n  SELECT n,author_kind,author FROM (\n    SELECT s.n,s.author_kind,s.author FROM legacy_said_meta m CROSS JOIN legacy_said_build s\n    WHERE m.id=1 AND m.scanned=1 AND s.thread=?1\n      AND s.n >= COALESCE((SELECT n FROM dirty_latest), -9223372036854775808)\n      AND NOT EXISTS (SELECT 1 FROM legacy_said_dirty d WHERE d.thread=s.thread AND d.n=s.n)\n    ORDER BY s.n DESC LIMIT 1\n  )\n  UNION ALL\n  SELECT n,author_kind,author FROM (\n    SELECT e.n,e.author_kind,e.author FROM legacy_said_meta m CROSS JOIN entries e\n    WHERE m.id=1 AND m.scanned=0 AND e.thread=?1 AND e.kind='message' AND e.letter IS NULL\n    ORDER BY e.n DESC LIMIT 1\n  )\n  ORDER BY n DESC LIMIT 1"
+
+let LEGACY_SAID_SCAN_SQL : String = "SELECT n, author_kind, author FROM legacy_said WHERE thread = ?1 AND n < ?2 ORDER BY n DESC LIMIT ?3"
+
+let LEGACY_SAID_NEEDS_DRAIN_SQL : String = "SELECT 1 FROM legacy_said_meta m WHERE m.id=1 AND m.scanned=1 AND EXISTS (\n    SELECT 1 FROM legacy_said_dirty WHERE thread=?1 LIMIT 1 OFFSET 64)"
+
+let LEGACY_SAID_HEAD_FIRST_SQL : String = "SELECT CASE WHEN e.kind='message' AND e.letter IS NULL THEN e.n END AS n,\n    CASE WHEN e.kind='message' AND e.letter IS NULL THEN e.author_kind END AS author_kind,\n    CASE WHEN e.kind='message' AND e.letter IS NULL THEN e.author END AS author\n    FROM entries e WHERE e.thread=? ORDER BY e.n DESC LIMIT 1"
+
+let LEGACY_SAID_HEAD_TAIL_SQL : String = "WITH tail AS MATERIALIZED (\n      SELECT n,kind,letter,author_kind,author FROM entries WHERE thread=? ORDER BY n DESC LIMIT 65\n    ), latest AS MATERIALIZED (\n      SELECT n,author_kind,author FROM tail WHERE kind='message' AND letter IS NULL ORDER BY n DESC LIMIT 1\n    ) SELECT (SELECT n FROM latest) AS n,(SELECT author_kind FROM latest) AS author_kind,\n      (SELECT author FROM latest) AS author,(SELECT COUNT(*) FROM tail) AS count"
+
+fn is_json_null(j : base_codec::Json) -> Bool {
+  match j {
+    base_codec::Json::Null => true
+    _ => false
+  }
+}
+
+fn is_json_num_eq(j : base_codec::Json, want : Double) -> Bool {
+  match j {
+    base_codec::Json::Num(d, _) => d == want
+    _ => false
+  }
+}
+
+fn is_json_str_eq(j : base_codec::Json, want : String) -> Bool {
+  match j {
+    base_codec::Json::Str(s) => s == want
+    _ => false
+  }
+}
+
+fn json_num_or_zero(j : base_codec::Json) -> Double {
+  match j {
+    base_codec::Json::Num(d, _) => d
+    _ => 0.0
+  }
+}
+
+/// 1:1 with `station/mb/src/readops/pages.mbt:25` (`has_legacy_said`).
+pub fn has_legacy_said(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match db.has_schema("view", "legacy_said") {
+    Ok(false) => return Ok(false)
+    Ok(true) => ()
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  match db.has_schema("table", "legacy_said_meta") {
+    Ok(false) => return Err(builders_core::StepError::App("legacy said view has no metadata"))
+    Ok(true) => ()
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let m = match db.first("SELECT version, scanned FROM legacy_said_meta WHERE id=1", []) {
+    Ok(Some(row)) => row
+    Ok(None) => return Err(builders_core::StepError::App("legacy said view has an unsupported version"))
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ver_ok = is_json_num_eq(sql_db::row_val(m, "version"), 1.0)
+  let sc = sql_db::row_val(m, "scanned")
+  let scanned_ok = is_json_num_eq(sc, 0.0) || is_json_num_eq(sc, 1.0)
+  if !ver_ok || !scanned_ok {
+    return Err(builders_core::StepError::App("legacy said view has an unsupported version"))
+  }
+  Ok(true)
+}
+
+/// 1:1 with `station/mb/src/readops/chatparts.mbt:43` (`legacy_said_head`).
+pub fn legacy_said_head(
+  db : sql_db::Db,
+  t : base_codec::Json,
+) -> Result[(Bool, Option[Map[String, base_codec::Json]]), builders_core::StepError] {
+  let first = match db.first(LEGACY_SAID_HEAD_FIRST_SQL, [t]) {
+    Ok(Some(r)) => r
+    Ok(None) => return Ok((true, None))
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !is_json_null(sql_db::row_val(first, "n")) {
+    return Ok((true, Some(first)))
+  }
+  let needs_drain = match db.first(LEGACY_SAID_NEEDS_DRAIN_SQL, [t]) {
+    Ok(Some(_)) => true
+    Ok(None) => false
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !needs_drain {
+    match db.first(LEGACY_SAID_LATEST_SQL, [t]) {
+      Ok(row) => return Ok((true, row))
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  }
+  let tail = match db.first(LEGACY_SAID_HEAD_TAIL_SQL, [t]) {
+    Ok(Some(r)) => r
+    Ok(None) => return Ok((true, None))
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if !is_json_null(sql_db::row_val(tail, "n")) {
+    return Ok((true, Some(tail)))
+  }
+  Ok((json_num_or_zero(sql_db::row_val(tail, "count")) < 65.0, None))
+}
+
+fn legacy_needs_drain(db : sql_db::Db, t : base_codec::Json) -> Result[Bool, builders_core::StepError] {
+  match db.all(LEGACY_SAID_NEEDS_DRAIN_SQL, [t]) {
+    Ok(rows) => Ok(rows.length() > 0)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn legacy_drain(db : sql_db::Db, t : base_codec::Json, limit : Int) -> Result[Unit, builders_core::StepError] {
+  db.tx_err(
+    fn(tx : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      let meta = match tx.all("SELECT version FROM legacy_said_meta WHERE id=1", []) {
+        Ok(rows) => rows
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if meta.length() == 0 {
+        return Err(builders_core::StepError::App("legacy said metadata is missing"))
+      }
+      let ver = sql_db::row_val(meta[0], "version")
+      if !is_json_num_eq(ver, 1.0) {
+        return Err(
+          builders_core::StepError::App(
+            "legacy said version " + sql_db::stringify_json(ver) + " is incompatible with 1",
+          ),
+        )
+      }
+      let keys = match tx.all(
+        "SELECT CAST(d.thread AS TEXT) thread,CAST(d.n AS TEXT) n FROM legacy_said_dirty d WHERE d.thread=? ORDER BY d.n LIMIT ?",
+        [t, base_codec::json_int(limit)],
+      ) {
+        Ok(rows) => rows
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      for i in 0..<keys.length() {
+        let k = [sql_db::row_val(keys[i], "thread"), sql_db::row_val(keys[i], "n")]
+        match tx.run("DELETE FROM legacy_said_build WHERE thread=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER)", k) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx.run(
+          "INSERT INTO legacy_said_build(thread,n,author_kind,author) SELECT thread,n,author_kind,author FROM entries WHERE thread=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER) AND kind='message' AND letter IS NULL",
+          k,
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx.run("DELETE FROM legacy_said_dirty WHERE thread=CAST(? AS INTEGER) AND n=CAST(? AS INTEGER)", k) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(())
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+fn said_known(
+  state : Option[Map[String, base_codec::Json]],
+  latest : Map[String, base_codec::Json],
+) -> Bool {
+  if !is_json_str_eq(sql_db::row_val(latest, "author_kind"), "person") {
+    return true
+  }
+  let s = match state {
+    Some(r) => r
+    None => return false
+  }
+  let same_n = base_codec::json_eq(sql_db::row_val(s, "said_n"), sql_db::row_val(latest, "n"))
+  let known_ok = is_json_num_eq(sql_db::row_val(s, "said_other_known"), 1.0)
+  let by_state = same_n && known_ok
+  let guard_ok = is_json_num_eq(sql_db::row_val(s, "guard_ready"), 1.0)
+  let same_author = base_codec::json_eq(sql_db::row_val(s, "guard_author"), sql_db::row_val(latest, "author"))
+  let by_guard = guard_ok && same_author
+  by_state || by_guard
+}
+
+fn said_latest(
+  db : sql_db::Db,
+  legacy : Bool,
+  t : base_codec::Json,
+) -> Result[(Bool, Option[Map[String, base_codec::Json]]), builders_core::StepError] {
+  if legacy {
+    legacy_said_head(db, t)
+  } else {
+    match db.first(SAID_LATEST_SQL, [t]) {
+      Ok(row) => Ok((true, row))
+      Err(e) => Err(builders_core::StepError::Sql(e))
+    }
+  }
+}
+
+fn said_state(
+  db : sql_db::Db,
+  t : base_codec::Json,
+) -> Result[Option[Map[String, base_codec::Json]], builders_core::StepError] {
+  match db.first(SAID_STATE_SQL, [t]) {
+    Ok(row) => Ok(row)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn said_draining(
+  db : sql_db::Db,
+  legacy : Bool,
+  t : base_codec::Json,
+) -> Result[Bool, builders_core::StepError] {
+  if !legacy {
+    return Ok(false)
+  }
+  legacy_needs_drain(db, t)
+}
+
+fn said_guarded(
+  db : sql_db::Db,
+  t : base_codec::Json,
+  token : String,
+) -> Result[Bool, builders_core::StepError] {
+  match db.first("SELECT token FROM said_state_guard WHERE thread=?", [t]) {
+    Ok(Some(g)) => Ok(is_json_str_eq(sql_db::row_val(g, "token"), token))
+    Ok(None) => Ok(false)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+pub struct SaidScan {
+  thread : Int64
+  author : base_codec::Json
+  token : String
+  mut before : base_codec::Json
+  mut found : Option[base_codec::Json]
+}
+
+pub fn SaidScan::token(self : SaidScan) -> String {
+  self.token
+}
+
+enum SaidScanRead {
+  LostGuard
+  NeedsDrain
+  Rows(Array[Map[String, base_codec::Json]])
+}
+
+enum SaidPublishOutcome {
+  LostGuard
+  RetrySameScan
+  Done
+}
+
+pub fn said_step(
+  db : sql_db::Db,
+  thread : Int64,
+  scan_opt : Option[SaidScan],
+  make_token : () -> String,
+  may_write : () -> Bool,
+  limit : Int = SAID_BATCH,
+) -> Result[(Bool, Option[SaidScan]), builders_core::StepError] {
+  if limit < 1 || limit > SAID_BATCH {
+    return Err(builders_core::StepError::App("said scan batch must be between 1 and 64"))
+  }
+  let t = base_codec::json_num(thread.to_double())
+  let legacy = match has_legacy_said(db) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+
+  let is_draining = match said_draining(db, legacy, t) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if is_draining {
+    if may_write() {
+      match legacy_drain(db, t, limit) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+    }
+    return Ok((false, scan_opt))
+  }
+
+  let scan = match scan_opt {
+    Some(sc) => sc
+    None => {
+      let (head_known, head_present, boundary_known) = match db.savepoint_swallow_err(
+        "said_scan",
+        fn(sp : sql_db::Db) -> Result[(Bool, Bool, Bool), builders_core::StepError] {
+          let (k, h) = match said_latest(sp, legacy, t) {
+            Ok(v) => v
+            Err(e) => return Err(e)
+          }
+          match h {
+            None => Ok((k, false, false))
+            Some(row) => {
+              let st = match said_state(sp, t) {
+                Ok(s) => s
+                Err(e) => return Err(e)
+              }
+              Ok((k, true, said_known(st, row)))
+            }
+          }
+        },
+        fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+      ) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if !head_known {
+        if may_write() {
+          match legacy_drain(db, t, limit) {
+            Ok(_) => ()
+            Err(e) => return Err(e)
+          }
+        }
+        return Ok((false, None))
+      }
+      if !head_present || boundary_known {
+        return Ok((true, None))
+      }
+      if !may_write() {
+        return Ok((false, None))
+      }
+      return db.tx_err(
+        fn(tx : sql_db::Db) -> Result[(Bool, Option[SaidScan]), builders_core::StepError] {
+          let (cur_known, cur) = match said_latest(tx, legacy, t) {
+            Ok(v) => v
+            Err(e) => return Err(e)
+          }
+          let d2 = match said_draining(tx, legacy, t) {
+            Ok(v) => v
+            Err(e) => return Err(e)
+          }
+          if !cur_known || d2 {
+            return Ok((false, None))
+          }
+          let current = match cur {
+            Some(r) => r
+            None => return Ok((true, None))
+          }
+          let st2 = match said_state(tx, t) {
+            Ok(s) => s
+            Err(e) => return Err(e)
+          }
+          if said_known(st2, current) {
+            return Ok((true, None))
+          }
+          let tok = make_token()
+          let author = sql_db::row_val(current, "author")
+          match tx.run(
+            "INSERT INTO said_state_guard(thread,token,author,other_n,ready) VALUES (?,?,?,NULL,0) ON CONFLICT(thread) DO UPDATE SET token=excluded.token,author=excluded.author,other_n=NULL,ready=0",
+            [t, base_codec::json_str(tok), author],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          Ok(
+            (
+              false,
+              Some(
+                SaidScan::{
+                  thread: thread,
+                  author: author,
+                  token: tok,
+                  before: sql_db::row_val(current, "n"),
+                  found: None,
+                },
+              ),
+            ),
+          )
+        },
+        fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+      )
+    }
+  }
+
+  if scan.thread != thread {
+    return Err(builders_core::StepError::App("said scan belongs to another chat"))
+  }
+
+  let scan_token = scan.token
+  let scan_before = scan.before
+  let scan_has_found = match scan.found {
+    Some(_) => true
+    None => false
+  }
+  let read_res = match db.savepoint_swallow_err(
+    "said_scan",
+    fn(sp : sql_db::Db) -> Result[SaidScanRead, builders_core::StepError] {
+      let g = match said_guarded(sp, t, scan_token) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if !g {
+        return Ok(SaidScanRead::LostGuard)
+      }
+      let d = match said_draining(sp, legacy, t) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if d {
+        return Ok(SaidScanRead::NeedsDrain)
+      }
+      if !scan_has_found {
+        let sql = if legacy { LEGACY_SAID_SCAN_SQL } else { SAID_SCAN_SQL }
+        match sp.all(sql, [t, scan_before, base_codec::json_int(limit)]) {
+          Ok(rows) => Ok(SaidScanRead::Rows(rows))
+          Err(e) => Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        Ok(SaidScanRead::Rows([]))
+      }
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  ) {
+    Ok(r) => r
+    Err(e) => return Err(e)
+  }
+
+  let rows = match read_res {
+    SaidScanRead::LostGuard => return Ok((false, None))
+    SaidScanRead::NeedsDrain => {
+      if may_write() {
+        match legacy_drain(db, t, limit) {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+      }
+      return Ok((false, Some(scan)))
+    }
+    SaidScanRead::Rows(rs) => rs
+  }
+
+  if !scan_has_found {
+    let mut matched_n : Option[base_codec::Json] = None
+    for i in 0..<rows.length() {
+      let r = rows[i]
+      let is_person = is_json_str_eq(sql_db::row_val(r, "author_kind"), "person")
+      let same_auth = base_codec::json_eq(sql_db::row_val(r, "author"), scan.author)
+      if !is_person || !same_auth {
+        matched_n = Some(sql_db::row_val(r, "n"))
+        break
+      }
+    }
+    match matched_n {
+      Some(other_n) => scan.found = Some(other_n)
+      None => {
+        if rows.length() < limit {
+          scan.found = Some(base_codec::json_null())
+        } else {
+          scan.before = sql_db::row_val(rows[rows.length() - 1], "n")
+        }
+      }
+    }
+  }
+
+  let found = match scan.found {
+    Some(f) => f
+    None => return Ok((false, Some(scan)))
+  }
+  if !may_write() {
+    return Ok((false, Some(scan)))
+  }
+
+  let scan_author = scan.author
+  let outcome = match db.tx_err(
+    fn(tx : sql_db::Db) -> Result[SaidPublishOutcome, builders_core::StepError] {
+      let g2 = match said_guarded(tx, t, scan_token) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if !g2 {
+        return Ok(SaidPublishOutcome::LostGuard)
+      }
+      let (cur_known, current) = match said_latest(tx, legacy, t) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      let d2 = match said_draining(tx, legacy, t) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if !cur_known || d2 {
+        return Ok(SaidPublishOutcome::RetrySameScan)
+      }
+      let tok = base_codec::json_str(scan_token)
+      match current {
+        None => {
+          match tx.run("DELETE FROM said_state_guard WHERE thread=? AND token=?", [t, tok]) {
+            Ok(_) => Ok(SaidPublishOutcome::Done)
+            Err(e) => Err(builders_core::StepError::Sql(e))
+          }
+        }
+        Some(c) => {
+          let is_person = is_json_str_eq(sql_db::row_val(c, "author_kind"), "person")
+          let same_auth = base_codec::json_eq(sql_db::row_val(c, "author"), scan_author)
+          if !is_person || !same_auth {
+            return Ok(SaidPublishOutcome::LostGuard)
+          }
+          let wrote = match tx.run(
+            "UPDATE thread_state SET said_other_n=?, said_other_known=1 WHERE thread=? AND said_n=?",
+            [found, t, sql_db::row_val(c, "n")],
+          ) {
+            Ok(n) => n
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          if wrote > 0 {
+            match tx.run("DELETE FROM said_state_guard WHERE thread=? AND token=?", [t, tok]) {
+              Ok(_) => Ok(SaidPublishOutcome::Done)
+              Err(e) => Err(builders_core::StepError::Sql(e))
+            }
+          } else {
+            match tx.run(
+              "UPDATE said_state_guard SET author=?, other_n=?, ready=1 WHERE thread=? AND token=?",
+              [scan_author, found, t, tok],
+            ) {
+              Ok(_) => Ok(SaidPublishOutcome::Done)
+              Err(e) => Err(builders_core::StepError::Sql(e))
+            }
+          }
+        }
+      }
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  ) {
+    Ok(o) => o
+    Err(e) => return Err(e)
+  }
+
+  match outcome {
+    SaidPublishOutcome::LostGuard => Ok((false, None))
+    SaidPublishOutcome::RetrySameScan => Ok((false, Some(scan)))
+    SaidPublishOutcome::Done => Ok((true, None))
+  }
+}
+
+pub fn said_is_mode_request(ask : base_codec::Json) -> Bool {
+  builders_core::json_has_key(ask, "thread") || builders_core::json_has_key(ask, "cancel")
+}
+
+pub fn run_said(db_path : String) -> Int {
+  let db = match sql_db::Db::attach(db_path, wait_ms=250) {
+    Ok(d) => d
+    Err(e) => {
+      let _ = host_shim::write_stderr_line(e.message)
+      return 1
+    }
+  }
+  match db.exec("PRAGMA synchronous = NORMAL") {
+    Ok(_) => ()
+    Err(e) => {
+      db.close()
+      let _ = host_shim::write_stderr_line(e.message)
+      return 1
+    }
+  }
+  if !host_shim::start("", true) {
+    db.close()
+    let _ = host_shim::write_stderr_line("builder said: failed to start stdin loop")
+    return 1
+  }
+
+  let queue = builders_core::LineQueue::new()
+  let permit = builders_core::Permit::new(queue, said_is_mode_request)
+  let scans : Map[Int64, SaidScan] = Map::new()
+  let mut tokens = 0
+  let mut write_failed = false
+
+  while true {
+    let line = match permit.next_line() {
+      Some(l) => l
+      None => break
+    }
+    if line.length() == 0 {
+      continue
+    }
+    let ask = builders_core::parse_ask_line(line)
+    let thread = match builders_core::json_get_last(ask, "thread") {
+      Some(base_codec::Json::Num(n, _)) => builders_core::double_to_i64_saturating(n)
+      _ => {
+        let out = builders_core::format_step_response("sidebar said state", Ok(None))
+        if !host_shim::write_stdout_line(out) {
+          write_failed = true
+          break
+        }
+        continue
+      }
+    }
+    if builders_core::is_cancel_ask(ask) {
+      match scans.get(thread) {
+        Some(scan) => {
+          let _ = scans.remove(thread)
+          if permit.take() {
+            let _ = db.run(
+              "DELETE FROM said_state_guard WHERE thread=? AND token=? AND ready=0",
+              [base_codec::json_num(thread.to_double()), base_codec::json_str(scan.token())],
+            )
+            permit.give()
+          }
+        }
+        None => ()
+      }
+      continue
+    }
+    let res = match said_step(
+      db,
+      thread,
+      scans.get(thread),
+      fn() -> String {
+        tokens = tokens + 1
+        format_guard_token(host_shim::wall_ms(), tokens, host_shim::pid())
+      },
+      fn() -> Bool { permit.take() },
+    ) {
+      Ok((done, next_scan)) => {
+        match next_scan {
+          Some(sc) => scans.set(thread, sc)
+          None => {
+            let _ = scans.remove(thread)
+          }
+        }
+        Ok(Some(done))
+      }
+      Err(e) => Err(e)
+    }
+    match db.rollback_if_in_tx() {
+      Ok(_) => ()
+      Err(e) => {
+        db.close()
+        let _ = host_shim::write_stderr_line(
+          "builder said: transaction remained open after ROLLBACK: " + e.message,
+        )
+        host_shim::stop()
+        return 1
+      }
+    }
+    permit.release_implicit()
+    let out = builders_core::format_step_response("sidebar said state", res)
+    if !host_shim::write_stdout_line(out) {
+      write_failed = true
+      break
+    }
+  }
+
+  db.close()
+  host_shim::stop()
+  if write_failed { 1 } else { 0 }
+}

@@ -1319,7 +1319,7 @@ test("large low-percent disk jitter and routine healthy copies ticks do not trig
 
   events.overviewChanged();
   await settle();
-  const base = stream.got.filter((e) => e.event === "overview").length;
+  let base = stream.got.filter((e) => e.event === "overview").length;
   assert.equal(base, 1);
 
   // Small +/-200 MiB fluctuations on a 1858 GiB drive with 94 GiB free (5.1%) stay in the same 1% bucket.
@@ -1341,6 +1341,32 @@ test("large low-percent disk jitter and routine healthy copies ticks do not trig
   events.overviewChanged();
   await settle();
   assert.equal(stream.got.filter((e) => e.event === "overview").length, base, "healthy routine copies progress suppressed");
+
+  // When a place was last level is what its row says ("N minutes ago"): told again once it moved on by a step.
+  state.copies.keepers[0].at = 1_795_520_000_000 + 11 * 60_000;
+  state.copies.backup.s3[0].at = 1_795_520_000_000 + 11 * 60_000;
+  events.overviewChanged();
+  await settle();
+  assert.equal(stream.got.filter((e) => e.event === "overview").length, base + 1, "a later backup time is told within ten minutes");
+  base += 1;
+
+  // A large drive's free space as a warning says it is never more than 4 GiB off.
+  state.disk.freeBytes -= 5 * GiB;
+  events.overviewChanged();
+  await settle();
+  assert.equal(stream.got.filter((e) => e.event === "overview").length, base + 1, "5 GiB less on a large low drive emits");
+  base += 1;
+
+  // The first chat on a station changes what is offered on it.
+  state.copies.chats = 0;
+  events.overviewChanged();
+  await settle();
+  base = stream.got.filter((e) => e.event === "overview").length;
+  state.copies.chats = 1;
+  events.overviewChanged();
+  await settle();
+  assert.equal(stream.got.filter((e) => e.event === "overview").length, base + 1, "its first chat emits");
+  base += 1;
 
   // Crossing into <= 10 GiB still emits.
   state.disk.freeBytes = 8 * GiB;

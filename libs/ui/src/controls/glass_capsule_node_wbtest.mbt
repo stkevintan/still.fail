@@ -116,7 +116,99 @@ test "glass_capsule_node interactive press updates without nested glass or audit
 }
 
 ///|
-test "viewer_bar_node uses progressive scroll edge and floating liquid glass pills with zero hidden glass" {
+test "viewer_bar_node uses progressive scroll edge and floating adaptive liquid glass pills with zero hidden glass" {
+  for (dark, solid) in [(false, false), (true, false), (false, true)] {
+    let ink : ViewerInk = if dark {
+      {
+        ground: 0x222222FFL,
+        ink: 0xFFFFFFFFL,
+        muted: 0xAAAAAAFFL,
+        line: 0x444444FFL,
+        hover: 0x2427E70FL,
+        chosen: 0x2427E71FL,
+      }
+    } else {
+      {
+        ground: 0xF7F7FAFFL,
+        ink: 0x111111FFL,
+        muted: 0x666666FFL,
+        line: 0xE0E0E4FFL,
+        hover: 0x2427E70FL,
+        chosen: 0x2427E71FL,
+      }
+    }
+    let hidden = @signals.signal(false, same=fn(a, b) { a == b })
+    let t = @ui.Tester::new(fn(_c) {  }, w=1280.0, h=800.0, dark~, platform=0, window_corner=16.0)
+    set_dark(Some(dark))
+    @ui.set_glass_solid(if solid { Some(true) } else { None })
+    @ui.set_view_app(fn(root) {
+      @ui.set_tree_theme(ui_theme_now)
+      root.box(fn(bg) { bg.grow(Is(1.0)).ground(Is(ink.ground)) |> ignore }) |> ignore
+      let tips = TipLayer::new(fn() { Some(root) })
+      viewer_bar_node(
+        root,
+        fn() { "整理发布清单" },
+        fn() { "a.png" },
+        fn() { "18 KB" },
+        fn() { "" },
+        fn() { hidden.get() },
+        fn(_) { 1.0 },
+        fn() { 0.0 },
+        fn() { 1280.0 },
+        fn() { ink },
+        fn(row, corner) {
+          tool_node(
+            row,
+            fn() { { icon: "copy", label: "Copy", on: false, disabled: false } },
+            fn() { ink },
+            corner,
+            fn() {  },
+            tip=tips,
+          )
+          |> ignore
+          tool_node(
+            row,
+            fn() { { icon: "download", label: "Download", on: false, disabled: false } },
+            fn() { ink },
+            corner,
+            fn() {  },
+            tip=tips,
+          )
+          |> ignore
+        },
+        fn() {  },
+        tips,
+      )
+      |> ignore
+    })
+    t.draw()
+    assert_no_nested_glass(t, "viewer_bar_node with tools dark=\{dark} solid=\{solid}")
+    let liquid_insts = t.drawn_instances().filter(fn(a) { a.length() >= 60 && a[5] == 6.0 })
+    let adaptive_count = liquid_insts.filter(fn(a) { a[14] < -0.5 }).length()
+    let expected_liquid = if solid { 0 } else { 2 }
+    // Bare title (`middle`) emits negative-slot-23 adaptive kind == 7 text (a[23] < 0); back pill emits positive (a[23] > 0).
+    let bare_text_count = t.drawn_instances().filter(fn(a) { a.length() >= 60 && a[5] == 7.0 && a[23] < 0.0 }).length()
+    let cap_text_count = t.drawn_instances().filter(fn(a) { a.length() >= 60 && a[5] == 7.0 && a[23] > 0.0 }).length()
+    // `back_node` uses intentional optical 4pt/10pt icon-label padding which triggers rule 4 under solid hairline border.
+    let audits = t.audit().filter(fn(a) { !(solid && a.has_prefix("rule 4:")) })
+    assert_eq(
+      (
+        dark,
+        solid,
+        liquid_insts.length(),
+        adaptive_count,
+        if solid { bare_text_count == 0 && cap_text_count == 0 } else { bare_text_count > 0 && cap_text_count > 0 },
+        audits,
+      ),
+      (dark, solid, expected_liquid, expected_liquid, true, []),
+    )
+    // Hide bar and let animation complete: zero hidden glass instances at rest
+    @ui.view_tree().unwrap().event(t.time(), fn() { hidden.set(true) })
+    t.run_for(viewer_bar_ms + 50.0)
+    assert_eq(t.drawn_glass().length(), 0)
+    @ui.set_glass_solid(None)
+  }
+  // When tools are empty, only the back pill emits kind == 6 (tools pill is gone_empty, title is bare adaptive text)
   let ink : ViewerInk = {
     ground: 0x222222FFL,
     ink: 0xFFFFFFFFL,
@@ -126,17 +218,22 @@ test "viewer_bar_node uses progressive scroll edge and floating liquid glass pil
     chosen: 0x2427E71FL,
   }
   let hidden = @signals.signal(false, same=fn(a, b) { a == b })
-  let t = @ui.Tester::new(fn(_c) {  }, w=1280.0, h=800.0, dark=true, platform=0)
+  let t = @ui.Tester::new(fn(_c) {  }, w=1280.0, h=800.0, dark=true, platform=0, window_corner=16.0)
   set_dark(Some(true))
   @ui.set_view_app(fn(root) {
     @ui.set_tree_theme(ui_theme_now)
+    root.box(fn(bg) { bg.grow(Is(1.0)).ground(Is(ink.ground)) |> ignore }) |> ignore
     viewer_bar_test_node(root, ink, fn() { hidden.get() })
   })
   t.draw()
-  assert_no_nested_glass(t, "viewer_bar_node visible")
-  // Back capsule is single-layer liquid glass (`kind == 6`)
-  assert_true(t.drawn_glass().filter(fn(g) { g.4 == 6 }).length() >= 1)
-  // Hide bar and let animation complete: zero hidden glass instances at rest
+  assert_no_nested_glass(t, "viewer_bar_node empty tools")
+  let liquid_empty = t.drawn_instances().filter(fn(a) { a.length() >= 60 && a[5] == 6.0 })
+  assert_eq(liquid_empty.length(), 1)
+  assert_eq(liquid_empty.filter(fn(a) { a[14] < -0.5 }).length(), 1)
+  let bare_text_empty = t.drawn_instances().filter(fn(a) { a.length() >= 60 && a[5] == 7.0 && a[23] < 0.0 }).length()
+  let cap_text_empty = t.drawn_instances().filter(fn(a) { a.length() >= 60 && a[5] == 7.0 && a[23] > 0.0 }).length()
+  assert_true(bare_text_empty > 0 && cap_text_empty > 0)
+  assert_eq(t.audit(), [])
   @ui.view_tree().unwrap().event(t.time(), fn() { hidden.set(true) })
   t.run_for(viewer_bar_ms + 50.0)
   assert_eq(t.drawn_glass().length(), 0)

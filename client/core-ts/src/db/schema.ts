@@ -364,6 +364,11 @@ const overviewTriggers = (): [string, string][] => [
   ["station_part_drop", `CREATE TRIGGER station_part_drop AFTER DELETE ON station WHEN old.kind = 'overview'
       BEGIN
         DELETE FROM station_part WHERE address = old.address;
+      END`],
+  // (a name of its own: a core from before the profiles' table makes `station_part_drop` again as its own, and this
+  // one stays, so an overview it deletes leaves no profiles behind)
+  ["station_part_profiles_drop", `CREATE TRIGGER station_part_profiles_drop AFTER DELETE ON station WHEN old.kind = 'overview'
+      BEGIN
         DELETE FROM station_part_profiles WHERE address = old.address;
       END`],
 ];
@@ -553,14 +558,15 @@ export function ensureChatColumns(sql: Sql, derive: (agents: unknown) => { state
     // archive's place on a phone, 2026-11-19. Made again partial and covering)
     const archiveWas = sql.all("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'chat_archive'");
     if (archiveWas.length > 0 && !/\bstation\b/.test(String(archiveWas[0]![0]))) sql.exec("DROP INDEX chat_archive");
-    // (`chat_made` as a partial index over unmade rows alone: 0 index writes on steady-state chat upserts that alternate
-    // `made` between CHAT_MADE and CHAT_MADE_ALT, and an empty covering index to check at open)
+    // (`chat_unmade`, a partial index over unmade rows alone: 0 index writes on steady-state chat upserts that alternate
+    // `made` between CHAT_MADE and CHAT_MADE_ALT, and an empty covering index to check at open. `chat_made` is the
+    // name of the whole index of a core from before, which makes it again where it is missing and asks by it: left
+    // to it under that name, never made partial there (its `made < ?` would read the table whole), and dropped here)
     const unmade = `made IS NULL OR made NOT IN (${CHAT_MADE}, ${CHAT_MADE_ALT})`;
-    const madeWas = sql.all("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'chat_made'");
-    if (madeWas.length > 0 && !/WHERE /.test(String(madeWas[0]![0]))) sql.exec("DROP INDEX chat_made");
+    sql.exec("DROP INDEX IF EXISTS chat_made");
     sql.exec(`
       CREATE INDEX IF NOT EXISTS chat_recent ON chat (archived, pinned_at DESC, last_active DESC, station, ord, id, mine, hidden, led, watched, thread, session) WHERE archived = 0;
-      CREATE INDEX IF NOT EXISTS chat_made ON chat (made) WHERE ${unmade};
+      CREATE INDEX IF NOT EXISTS chat_unmade ON chat (made) WHERE ${unmade};
       CREATE INDEX IF NOT EXISTS chat_archived_at ON chat (station, archived, archived_mark, archived_at DESC, thread, session) WHERE archived_mark = 1;
       CREATE INDEX IF NOT EXISTS chat_archive ON chat (archived, archived_mark, coalesce(archived_at, 0) DESC, station, ord, id, thread, session) WHERE archived = 1 AND archived_mark = 1;
       CREATE INDEX IF NOT EXISTS chat_listed ON chat (station, archived, state, mine, hidden, led, watched, last_active, thread, session, id) WHERE archived = 0;
@@ -589,7 +595,7 @@ export function ensureChatColumns(sql: Sql, derive: (agents: unknown) => { state
         WHERE json_type(CASE a.type WHEN 'object' THEN a.value ELSE '{}' END, '$.key') = 'text'`);
     }
     const out: ChatColumnsMade = { rows: 0, read: 0, bytes: 0 };
-    // (by the partial covering index `chat_made` alone: literal predicate matches the index WHERE, no table row read)
+    // (by the partial covering index `chat_unmade` alone: literal predicate matches the index WHERE, no table row read)
     const any = sql.all(`SELECT 1 FROM chat WHERE ${unmade} LIMIT 1`).length > 0;
     if (any) {
       out.rows = sql.run(`UPDATE chat SET ${CHAT_COLUMNS.map(([c, of]) => `${c} = ${of("chat.json")}`).join(", ")} WHERE ${unmade}`);

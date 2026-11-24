@@ -317,3 +317,176 @@ let intent_pin_btn : Double = 26.0
 
 ///|
 let intent_pin_icon : Double = 14.0
+
+///|
+/// How wide a 戳一下's note stands in the margin beside the chat's column, and how far it is from the column's words
+/// and from the list's right edge.
+let intent_note_w : Double = 280.0
+
+///|
+let intent_note_gap : Double = 16.0
+
+///|
+/// How far in from the list's right edge a note stands: clear of the outline's rail at that edge (outline.mbt).
+let intent_note_edge : Double = 40.0
+
+///|
+/// How wide a chat's list is at least for its 戳一下 to be kept as notes in a margin beside its column: as wide as the
+/// column is at most, so that one narrowed for the margin still has its words a readable width across.
+let intent_notes_least_w : Double = 760.0
+
+///|
+/// Whether a chat's list `w` wide keeps its 戳一下 as notes in its margin (else they open in a panel by where they were
+/// pressed, as ever).
+fn intent_notes_fit(w : Double) -> Bool {
+  w >= intent_notes_least_w && !@sf.native_on()
+}
+
+///|
+/// How much further in than its side a row of chat `draft` stands at its right, in a list `w` wide: the room of the
+/// margin its notes stand in, while it has any (none else, its column where it ever is).
+fn intent_note_room(draft : String, w : Double) -> Double {
+  if !intent_notes_fit(w) || @sfbase.intent_notes_for(draft).is_empty() {
+    return 0.0
+  }
+  @sf.dmax(0.0, intent_note_w + intent_note_gap + intent_note_edge - row_side(w))
+}
+
+///|
+/// The words of the message of row `row` of chat `draft` its notes are of, each lit as it is kept (a quote's flash's
+/// ground at its full).
+fn intent_note_lits(draft : String, row : String) -> Array[(String, Int64)] {
+  let ground = @sf.alpha(@sf.theme().p.accent, @sfbase.picked_alpha)
+  @sfbase.intent_notes_on(draft, row).map(fn(n) { (n.selection, ground) })
+}
+
+///|
+/// In the room at row `p`'s right (intent_note_room's), its notes, `top` down as its words are, one under another: each
+/// 戳一下 of words of its message, its answer as it comes. `stick_top`: held under the pane's top as a long message
+/// scrolls past, pushed up by its foot, as the row's picture is (message_others_node's), so that its head and keys are
+/// never under the chat's bar while the words it is of are in sight.
+fn intent_notes_node(
+  p : @view.View,
+  src : Source,
+  draft : String,
+  row : () -> String,
+  room : () -> Double,
+  top : () -> Double,
+  stick_top? : () -> Double,
+) -> Unit {
+  p.show(fn() { room() > 0.0 && !@sfbase.intent_notes_on(draft, row()).is_empty() }, at_once=true, fn(o) {
+    o.over_at(By(fn() { (None, Some(top()), Some(intent_note_edge), None) })) |> ignore
+    if stick_top is Some(at) {
+      o.sticky(By(fn() { Some(at()) })) |> ignore
+    }
+    @sf.style_node(o, fn() { intent_notes_column })
+    o.each(fn() { @sfbase.intent_notes_on(draft, row()) }, fn(n) { n.id }, fn(cell, n) { intent_note_card(cell, src, fn() { n.get() }) })
+  })
+}
+
+///|
+/// A 戳一下's note: its head (戳一下, and what can be done with it: 复制 once it has its answer, 重试 where it failed, and
+/// 关闭, which takes it off its words), then its answer, or that it is being worked out, or why it failed.
+fn intent_note_card(parent : @view.View, src : Source, n : () -> @sfbase.IntentNote) -> Unit {
+  parent.box(fn(card) {
+    @sf.style_node(card, fn() { intent_note_card_style })
+    @sf.glass_capsule_node(card, radius=Some(@sf.card_corner), panel=true) |> ignore
+    let corner_in = @sf.card_corner - intent_pin_btn / 2.0
+    card.padding(Is((intent_pin_side_in, corner_in, corner_in, intent_pin_side_in))) |> ignore
+    card.box(fn(head) {
+      @sf.style_node(head, fn() { intent_pin_head })
+      @sf.icon_node(head, "poke", intent_pin_icon, By(fn() { @sf.theme().p.accent_text })) |> ignore
+      head.box(fn(t) {
+        @sf.style_node(t, fn() { intent_pin_title_wrap }, in_row=true)
+        @sf.words_node(t, fn() { @sf.t("web-main.chat.inferIntent.title") }, fn() { intent_title_words }) |> ignore
+      })
+      |> ignore
+      head.show(along_row=true, fn() { n().reply != "" }, fn(k) {
+        @sf.icon_button_node(
+          k,
+          "copy",
+          fn() { @sf.t("common.copy") },
+          fn() { @sfbase.copy_out(@signals.untracked(n).reply, said=@sf.t("common.copied")) },
+          size=intent_pin_btn,
+          icon_size=intent_pin_icon,
+        )
+        |> ignore
+      })
+      head.show(along_row=true, fn() { n().error != "" && !n().error.has_prefix("no route ") }, fn(k) {
+        @sf.icon_button_node(
+          k,
+          "refresh",
+          fn() { @sf.t("web-main.chat.inferIntent.retry") },
+          fn() { @sfbase.intent_note_retry(src, @signals.untracked(n).id) },
+          size=intent_pin_btn,
+          icon_size=intent_pin_icon,
+        )
+        |> ignore
+      })
+      @sf.icon_button_node(
+        head,
+        "close",
+        fn() { @sf.t("common.close") },
+        fn() { @sfbase.intent_note_remove(@signals.untracked(n).id) },
+        size=intent_pin_btn,
+        icon_size=intent_pin_icon,
+      )
+      |> ignore
+    })
+    |> ignore
+    card.pick(
+      fn() {
+        let now = n()
+        if now.loading {
+          IntentViewKind::Loading
+        } else if now.error != "" {
+          IntentViewKind::Failed
+        } else {
+          IntentViewKind::Ready
+        }
+      },
+      fn(area, kind) {
+        @sf.style_node(area, fn() { intent_note_body })
+        match kind {
+          Loading =>
+            area.box(fn(row) {
+              @sf.style_node(row, fn() { intent_loading_row })
+              @sf.spinner_node(row, size=14.0) |> ignore
+              @sf.words_node(row, fn() { @sf.t("web-main.chat.inferIntent.loading") }, fn() { intent_meta_words })
+              |> ignore
+            })
+            |> ignore
+          Failed => {
+            let outdated = fn() { n().error.has_prefix("no route ") }
+            @sf.words_node(
+              area,
+              fn() { @sf.t(if outdated() { "web-main.chat.inferIntent.outdated" } else { "web-main.chat.inferIntent.failed" }) },
+              fn() { intent_failed_title },
+            )
+            |> ignore
+            @sf.words_node(
+              area,
+              fn() { if outdated() { @sf.t("web-main.chat.inferIntent.outdatedHint") } else { n().error } },
+              fn() { intent_meta_words },
+            )
+            |> ignore
+          }
+          Ready => @sf.words_node(area, fn() { n().reply }, fn() { intent_reply_words }) |> ignore
+        }
+      },
+    )
+  })
+  |> ignore
+}
+
+///|
+// kept across runs: a value (no field of it changes)
+let intent_notes_column : @ui.Style = @ui.style(w=Fixed(intent_note_w), gap=S2)
+
+///|
+// kept across runs: a value (no field of it changes)
+let intent_note_card_style : @ui.Style = @ui.css("w=Full gap=S2 radius=Xl")
+
+///|
+// kept across runs: a value (no field of it changes)
+let intent_note_body : @ui.Style = @ui.css("w=Full gap=S1")

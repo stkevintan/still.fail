@@ -46,7 +46,9 @@ export type NodeMemory = { rss: number; heapUsed: number; external: number; arra
 
 export type SelfMemoryOptions = {
   clock?: Clock.Clock;
-  totalBytes: number;
+  /// The machine's memory; read at every sample where given as a function, as a VM's grows when memory is plugged in
+  /// (a station VM sharing its pool with apps boots with part of it: limits made from that alone stay too low).
+  totalBytes: number | (() => number);
   /// When this process started, on the clock.
   startedAt: number;
   /// Node's own (process.memoryUsage).
@@ -88,10 +90,12 @@ export type SelfVerdict = {
 export class SelfMemoryGovernor {
   readonly #o: SelfMemoryOptions;
   readonly #fibers: Fibers;
-  readonly #soft: number;
-  readonly #hardRss: number;
+  #soft = 0;
+  #hardRss = 0;
   readonly #hardHeap: number;
-  readonly #hardFront: number;
+  #hardFront = 0;
+  /// The machine's memory the limits above were made from.
+  #total = -1;
   #lastRelief: number | null = null;
   /// Samples in a row with the station's whole or Node's heap past its hard limit.
   #over = 0;
@@ -103,10 +107,18 @@ export class SelfMemoryGovernor {
   constructor(o: SelfMemoryOptions) {
     this.#o = o;
     this.#fibers = new Fibers("memory", o.clock);
-    this.#soft = o.softBytes ?? softLimitOf(o.totalBytes);
-    this.#hardRss = o.hardRssBytes ?? hardRssOf(o.totalBytes);
     this.#hardHeap = o.hardHeapBytes ?? HEAP_MOST;
-    this.#hardFront = o.hardFrontBytes ?? hardFrontOf(o.totalBytes);
+    this.#limits();
+  }
+
+  /// The limits from the machine's memory as it is now (those given stay as given).
+  #limits() {
+    const total = typeof this.#o.totalBytes === "function" ? this.#o.totalBytes() : this.#o.totalBytes;
+    if (total === this.#total) return;
+    this.#total = total;
+    this.#soft = this.#o.softBytes ?? softLimitOf(total);
+    this.#hardRss = this.#o.hardRssBytes ?? hardRssOf(total);
+    this.#hardFront = this.#o.hardFrontBytes ?? hardFrontOf(total);
   }
 
   start(): void {
@@ -114,6 +126,7 @@ export class SelfMemoryGovernor {
   }
 
   async sample(): Promise<SelfVerdict> {
+    this.#limits();
     const now = this.#fibers.now();
     const node = this.#o.memory();
     const children = await this.#o.children();

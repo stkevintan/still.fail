@@ -596,7 +596,12 @@ for t in $targets; do
           # answers_still's five runs, nine processes on four cores) and 139 s for 4/4. Group 2 reckoned 660, group 3
           # 700, group 4 460. By the table: 643, 483, 443 and 683 s of pages (was 804, 704, 743 and 903 by the old
           # table).
-          *) specs="4,4,500,1 4,4,660,1 4,4,700,1 4,4,460,1" ;;
+          # Then 1/4 and 4/4 were the slow ends and 3/4 (answers_still's runs, 94-108 s) the short one: release
+          # 45428114521 (-O0) cut app 1/4 at 300 s (chat_page_nodes' and preview_tree's halves beside its pages, 297 s),
+          # 2/4 179 s, 3/4 112 s, 4/4 178 s; 45432308828 4/4 240 s; 45431574527 1/4 192 s and 4/4 218 s; main
+          # 45428591108 (-O2) 130, 113, 99 and 144 s. Groups 1 and 2 reckoned 640, 3 and 4 560. By the table: 501, 523,
+          # 625 and 603 s of pages (was 643, 483, 443 and 683).
+          *) specs="4,4,640,1 4,4,640,1 4,4,560,1 4,4,560,1" ;;
         esac
         g1=() g2=() g3=() g4=()
         while read -r g f; do

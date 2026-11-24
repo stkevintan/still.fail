@@ -1,0 +1,134 @@
+// Pure-Pion unit tests for `builders_vault` (`pionc test --json`).
+
+import "base_codec"
+import "js_json"
+import "sql_db"
+
+fn expect(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+test "well_formed_utf16 distinguishes valid pairs from lone surrogates" {
+  expect(well_formed_utf16([]), "empty")
+  expect(well_formed_utf16([0x61, 0x00, 0x62]), "embedded NUL")
+  expect(well_formed_utf16([0xD83D, 0xDE80]), "valid surrogate pair")
+  expect(!well_formed_utf16([0xD800]), "lone high surrogate")
+  expect(!well_formed_utf16([0xDC00]), "lone low surrogate")
+  expect(!well_formed_utf16([0xD800, 0x0041]), "high + ascii")
+  expect(!well_formed_utf16([0xDC00, 0xD800]), "reversed pair")
+}
+
+test "utf16_blob encodes lone surrogates and NUL as exact UTF-16LE bytes" {
+  let b = utf16_blob([0xD800, 0x0000, 0xDC00])
+  match b {
+    base_codec::Json::Arr(items) => {
+      expect(items.length() == 6, "6 bytes")
+      expect(base_codec::json_eq(items[0], base_codec::json_int(0x00)), "b0")
+      expect(base_codec::json_eq(items[1], base_codec::json_int(0xD8)), "b1")
+      expect(base_codec::json_eq(items[2], base_codec::json_int(0x00)), "b2")
+      expect(base_codec::json_eq(items[3], base_codec::json_int(0x00)), "b3")
+      expect(base_codec::json_eq(items[4], base_codec::json_int(0x00)), "b4")
+      expect(base_codec::json_eq(items[5], base_codec::json_int(0xDC)), "b5")
+    }
+    _ => panic("expected Json::Arr")
+  }
+}
+
+fn fmt_simple(d : Double) -> String {
+  if d == 0.0 { "0" } else { d.to_string() }
+}
+
+test "use_time_with_num maps null, bool, number, sanitized string, and object" {
+  expect(base_codec::json_eq(use_time_with_num(None, fmt_simple), base_codec::json_null()), "none")
+  expect(
+    base_codec::json_eq(use_time_with_num(Some(js_json::JValue::Null), fmt_simple), base_codec::json_null()),
+    "null",
+  )
+  expect(
+    base_codec::json_eq(use_time_with_num(Some(js_json::JValue::Bool(true)), fmt_simple), base_codec::json_num(1.0)),
+    "true",
+  )
+  expect(
+    base_codec::json_eq(use_time_with_num(Some(js_json::JValue::Bool(false)), fmt_simple), base_codec::json_num(0.0)),
+    "false",
+  )
+  expect(
+    base_codec::json_eq(use_time_with_num(Some(js_json::JValue::Num(42.5)), fmt_simple), base_codec::json_num(42.5)),
+    "num",
+  )
+  expect(
+    base_codec::json_eq(
+      use_time_with_num(Some(js_json::JValue::Str([0x61, 0xD800, 0x62])), fmt_simple),
+      base_codec::json_str("a\u{FFFD}b"),
+    ),
+    "sanitized str",
+  )
+  let obj = match js_json::parse("{\"b\":1,\"0\":2}") {
+    Ok(v) => v
+    Err(_) => panic("parse obj failed")
+  }
+  expect(
+    base_codec::json_eq(use_time_with_num(Some(obj), fmt_simple), base_codec::json_str("{\"0\":2,\"b\":1}")),
+    "object canonical key order",
+  )
+}
+
+test "is_pending_req treats any string kind as pending" {
+  let pending_any = match js_json::parse("{\"kind\":\"anything\",\"ws\":\"w\"}") {
+    Ok(v) => v
+    Err(_) => panic("parse failed")
+  }
+  expect(is_pending_req(pending_any), "arbitrary string kind")
+  let non_string_kind = match js_json::parse("{\"kind\":true,\"ws\":\"w\"}") {
+    Ok(v) => v
+    Err(_) => panic("parse failed")
+  }
+  expect(!is_pending_req(non_string_kind), "bool kind is not pending")
+  let no_kind = match js_json::parse("{\"ws\":\"w\",\"vault\":\"v\"}") {
+    Ok(v) => v
+    Err(_) => panic("parse failed")
+  }
+  expect(!is_pending_req(no_kind), "missing kind is not pending")
+}
+
+test "format_vault_response_with maps busy and error without id" {
+  let busy_json = format_vault_response_with(
+    Err(VaultError::Sql(sql_db::sql_error(5, "database is locked"))),
+    base_codec::json_stringify,
+  )
+  expect(busy_json == "{\"busy\":true}", "busy without id")
+
+  let err_json = format_vault_response_with(
+    Err(VaultError::Sql(sql_db::sql_error(1, "no such table: vault_requests"))),
+    base_codec::json_stringify,
+  )
+  expect(err_json == "{\"error\":\"no such table: vault_requests\"}", "sql error without id")
+
+  let app_json = format_vault_response_with(
+    Err(VaultError::App("unreadable request: unexpected input at 3")),
+    base_codec::json_stringify,
+  )
+  expect(app_json == "{\"error\":\"unreadable request: unexpected input at 3\"}", "app error without id")
+}
+
+test "js_json parse preserves lone surrogates in request fields" {
+  let parsed = match js_json::parse("{\"op\":\"ready\",\"q\":{\"id\":7,\"ws\":\"w\",\"vault\":\"\\ud800\",\"owner\":\"\\udc00@x\",\"limit\":10}}") {
+    Ok(v) => v
+    Err(e) => panic("parse failed: " + e)
+  }
+  let q = match parsed.get("q") {
+    Some(v) => v
+    None => panic("missing q")
+  }
+  let r = read_of(q)
+  expect(r.vault.length() == 1 && r.vault[0] == 0xD800, "vault lone high surrogate")
+  match r.owner {
+    Some(o) => {
+      expect(o.length() == 3 && o[0] == 0xDC00 && o[1] == 0x40 && o[2] == 0x78, "owner lone low surrogate")
+    }
+    None => panic("missing owner")
+  }
+  expect(base_codec::json_eq(id_of(q), base_codec::json_num(7.0)), "id")
+}

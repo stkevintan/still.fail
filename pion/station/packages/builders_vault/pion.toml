@@ -1,0 +1,10 @@
+[package]
+name = "builders_vault"
+version = "0.1.0"
+
+[dependencies]
+base_codec = { workspace = true }
+builders_core = { workspace = true }
+host_shim = { workspace = true }
+js_json = { workspace = true }
+sql_db = { workspace = true }

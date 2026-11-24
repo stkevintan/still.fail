@@ -73,6 +73,7 @@ pub fn viewer_bar_node(
         side=Top,
         bg=fn() { ink().ground },
         shield=false,
+        pure=true,
       )
       |> ignore
       // (its ground on under the status bar where the system's bars are over the window: a tablet's)
@@ -91,7 +92,11 @@ pub fn viewer_bar_node(
         .lines_up(Is(Some(Middle)))
         .height(By(fn() { Some(viewer_bar_h + bar_over()) }))
         .gap(Is(@ui.Space::px(S4)))
-        .padding(By(fn() { (bar_start_in(), bar_over(), bar_end_in(width(), capsule_end || capsule_now()), hairline_h) }))
+        .padding(
+          By(fn() {
+            (bar_start_in(), bar_over(), bar_end_in(width(), capsule_end || capsule_now()), hairline_h)
+          }),
+        )
         |> ignore
         // clear of the window's buttons at its left, the system's (not in full screen)
         row.show(@ui.window_keys_left_now, fn(k) { k.width(Is(Some(viewer_buttons_w))) |> ignore })
@@ -131,6 +136,7 @@ pub fn viewer_bar_node(
                 }))
                 .shrink(Is(1.0))
                 .min_width(Is(Some(0.0)))
+                .adaptive_ink(Is(true))
                 |> ignore
                 m.box(fn(n) {
                   n
@@ -176,11 +182,35 @@ pub fn viewer_bar_node(
           .fits(Is(true))
           .keeps_held(Is(true))
           |> ignore
-          // (one hover ground for its tools, going from the one the hand left to the next: RovingHover)
-          end.lends(rove_lent, RovingHover::new()) |> ignore
           // (at its end, nothing before them but what is left: viewer_bar_end's justify end)
           end.box(fn(g) { g.grow(Is(1.0)) |> ignore }) |> ignore
-          tools(end, bar_tool_corner())
+          let is_capsule = fn() { capsule_end || capsule_now() }
+          let pill_corner = fn() { bar_tools_pill_corner(is_capsule()) }
+          end.box(fn(pill) {
+            pill
+            .row(Is(true))
+            .lines_up(Is(Some(Middle)))
+            .gap(Is(keys_apart()))
+            .gone_empty(Is(true))
+            .padding(Is((viewer_tools_pad, viewer_tools_pad, viewer_tools_pad, viewer_tools_pad)))
+            .radius(By(pill_corner))
+            .fits(Is(true))
+            .keeps_held(Is(true))
+            |> ignore
+            @glass.liquid_capsule_decorate(
+              pill,
+              glass=fn(_) { viewer_bar_pill_glass(ink()) },
+              shadow=glass_control_shadow,
+              solid_edge=@glass.liquid_solid_edge,
+            )
+            |> ignore
+            corner_card_node(pill, pill_corner, inset=fn() { viewer_tools_pad })
+            pill.lends(viewer_tools_pill_lent, true) |> ignore
+            // (one hover ground for its tools, going from the one the hand left to the next: RovingHover)
+            pill.lends(rove_lent, RovingHover::new()) |> ignore
+            tools(pill, bar_tool_corner(is_capsule))
+          })
+          |> ignore
         })
         |> ignore
       })
@@ -199,9 +229,18 @@ pub fn viewer_bar_node(
 let viewer_side_gives : Double = 10000.0
 
 ///|
-/// How far in from the window's side the bar's last tool stands, the window `w` wide (viewer_bar's end): clear of the
-/// window's buttons where they are the app's, as they stand on its line (window_keys' whole); else at the window's corner as a page's bar's last is (window_end_in), as
-/// the window's corner is now for the window's tree, followed.
+/// Padding inside the right tools liquid glass pill (`2.0`, matching `window_keys_pill_pad`: 32pt tools + 2×2pt = 36pt).
+let viewer_tools_pad : Double = 2.0
+
+///|
+/// Lent on the right tools liquid glass pill so embedded controls (such as `seg_node`) match `tool_side` (32pt) height.
+let viewer_tools_pill_lent : @view.Lent[Bool] = @view.Lent::new()
+
+///|
+/// How far in from the window's side the bar's tools pill stands, the window `w` wide (viewer_bar's end): clear of the
+/// window's buttons where they are the app's (12pt gap between pills); on rounded windows following the window's corner
+/// (macOS 16pt), symmetric `bar_keys_top() - viewer_tools_pad` (4pt) so the pill is concentric with the window corner
+/// and the last tool button inside stays at `window_end_in` (6pt); otherwise `window_end_in`.
 fn bar_end_in(w : Double, capsule : Bool) -> Double {
   ignore(w)
   let roots = @ui.tree_corner_roots_now()
@@ -212,7 +251,12 @@ fn bar_end_in(w : Double, capsule : Bool) -> Double {
     // (a capsule of words at its end, past the window's corner: viewer_bar's capsule_end, window_clear_in)
     window_corner_past(viewer_bar_in, roots~)
   } else {
-    window_end_in(viewer_bar_in, roots~)
+    let link = viewer_tools_pill_corner()
+    if link.follows(roots) && link.radius(roots) <= (tool_side + 2.0 * viewer_tools_pad) / 2.0 + 0.5 {
+      bar_keys_top() - viewer_tools_pad
+    } else {
+      window_end_in(viewer_bar_in, roots~)
+    }
   }
 }
 
@@ -241,17 +285,30 @@ fn bar_back_corner() -> Double {
 }
 
 ///|
-/// The corner of the bar's tools (viewer_tool_corner's, for the bar across the top): the one a page's bar's buttons
-/// share at the window's corner (bar_keys_link: window_corner_key), followed as the window's corner changes and as its
-/// own buttons come to be the app's or not (full screen); round where they are the app's.
-fn bar_tool_corner() -> @view.Live[Double] {
-  By(fn() {
-    if @ui.window_keys_own_now() {
-      tool_side / 2.0
-    } else {
-      window_corner_key().radius(@ui.tree_corner_roots_now())
-    }
-  })
+/// The corner spec of the bar's tools pill at the window's top right corner: concentric with the window corner from
+/// `bar_keys_top() - viewer_tools_pad` (4pt), falling back to a full 18pt capsule where it cannot follow.
+fn viewer_tools_pill_corner() -> @ui.CornerOf {
+  Follow(Window, bar_keys_top() - viewer_tools_pad, (tool_side + 2.0 * viewer_tools_pad) / 2.0)
+}
+
+///|
+/// The corner radius of the bar's right tools pill: full 18pt capsule beside the app's window controls (matching
+/// `window_keys_node`) or when holding word-capsule buttons past the window corner (`capsule`), or concentric with the
+/// window corner otherwise.
+fn bar_tools_pill_corner(capsule : Bool) -> Double {
+  let pill_r = (tool_side + 2.0 * viewer_tools_pad) / 2.0
+  if @ui.window_keys_own_now() || capsule {
+    pill_r
+  } else {
+    viewer_tools_pill_corner().radius(@ui.tree_corner_roots_now())
+  }
+}
+
+///|
+/// The corner of the bar's tools inside the right tools pill: concentric with `bar_tools_pill_corner` less
+/// `viewer_tools_pad` (`2.0`).
+fn bar_tool_corner(capsule : () -> Bool) -> @view.Live[Double] {
+  By(fn() { dmax(0.0, bar_tools_pill_corner(capsule()) - viewer_tools_pad) })
 }
 
 ///|
@@ -263,8 +320,9 @@ fn bar_words(size : @ui.TextSize, line : @ui.Leading, weight : Int) -> @view.Wor
 }
 
 ///|
-/// Single-layer liquid glass recipe for floating capsules in `viewer_bar_node`: picks `@glass.liquid_viewer_dark_glass`
-/// on dark media grounds (keeping white ink >= 4.5:1) and `@glass.liquid_viewer_clear_glass` on light/paper grounds.
+/// Single-layer adaptive liquid glass recipe for floating capsules in `viewer_bar_node`: picks
+/// `@glass.liquid_viewer_dark_glass` on dark media grounds and `@glass.liquid_viewer_clear_glass` on light/paper
+/// grounds, with `adaptive: true` so capsules adapt optical density and ink over bright or dark media underneath.
 fn viewer_bar_pill_glass(k : ViewerInk, spot? : (Double, Double)? = None) -> @ui.Glass {
   // kept in viewer_bar.mbt (outside Track Q2 file boundary)
   ignore(viewer_bar_share)
@@ -273,9 +331,9 @@ fn viewer_bar_pill_glass(k : ViewerInk, spot? : (Double, Double)? = None) -> @ui
   let b = ((k.ground >> 8) & 0xFFL).to_double()
   let lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
   if lum < 0.35 {
-    @glass.liquid_viewer_dark_glass(spot~, solid=k.ground, sharing=true)
+    { ..@glass.liquid_viewer_dark_glass(spot~, solid=k.ground, sharing=true), adaptive: true }
   } else {
-    @glass.liquid_viewer_clear_glass(spot~, solid=k.ground, sharing=true)
+    { ..@glass.liquid_viewer_clear_glass(spot~, solid=k.ground, sharing=true), adaptive: true }
   }
 }
 

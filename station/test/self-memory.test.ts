@@ -217,6 +217,32 @@ function rig(o: { launcher: boolean; restartFront?: boolean }) {
   return { governor, state, calls, at };
 }
 
+test("the limits follow the machine's memory as it is plugged in, not only as the station found it", async () => {
+  const scope = Effect.runSync(Scope.make());
+  scopes.push(scope);
+  const clock = Effect.runSync(Scope.provide(TestClock.make(), scope));
+  // A station VM sharing its pool with apps boots with part of it (8 GiB here), the rest plugged in after.
+  let total = 8 * GiB;
+  let trims = 0;
+  const governor = new SelfMemoryGovernor({
+    clock,
+    totalBytes: () => total,
+    startedAt: clock.currentTimeMillisUnsafe(),
+    memory: () => ({ rss: 1 * GiB, heapUsed: 200 * MiB, external: 0, arrayBuffers: 0 }),
+    children: async () => ({ bytes: 1.5 * GiB, count: 12 }),
+    pressure: async () => "normal",
+    trimIdle: () => (trims++, 4),
+    handover: async () => null,
+  });
+  // 2.5 GiB past the soft limit of 8 GiB (2 GiB, its floor): what is idle goes.
+  assert.equal((await governor.sample()).trimmed, 4);
+  // Plugged in to 16 GiB (its soft limit 3.2 GiB): the same 2.5 GiB is let be.
+  total = 16 * GiB;
+  await Effect.runPromise(clock.adjust("60000 millis"));
+  assert.equal((await governor.sample()).trimmed, null);
+  assert.equal(trims, 1);
+});
+
 test("a station within its limits does nothing", async () => {
   const r = rig({ launcher: true });
   for (let i = 0; i < 5; i++) assert.deepEqual(await r.governor.sample(), { trimmed: null, evictedWarm: null, handover: null, front: null });

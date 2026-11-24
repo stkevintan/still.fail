@@ -123,6 +123,37 @@ static const char *VS =
     "  float bgL = vs_backdrop_luma_rect(ac, vec2(max(fallback_r, 1.0)));\n"
     "  return vec2(1.0 - smoothstep(0.30, 0.42, bgL), bgL);\n"
     "}\n"
+    "float vs_srgb_to_lin(float c) {\n"
+    "  return c <= 0.04045 ? (c / 12.92) : pow(max((c + 0.055) / 1.055, 0.0), 2.4);\n"
+    "}\n"
+    "float vs_lin_to_srgb(float y) {\n"
+    "  y = clamp(y, 0.0, 1.0);\n"
+    "  return y <= 0.0031308 ? (12.92 * y) : (1.055 * pow(max(y, 0.0), 1.0 / 2.4) - 0.055);\n"
+    "}\n"
+    "vec3 vs_bare_adaptive_ink_at(vec3 rgb, vec2 ac, float hr) {\n"
+    "  float ch = max(max(rgb.r, rgb.g), rgb.b) - min(min(rgb.r, rgb.g), rgb.b);\n"
+    "  if (ch > 0.08) return rgb;\n"
+    "  float origL = vs_luma(rgb);\n"
+    "  float bgL = vs_backdrop_luma_rect(ac, vec2(max(hr, 1.0)));\n"
+    "  float c_bg = sqrt(max(bgL, 0.0));\n"
+    "  float Lbg = vs_srgb_to_lin(c_bg);\n"
+    "  float target = 4.65;\n"
+    "  float out_c;\n"
+    "  if (Lbg >= 0.1792) {\n"
+    "    float pref = origL < 0.5 ? origL : clamp(1.0 - origL, 0.02, 0.45);\n"
+    "    float y_pref = vs_srgb_to_lin(pref);\n"
+    "    float y_max = max(0.0, (Lbg + 0.05) / target - 0.05);\n"
+    "    if (origL < 0.5 && y_pref <= y_max) return rgb;\n"
+    "    out_c = vs_lin_to_srgb(min(y_pref, y_max));\n"
+    "  } else {\n"
+    "    float pref = origL >= 0.5 ? origL : clamp(1.06 - origL, 0.55, 0.98);\n"
+    "    float y_pref = vs_srgb_to_lin(pref);\n"
+    "    float y_min = min(1.0, target * (Lbg + 0.05) - 0.05);\n"
+    "    if (origL >= 0.5 && y_pref >= y_min) return rgb;\n"
+    "    out_c = vs_lin_to_srgb(max(y_pref, y_min));\n"
+    "  }\n"
+    "  return vec3(out_c);\n"
+    "}\n"
     "vec3 vs_adaptive_ink_at(vec3 rgb, vec2 ac, float fallback_r, vec4 rect, vec2 sample_off, bool is_icon) {\n"
     "  float ch = max(max(rgb.r, rgb.g), rgb.b) - min(min(rgb.r, rgb.g), rgb.b);\n"
     "  float origL = vs_luma(rgb);\n"
@@ -190,7 +221,9 @@ static const char *VS =
     "  v_pos = pos; v_cpos = a_rot.w > 0.5 ? at : pos; v_rect = a_rect; v_p = a_p; v_color = a_color; v_c2 = a_c2; v_clip = a_clip; v_pad = a_pad; v_rc = a_rc; v_rs = a_rs; v_rr = a_rr;\n"
     "#if MB_VS_ADAPTIVE\n"
     "  if (kind == 7) {\n"
-    "    v_color.rgb = vs_adaptive_ink_at(a_color.rgb, a_pad.yz, a_pad.w * 0.5, a_rect, a_p.zw, false);\n"
+    "    v_color.rgb = a_pad.w < 0.0\n"
+    "      ? vs_bare_adaptive_ink_at(a_color.rgb, a_pad.yz, -a_pad.w * 0.5)\n"
+    "      : vs_adaptive_ink_at(a_color.rgb, a_pad.yz, a_pad.w * 0.5, a_rect, a_p.zw, false);\n"
     "  } else if ((kind == 10 || kind == 11) && a_pad.w > 0.0) {\n"
     "    v_color.rgb = vs_adaptive_ink_at(a_color.rgb, a_pad.yz, a_pad.w * 0.5, a_rect, kind == 10 ? vec2(0.0) : a_p.zw, true);\n"
     "  } else if (kind == 0 && a_pad.w < 0.0) {\n"
@@ -1172,8 +1205,8 @@ static const char *FS =
     "    float ps = prog_glass ? fr_s : 1.0;\n"
     "    float ts = prog_glass ? fr_s : 1.0;\n"
     "    float sat = prog_glass ? mix(1.0, v_p.z, ps) : v_p.z;\n"
-    "    float bg_diff = prog_glass ? smoothstep(0.22, 0.72, abs(luma(col.rgb) - luma(g3))) : 0.0;\n"
-    "    float base_a = prog_glass ? mix(col.a, min(0.86, col.a + 0.34), bg_diff) : col.a;\n"
+    "    float bg_diff = (prog_glass && col.a > 0.001) ? smoothstep(0.22, 0.72, abs(luma(col.rgb) - luma(g3))) : 0.0;\n"
+    "    float base_a = (prog_glass && col.a > 0.001) ? mix(col.a, min(0.86, col.a + 0.34), bg_diff) : col.a;\n"
     "    float ta = prog_glass ? (base_a * ts) : col.a;\n"
     "    g3 = max(mix(vec3(luma(g3)), g3, sat), 0.0);\n"
     "    g3 = g3 * (1.0 - ta) + col.rgb * ta;\n"
@@ -2470,6 +2503,20 @@ static int grab_of(Grab *m, const float *f, int32_t start, int32_t end, int32_t 
     if (bx1 > x1) x1 = bx1;
     if (by1 > y1) y1 = by1;
   }
+  if (kind == 5 || unmerged_liquid) {
+    for (int32_t i = end; i < count; i++) {
+      const float *b = f + i * MB_INST;
+      int bk = (int)(b[5] + 0.5f);
+      if ((bk == 5 || bk == 6) && b[20] < 0.0f && b[20] != a[20]) break;
+      if (bk == 7 && b[23] < 0.0f) {
+        float hr = -b[23] * 0.5f;
+        if (b[21] - hr < x0) x0 = b[21] - hr;
+        if (b[22] - hr < y0) y0 = b[22] - hr;
+        if (b[21] + hr > x1) x1 = b[21] + hr;
+        if (b[22] + hr > y1) y1 = b[22] + hr;
+      }
+    }
+  }
   m->gb[0] = x0 - 2; m->gb[1] = y0 - 2; m->gb[2] = x1 + 2; m->gb[3] = y1 + 2;
   float sc = (float)cur_scale;
   // in the surface's pixels, from its foot (GL's way up)
@@ -3298,7 +3345,7 @@ static int under_take(const float *f, int32_t start, int32_t count, int32_t piec
           if (ey1 > dep[3]) { dep[3] = ey1; grew = 1; }
         }
       } else {
-        float rad = bi[23] + 4.0f;
+        float rad = fabsf(bi[23]) + 4.0f;
         float ex0 = bi[21] - rad, ey0 = bi[22] - rad;
         float ex1 = bi[21] + rad, ey1 = bi[22] + rad;
         if (ex0 < dep[0]) { dep[0] = ex0; grew = 1; }

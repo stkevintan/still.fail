@@ -291,6 +291,37 @@ static const char *shader_src =
     "  float bgL = mb_backdrop_luma_rect(ac, float2(max(fallback_r, 1.0), max(fallback_r, 1.0)));\n"
     "  return float2(1.0 - smoothstep(0.30, 0.42, bgL), bgL);\n"
     "}\n"
+    "float mb_srgb_to_lin(float c) {\n"
+    "  return c <= 0.04045 ? (c / 12.92) : pow(max((c + 0.055) / 1.055, 0.0), 2.4);\n"
+    "}\n"
+    "float mb_lin_to_srgb(float y) {\n"
+    "  y = clamp(y, 0.0, 1.0);\n"
+    "  return y <= 0.0031308 ? (12.92 * y) : (1.055 * pow(max(y, 0.0), 1.0 / 2.4) - 0.055);\n"
+    "}\n"
+    "float3 mb_bare_adaptive_ink_at(float3 rgb, float2 ac, float hr) {\n"
+    "  float ch = max(max(rgb.r, rgb.g), rgb.b) - min(min(rgb.r, rgb.g), rgb.b);\n"
+    "  if (ch > 0.08) return rgb;\n"
+    "  float origL = luma(rgb);\n"
+    "  float bgL = mb_backdrop_luma_rect(ac, float2(max(hr, 1.0), max(hr, 1.0)));\n"
+    "  float c_bg = sqrt(max(bgL, 0.0));\n"
+    "  float Lbg = mb_srgb_to_lin(c_bg);\n"
+    "  float target = 4.65;\n"
+    "  float out_c;\n"
+    "  if (Lbg >= 0.1792) {\n"
+    "    float pref = origL < 0.5 ? origL : clamp(1.0 - origL, 0.02, 0.45);\n"
+    "    float y_pref = mb_srgb_to_lin(pref);\n"
+    "    float y_max = max(0.0, (Lbg + 0.05) / target - 0.05);\n"
+    "    if (origL < 0.5 && y_pref <= y_max) return rgb;\n"
+    "    out_c = mb_lin_to_srgb(min(y_pref, y_max));\n"
+    "  } else {\n"
+    "    float pref = origL >= 0.5 ? origL : clamp(1.06 - origL, 0.55, 0.98);\n"
+    "    float y_pref = mb_srgb_to_lin(pref);\n"
+    "    float y_min = min(1.0, target * (Lbg + 0.05) - 0.05);\n"
+    "    if (origL >= 0.5 && y_pref >= y_min) return rgb;\n"
+    "    out_c = mb_lin_to_srgb(max(y_pref, y_min));\n"
+    "  }\n"
+    "  return float3(out_c, out_c, out_c);\n"
+    "}\n"
     "float3 mb_adaptive_ink_at(float3 rgb, float2 ac, float fallback_r, float4 rect, float2 sample_off, bool is_icon) {\n"
     "  float ch = max(max(rgb.r, rgb.g), rgb.b) - min(min(rgb.r, rgb.g), rgb.b);\n"
     "  float origL = luma(rgb);\n"
@@ -350,7 +381,9 @@ static const char *shader_src =
     "    at = I.rot.yz + float2(c * d.x - s * d.y, s * d.x + c * d.y); }\n"
     "  float4 col = I.color;\n"
     "  if (kind == 7) {\n"
-    "    col.rgb = mb_adaptive_ink_at(col.rgb, I.pd.yz, I.pd.w * 0.5, I.rect, I.p.zw, false);\n"
+    "    col.rgb = I.pd.w < 0.0\n"
+    "      ? mb_bare_adaptive_ink_at(col.rgb, I.pd.yz, -I.pd.w * 0.5)\n"
+    "      : mb_adaptive_ink_at(col.rgb, I.pd.yz, I.pd.w * 0.5, I.rect, I.p.zw, false);\n"
     "  } else if (kind == 10 && I.pd.w > 0.0) {\n"
     "    col.rgb = mb_adaptive_ink_at(col.rgb, I.pd.yz, I.pd.w * 0.5, I.rect, float2(0.0, 0.0), true);\n"
     "  } else if (kind == 11 && I.pd.w > 0.0) {\n"
@@ -1276,8 +1309,8 @@ static const char *shader_src =
     "    float ps = prog_glass ? fr_s : 1.0;\n"
     "    float ts = prog_glass ? fr_s : 1.0;\n"
     "    float sat = prog_glass ? lerp(1.0, I.prm.z, ps) : I.prm.z;\n"
-    "    float bg_diff = prog_glass ? smoothstep(0.22, 0.72, abs(luma(col.rgb) - lg)) : 0.0;\n"
-    "    float base_a = prog_glass ? lerp(col.a, min(0.86, col.a + 0.34), bg_diff) : col.a;\n"
+    "    float bg_diff = (prog_glass && col.a > 0.001) ? smoothstep(0.22, 0.72, abs(luma(col.rgb) - lg)) : 0.0;\n"
+    "    float base_a = (prog_glass && col.a > 0.001) ? lerp(col.a, min(0.86, col.a + 0.34), bg_diff) : col.a;\n"
     "    float ta = prog_glass ? (base_a * ts) : col.a;\n"
     "    g3 = max(lerp(float3(lg, lg, lg), g3, sat), 0.0);\n"
     "    g3 = g3 * (1.0 - ta) + col.rgb * ta;\n"
@@ -2781,6 +2814,20 @@ static int grab_of(Grab *m, const float *f, int32_t start, int32_t end, int32_t 
     if (bx1 > x1) x1 = bx1;
     if (by1 > y1) y1 = by1;
   }
+  if (kind == 5 || unmerged_liquid) {
+    for (int32_t i = end; i < count; i++) {
+      const float *b = f + i * MB_INST;
+      int bk = (int)(b[5] + 0.5f);
+      if ((bk == 5 || bk == 6) && b[20] < 0.0f && b[20] != a[20]) break;
+      if (bk == 7 && b[23] < 0.0f) {
+        float hr = -b[23] * 0.5f;
+        if (b[21] - hr < x0) x0 = b[21] - hr;
+        if (b[22] - hr < y0) y0 = b[22] - hr;
+        if (b[21] + hr > x1) x1 = b[21] + hr;
+        if (b[22] + hr > y1) y1 = b[22] + hr;
+      }
+    }
+  }
   m->g.misc[0] = (float)n;
   m->g.misc[1] = 0.0f;
   m->g.gb[0] = x0 - 2; m->g.gb[1] = y0 - 2; m->g.gb[2] = x1 + 2; m->g.gb[3] = y1 + 2;
@@ -2949,7 +2996,7 @@ static int under_take(const float *f, int32_t start, int32_t count, int32_t piec
           if (ey1 > dep[3]) { dep[3] = ey1; grew = 1; }
         }
       } else {
-        float rad = bi[23] + 4.0f;
+        float rad = fabsf(bi[23]) + 4.0f;
         float ex0 = bi[21] - rad, ey0 = bi[22] - rad;
         float ex1 = bi[21] + rad, ey1 = bi[22] + rad;
         if (ex0 < dep[0]) { dep[0] = ex0; grew = 1; }

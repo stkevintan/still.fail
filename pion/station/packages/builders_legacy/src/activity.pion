@@ -1,0 +1,1048 @@
+// 1:1 port of `station/mb/src/activity/{activity.mbt, directory.mbt, sandbox.mbt, share.mbt}`:
+// - `activity_step`, `recovery_step`, `awake_step`
+// - `directory_install`, `directory_step`
+// - `key_part`, `sandbox_name`, `sandbox_enable`, `sandbox_disable`, `sandbox_step`
+// - `share_install`, `share_step`
+//
+// Invariants:
+// - All write transactions go exclusively through `db.tx_err(...)` (zero raw tx SQL).
+// - All `CREATE TRIGGER ... BEGIN ... END;` literals are self-contained.
+// - `key_part` truncates to 24 UTF-16 code units via `js_json::utf16_units`.
+// - `share_values` enforces 16384 UTF-16 code-unit limit via `js_json::utf16_len`
+//   and checks `js_json::is_safe_integer(u) && js_json::is_safe_integer(u + IDLE_MS)`.
+
+import "base_codec"
+import "builders_core"
+import "crypto"
+import "js_json"
+import "sql_db"
+
+// ── Activity / Recovery / Awake ──
+
+fn row_complete(row : Map[String, base_codec::Json]) -> Bool {
+  json_is_one(sql_db::row_val(row, "complete"))
+}
+
+let ADD_ACTIVE_SQL : String = "INSERT INTO workspace_activity (ws, session) SELECT s.ws, s.key FROM sessions s WHERE s.key = ?1 AND s.ws IS NOT NULL AND EXISTS (SELECT 1 FROM sessions z WHERE z.key = s.key AND (z.running = 1 OR EXISTS (SELECT 1 FROM deliveries d INDEXED BY deliveries_pending WHERE d.session = z.key AND d.delivered_at IS NULL) OR EXISTS (SELECT 1 FROM letter_deliveries d INDEXED BY letter_deliveries_pending WHERE d.session = z.key AND d.delivered_at IS NULL))) AND NOT EXISTS (SELECT 1 FROM workspace_activity a WHERE a.ws = s.ws AND a.session = s.key)"
+
+fn next_active_sql(after : Bool) -> String {
+  let key_cond = if after { " AND key > ?1" } else { "" }
+  let ses_cond = if after { " AND session > ?1" } else { "" }
+  "SELECT MIN(session) AS session FROM (SELECT (SELECT key FROM sessions INDEXED BY sessions_running WHERE running = 1" +
+  key_cond +
+  " ORDER BY key LIMIT 1) AS session UNION ALL SELECT (SELECT session FROM deliveries INDEXED BY deliveries_pending WHERE delivered_at IS NULL" +
+  ses_cond +
+  " ORDER BY session LIMIT 1) UNION ALL SELECT (SELECT session FROM letter_deliveries INDEXED BY letter_deliveries_pending WHERE delivered_at IS NULL" +
+  ses_cond +
+  " ORDER BY session LIMIT 1))"
+}
+
+pub fn activity_step(db : sql_db::Db, limit : Int = 64) -> Result[Bool, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      let meta = match tx_db.first("SELECT cursor, complete FROM workspace_activity_meta WHERE id = 1", []) {
+        Ok(Some(r)) => r
+        Ok(None) => return Err(builders_core::StepError::App("workspace activity metadata is missing"))
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if row_complete(meta) {
+        return Ok(true)
+      }
+      let mut cursor = sql_db::row_val(meta, "cursor")
+      let mut visited = 0
+      let mut done = false
+      while visited < limit {
+        let after = !is_json_null(cursor)
+        let params : Array[base_codec::Json] = if after { [cursor] } else { [] }
+        let key = match tx_db.first(next_active_sql(after), params) {
+          Ok(Some(r)) => sql_db::row_val(r, "session")
+          Ok(None) => base_codec::json_null()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        if is_json_null(key) {
+          done = true
+          break
+        }
+        match tx_db.run(ADD_ACTIVE_SQL, [key]) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        cursor = key
+        visited = visited + 1
+      }
+      match tx_db.run("UPDATE workspace_activity_meta SET cursor = ?, complete = ? WHERE id = 1", [cursor, json_flag(done)]) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      Ok(done)
+    },
+    map_sql,
+  )
+}
+
+let AWAKE_DEADLINE_PARAM1 : String = "(SELECT CASE WHEN typeof(t.ended_at) = 'integer' AND t.ended_at BETWEEN -2251799813685247 AND 2251799813685247 AND (t.wait_seconds IS NULL OR (typeof(t.wait_seconds) = 'integer' AND t.wait_seconds BETWEEN -2251799813685 AND 2251799813685)) THEN t.ended_at + COALESCE(t.wait_seconds, 0) * 1000 ELSE -9007199254740991 END FROM sessions s CROSS JOIN turns t ON t.rowid = (SELECT rowid FROM turns INDEXED BY turns_by_session WHERE session_key = s.key ORDER BY started_at DESC, rowid DESC LIMIT 1) WHERE s.key = ?1 AND s.archived_at IS NULL AND s.running != 1 AND t.ended_at IS NOT NULL AND t.declared = 'waiting')"
+
+let SYNC_AWAKE_SQL : String = "UPDATE session_recover_waits SET awake_deadline = " +
+AWAKE_DEADLINE_PARAM1 +
+" WHERE session = ?1 AND (1) AND awake_deadline IS NOT " +
+AWAKE_DEADLINE_PARAM1
+
+let WANTED_RECOVERY_SQL : String = "EXISTS (SELECT 1 FROM sessions s WHERE s.key = ?1 AND s.archived_at IS NULL AND s.running != 1) AND EXISTS (SELECT 1 FROM turns t WHERE t.rowid = (SELECT rowid FROM turns INDEXED BY turns_by_session WHERE session_key = ?1 ORDER BY started_at DESC, rowid DESC LIMIT 1) AND t.ended_at IS NOT NULL AND (t.declared = 'waiting' OR (t.outcome = 'failed' AND substr(t.detail, 1, 11) = 'rate_limit:')))"
+
+let DROP_RECOVERY_SQL : String = "DELETE FROM session_recover_waits WHERE session = ?1 AND (1) AND NOT (" +
+WANTED_RECOVERY_SQL +
+")"
+
+let PUT_RECOVERY_SQL : String = "INSERT INTO session_recover_waits (session, awake_deadline) SELECT ?1, " +
+AWAKE_DEADLINE_PARAM1 +
+" WHERE (1) AND " +
+WANTED_RECOVERY_SQL +
+" AND NOT EXISTS (SELECT 1 FROM session_recover_waits WHERE session = ?1)"
+
+fn walk_table(
+  db : sql_db::Db,
+  meta_table : String,
+  table : String,
+  column : String,
+  limit : Int,
+  before : (sql_db::Db) -> Result[Bool, builders_core::StepError],
+  each : (sql_db::Db, base_codec::Json) -> Result[Unit, builders_core::StepError],
+) -> Result[Bool, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      let meta = match tx_db.first("SELECT cursor, complete FROM " + meta_table + " WHERE id = 1", []) {
+        Ok(Some(r)) => r
+        Ok(None) => return Err(builders_core::StepError::App(meta_table + " has no row"))
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if row_complete(meta) {
+        return Ok(true)
+      }
+      match before(tx_db) {
+        Ok(false) => return Ok(false)
+        Ok(true) => ()
+        Err(e) => return Err(e)
+      }
+      let cursor = sql_db::row_val(meta, "cursor")
+      let lim = base_codec::json_num(limit.to_double())
+      let rows = if is_json_null(cursor) {
+        match tx_db.all("SELECT " + column + " AS k FROM " + table + " ORDER BY " + column + " LIMIT ?", [lim]) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx_db.all(
+          "SELECT " + column + " AS k FROM " + table + " WHERE " + column + " > ? ORDER BY " + column + " LIMIT ?",
+          [cursor, lim],
+        ) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      for i in 0..<rows.length() {
+        match each(tx_db, sql_db::row_val(rows[i], "k")) {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+      }
+      let done = rows.length() < limit
+      let reached = if rows.length() > 0 {
+        sql_db::row_val(rows[rows.length() - 1], "k")
+      } else {
+        cursor
+      }
+      match tx_db.run("UPDATE " + meta_table + " SET cursor = ?, complete = ? WHERE id = 1", [reached, json_flag(done)]) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      Ok(done)
+    },
+    map_sql,
+  )
+}
+
+pub fn recovery_step(db : sql_db::Db, limit : Int = 64) -> Result[Bool, builders_core::StepError] {
+  walk_table(
+    db,
+    "session_recover_wait_meta",
+    "sessions",
+    "key",
+    limit,
+    fn(_tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] { Ok(true) },
+    fn(tx_db : sql_db::Db, key : base_codec::Json) -> Result[Unit, builders_core::StepError] {
+      match tx_db.run(DROP_RECOVERY_SQL, [key]) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      match tx_db.run(PUT_RECOVERY_SQL, [key]) {
+        Ok(_) => Ok(())
+        Err(e) => Err(builders_core::StepError::Sql(e))
+      }
+    },
+  )
+}
+
+pub fn awake_step(db : sql_db::Db, limit : Int = 64) -> Result[Bool, builders_core::StepError] {
+  walk_table(
+    db,
+    "session_awake_wait_meta",
+    "session_recover_waits",
+    "session",
+    limit,
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      match tx_db.first("SELECT complete FROM session_recover_wait_meta WHERE id = 1", []) {
+        Ok(Some(r)) => Ok(row_complete(r))
+        Ok(None) => Ok(false)
+        Err(e) => Err(builders_core::StepError::Sql(e))
+      }
+    },
+    fn(tx_db : sql_db::Db, key : base_codec::Json) -> Result[Unit, builders_core::StepError] {
+      match tx_db.run(SYNC_AWAKE_SQL, [key]) {
+        Ok(_) => Ok(())
+        Err(e) => Err(builders_core::StepError::Sql(e))
+      }
+    },
+  )
+}
+
+// ── Session Directory Lookup ──
+
+let DIRECTORY_VERSION : Int = 1
+
+fn directory_schema_stmts() -> Array[String] {
+  [
+    "CREATE TABLE session_dir_meta (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL, phase INTEGER NOT NULL, cursor TEXT, end_session TEXT) WITHOUT ROWID;",
+    "INSERT INTO session_dir_meta VALUES (1, 1, 0, NULL, (SELECT key FROM sessions WHERE key IS NOT NULL ORDER BY key DESC LIMIT 1));",
+    "CREATE TABLE session_dir_rows (session TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY(session, root)) WITHOUT ROWID;",
+    "CREATE INDEX session_dir_root ON session_dir_rows (root, session);",
+    "CREATE TABLE session_dir_dirty (session TEXT PRIMARY KEY) WITHOUT ROWID;",
+    "CREATE TRIGGER session_dir_before_add BEFORE INSERT ON sessions BEGIN INSERT INTO session_dir_dirty (session) SELECT NEW.key WHERE NEW.key IS NOT NULL AND NOT EXISTS (SELECT 1 FROM session_dir_dirty d WHERE d.session = NEW.key); INSERT INTO session_dir_dirty (session) SELECT s.key FROM sessions s WHERE (s.token = NEW.token OR s.rowid = NEW.rowid) AND s.key IS NOT NEW.key AND NOT EXISTS (SELECT 1 FROM session_dir_dirty d WHERE d.session = s.key); END;",
+    "CREATE TRIGGER session_dir_before_change BEFORE UPDATE ON sessions WHEN OLD.rowid IS NOT NEW.rowid OR OLD.key IS NOT NEW.key OR OLD.token IS NOT NEW.token OR OLD.workspace IS NOT NEW.workspace OR OLD.cwd IS NOT NEW.cwd BEGIN INSERT INTO session_dir_dirty (session) SELECT OLD.key WHERE OLD.key IS NOT NULL AND NOT EXISTS (SELECT 1 FROM session_dir_dirty d WHERE d.session = OLD.key); INSERT INTO session_dir_dirty (session) SELECT NEW.key WHERE NEW.key IS NOT NULL AND NOT EXISTS (SELECT 1 FROM session_dir_dirty d WHERE d.session = NEW.key); INSERT INTO session_dir_dirty (session) SELECT s.key FROM sessions s WHERE (s.token = NEW.token OR s.rowid = NEW.rowid) AND s.key IS NOT NEW.key AND NOT EXISTS (SELECT 1 FROM session_dir_dirty d WHERE d.session = s.key); END;",
+    "CREATE TRIGGER session_dir_before_drop BEFORE DELETE ON sessions BEGIN INSERT INTO session_dir_dirty (session) SELECT OLD.key WHERE OLD.key IS NOT NULL AND NOT EXISTS (SELECT 1 FROM session_dir_dirty d WHERE d.session = OLD.key); END;",
+  ]
+}
+
+fn directory_check(db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+  let v = match db.first("SELECT version FROM session_dir_meta WHERE id = 1", []) {
+    Ok(Some(m)) => sql_db::row_val(m, "version")
+    Ok(None) => base_codec::json_null()
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ok = match v {
+    base_codec::Json::Num(n, _) => n.to_int() == DIRECTORY_VERSION
+    _ => false
+  }
+  if !ok {
+    let said = if is_json_null(v) { "missing" } else { sql_db::stringify_json(v) }
+    return Err(
+      builders_core::StepError::App(
+        "session directory index version " + said + " is incompatible with " + DIRECTORY_VERSION.to_string(),
+      ),
+    )
+  }
+  Ok(())
+}
+
+fn directory_installed(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match db.first("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_dir_meta'", []) {
+    Ok(Some(_)) => Ok(true)
+    Ok(None) => Ok(false)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+pub fn directory_install(db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+  match directory_installed(db) {
+    Ok(true) => return directory_check(db)
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      match directory_installed(tx_db) {
+        Ok(false) => {
+          let stmts = directory_schema_stmts()
+          for i in 0..<stmts.length() {
+            match tx_db.exec(stmts[i]) {
+              Ok(_) => ()
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+        }
+        Ok(true) => ()
+        Err(e) => return Err(e)
+      }
+      Ok(())
+    },
+    map_sql,
+  )
+}
+
+pub fn directory_step(db : sql_db::Db, limit : Int = 64) -> Result[Bool, builders_core::StepError] {
+  if limit < 1 {
+    return Err(builders_core::StepError::App("session directory batch must be positive"))
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      match directory_check(tx_db) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      let meta = match tx_db.first("SELECT phase, cursor, end_session FROM session_dir_meta WHERE id = 1", []) {
+        Ok(Some(r)) => r
+        Ok(None) =>
+        return Err(
+          builders_core::StepError::App(
+            "session directory index version missing is incompatible with " + DIRECTORY_VERSION.to_string(),
+          ),
+        )
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let end = sql_db::row_val(meta, "end_session")
+      let mut phase = match sql_db::row_val(meta, "phase") {
+        base_codec::Json::Num(p, _) => p.to_int()
+        _ => 0
+      }
+      let mut cursor = sql_db::row_val(meta, "cursor")
+      let mut visited = 0
+      while visited < limit {
+        let lim = base_codec::json_num((limit - visited).to_double())
+        let rows = if phase == 0 {
+          let found = if is_json_null(end) {
+            []
+          } else if is_json_null(cursor) {
+            match tx_db.all("SELECT key AS session FROM sessions WHERE key <= ? ORDER BY key LIMIT ?", [end, lim]) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          } else {
+            match tx_db.all(
+              "SELECT key AS session FROM sessions WHERE key > ? AND key <= ? ORDER BY key LIMIT ?",
+              [cursor, end, lim],
+            ) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+          if found.length() == 0 {
+            phase = 1
+            cursor = base_codec::json_null()
+            continue
+          }
+          found
+        } else {
+          let found = match tx_db.all("SELECT session FROM session_dir_dirty ORDER BY session LIMIT ?", [lim]) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          if found.length() == 0 {
+            break
+          }
+          found
+        }
+        for i in 0..<rows.length() {
+          let session = sql_db::row_val(rows[i], "session")
+          match tx_db.run("DELETE FROM session_dir_rows WHERE session = ?", [session]) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          match tx_db.run(
+            "INSERT INTO session_dir_rows (session, root) SELECT key, workspace FROM sessions WHERE key = ?1 AND workspace <> '' UNION SELECT key, cwd FROM sessions WHERE key = ?1 AND cwd IS NOT NULL AND cwd <> ''",
+            [session],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          match tx_db.run("DELETE FROM session_dir_dirty WHERE session = ?", [session]) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          if phase == 0 {
+            cursor = session
+          }
+          visited = visited + 1
+        }
+      }
+      match tx_db.run(
+        "UPDATE session_dir_meta SET phase = ?, cursor = ? WHERE id = 1",
+        [base_codec::json_num(phase.to_double()), cursor],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let dirty_any = match tx_db.first("SELECT 1 FROM session_dir_dirty LIMIT 1", []) {
+        Ok(Some(_)) => true
+        Ok(None) => false
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      Ok(phase == 1 && !dirty_any)
+    },
+    map_sql,
+  )
+}
+
+// ── Sandbox Name Lookup ──
+
+let SANDBOX_VERSION : Int = 1
+
+fn hash10(s : String) -> String {
+  let clean_utf8 = js_json::utf8_bytes(js_json::sanitize_str(js_json::utf16_units(s)))
+  let hex = crypto::sha256_hex(clean_utf8)
+  slice_bytes_str(hex.to_bytes(), 0, 10)
+}
+
+/// Key part for runner id: first at most 24 UTF-16 code units, replacing any unit
+/// outside `[A-Za-z0-9_-]` with `_`, appending `-<hash10(key)>` if changed.
+pub fn key_part(key : String) -> String {
+  let units = js_json::utf16_units(key)
+  let n = if units.length() < 24 { units.length() } else { 24 }
+  let sb = StringBuilder::new()
+  for i in 0..<n {
+    let c = units[i]
+    let ok = (c >= 0x41 && c <= 0x5A) ||
+    (c >= 0x61 && c <= 0x7A) ||
+    (c >= 0x30 && c <= 0x39) ||
+    c == 0x5F ||
+    c == 0x2D
+    sb.write_byte(if ok { c as Byte } else { 0x5F as Byte })
+  }
+  let cleaned = sb.to_string()
+  if cleaned == key {
+    cleaned
+  } else {
+    cleaned + "-" + hash10(key)
+  }
+}
+
+/// Sandbox name for a key: lowercased as JS (ASCII A-Z, Kelvin 0x212A -> 'k', İ 0x0130 -> "i\u{307}"),
+/// non-[a-z0-9] runs collapsed to '-', trimmed, truncated to 16 chars, trailing '-' trimmed, plus hash10.
+pub fn sandbox_name(key : String) -> String {
+  let units = js_json::utf16_units(key)
+  let lower : Array[Int] = []
+  let mut idx = 0
+  while idx < units.length() {
+    let c = units[idx]
+    idx = idx + 1
+    if c >= 0xD800 && c <= 0xDBFF && idx < units.length() {
+      let d = units[idx]
+      if d >= 0xDC00 && d <= 0xDFFF {
+        let cp = 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00)
+        lower.push(cp)
+        idx = idx + 1
+        continue
+      }
+    }
+    if c >= 0x41 && c <= 0x5A {
+      lower.push(c + 32)
+    } else if c == 0x212A {
+      lower.push(0x6B)
+    } else if c == 0x0130 {
+      lower.push(0x69)
+      lower.push(0x0307)
+    } else {
+      lower.push(c)
+    }
+  }
+  let dashed : Array[Int] = []
+  let mut run = false
+  for i in 0..<lower.length() {
+    let cp = lower[i]
+    if (cp >= 0x61 && cp <= 0x7A) || (cp >= 0x30 && cp <= 0x39) {
+      dashed.push(cp)
+      run = false
+    } else if !run {
+      dashed.push(0x2D)
+      run = true
+    }
+  }
+  let mut start = 0
+  while start < dashed.length() && dashed[start] == 0x2D {
+    start = start + 1
+  }
+  let mut end = dashed.length()
+  while end > start && dashed[end - 1] == 0x2D {
+    end = end - 1
+  }
+  if end - start > 16 {
+    end = start + 16
+  }
+  while end > start && dashed[end - 1] == 0x2D {
+    end = end - 1
+  }
+  let sb = StringBuilder::new()
+  for i in start..<end {
+    sb.write_byte(dashed[i] as Byte)
+  }
+  let clean = sb.to_string()
+  let hash = hash10(key)
+  if clean == "" {
+    "s-" + hash
+  } else {
+    "s-" + clean + "-" + hash
+  }
+}
+
+fn sandbox_schema_stmts() -> Array[String] {
+  [
+    "CREATE TABLE sandbox_name_meta (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL, enabled INTEGER NOT NULL, phase INTEGER NOT NULL, cursor TEXT, prune INTEGER NOT NULL, end_session TEXT, end_prune TEXT) WITHOUT ROWID;",
+    "INSERT INTO sandbox_name_meta (id, version, enabled, phase, cursor, prune, end_session, end_prune) VALUES (1, 1, 1, 0, NULL, 0, (SELECT key FROM sessions WHERE key IS NOT NULL ORDER BY key DESC LIMIT 1), NULL);",
+    "CREATE TABLE sandbox_name_rows (session TEXT PRIMARY KEY, name TEXT NOT NULL) WITHOUT ROWID;",
+    "CREATE INDEX sandbox_name_lookup ON sandbox_name_rows (name);",
+    "CREATE TABLE sandbox_name_dirty (session TEXT PRIMARY KEY) WITHOUT ROWID;",
+    "CREATE TRIGGER sandbox_name_before_add BEFORE INSERT ON sessions WHEN (SELECT enabled FROM sandbox_name_meta WHERE id = 1) = 1 BEGIN INSERT INTO sandbox_name_dirty (session) SELECT NEW.key WHERE NEW.key IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sandbox_name_dirty d WHERE d.session = NEW.key); INSERT INTO sandbox_name_dirty (session) SELECT s.key FROM sessions s WHERE (s.token = NEW.token OR s.rowid = NEW.rowid) AND s.key IS NOT NEW.key AND NOT EXISTS (SELECT 1 FROM sandbox_name_dirty d WHERE d.session = s.key); END;",
+    "CREATE TRIGGER sandbox_name_before_change BEFORE UPDATE ON sessions WHEN (OLD.rowid IS NOT NEW.rowid OR OLD.key IS NOT NEW.key OR OLD.token IS NOT NEW.token) AND (SELECT enabled FROM sandbox_name_meta WHERE id = 1) = 1 BEGIN INSERT INTO sandbox_name_dirty (session) SELECT OLD.key WHERE OLD.key IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sandbox_name_dirty d WHERE d.session = OLD.key); INSERT INTO sandbox_name_dirty (session) SELECT NEW.key WHERE NEW.key IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sandbox_name_dirty d WHERE d.session = NEW.key); INSERT INTO sandbox_name_dirty (session) SELECT s.key FROM sessions s WHERE (s.token = NEW.token OR s.rowid = NEW.rowid) AND s.key IS NOT NEW.key AND NOT EXISTS (SELECT 1 FROM sandbox_name_dirty d WHERE d.session = s.key); END;",
+    "CREATE TRIGGER sandbox_name_before_drop BEFORE DELETE ON sessions WHEN (SELECT enabled FROM sandbox_name_meta WHERE id = 1) = 1 BEGIN INSERT INTO sandbox_name_dirty (session) SELECT OLD.key WHERE OLD.key IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sandbox_name_dirty d WHERE d.session = OLD.key); END;",
+  ]
+}
+
+fn sandbox_meta(db : sql_db::Db) -> Result[Option[Int], builders_core::StepError] {
+  match db.first("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sandbox_name_meta'", []) {
+    Ok(None) => return Ok(None)
+    Ok(Some(_)) => ()
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let m = match db.first("SELECT version, enabled FROM sandbox_name_meta WHERE id = 1", []) {
+    Ok(r) => r
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let v = match m {
+    Some(r) => sql_db::row_val(r, "version")
+    None => base_codec::json_null()
+  }
+  let ok_ver = match v {
+    base_codec::Json::Num(n, _) => n.to_int() == SANDBOX_VERSION
+    _ => false
+  }
+  match m {
+    Some(r) => {
+      if !ok_ver {
+        let said = if is_json_null(v) { "missing" } else { sql_db::stringify_json(v) }
+        return Err(
+          builders_core::StepError::App(
+            "sandbox name index version " + said + " is incompatible with " + SANDBOX_VERSION.to_string(),
+          ),
+        )
+      }
+      match sql_db::row_val(r, "enabled") {
+        base_codec::Json::Num(e, _) => Ok(Some(e.to_int()))
+        _ => Ok(Some(0))
+      }
+    }
+    None => {
+      Err(
+        builders_core::StepError::App(
+          "sandbox name index version missing is incompatible with " + SANDBOX_VERSION.to_string(),
+        ),
+      )
+    }
+  }
+}
+
+pub fn sandbox_enable(db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+  match sandbox_meta(db) {
+    Ok(Some(1)) => return Ok(())
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      match sandbox_meta(tx_db) {
+        Ok(None) => {
+          let stmts = sandbox_schema_stmts()
+          for i in 0..<stmts.length() {
+            match tx_db.exec(stmts[i]) {
+              Ok(_) => ()
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+        }
+        Ok(Some(0)) => {
+          match tx_db.exec(
+            "UPDATE sandbox_name_meta SET enabled = 1, phase = 0, cursor = NULL, prune = 1, end_session = (SELECT key FROM sessions WHERE key IS NOT NULL ORDER BY key DESC LIMIT 1), end_prune = (SELECT session FROM sandbox_name_rows ORDER BY session DESC LIMIT 1) WHERE id = 1",
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      Ok(())
+    },
+    map_sql,
+  )
+}
+
+pub fn sandbox_disable(db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+  match sandbox_meta(db) {
+    Ok(Some(1)) => {
+      match db.exec("UPDATE sandbox_name_meta SET enabled = 0 WHERE id = 1") {
+        Ok(_) => Ok(())
+        Err(e) => Err(builders_core::StepError::Sql(e))
+      }
+    }
+    Ok(_) => Ok(())
+    Err(e) => Err(e)
+  }
+}
+
+pub fn sandbox_step(db : sql_db::Db, limit : Int = 64) -> Result[Bool, builders_core::StepError] {
+  if limit < 1 {
+    return Err(builders_core::StepError::App("sandbox name batch must be positive"))
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      let meta = match tx_db.first(
+        "SELECT version, enabled, phase, cursor, prune, end_session, end_prune FROM sandbox_name_meta WHERE id = 1",
+        [],
+      ) {
+        Ok(Some(r)) => r
+        Ok(None) =>
+        return Err(
+          builders_core::StepError::App(
+            "sandbox name index version is incompatible with " + SANDBOX_VERSION.to_string(),
+          ),
+        )
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let ver_ok = match sql_db::row_val(meta, "version") {
+        base_codec::Json::Num(v, _) => v.to_int() == SANDBOX_VERSION
+        _ => false
+      }
+      if !ver_ok {
+        return Err(
+          builders_core::StepError::App(
+            "sandbox name index version is incompatible with " + SANDBOX_VERSION.to_string(),
+          ),
+        )
+      }
+      if !json_is_one(sql_db::row_val(meta, "enabled")) {
+        return Ok(true)
+      }
+      let save = fn(session : base_codec::Json) -> Result[Unit, builders_core::StepError] {
+        match session {
+          base_codec::Json::Str(key) => {
+            match tx_db.run(
+              "INSERT INTO sandbox_name_rows (session, name) VALUES (?, ?) ON CONFLICT(session) DO UPDATE SET name = excluded.name WHERE name IS NOT excluded.name",
+              [session, base_codec::json_str(sandbox_name(key_part(key)))],
+            ) {
+              Ok(_) => Ok(())
+              Err(e) => Err(builders_core::StepError::Sql(e))
+            }
+          }
+          _ => Ok(())
+        }
+      }
+      let present = fn(session : base_codec::Json) -> Result[Bool, builders_core::StepError] {
+        match tx_db.first("SELECT 1 FROM sessions WHERE key = ?", [session]) {
+          Ok(Some(_)) => Ok(true)
+          Ok(None) => Ok(false)
+          Err(e) => Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let prune = json_is_one(sql_db::row_val(meta, "prune"))
+      let end_session = sql_db::row_val(meta, "end_session")
+      let end_prune = sql_db::row_val(meta, "end_prune")
+      let mut phase = match sql_db::row_val(meta, "phase") {
+        base_codec::Json::Num(p, _) => p.to_int()
+        _ => 0
+      }
+      let mut cursor = sql_db::row_val(meta, "cursor")
+      let mut visited = 0
+      while visited < limit {
+        let lim = base_codec::json_num((limit - visited).to_double())
+        if phase == 0 {
+          let rows = if is_json_null(end_session) {
+            []
+          } else if is_json_null(cursor) {
+            match tx_db.all("SELECT key AS session FROM sessions WHERE key <= ? ORDER BY key LIMIT ?", [end_session, lim]) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          } else {
+            match tx_db.all(
+              "SELECT key AS session FROM sessions WHERE key > ? AND key <= ? ORDER BY key LIMIT ?",
+              [cursor, end_session, lim],
+            ) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+          if rows.length() == 0 {
+            phase = if prune { 1 } else { 2 }
+            cursor = base_codec::json_null()
+            continue
+          }
+          for i in 0..<rows.length() {
+            let session = sql_db::row_val(rows[i], "session")
+            match save(session) {
+              Ok(_) => ()
+              Err(e) => return Err(e)
+            }
+            match tx_db.run("DELETE FROM sandbox_name_dirty WHERE session = ?", [session]) {
+              Ok(_) => ()
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+            cursor = session
+            visited = visited + 1
+          }
+        } else if phase == 1 {
+          let rows = if is_json_null(end_prune) {
+            []
+          } else if is_json_null(cursor) {
+            match tx_db.all(
+              "SELECT session FROM sandbox_name_rows WHERE session <= ? ORDER BY session LIMIT ?",
+              [end_prune, lim],
+            ) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          } else {
+            match tx_db.all(
+              "SELECT session FROM sandbox_name_rows WHERE session > ? AND session <= ? ORDER BY session LIMIT ?",
+              [cursor, end_prune, lim],
+            ) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+          if rows.length() == 0 {
+            phase = 2
+            cursor = base_codec::json_null()
+            continue
+          }
+          for i in 0..<rows.length() {
+            let session = sql_db::row_val(rows[i], "session")
+            let is_pres = match present(session) {
+              Ok(b) => b
+              Err(e) => return Err(e)
+            }
+            if !is_pres {
+              match tx_db.run("DELETE FROM sandbox_name_rows WHERE session = ?", [session]) {
+                Ok(_) => ()
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+            }
+            cursor = session
+            visited = visited + 1
+          }
+        } else {
+          let rows = match tx_db.all("SELECT session FROM sandbox_name_dirty ORDER BY session LIMIT ?", [lim]) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          if rows.length() == 0 {
+            break
+          }
+          for i in 0..<rows.length() {
+            let session = sql_db::row_val(rows[i], "session")
+            let is_pres = match present(session) {
+              Ok(b) => b
+              Err(e) => return Err(e)
+            }
+            if !is_pres {
+              match tx_db.run("DELETE FROM sandbox_name_rows WHERE session = ?", [session]) {
+                Ok(_) => ()
+                Err(e) => return Err(builders_core::StepError::Sql(e))
+              }
+            } else {
+              match save(session) {
+                Ok(_) => ()
+                Err(e) => return Err(e)
+              }
+            }
+            match tx_db.run("DELETE FROM sandbox_name_dirty WHERE session = ?", [session]) {
+              Ok(_) => ()
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+            visited = visited + 1
+          }
+        }
+      }
+      match tx_db.run(
+        "UPDATE sandbox_name_meta SET phase = ?, cursor = ? WHERE id = 1",
+        [base_codec::json_num(phase.to_double()), cursor],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let dirty_any = match tx_db.first("SELECT 1 FROM sandbox_name_dirty LIMIT 1", []) {
+        Ok(Some(_)) => true
+        Ok(None) => false
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      Ok(phase == 2 && !dirty_any)
+    },
+    map_sql,
+  )
+}
+
+// ── Chat Share Index ──
+
+let SHARE_VERSION : Int = 1
+
+let XSHARE_IDLE_MS : Double = 21600000.0
+
+fn share_schema_stmts() -> Array[String] {
+  [
+    "CREATE TABLE chat_share_index_meta (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL, phase INTEGER NOT NULL, cursor TEXT, end_session TEXT) WITHOUT ROWID;",
+    "INSERT INTO chat_share_index_meta VALUES (1, 1, 0, NULL, (SELECT session FROM chat_shares WHERE session IS NOT NULL ORDER BY session DESC LIMIT 1));",
+    "CREATE TABLE chat_share_targets (session TEXT NOT NULL, ordinal INTEGER NOT NULL, workspace TEXT NOT NULL, used INTEGER NOT NULL, PRIMARY KEY(session, ordinal)) WITHOUT ROWID;",
+    "CREATE INDEX chat_share_target_time ON chat_share_targets (used, session);",
+    "CREATE INDEX chat_share_target_workspace ON chat_share_targets (workspace, used, session);",
+    "CREATE TABLE chat_share_uncertain (session TEXT PRIMARY KEY) WITHOUT ROWID;",
+    "CREATE TABLE chat_share_dirty (session TEXT PRIMARY KEY) WITHOUT ROWID;",
+    "CREATE TRIGGER chat_share_index_before_add BEFORE INSERT ON chat_shares BEGIN INSERT INTO chat_share_dirty (session) SELECT NEW.session WHERE NEW.session IS NOT NULL AND NOT EXISTS (SELECT 1 FROM chat_share_dirty d WHERE d.session = NEW.session); INSERT INTO chat_share_dirty (session) SELECT s.session FROM chat_shares s WHERE s.rowid = NEW.rowid AND s.session IS NOT NEW.session AND s.session IS NOT NULL AND NOT EXISTS (SELECT 1 FROM chat_share_dirty d WHERE d.session = s.session); END;",
+    "CREATE TRIGGER chat_share_index_before_change BEFORE UPDATE ON chat_shares WHEN OLD.rowid IS NOT NEW.rowid OR OLD.session IS NOT NEW.session OR OLD.shared IS NOT NEW.shared OR OLD.at IS NOT NEW.at BEGIN INSERT INTO chat_share_dirty (session) SELECT OLD.session WHERE OLD.session IS NOT NULL AND NOT EXISTS (SELECT 1 FROM chat_share_dirty d WHERE d.session = OLD.session); INSERT INTO chat_share_dirty (session) SELECT NEW.session WHERE NEW.session IS NOT NULL AND NOT EXISTS (SELECT 1 FROM chat_share_dirty d WHERE d.session = NEW.session); INSERT INTO chat_share_dirty (session) SELECT s.session FROM chat_shares s WHERE s.rowid = NEW.rowid AND s.session IS NOT NEW.session AND s.session IS NOT NULL AND NOT EXISTS (SELECT 1 FROM chat_share_dirty d WHERE d.session = s.session); END;",
+    "CREATE TRIGGER chat_share_index_before_drop BEFORE DELETE ON chat_shares BEGIN INSERT INTO chat_share_dirty (session) SELECT OLD.session WHERE OLD.session IS NOT NULL AND NOT EXISTS (SELECT 1 FROM chat_share_dirty d WHERE d.session = OLD.session); END;",
+  ]
+}
+
+fn share_check(db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+  let v = match db.first("SELECT version FROM chat_share_index_meta WHERE id = 1", []) {
+    Ok(Some(m)) => sql_db::row_val(m, "version")
+    Ok(None) => base_codec::json_null()
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ok = match v {
+    base_codec::Json::Num(n, _) => n.to_int() == SHARE_VERSION
+    _ => false
+  }
+  if !ok {
+    let said = if is_json_null(v) { "missing" } else { sql_db::stringify_json(v) }
+    return Err(
+      builders_core::StepError::App(
+        "chat share index version " + said + " is incompatible with " + SHARE_VERSION.to_string(),
+      ),
+    )
+  }
+  Ok(())
+}
+
+fn share_installed(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match db.first("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chat_share_index_meta'", []) {
+    Ok(Some(_)) => Ok(true)
+    Ok(None) => Ok(false)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+pub fn share_install(db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+  match share_installed(db) {
+    Ok(true) => return share_check(db)
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      match share_installed(tx_db) {
+        Ok(false) => {
+          let stmts = share_schema_stmts()
+          for i in 0..<stmts.length() {
+            match tx_db.exec(stmts[i]) {
+              Ok(_) => ()
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+          Ok(())
+        }
+        Ok(true) => share_check(tx_db)
+        Err(e) => Err(e)
+      }
+    },
+    map_sql,
+  )
+}
+
+/// Parse saved share JSON into `(workspace, used)` pairs; `None` means uncertain.
+/// Enforces 16384 UTF-16 code-unit limit, matches MB `@json.parse` whole-document rejection of
+/// lone UTF-16 surrogate escapes (`has_lone_surrogate` -> empty targets), and checks
+/// `is_safe_integer(u) && is_safe_integer(u + IDLE_MS)`.
+pub fn parse_share_values(shared : String, at_opt : Option[Double]) -> Option[Array[(String, Double)]] {
+  if js_json::utf16_len(shared) > 16384 {
+    return None
+  }
+  // 1:1 align with MB `@json.parse` (intentionally differs from JS `JSON.parse`).
+  if builders_core::has_lone_surrogate(shared) {
+    return Some([])
+  }
+  let parsed = match js_json::parse(shared) {
+    Ok(v) => v
+    Err(_) => js_json::JValue::Arr([])
+  }
+  let items = match parsed {
+    js_json::JValue::Arr(xs) => xs
+    _ => []
+  }
+  let values : Array[(String, Double)] = []
+  for i in 0..<items.length() {
+    let item = items[i]
+    let ws = match item.get("workspace") {
+      Some(js_json::JValue::Str(units)) => js_json::sanitize_str(units)
+      _ => continue
+    }
+    let used_opt = match item.get("used") {
+      Some(js_json::JValue::Num(u)) => Some(u)
+      _ => at_opt
+    }
+    let u = match used_opt {
+      Some(v) => v
+      None => return None
+    }
+    if !js_json::is_safe_integer(u) || !js_json::is_safe_integer(u + XSHARE_IDLE_MS) {
+      return None
+    }
+    values.push((ws, u))
+  }
+  if values.length() > 16 {
+    return None
+  }
+  Some(values)
+}
+
+fn share_values_row(row : Map[String, base_codec::Json]) -> Option[Array[(String, Double)]] {
+  if !base_codec::json_eq(sql_db::row_val(row, "shared_type"), base_codec::json_str("text")) {
+    return None
+  }
+  let shared = match sql_db::row_val(row, "shared") {
+    base_codec::Json::Str(s) => s
+    _ => return None
+  }
+  let at_opt = match sql_db::row_val(row, "at") {
+    base_codec::Json::Num(n, _) => Some(n)
+    _ => None
+  }
+  parse_share_values(shared, at_opt)
+}
+
+pub fn share_step(db : sql_db::Db, limit : Int = 64) -> Result[Bool, builders_core::StepError] {
+  if limit < 1 {
+    return Err(builders_core::StepError::App("chat share batch must be positive"))
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      match share_check(tx_db) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      let meta = match tx_db.first("SELECT phase, cursor, end_session FROM chat_share_index_meta WHERE id = 1", []) {
+        Ok(Some(r)) => r
+        Ok(None) =>
+        return Err(
+          builders_core::StepError::App(
+            "chat share index version missing is incompatible with " + SHARE_VERSION.to_string(),
+          ),
+        )
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let end = sql_db::row_val(meta, "end_session")
+      let mut phase = match sql_db::row_val(meta, "phase") {
+        base_codec::Json::Num(p, _) => p.to_int()
+        _ => 0
+      }
+      let mut cursor = sql_db::row_val(meta, "cursor")
+      let mut visited = 0
+      while visited < limit {
+        let lim = base_codec::json_num((limit - visited).to_double())
+        let keys = if phase == 0 {
+          if is_json_null(end) {
+            []
+          } else if is_json_null(cursor) {
+            match tx_db.all("SELECT session FROM chat_shares WHERE session <= ? ORDER BY session LIMIT ?", [end, lim]) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          } else {
+            match tx_db.all(
+              "SELECT session FROM chat_shares WHERE session > ? AND session <= ? ORDER BY session LIMIT ?",
+              [cursor, end, lim],
+            ) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+        } else {
+          match tx_db.all("SELECT session FROM chat_share_dirty ORDER BY session LIMIT ?", [lim]) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        if keys.length() == 0 {
+          if phase == 0 {
+            phase = 1
+            cursor = base_codec::json_null()
+            continue
+          }
+          break
+        }
+        for i in 0..<keys.length() {
+          let session = sql_db::row_val(keys[i], "session")
+          match tx_db.run("DELETE FROM chat_share_targets WHERE session = ?", [session]) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          match tx_db.run("DELETE FROM chat_share_uncertain WHERE session = ?", [session]) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          match tx_db.first(
+            "SELECT typeof(shared) AS shared_type, shared, CASE WHEN typeof(at) IN ('integer', 'real') AND at BETWEEN -9007199254740991 AND 9007199254740991 THEN at END AS at FROM chat_shares WHERE session = ?",
+            [session],
+          ) {
+            Ok(Some(row)) => {
+              match share_values_row(row) {
+                None => {
+                  match tx_db.run("INSERT INTO chat_share_uncertain (session) VALUES (?)", [session]) {
+                    Ok(_) => ()
+                    Err(e) => return Err(builders_core::StepError::Sql(e))
+                  }
+                }
+                Some(values) => {
+                  for j in 0..<values.length() {
+                    let (ws, used_v) = values[j]
+                    match tx_db.run(
+                      "INSERT INTO chat_share_targets (session, ordinal, workspace, used) VALUES (?, ?, ?, ?)",
+                      [
+                        session,
+                        base_codec::json_num(j.to_double()),
+                        base_codec::json_str(ws),
+                        base_codec::json_num(used_v),
+                      ],
+                    ) {
+                      Ok(_) => ()
+                      Err(e) => return Err(builders_core::StepError::Sql(e))
+                    }
+                  }
+                }
+              }
+            }
+            Ok(None) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          match tx_db.run("DELETE FROM chat_share_dirty WHERE session = ?", [session]) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          if phase == 0 {
+            cursor = session
+          }
+          visited = visited + 1
+        }
+      }
+      match tx_db.run(
+        "UPDATE chat_share_index_meta SET phase = ?, cursor = ? WHERE id = 1",
+        [base_codec::json_num(phase.to_double()), cursor],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let dirty_any = match tx_db.first("SELECT 1 FROM chat_share_dirty LIMIT 1", []) {
+        Ok(Some(_)) => true
+        Ok(None) => false
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      Ok(phase == 1 && !dirty_any)
+    },
+    map_sql,
+  )
+}

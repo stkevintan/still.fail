@@ -1,0 +1,648 @@
+// Pending requests lookup, vault members lookup, and recoverable requests lookup,
+// 1:1 aligned with `station/mb/src/vaultuses/pending.mbt`.
+// All write transactions go exclusively through `db.tx_err(...)`.
+
+import "base_codec"
+import "sql_db"
+
+fn owner_decision(body : String) -> String {
+  "json_extract(" +
+  body +
+  ", '$.vault') = 'plain' OR CASE json_type(" +
+  body +
+  ", '$.save') WHEN 'object' THEN 1 WHEN 'array' THEN 1 WHEN 'true' THEN 1 WHEN 'text' THEN json_extract(" +
+  body +
+  ", '$.save') != '' WHEN 'integer' THEN json_extract(" +
+  body +
+  ", '$.save') != 0 WHEN 'real' THEN json_extract(" +
+  body +
+  ", '$.save') != 0 ELSE 0 END"
+}
+
+fn pending_values(row : String) -> String {
+  let body = row + ".body"
+  row +
+  ".ws, " +
+  row +
+  ".id, CASE WHEN " +
+  owner_decision(body) +
+  " THEN 1 ELSE 0 END, CASE WHEN " +
+  owner_decision(body) +
+  " THEN json_extract(" +
+  body +
+  ", '$.owner') ELSE json_extract(" +
+  body +
+  ", '$.vault') END, json_extract(" +
+  body +
+  ", '$.at')"
+}
+
+fn duplicate_fields(body : String) -> String {
+  "CASE WHEN json_valid(" +
+  body +
+  ") THEN EXISTS (SELECT 1 FROM json_each(" +
+  body +
+  ") WHERE key IN ('vault', 'owner', 'save', 'at') GROUP BY key HAVING count(*) > 1) ELSE 0 END"
+}
+
+fn nul_fields(body : String) -> String {
+  "CASE WHEN instr(" +
+  body +
+  ", '\\u0000') > 0 AND json_valid(" +
+  body +
+  ") THEN EXISTS (SELECT 1 FROM json_each(" +
+  body +
+  ") WHERE instr(key, char(0)) > 0) ELSE 0 END"
+}
+
+fn pending_index_complete(db : sql_db::Db, ws : base_codec::Json) -> Result[Bool, VaultError] {
+  done_of(db, "SELECT done FROM vault_pending_backfill WHERE ws = ?", [ws])
+}
+
+fn duplicate_audit_complete(db : sql_db::Db, ws : base_codec::Json) -> Result[Bool, VaultError] {
+  done_of(db, "SELECT done FROM vault_pending_audit_v2 WHERE ws = ?", [ws])
+}
+
+fn nul_audit_complete(db : sql_db::Db, ws : base_codec::Json) -> Result[Bool, VaultError] {
+  done_of(db, "SELECT done FROM vault_pending_nul_audit_v3 WHERE ws = ?", [ws])
+}
+
+fn has_vault_members(db : sql_db::Db) -> Result[Bool, VaultError] {
+  match db.first("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'vault_member_backfill'", []) {
+    Ok(Some(_)) => Ok(true)
+    Ok(None) => Ok(false)
+    Err(e) => Err(VaultError::Sql(e))
+  }
+}
+
+fn vault_members_complete(db : sql_db::Db, ws : base_codec::Json) -> Result[Bool, VaultError] {
+  match db.first(
+    "SELECT b.done, a.done AS audited, t.done AS type_audited, n.done AS nul_audited FROM vault_member_backfill b LEFT JOIN vault_member_audit_v2 a ON a.ws = b.ws LEFT JOIN vault_member_type_audit_v3 t ON t.ws = b.ws LEFT JOIN vault_member_nul_audit_v4 n ON n.ws = b.ws WHERE b.ws = ?",
+    [ws],
+  ) {
+    Ok(Some(r)) =>
+    Ok(
+      is_num_one(sql_db::row_val(r, "done")) &&
+      is_num_one(sql_db::row_val(r, "audited")) &&
+      is_num_one(sql_db::row_val(r, "type_audited")) &&
+      is_num_one(sql_db::row_val(r, "nul_audited")),
+    )
+    Ok(None) => Ok(false)
+    Err(e) => Err(VaultError::Sql(e))
+  }
+}
+
+/// The workspace's pending lookup prepared (with its audits and members where asked) (`pendingPreparationComplete`).
+pub fn pending_preparation_complete(
+  db : sql_db::Db,
+  ws : base_codec::Json,
+  members : Bool,
+  audit : Bool,
+) -> Result[Bool, VaultError] {
+  let idx_ok = match pending_index_complete(db, ws) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  if !idx_ok {
+    return Ok(false)
+  }
+  if audit {
+    let dup_ok = match duplicate_audit_complete(db, ws) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+    if !dup_ok {
+      return Ok(false)
+    }
+    let nul_ok = match nul_audit_complete(db, ws) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+    if !nul_ok {
+      return Ok(false)
+    }
+  }
+  if !members {
+    return Ok(true)
+  }
+  let has_mem = match has_vault_members(db) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  if !has_mem {
+    return Ok(true)
+  }
+  vault_members_complete(db, ws)
+}
+
+fn audit_pending(
+  db : sql_db::Db,
+  table : String,
+  check : (String) -> String,
+  ws : base_codec::Json,
+  rows : Array[Map[String, base_codec::Json]],
+) -> Result[Unit, VaultError] {
+  let del_sql = "DELETE FROM " + table + " WHERE ws = ? AND id = ?"
+  let ins_sql = "INSERT OR IGNORE INTO " +
+  table +
+  " SELECT r.ws, r.id FROM vault_requests r WHERE r.ws = ? AND r.id = ? AND r.status = 'pending' AND (" +
+  check("r.body") +
+  ") = 1"
+  for i in 0..<rows.length() {
+    let id = sql_db::row_val(rows[i], "id")
+    match db.run(del_sql, [ws, id]) {
+      Ok(_) => ()
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    match db.run(ins_sql, [ws, id]) {
+      Ok(_) => ()
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+  }
+  Ok(())
+}
+
+/// One batch of an audit of the old pending lookup (`backfillPendingAudit`, `backfillPendingNulAudit`).
+fn backfill_pending_audit(
+  db : sql_db::Db,
+  ws : base_codec::Json,
+  progress : String,
+  table : String,
+  check : (String) -> String,
+  limit : Int = 32,
+) -> Result[Bool, VaultError] {
+  tx_bool(db, fn(tx_db : sql_db::Db) -> Result[Bool, VaultError] {
+    match tx_db.run("INSERT OR IGNORE INTO " + progress + " (ws, after_id, done) VALUES (?, NULL, 0)", [ws]) {
+      Ok(_) => ()
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    let audit = match tx_db.first("SELECT after_id, done FROM " + progress + " WHERE ws = ?", [ws]) {
+      Ok(Some(r)) => r
+      Ok(None) => return Err(VaultError::App(progress + " row missing"))
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    if is_num_one(sql_db::row_val(audit, "done")) {
+      return Ok(true)
+    }
+    let after = sql_db::row_val(audit, "after_id")
+    let rows = match ids_after(tx_db, "vault_pending_lookup", ws, after, limit) {
+      Ok(r) => r
+      Err(e) => return Err(e)
+    }
+    match audit_pending(tx_db, table, check, ws, rows) {
+      Ok(_) => ()
+      Err(e) => return Err(e)
+    }
+    let done = rows.length() < limit
+    match tx_db.run(
+      "UPDATE " + progress + " SET after_id = ?, done = ? WHERE ws = ?",
+      [last_id(rows, after), flag(done), ws],
+    ) {
+      Ok(_) => Ok(done)
+      Err(e) => Err(VaultError::Sql(e))
+    }
+  })
+}
+
+/// One batch of the old pending requests (`backfillPendingIndex`), new workspaces' audits along with it.
+fn backfill_pending_index(db : sql_db::Db, ws : base_codec::Json, limit : Int = 32) -> Result[Bool, VaultError] {
+  tx_bool(db, fn(tx_db : sql_db::Db) -> Result[Bool, VaultError] {
+    let tables = ["vault_pending_backfill", "vault_pending_audit_v2", "vault_pending_nul_audit_v3"]
+    for i in 0..<tables.length() {
+      match tx_db.run(
+        "INSERT OR IGNORE INTO " + tables[i] + " (ws, after_id, done) VALUES (?, NULL, 0)",
+        [ws],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    let state = match tx_db.first("SELECT after_id, done FROM vault_pending_backfill WHERE ws = ?", [ws]) {
+      Ok(Some(r)) => r
+      Ok(None) => return Err(VaultError::App("vault_pending_backfill row missing"))
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    let audit = match tx_db.first("SELECT after_id, done FROM vault_pending_audit_v2 WHERE ws = ?", [ws]) {
+      Ok(Some(r)) => r
+      Ok(None) => return Err(VaultError::App("vault_pending_audit_v2 row missing"))
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    let nul = match tx_db.first("SELECT after_id, done FROM vault_pending_nul_audit_v3 WHERE ws = ?", [ws]) {
+      Ok(Some(r)) => r
+      Ok(None) => return Err(VaultError::App("vault_pending_nul_audit_v3 row missing"))
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    if is_num_one(sql_db::row_val(state, "done")) {
+      return Ok(true)
+    }
+    let state_after = sql_db::row_val(state, "after_id")
+    let rows = match ids_after(tx_db, "vault_requests", ws, state_after, limit) {
+      Ok(r) => r
+      Err(e) => return Err(e)
+    }
+    let ins_sql = "INSERT OR IGNORE INTO vault_pending_lookup SELECT " +
+    pending_values("r") +
+    " FROM vault_requests r WHERE r.ws = ? AND r.id = ? AND r.status = 'pending'"
+    for i in 0..<rows.length() {
+      match tx_db.run(ins_sql, [ws, sql_db::row_val(rows[i], "id")]) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    let done = rows.length() < limit
+    let audit_after = sql_db::row_val(audit, "after_id")
+    if !is_num_one(sql_db::row_val(audit, "done")) && base_codec::json_eq(audit_after, state_after) {
+      match audit_pending(tx_db, "vault_pending_duplicates_v2", duplicate_fields, ws, rows) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      match tx_db.run(
+        "UPDATE vault_pending_audit_v2 SET after_id = ?, done = ? WHERE ws = ?",
+        [last_id(rows, audit_after), flag(done), ws],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    let nul_after = sql_db::row_val(nul, "after_id")
+    if !is_num_one(sql_db::row_val(nul, "done")) && base_codec::json_eq(nul_after, state_after) {
+      match audit_pending(tx_db, "vault_pending_nul_v3", nul_fields, ws, rows) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      match tx_db.run(
+        "UPDATE vault_pending_nul_audit_v3 SET after_id = ?, done = ? WHERE ws = ?",
+        [last_id(rows, nul_after), flag(done), ws],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    match tx_db.run(
+      "UPDATE vault_pending_backfill SET after_id = ?, done = ? WHERE ws = ?",
+      [last_id(rows, state_after), flag(done), ws],
+    ) {
+      Ok(_) => Ok(done)
+      Err(e) => Err(VaultError::Sql(e))
+    }
+  })
+}
+
+/// One batch toward a workspace's pending lookup (`backfillPendingPreparation`).
+pub fn backfill_pending_preparation(
+  db : sql_db::Db,
+  ws : base_codec::Json,
+  members : Bool,
+  audit : Bool,
+) -> Result[Bool, VaultError] {
+  let idx_ok = match pending_index_complete(db, ws) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  if !idx_ok {
+    let step_done = match backfill_pending_index(db, ws) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+    if !step_done {
+      return Ok(false)
+    }
+    return pending_preparation_complete(db, ws, members, audit)
+  }
+  if audit {
+    let dup_ok = match duplicate_audit_complete(db, ws) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+    if !dup_ok {
+      let step_done = match backfill_pending_audit(
+        db,
+        ws,
+        "vault_pending_audit_v2",
+        "vault_pending_duplicates_v2",
+        duplicate_fields,
+      ) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      if !step_done {
+        return Ok(false)
+      }
+      return pending_preparation_complete(db, ws, members, audit)
+    }
+    let nul_ok = match nul_audit_complete(db, ws) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+    if !nul_ok {
+      let step_done = match backfill_pending_audit(
+        db,
+        ws,
+        "vault_pending_nul_audit_v3",
+        "vault_pending_nul_v3",
+        nul_fields,
+      ) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      if !step_done {
+        return Ok(false)
+      }
+      return pending_preparation_complete(db, ws, members, audit)
+    }
+  }
+  if !members {
+    return Ok(true)
+  }
+  let has_mem = match has_vault_members(db) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  if !has_mem {
+    return Ok(true)
+  }
+  let mem_done = match vault_members_complete(db, ws) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  if mem_done {
+    return Ok(true)
+  }
+  backfill_vault_members(db, ws)
+}
+
+// ── Vault members (`member-index.ts`) ──
+
+fn valid_members(body : String) -> String {
+  "CASE WHEN json_valid(" +
+  body +
+  ") THEN CASE WHEN json_type(" +
+  body +
+  ", '$.members') = 'array' THEN 1 ELSE 0 END ELSE 0 END"
+}
+
+fn members_body(body : String) -> String {
+  "CASE WHEN (" + valid_members(body) + ") = 1 THEN " + body + " ELSE '{\"members\":[]}' END"
+}
+
+fn duplicate_members(body : String) -> String {
+  "CASE WHEN json_valid(" +
+  body +
+  ") THEN EXISTS (SELECT 1 FROM json_each(" +
+  body +
+  ") WHERE key = 'members' LIMIT 1 OFFSET 1) ELSE 0 END"
+}
+
+fn nul_members(body : String) -> String {
+  "CASE WHEN instr(" +
+  body +
+  ", '\\u0000') > 0 AND json_valid(" +
+  body +
+  ") THEN EXISTS (SELECT 1 FROM json_each(" +
+  body +
+  ") WHERE instr(key, char(0)) > 0 AND substr(key, 1, instr(key, char(0)) - 1) = 'members') ELSE 0 END"
+}
+
+fn row_is_done(r : Map[String, base_codec::Json]) -> Bool {
+  !is_num_zero(sql_db::row_val(r, "done"))
+}
+
+/// At most `limit` vaults' members, invalid bodies and audits (`backfillVaultMembers`).
+fn backfill_vault_members(db : sql_db::Db, ws : base_codec::Json, limit : Int = 32) -> Result[Bool, VaultError] {
+  tx_bool(db, fn(tx_db : sql_db::Db) -> Result[Bool, VaultError] {
+    let tables = [
+      "vault_member_backfill",
+      "vault_member_audit_v2",
+      "vault_member_type_audit_v3",
+      "vault_member_nul_audit_v4",
+    ]
+    for i in 0..<tables.length() {
+      match tx_db.run(
+        "INSERT OR IGNORE INTO " + tables[i] + " (ws, after_id, done) VALUES (?, NULL, 0)",
+        [ws],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    let state = match tx_db.first("SELECT after_id, done FROM vault_member_backfill WHERE ws = ?", [ws]) {
+      Ok(Some(r)) => r
+      Ok(None) => return Err(VaultError::App("vault_member_backfill row missing"))
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    let audit = match tx_db.first("SELECT after_id, done FROM vault_member_audit_v2 WHERE ws = ?", [ws]) {
+      Ok(Some(r)) => r
+      Ok(None) => return Err(VaultError::App("vault_member_audit_v2 row missing"))
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    let types = match tx_db.first("SELECT after_id, done FROM vault_member_type_audit_v3 WHERE ws = ?", [ws]) {
+      Ok(Some(r)) => r
+      Ok(None) => return Err(VaultError::App("vault_member_type_audit_v3 row missing"))
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    let nul = match tx_db.first("SELECT after_id, done FROM vault_member_nul_audit_v4 WHERE ws = ?", [ws]) {
+      Ok(Some(r)) => r
+      Ok(None) => return Err(VaultError::App("vault_member_nul_audit_v4 row missing"))
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    let state_done = row_is_done(state)
+    let audit_done = row_is_done(audit)
+    let types_done = row_is_done(types)
+    let nul_done = row_is_done(nul)
+    if state_done && audit_done && types_done && nul_done {
+      return Ok(true)
+    }
+    let state_after = sql_db::row_val(state, "after_id")
+    let audit_after = sql_db::row_val(audit, "after_id")
+    let types_after = sql_db::row_val(types, "after_id")
+    let nul_after = sql_db::row_val(nul, "after_id")
+    let audit_batch = !audit_done && (state_done || base_codec::json_eq(state_after, audit_after))
+    let after = if !state_done {
+      state_after
+    } else if !audit_done {
+      audit_after
+    } else if !types_done {
+      types_after
+    } else {
+      nul_after
+    }
+    let type_batch = !types_done && base_codec::json_eq(types_after, after)
+    let nul_batch = !nul_done && base_codec::json_eq(nul_after, after)
+    let rows = match ids_after(tx_db, "vaults", ws, after, limit) {
+      Ok(r) => r
+      Err(e) => return Err(e)
+    }
+    let done = rows.length() < limit
+    let invalid = "INSERT OR IGNORE INTO vault_member_invalid SELECT v.ws, v.id FROM vaults v WHERE v.ws = ? AND v.id = ? AND (" +
+    valid_members("v.body") +
+    ") = 0"
+    let add = "INSERT OR IGNORE INTO vault_member_lookup SELECT v.ws, m.value, v.id FROM vaults v JOIN json_each(" +
+    members_body("v.body") +
+    ", '$.members') m WHERE v.ws = ? AND v.id = ? AND m.type = 'text'"
+    if !state_done {
+      for i in 0..<rows.length() {
+        let id = sql_db::row_val(rows[i], "id")
+        match tx_db.run(invalid, [ws, id]) {
+          Ok(_) => ()
+          Err(e) => return Err(VaultError::Sql(e))
+        }
+        match tx_db.run(add, [ws, id]) {
+          Ok(_) => ()
+          Err(e) => return Err(VaultError::Sql(e))
+        }
+      }
+      match tx_db.run(
+        "UPDATE vault_member_backfill SET after_id = ?, done = ? WHERE ws = ?",
+        [last_id(rows, state_after), flag(done), ws],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    if audit_batch {
+      let dup_ins = "INSERT OR IGNORE INTO vault_member_duplicates_v2 SELECT v.ws, v.id FROM vaults v WHERE v.ws = ? AND v.id = ? AND (" +
+      duplicate_members("v.body") +
+      ") = 1"
+      for i in 0..<rows.length() {
+        let id = sql_db::row_val(rows[i], "id")
+        match tx_db.run("DELETE FROM vault_member_duplicates_v2 WHERE ws = ? AND vault = ?", [ws, id]) {
+          Ok(_) => ()
+          Err(e) => return Err(VaultError::Sql(e))
+        }
+        match tx_db.run(dup_ins, [ws, id]) {
+          Ok(_) => ()
+          Err(e) => return Err(VaultError::Sql(e))
+        }
+      }
+      match tx_db.run(
+        "UPDATE vault_member_audit_v2 SET after_id = ?, done = ? WHERE ws = ?",
+        [last_id(rows, audit_after), flag(done), ws],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    if type_batch {
+      let clear = "DELETE FROM vault_member_invalid WHERE ws = ? AND vault = ? AND EXISTS (SELECT 1 FROM vaults v WHERE v.ws = ? AND v.id = ? AND (" +
+      valid_members("v.body") +
+      ") = 1)"
+      for i in 0..<rows.length() {
+        let id = sql_db::row_val(rows[i], "id")
+        if !state_done {
+          match tx_db.run(clear, [ws, id, ws, id]) {
+            Ok(_) => ()
+            Err(e) => return Err(VaultError::Sql(e))
+          }
+        } else {
+          match tx_db.run(add, [ws, id]) {
+            Ok(_) => ()
+            Err(e) => return Err(VaultError::Sql(e))
+          }
+          match tx_db.run(clear, [ws, id, ws, id]) {
+            Ok(_) => ()
+            Err(e) => return Err(VaultError::Sql(e))
+          }
+          match tx_db.run(invalid, [ws, id]) {
+            Ok(_) => ()
+            Err(e) => return Err(VaultError::Sql(e))
+          }
+        }
+      }
+      match tx_db.run(
+        "UPDATE vault_member_type_audit_v3 SET after_id = ?, done = ? WHERE ws = ?",
+        [last_id(rows, types_after), flag(done), ws],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    if nul_batch {
+      let nul_ins = "INSERT OR IGNORE INTO vault_member_nul_v4 SELECT v.ws, v.id FROM vaults v WHERE v.ws = ? AND v.id = ? AND (" +
+      nul_members("v.body") +
+      ") = 1"
+      for i in 0..<rows.length() {
+        let id = sql_db::row_val(rows[i], "id")
+        match tx_db.run("DELETE FROM vault_member_nul_v4 WHERE ws = ? AND vault = ?", [ws, id]) {
+          Ok(_) => ()
+          Err(e) => return Err(VaultError::Sql(e))
+        }
+        match tx_db.run(nul_ins, [ws, id]) {
+          Ok(_) => ()
+          Err(e) => return Err(VaultError::Sql(e))
+        }
+      }
+      match tx_db.run(
+        "UPDATE vault_member_nul_audit_v4 SET after_id = ?, done = ? WHERE ws = ?",
+        [last_id(rows, nul_after), flag(done), ws],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    Ok(
+      (state_done || done) &&
+      (audit_done || (audit_batch && done)) &&
+      (types_done || (type_batch && done)) &&
+      (nul_done || (nul_batch && done)),
+    )
+  })
+}
+
+// ── Recoverable requests (`rebox-index.ts`) ──
+
+/// At most `limit` old request ids put in the recovery lookup (`backfillReboxIndex`); whether all are.
+pub fn backfill_rebox(db : sql_db::Db, limit : Int = 32) -> Result[Bool, VaultError] {
+  let pre = match db.first("SELECT done FROM vault_rebox_backfill WHERE id = 1", []) {
+    Ok(Some(r)) => r
+    Ok(None) => return Err(VaultError::App("vault_rebox_backfill row missing"))
+    Err(e) => return Err(VaultError::Sql(e))
+  }
+  if is_num_one(sql_db::row_val(pre, "done")) {
+    return Ok(true)
+  }
+  tx_bool(db, fn(tx_db : sql_db::Db) -> Result[Bool, VaultError] {
+    let state = match tx_db.first("SELECT after_ws, after_id, done FROM vault_rebox_backfill WHERE id = 1", []) {
+      Ok(Some(r)) => r
+      Ok(None) => return Err(VaultError::App("vault_rebox_backfill row missing"))
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    if is_num_one(sql_db::row_val(state, "done")) {
+      return Ok(true)
+    }
+    let lim = base_codec::json_num(limit.to_double())
+    let after_ws = sql_db::row_val(state, "after_ws")
+    let after_id = sql_db::row_val(state, "after_id")
+    let rows_res = if is_json_null(after_ws) {
+      tx_db.all("SELECT ws, id FROM vault_requests ORDER BY ws, id LIMIT ?", [lim])
+    } else {
+      tx_db.all(
+        "SELECT ws, id FROM vault_requests WHERE (ws, id) > (?, ?) ORDER BY ws, id LIMIT ?",
+        [after_ws, after_id, lim],
+      )
+    }
+    let rows = match rows_res {
+      Ok(r) => r
+      Err(e) => return Err(VaultError::Sql(e))
+    }
+    for i in 0..<rows.length() {
+      match tx_db.run(
+        "INSERT INTO vault_rebox_lookup SELECT ws, id FROM vault_requests WHERE ws = ? AND id = ? AND status = 'pending' ON CONFLICT(ws, id) DO NOTHING",
+        [sql_db::row_val(rows[i], "ws"), sql_db::row_val(rows[i], "id")],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(VaultError::Sql(e))
+      }
+    }
+    let done = rows.length() < limit
+    let n = rows.length()
+    let next_ws = if n > 0 { sql_db::row_val(rows[n - 1], "ws") } else { after_ws }
+    let next_id = if n > 0 { sql_db::row_val(rows[n - 1], "id") } else { after_id }
+    match tx_db.run(
+      "UPDATE vault_rebox_backfill SET after_ws = ?, after_id = ?, done = ? WHERE id = 1",
+      [next_ws, next_id, flag(done)],
+    ) {
+      Ok(_) => Ok(done)
+      Err(e) => Err(VaultError::Sql(e))
+    }
+  })
+}

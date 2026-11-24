@@ -1862,11 +1862,13 @@ test "viewer on the tree, a wide window, the bar across the top the same coming 
       node.push(n)
       last.push(l)
       // (where a page's bar's last stands, the window so: clear of its own buttons where they are the app's, else at
-      // its corner)
+      // its corner; tools live inside a 2pt-padded liquid glass pill, while on rounded windows following the corner
+      // (window_end_in < viewer_bar_in) the pill sits at 4pt so the inner last tool stays at window_end_in = 6pt)
       let want = if @ui.window_keys_own() {
-        @sf.window_keys_room() + @sf.viewer_bar_in
+        @sf.window_keys_room() + @sf.viewer_bar_in + 2.0
       } else {
-        @sf.window_end_in(@sf.viewer_bar_in)
+        let end = @sf.window_end_in(@sf.viewer_bar_in)
+        if end < @sf.viewer_bar_in { end } else { end + 2.0 }
       }
       assert_true((l - want).abs() < 0.001, msg="\{platform}, inset \{inset}: its last tool \{l} in, as a page's bar's last: \{want}")
     }
@@ -1965,8 +1967,14 @@ test "viewer on the tree, a wide window, the bar across the top: its last tool a
       [d, ..] => w - (d.rect.0 + d.rect.2)
       [] => -1.0
     }
-    // (a page's bar's last, as the old views have it: the window's corner and the theme's ranges as they ask them)
-    let want = @sf.window_end_in(@sf.viewer_bar_in)
+    // (tools live inside a 2pt-padded liquid glass pill; on macOS rounded corners the pill sits at 4pt so the inner
+    // last tool stays at window_end_in = 6pt, while on square/small-corner windows the pill outer edge aligns with
+    // window_end_in so the inner last tool is inset by 2pt)
+    let want = if platform == 0 {
+      @sf.window_end_in(@sf.viewer_bar_in)
+    } else {
+      @sf.window_end_in(@sf.viewer_bar_in) + 2.0
+    }
     assert_true(
       (last - want).abs() < 0.001,
       msg="\{platform} \{w}: its last tool \{last} in, a page's bar's \{want}; roots \{Repr(@ui.tree_corner_roots_now())} and \{Repr(@ui.corner_roots())}",
@@ -2014,7 +2022,8 @@ test "viewer on the tree, an Android tablet 840 wide, a picture whose name is fa
   let half = (840.0 - @sf.viewer_bar_in - end_in - 2.0 * 16.0 - middle) / 2.0
   let tools = last.0 + last.2 - first.0
   assert_true(tools > 0.0 && tools <= half, msg="the tools whole, within what is beside the name: \{tools} and \{half}")
-  assert_true((840.0 - (last.0 + last.2) - end_in).abs() < 0.001, msg="its last tool \{840.0 - (last.0 + last.2)} in, a page's bar's \{end_in}")
+  // (on Android square windows, the right tools pill outer edge aligns with end_in, so the last tool is 2pt inside it)
+  assert_true((840.0 - (last.0 + last.2) - (end_in + 2.0)).abs() < 0.001, msg="its last tool \{840.0 - (last.0 + last.2)} in, pill outer edge at \{end_in}")
   assert_true(back.0 + back.2 <= first.0, msg="the way back clear of the tools: \{Repr(back)} and \{Repr(first)}")
 }
 
@@ -2092,8 +2101,11 @@ test "viewer on the tree, the bar across the top, a name far longer than its mid
         for hold in [false, true] {
           let short = wide_bar_room("image", w, platform, fs, hold)
           let long = wide_bar_room("long", w, platform, fs, hold)
+          // (tools live inside a 2pt-padded liquid glass pill; on Windows the pill sits 12pt left of the window controls
+          // pill so its inner last tool is +2pt further in, while on macOS the pill sits at 4pt so its inner last tool
+          // stays at window_end_in = 6pt)
           let end_in = if platform == 3 {
-            @sf.window_keys_room() + @sf.viewer_bar_in
+            @sf.window_keys_room() + @sf.viewer_bar_in + 2.0
           } else {
             @sf.window_end_in(@sf.viewer_bar_in)
           }

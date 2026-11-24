@@ -36,13 +36,20 @@ fn person_words_node(
       None => []
     }
   }
+  // (and the passages kept lit on them by what they are in: md_lits, as a Markdown text's are)
+  let kept = match v.lent(@sf.md_lits) {
+    Some(f) => f
+    None => fn() { [] }
+  }
   // (no find and no passage lit, as nearly always: none, their words not read for it)
   let marks = fn() {
     let l = lit()
-    if found_at() is None && l.0 == "" {
+    let ls = kept()
+    if found_at() is None && l.0 == "" && ls.is_empty() {
       []
     } else {
-      found_now() + @sf.passage_marks(runs(), l)
+      let now = runs()
+      found_now() + ls.map(fn(k) { @sf.passage_marks(now, k) }).flatten() + @sf.passage_marks(now, l)
     }
   }
   let words = v.box(fn(w) {

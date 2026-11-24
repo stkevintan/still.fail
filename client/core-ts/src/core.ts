@@ -263,6 +263,7 @@ export class Core {
         );
       inner.data.onSignedOut = (sub, me) => inner.cloudSync?.signedOut(sub, me);
       inner.data.onNote = () => inner.status.setDb(inner.data.notes);
+      inner.data.onRoomAgain = (kept) => inner.stations?.roomAgain(kept);
       yield* inner.data.open(inner.accounts.list().map((a) => a.sub));
       // (signatures checked once on this device, kept with its own values: vault/verified.ts)
       keepVerified({ get: (k) => inner.data.device.get("verified", k), put: (k, ok) => void inner.data.device.put("verified", k, ok) });

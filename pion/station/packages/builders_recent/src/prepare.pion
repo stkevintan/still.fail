@@ -1,0 +1,487 @@
+// A requested scope's recent chats prepared one bounded piece at a time, 1:1 aligned with
+// `station/mb/src/recent/prepare.mbt` and `station/mb/src/reader/main.mbt:1200-1220`.
+
+import "base_codec"
+import "builders_core"
+import "sql_db"
+
+pub struct Preparation {
+  db : sql_db::Db
+  limit : Int
+  turns : Map[String, Int]
+  mut global_installed : Bool
+  mut scope_installed : Bool
+  mut home_installed : Bool
+  tracked : Map[String, Bool]
+}
+
+pub fn Preparation::new(db : sql_db::Db, limit : Int = 64) -> Result[Preparation, builders_core::StepError] {
+  if limit < 1 {
+    return Err(builders_core::StepError::App("recent chat preparation batch must be positive"))
+  }
+  Ok(
+    Preparation::{
+      db: db,
+      limit: limit,
+      turns: Map::new(),
+      global_installed: false,
+      scope_installed: false,
+      home_installed: false,
+      tracked: Map::new(),
+    },
+  )
+}
+
+fn scope_key(is_home : Bool, ws : String) -> String {
+  (if is_home { "h:" } else { "w:" }) + ws
+}
+
+fn next_turn_index(turn : Int, offset : Int, lane_count : Int) -> Int {
+  (turn + offset) % lane_count
+}
+
+fn lane_pending(
+  db : sql_db::Db,
+  lane : Int,
+  scanned : Bool,
+  complete_val : Int,
+  w : Array[base_codec::Json],
+) -> Result[Bool, builders_core::StepError] {
+  if lane == 0 {
+    Ok(!scanned)
+  } else if lane == 1 {
+    Ok(scanned && complete_val != 1)
+  } else if lane == 2 {
+    if !scanned {
+      Ok(false)
+    } else {
+      exists(db, "SELECT 1 FROM recent_scope_session_dirty WHERE kind = 1 AND ws = ? LIMIT 1", w)
+    }
+  } else if lane == 3 {
+    if !scanned {
+      Ok(false)
+    } else {
+      exists(db, "SELECT 1 FROM recent_scope_member_dirty WHERE ws = ? LIMIT 1", w)
+    }
+  } else if lane == 4 {
+    exists(db, "SELECT 1 FROM recent_scope_order_dirty WHERE ws = ? LIMIT 1", w)
+  } else if lane == 5 {
+    exists(db, "SELECT 1 FROM recent_scope_visibility_dirty LIMIT 1", [])
+  } else if lane == 6 {
+    exists(db, "SELECT 1 FROM recent_scope_order_dispatch LIMIT 1", [])
+  } else if lane == 7 {
+    exists(db, "SELECT 1 FROM recent_home_meta WHERE id = 1 AND scan_done = 0", [])
+  } else if lane == 8 {
+    exists(db, "SELECT 1 FROM recent_scope_session_dirty WHERE kind = 0 AND ws = '' LIMIT 1", [])
+  } else if lane == 9 {
+    exists(db, "SELECT 1 FROM recent_home_dirty LIMIT 1", [])
+  } else if lane == 10 {
+    exists(db, "SELECT 1 FROM recent_home_order_dirty LIMIT 1", [])
+  } else if lane == 11 {
+    exists(db, "SELECT 1 FROM recent_home_overlap_meta WHERE id = 1 AND scan_done = 0", [])
+  } else {
+    exists(db, "SELECT 1 FROM recent_home_overlap_dirty LIMIT 1", [])
+  }
+}
+
+fn lane_step(
+  db : sql_db::Db,
+  lane : Int,
+  ws : String,
+  w : Array[base_codec::Json],
+  limit : Int,
+) -> Result[Int, builders_core::StepError] {
+  if lane == 0 {
+    scan_workspace(db, ws, limit)
+  } else if lane == 1 {
+    match db.run(
+      "UPDATE recent_scope_tracked SET complete = 1 WHERE kind = 1 AND ws = ? AND scan_done = 1 AND scan_session IS NULL",
+      w,
+    ) {
+      Ok(_) => Ok(0)
+      Err(e) => Err(builders_core::StepError::Sql(e))
+    }
+  } else if lane == 2 {
+    settle_workspace_session(db, ws, limit)
+  } else if lane == 3 {
+    settle_workspace_members(db, ws, limit)
+  } else if lane == 4 {
+    settle_workspace_order(db, ws, limit)
+  } else if lane == 5 {
+    settle_visibility(db, limit)
+  } else if lane == 6 {
+    dispatch_order(db, limit)
+  } else if lane == 7 {
+    scan_into(db, "recent_home_meta", "threads", "id", "recent_home_dirty", limit)
+  } else if lane == 8 {
+    settle_home_session(db, limit)
+  } else if lane == 9 {
+    settle_home_chats(db, limit)
+  } else if lane == 10 {
+    settle_home_order(db, limit)
+  } else if lane == 11 {
+    scan_into(db, "recent_home_overlap_meta", "recent_home_rows", "thread", "recent_home_overlap_dirty", limit)
+  } else {
+    settle_overlap(db, limit)
+  }
+}
+
+/// One batch of the scope (`ws` none: the station's order; `home`: the viewer's home); whether it is ready then.
+pub fn Preparation::step(
+  self : Preparation,
+  ws_opt : Option[String],
+  home_opt : Option[String],
+) -> Result[Bool, builders_core::StepError] {
+  let db = self.db
+  let limit = self.limit
+  let ws = match ws_opt {
+    Some(s) => s
+    None => {
+      if !self.global_installed {
+        match install_global(db) {
+          Ok(_) => self.global_installed = true
+          Err(e) => return Err(e)
+        }
+      }
+      match global_ready(db) {
+        Ok(true) => return Ok(true)
+        Ok(false) => ()
+        Err(e) => return Err(e)
+      }
+      return global_step(db, limit)
+    }
+  }
+  if !self.scope_installed {
+    match install_scope(db) {
+      Ok(_) => self.scope_installed = true
+      Err(e) => return Err(e)
+    }
+  }
+  let already_tracked = match self.tracked.get(ws) {
+    Some(_) => true
+    None => false
+  }
+  if !already_tracked {
+    match track(db, 1, ws) {
+      Ok(_) => self.tracked.set(ws, true)
+      Err(e) => return Err(e)
+    }
+  }
+  let is_home = match home_opt {
+    Some(h) => h == ws
+    None => false
+  }
+  if is_home && !self.home_installed {
+    match install_home(db) {
+      Ok(_) => ()
+      Err(e) => return Err(e)
+    }
+    match install_overlap(db) {
+      Ok(_) => self.home_installed = true
+      Err(e) => return Err(e)
+    }
+  }
+  let initial_ready = if is_home {
+    home_ready(db, ws)
+  } else {
+    workspace_ready(db, ws)
+  }
+  match initial_ready {
+    Ok(true) => return Ok(true)
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  let w = [text(ws)]
+  let scope_row = match one(
+    db,
+    "SELECT scan_done, scan_session, complete FROM recent_scope_tracked WHERE kind = 1 AND ws = ?",
+    w,
+  ) {
+    Ok(r) => r
+    Err(e) => return Err(e)
+  }
+  let scanned = sql_db::row_int(scope_row, "scan_done") == 1 &&
+  is_json_null(sql_db::row_val(scope_row, "scan_session"))
+  let complete_val = sql_db::row_int(scope_row, "complete")
+  let lane_count = if is_home { 13 } else { 7 }
+  let key = scope_key(is_home, ws)
+  let turn = match self.turns.get(key) {
+    Some(t) => t
+    None => 0
+  }
+  for n in 0..<lane_count {
+    let at = next_turn_index(turn, n, lane_count)
+    let is_pend = match lane_pending(db, at, scanned, complete_val, w) {
+      Ok(b) => b
+      Err(e) => return Err(e)
+    }
+    if !is_pend {
+      continue
+    }
+    self.turns.set(key, (at + 1) % lane_count)
+    match lane_step(db, at, ws, w, limit) {
+      Ok(_) => return Ok(false)
+      Err(e) => return Err(e)
+    }
+  }
+  // (another connection can have completed the work after the readiness check)
+  let final_ready = if is_home {
+    home_ready(db, ws)
+  } else {
+    workspace_ready(db, ws)
+  }
+  match final_ready {
+    Ok(true) => return Ok(true)
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  Err(builders_core::StepError::App("recent chat preparation has no runnable work"))
+}
+
+pub struct ParsedScope {
+  pub ws : Option[String]
+  pub home : Option[String]
+}
+
+/// Strictly parses `[string|null, string|null]` via `builders_core::parse_ask_line`
+/// (rejecting invalid JSON, lone surrogates, wrong array lengths, or wrong element types).
+pub fn parse_recent_scope(scope_str : String) -> Result[ParsedScope, builders_core::StepError] {
+  let parsed = builders_core::parse_ask_line(scope_str)
+  match parsed {
+    base_codec::Json::Arr(items) => {
+      if items.length() != 2 {
+        return Err(builders_core::StepError::App("invalid recent chat scope"))
+      }
+      let ws = match items[0] {
+        base_codec::Json::Str(s) => Some(s)
+        base_codec::Json::Null => None
+        _ => return Err(builders_core::StepError::App("invalid recent chat scope"))
+      }
+      let home = match items[1] {
+        base_codec::Json::Str(s) => Some(s)
+        base_codec::Json::Null => None
+        _ => return Err(builders_core::StepError::App("invalid recent chat scope"))
+      }
+      Ok(ParsedScope::{ ws: ws, home: home })
+    }
+    _ => Err(builders_core::StepError::App("invalid recent chat scope"))
+  }
+}
+
+struct PrepCell {
+  mut state : Option[Preparation]
+}
+
+/// Entry point for `stillfail-pion --builder recent-chat --db <file>`.
+pub fn run_recent_chat(db_path : String) -> Int {
+  let cell = PrepCell::{ state: None }
+  builders_core::builder_loop(
+    db_path,
+    "recent chat",
+    fn(db : sql_db::Db, ask : base_codec::Json) -> Result[Option[Bool], builders_core::StepError] {
+      let scope_str = match builders_core::json_get_last(ask, "scope") {
+        Some(base_codec::Json::Str(s)) => s
+        _ => return Ok(None)
+      }
+      let parsed = match parse_recent_scope(scope_str) {
+        Ok(sc) => sc
+        Err(e) => return Err(e)
+      }
+      let p = match cell.state {
+        Some(existing) => existing
+        None => {
+          let created = match Preparation::new(db, limit=64) {
+            Ok(pr) => pr
+            Err(e) => return Err(e)
+          }
+          cell.state = Some(created)
+          created
+        }
+      }
+      match p.step(parsed.ws, parsed.home) {
+        Ok(done) => Ok(Some(done))
+        Err(e) => Err(e)
+      }
+    },
+  )
+}
+
+/// Real-SQLite self-test (invoked from `stillfail-pion --smoke-sql-db`) verifying:
+/// 1. `installed()` returns `Ok(false)` when `recent_chat_versions` and component are absent,
+///    and errors when a component table exists without `recent_chat_versions`.
+/// 2. Nested `contribution` (`savepoint_err`) partial rollback inside an outer `tx_err`
+///    rolls back partial writes (`recent_scope_sources` + `recent_scope_rows`) from a failing
+///    contribution while preserving earlier writes and letting subsequent writes in the outer tx commit.
+pub fn run_recent_selftest() -> Result[Unit, String] {
+  let db = match sql_db::Db::create(":memory:", wait_ms=250) {
+    Ok(d) => d
+    Err(e) => return Err("recent selftest open :memory: failed: " + e.message)
+  }
+  let setup_sql = "CREATE TABLE threads (id INTEGER PRIMARY KEY, surface TEXT, channel TEXT, thread_ts TEXT, home TEXT, created_at INTEGER NOT NULL); CREATE INDEX threads_home ON threads(home); CREATE TABLE thread_state (thread INTEGER PRIMARY KEY, said_n INTEGER); CREATE TABLE entries (thread INTEGER NOT NULL, n INTEGER NOT NULL, kind TEXT NOT NULL, ts TEXT, at INTEGER NOT NULL); CREATE TABLE sessions (key TEXT PRIMARY KEY, ws TEXT, token TEXT, connect TEXT); CREATE INDEX sessions_by_connect ON sessions(connect); CREATE TABLE thread_sessions (thread INTEGER NOT NULL, session TEXT NOT NULL); CREATE INDEX thread_sessions_session ON thread_sessions(session);"
+  match db.exec(setup_sql) {
+    Ok(_) => ()
+    Err(e) => {
+      db.close()
+      return Err("recent selftest setup failed: " + e.message)
+    }
+  }
+  // 1a. Missing recent_chat_versions + missing component -> Ok(false)
+  match installed(db, "scope") {
+    Ok(false) => ()
+    Ok(true) => {
+      db.close()
+      return Err("expected installed(scope) == false on empty db")
+    }
+    Err(_) => {
+      db.close()
+      return Err("expected installed(scope) to return Ok(false) when versions table missing")
+    }
+  }
+  // 1b. Component table present without recent_chat_versions -> incompatible/missing version error
+  let _ = db.exec("CREATE TABLE recent_chat_meta (id INTEGER PRIMARY KEY);")
+  match installed(db, "global") {
+    Err(builders_core::StepError::App(msg)) => {
+      if msg != "recent chat global index has an incompatible or missing version" {
+        db.close()
+        return Err("unexpected missing-versions error: " + msg)
+      }
+    }
+    _ => {
+      db.close()
+      return Err("expected missing-versions error when component exists without recent_chat_versions")
+    }
+  }
+  let _ = db.exec("DROP TABLE recent_chat_meta;")
+  // 2. Install scope, track W1 & W2, and install a trigger that aborts W2's total update AFTER
+  //    put_source(W2, ...) has already inserted into recent_scope_sources and recent_scope_rows.
+  match install_scope(db) {
+    Ok(_) => ()
+    Err(_) => {
+      db.close()
+      return Err("install_scope failed")
+    }
+  }
+  match track(db, 1, "W1") {
+    Ok(_) => ()
+    Err(_) => {
+      db.close()
+      return Err("track(W1) failed")
+    }
+  }
+  match track(db, 1, "W2") {
+    Ok(_) => ()
+    Err(_) => {
+      db.close()
+      return Err("track(W2) failed")
+    }
+  }
+  match db.exec(
+    "CREATE TRIGGER test_fail_w2 BEFORE UPDATE OF total ON recent_scope_tracked WHEN NEW.ws = 'W2' BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+  ) {
+    Ok(_) => ()
+    Err(e) => {
+      db.close()
+      return Err("create test_fail_w2 trigger failed: " + e.message)
+    }
+  }
+  let _ = db.exec(
+    "INSERT INTO threads(id, surface, channel, thread_ts, home, created_at) VALUES (1, 'web', 'c', 't1', NULL, 100), (2, 'web', 'c', 't2', NULL, 200), (3, 'web', 'c', 't3', NULL, 300);",
+  )
+  let tx_res = db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      match put_source(tx_db, text("W1"), text("1"), text("s1")) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      // put_source(W2, 2, s2) inserts into recent_scope_sources and recent_scope_rows,
+      // then fails on UPDATE recent_scope_tracked via test_fail_w2 (RAISE(ABORT, 'boom')).
+      let inner = put_source(tx_db, text("W2"), text("2"), text("s2"))
+      match inner {
+        Err(builders_core::StepError::Sql(e)) => {
+          if !str_contains(e.message, "boom") {
+            return Err(builders_core::StepError::App("unexpected inner sql error: " + e.message))
+          }
+        }
+        _ => return Err(builders_core::StepError::App("expected Sql(boom) from W2 contribution"))
+      }
+      // Verify W2's two INSERTs were rolled back by the nested savepoint while W1 stayed intact.
+      let w2_src = match exists(tx_db, "SELECT 1 FROM recent_scope_sources WHERE ws = 'W2'", []) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      let w2_row = match exists(tx_db, "SELECT 1 FROM recent_scope_rows WHERE ws = 'W2'", []) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      let w2_tot_row = match one(tx_db, "SELECT total FROM recent_scope_tracked WHERE kind = 1 AND ws = 'W2'", []) {
+        Ok(r) => r
+        Err(e) => return Err(e)
+      }
+      if w2_src || w2_row || sql_db::row_int(w2_tot_row, "total") != 0 {
+        return Err(
+          builders_core::StepError::App("W2 partial writes leaked past nested savepoint rollback"),
+        )
+      }
+      let w1_src = match exists(tx_db, "SELECT 1 FROM recent_scope_sources WHERE ws = 'W1' AND thread = 1", []) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      let w1_row = match exists(tx_db, "SELECT 1 FROM recent_scope_rows WHERE ws = 'W1' AND thread = 1", []) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      let w1_tot_row = match one(tx_db, "SELECT total FROM recent_scope_tracked WHERE kind = 1 AND ws = 'W1'", []) {
+        Ok(r) => r
+        Err(e) => return Err(e)
+      }
+      if !w1_src || !w1_row || sql_db::row_int(w1_tot_row, "total") != 1 {
+        return Err(
+          builders_core::StepError::App("W1 writes were not preserved inside outer tx"),
+        )
+      }
+      // Outer tx remains usable: write a second W1 contribution and commit cleanly.
+      put_source(tx_db, text("W1"), text("3"), text("s3"))
+    },
+    map_sql,
+  )
+  match tx_res {
+    Ok(_) => ()
+    Err(builders_core::StepError::App(msg)) => {
+      db.close()
+      return Err(msg)
+    }
+    Err(builders_core::StepError::Sql(e)) => {
+      db.close()
+      return Err("outer tx sql error: " + e.message)
+    }
+    Err(builders_core::StepError::Fallback) => {
+      db.close()
+      return Err("outer tx unexpected fallback")
+    }
+  }
+  let w1_cnt = match one(db, "SELECT COUNT(*) AS n FROM recent_scope_rows WHERE ws = 'W1'", []) {
+    Ok(r) => sql_db::row_int(r, "n")
+    Err(_) => -1
+  }
+  let w1_total = match one(db, "SELECT total FROM recent_scope_tracked WHERE kind = 1 AND ws = 'W1'", []) {
+    Ok(r) => sql_db::row_int(r, "total")
+    Err(_) => -1
+  }
+  let w2_src_after = match exists(db, "SELECT 1 FROM recent_scope_sources WHERE ws = 'W2'", []) {
+    Ok(b) => b
+    Err(_) => true
+  }
+  let w2_row_after = match exists(db, "SELECT 1 FROM recent_scope_rows WHERE ws = 'W2'", []) {
+    Ok(b) => b
+    Err(_) => true
+  }
+  let w2_total = match one(db, "SELECT total FROM recent_scope_tracked WHERE kind = 1 AND ws = 'W2'", []) {
+    Ok(r) => sql_db::row_int(r, "total")
+    Err(_) => -1
+  }
+  db.close()
+  if w1_cnt != 2 || w1_total != 2 || w2_src_after || w2_row_after || w2_total != 0 {
+    return Err("post-commit nested savepoint partial rollback invariant violated")
+  }
+  Ok(())
+}

@@ -1701,6 +1701,7 @@ pub fn reset() -> Unit {
   selection_intent_feature.set(false)
   selection_intent_reset()
   selection_intent_pins_reset()
+  intent_notes_reset()
   cmd_quote_feature.set(false)
   // a chat's messages out of avatars (emit.mbt)
   emits.clear()

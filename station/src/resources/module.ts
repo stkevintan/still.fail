@@ -115,7 +115,7 @@ export const ResourcesLive = Layer.effectDiscard(
         let table: Promise<ProcessInfo[] | null> | null = null;
         const governor = new SelfMemoryGovernor({
           clock: hub.clock,
-          totalBytes: totalmem(),
+          totalBytes: () => totalmem(),
           startedAt: hub.clock.currentTimeMillisUnsafe() - Math.round(process.uptime() * 1000),
           memory: () => process.memoryUsage(),
           children: async () => programsIn(await (table = platform.processTable(false)), MbProcess.live().map((p) => p.pid)),

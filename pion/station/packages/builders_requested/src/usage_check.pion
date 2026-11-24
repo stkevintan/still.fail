@@ -1,0 +1,244 @@
+// Usage statistics coverage checker (`--builder usage-check`), 1:1 aligned with
+// `station/mb/src/usage/usage.mbt` and `station/mb/src/reader/main.mbt:504-534`.
+// Read-only SQLite access; `Db::attach` retains default `PRAGMA synchronous = NORMAL`
+// without issuing any extra pragma.
+
+import "base_codec"
+import "builders_core"
+import "host_shim"
+import "sql_db"
+
+fn usage_installed(db : sql_db::Db, name : String) -> Result[Bool, sql_db::SqlError] {
+  match db.all("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", [base_codec::json_str(name)]) {
+    Ok(rows) => Ok(rows.length() > 0)
+    Err(e) => Err(e)
+  }
+}
+
+fn usage_one_is(
+  db : sql_db::Db,
+  sql : String,
+  params : Array[base_codec::Json],
+  column : String,
+  n : Double,
+) -> Result[Bool, sql_db::SqlError] {
+  match db.all(sql, params) {
+    Ok(rows) => {
+      if rows.length() == 0 {
+        return Ok(false)
+      }
+      match rows[0].get(column) {
+        Some(base_codec::Json::Num(v, _)) => Ok(v == n)
+        _ => Ok(false)
+      }
+    }
+    Err(e) => Err(e)
+  }
+}
+
+fn usage_some(
+  db : sql_db::Db,
+  sql : String,
+  params : Array[base_codec::Json],
+) -> Result[Bool, sql_db::SqlError] {
+  match db.all(sql, params) {
+    Ok(rows) => Ok(rows.length() > 0)
+    Err(e) => Err(e)
+  }
+}
+
+pub fn usage_remote_ready(db : sql_db::Db) -> Result[Bool, sql_db::SqlError] {
+  let has_tbl = match usage_installed(db, "remote_run_progress") {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if !has_tbl {
+    return Ok(true)
+  }
+  usage_one_is(db, "SELECT done FROM remote_run_progress WHERE id = 1", [], "done", 1.0)
+}
+
+/// A viewer's workspace and whether it is the home one, from `{workspace, home}`; None for none.
+/// Only literal `false` counts as `home = false`.
+pub fn usage_viewer(v : base_codec::Json) -> Option[(String, Bool)] {
+  let ws = match builders_core::json_get_last(v, "workspace") {
+    Some(base_codec::Json::Str(s)) => s
+    _ => return None
+  }
+  let home = match builders_core::json_get_last(v, "home") {
+    Some(base_codec::Json::Bool(false)) => false
+    _ => true
+  }
+  Some((ws, home))
+}
+
+pub fn usage_chats_ready(db : sql_db::Db, v : base_codec::Json) -> Result[Bool, sql_db::SqlError] {
+  let has_prog = match usage_installed(db, "usage_chat_progress") {
+    Ok(x) => x
+    Err(e) => return Err(e)
+  }
+  if !has_prog {
+    return Ok(true)
+  }
+  let has_inc = match usage_installed(db, "card_outcomes_incomplete") {
+    Ok(x) => x
+    Err(e) => return Err(e)
+  }
+  if has_inc {
+    return Ok(false)
+  }
+  let done_ok = match usage_one_is(db, "SELECT done FROM usage_chat_progress WHERE id = 1", [], "done", 1.0) {
+    Ok(x) => x
+    Err(e) => return Err(e)
+  }
+  if !done_ok {
+    return Ok(false)
+  }
+  match usage_viewer(v) {
+    None => {
+      match usage_some(db, "SELECT 1 FROM usage_chat_dirty LIMIT 1", []) {
+        Ok(dirty) => Ok(!dirty)
+        Err(e) => Err(e)
+      }
+    }
+    Some((ws, home)) => {
+      let ws_dirty = match usage_some(
+        db,
+        "SELECT 1 FROM usage_chat_dirty_scope WHERE kind = 2 AND ws = ? LIMIT 1",
+        [base_codec::json_str(ws)],
+      ) {
+        Ok(x) => x
+        Err(e) => return Err(e)
+      }
+      if ws_dirty {
+        return Ok(false)
+      }
+      if !home {
+        return Ok(true)
+      }
+      match usage_some(db, "SELECT 1 FROM usage_chat_dirty_scope WHERE kind = 1 AND ws = '' LIMIT 1", []) {
+        Ok(home_dirty) => Ok(!home_dirty)
+        Err(e) => Err(e)
+      }
+    }
+  }
+}
+
+pub fn usage_complete(db : sql_db::Db) -> Result[Bool, sql_db::SqlError] {
+  let r = match usage_remote_ready(db) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if !r {
+    return Ok(false)
+  }
+  usage_chats_ready(db, base_codec::json_null())
+}
+
+pub fn format_usage_response(
+  id : base_codec::Json,
+  res : Result[(Bool, String), sql_db::SqlError],
+) -> String {
+  let answer = match res {
+    Ok((true, _)) => base_codec::json_obj([("id", id)])
+    Ok((false, name)) =>
+    base_codec::json_obj([
+      ("id", id),
+      ("error", base_codec::json_str("historical " + name + " statistics are unavailable")),
+    ])
+    Err(e) =>
+    base_codec::json_obj([
+      ("id", id),
+      ("error", base_codec::json_str(e.message)),
+    ])
+  }
+  builders_core::escape_line_separators(sql_db::stringify_json(answer))
+}
+
+pub fn run_usage_check(db_path : String) -> Int {
+  let db = match sql_db::Db::attach(db_path, wait_ms=250) {
+    Ok(d) => d
+    Err(e) => {
+      let _ = host_shim::write_stderr_line(e.message)
+      return 1
+    }
+  }
+  // Do not catch startup `complete(db)` errors: exit immediately with empty stdout, matching MB.
+  let is_complete = match usage_complete(db) {
+    Ok(v) => v
+    Err(e) => {
+      db.close()
+      let _ = host_shim::write_stderr_line(e.message)
+      return 1
+    }
+  }
+  if is_complete {
+    if !host_shim::write_stdout_line("{\"complete\":true}") {
+      db.close()
+      return 1
+    }
+  }
+  if !host_shim::start("", true) {
+    db.close()
+    let _ = host_shim::write_stderr_line("builder usage-check: failed to start stdin loop")
+    return 1
+  }
+
+  let queue = builders_core::LineQueue::new()
+  let mut running = true
+  let mut write_failed = false
+
+  while running {
+    while running {
+      match queue.pop_line() {
+        None => break
+        Some(line) => {
+          if line.length() == 0 {
+            continue
+          }
+          let ask = builders_core::parse_ask_line(line)
+          let id = match builders_core::json_get_last(ask, "id") {
+            Some(v) => v
+            None => base_codec::json_null()
+          }
+          let res : Result[(Bool, String), sql_db::SqlError] = match builders_core::json_get_last(ask, "chats") {
+            Some(v) => {
+              match usage_chats_ready(db, v) {
+                Ok(ready) => Ok((ready, "chat and card"))
+                Err(e) => Err(e)
+              }
+            }
+            None => {
+              match usage_remote_ready(db) {
+                Ok(ready) => Ok((ready, "remote task"))
+                Err(e) => Err(e)
+              }
+            }
+          }
+          let out = format_usage_response(id, res)
+          if !host_shim::write_stdout_line(out) {
+            write_failed = true
+            running = false
+          }
+        }
+      }
+    }
+    if !running {
+      break
+    }
+    if queue.stdin_eof {
+      running = false
+      break
+    }
+    match host_shim::wait((-1).to_int64()) {
+      None => ()
+      Some(host_shim::HostEvent::StdinData(chunk)) => queue.enqueue_chunk(chunk)
+      Some(host_shim::HostEvent::StdinEof) => queue.stdin_eof = true
+      Some(_) => ()
+    }
+  }
+
+  db.close()
+  host_shim::stop()
+  if write_failed { 1 } else { 0 }
+}

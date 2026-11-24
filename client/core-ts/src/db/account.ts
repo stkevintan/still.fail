@@ -4,9 +4,12 @@
 // The writer: every change opens the burst's transaction (BEGIN IMMEDIATE) if none is open and runs in it, so what
 // is read next sees it; the database's write fiber commits the burst once the work at hand has run (a burst of
 // events is one transaction), then tells what changed in it: the topics whose values changed, the chat rows before
-// and after, the logs that grew. A row that did not change is not written. When the disk or the browser's quota is
-// full, the burst is rolled back and what this device did itself (the outbox, chats asked for, drafts, …) is written
-// again on its own; the rest comes again from the stations.
+// and after, the logs that grew. A write that may wait (`soon`: a station's event cursor, a transcript nothing shows)
+// is run at once too, so every read sees it and it is in the burst of what it came with, but does not ask for the
+// commit by itself: its burst is committed with the next write that may not wait, or as its wait ends. A row that did
+// not change is not written. When the disk or the browser's quota is full, the burst is rolled back and what this
+// device did itself (the outbox, chats asked for, drafts, …) is written again on its own; the rest comes again from
+// the stations.
 //
 // Reads: a row asked for by key is kept (by identity, frozen) until it is written; a station's list a view shows (its
 // chats, sessions, threads, jobs) is loaded by one indexed query the first time it is asked for and from then on kept
@@ -95,6 +98,19 @@ export class AccountDb {
   readonly kept: KeptValues;
   readonly #runner: Runner;
   #inTx = false;
+  /// A write of this database was lost since it was opened (no transaction could begin for it, or its burst was
+  /// rolled back): what the stations' events changed may not be kept, so where the device is in them is written no
+  /// more (`putCursor`). The core that opens it next takes up from the last one written, and is told those events again.
+  #lost = false;
+  /// The burst under way failed and no transaction could be begun again for the rest of it: nothing more of it is
+  /// run until one can, so that no statement of it is committed alone.
+  #noTx = false;
+  /// The burst under way holds only writes that may wait (`soon`): no commit is asked for yet.
+  #waits = false;
+  /// How long the write being run may wait for its commit (`soon`); null: it is committed as the work at hand has run.
+  #soonMs: number | null = null;
+  /// The waits whose end is still to come, by their length: one timer each, whatever the bursts that pass.
+  readonly #waitEnds = new Set<number>();
   /// What failed in this burst: it is rolled back.
   #failed: SqlError | null = null;
   #changes: Changes = { topics: new Map(), chats: new Map(), readChats: new Map(), logs: new Map(), firstChats: new Set(), freed: [], came: [] };
@@ -221,25 +237,106 @@ export class AccountDb {
   #write(fn: () => void): void {
     if (this.readOnly || this.#closed) return;
     try {
+      const soon = this.#soonMs;
       if (!this.#inTx) {
-        this.#inTx = true;
-        Queue.offerUnsafe(this.#bursts, undefined);
+        // (a burst is one only once its transaction began: where none can, nothing is left open, this write is not
+        // made, as ever, and the next one tries again)
         this.sql.exec("BEGIN IMMEDIATE");
+        this.#inTx = true;
+        if (soon === null) Queue.offerUnsafe(this.#bursts, undefined);
+        else {
+          this.#waits = true;
+          this.#waitEnd(soon);
+        }
+      } else {
+        if (this.#noTx) {
+          this.sql.exec("BEGIN IMMEDIATE");
+          this.#noTx = false;
+        }
+        if (soon === null) this.#hurry();
+        else if (this.#waits) this.#waitEnd(soon);
       }
       fn();
     } catch (e) {
-      // SQLite could not write (no room, the file gone): the burst is rolled back as it is committed, and said.
       if (!(e instanceof SqlError)) throw e;
+      this.#lost = true;
+      if (!this.#inTx) return this.#said(e);
+      // SQLite could not write (no room, the file gone): the burst is rolled back as it is committed, and said.
       this.#failed ??= e;
+      // SQLite may have ended the transaction itself (a full disk does): what the burst still runs is run in one
+      // begun again, rolled back with it, so that nothing of a burst that failed (a cursor past what it lost) is
+      // committed alone. Where none can be begun, nothing more of it is run until one can.
+      try {
+        this.sql.exec("ROLLBACK");
+      } catch {
+        // Ended already.
+      }
+      try {
+        this.sql.exec("BEGIN IMMEDIATE");
+        this.#noTx = false;
+      } catch {
+        this.#noTx = true;
+      }
+      this.#hurry();
     }
   }
 
+  /// What SQLite could not do, said: a full disk as the database's note (until a burst is written again), else logged.
+  #said(error: SqlError): void {
+    if (error.kind === "full" && !this.#full) {
+      this.#full = true;
+      this.onFull(true, error.message);
+    } else if (error.kind !== "full") console.error("still.fail core: a write failed:", error.message);
+  }
+
+  /// Runs `fn`, whose writes may wait `ms` for their commit: they are in the burst under way, or open one that is
+  /// committed with the next write that may not wait, or after `ms` (one commit for a burst of them).
+  soon(ms: number, fn: () => void): void {
+    const was = this.#soonMs;
+    this.#soonMs = ms;
+    try {
+      fn();
+    } finally {
+      this.#soonMs = was;
+    }
+  }
+
+  /// A burst that waits is committed as the work at hand has run, as any other.
+  #hurry(): void {
+    if (!this.#inTx || !this.#waits) return;
+    this.#waits = false;
+    Queue.offerUnsafe(this.#bursts, undefined);
+  }
+
+  #waitEnd(ms: number): void {
+    if (this.#waitEnds.has(ms)) return;
+    this.#waitEnds.add(ms);
+    this.#runner.fork(
+      Effect.andThen(
+        Effect.sleep(ms), // timer: debounce a burst of writes that may wait into one commit
+        Effect.sync(() => {
+          this.#waitEnds.delete(ms);
+          this.#hurry();
+        }),
+      ),
+    );
+  }
+
   #run(sql: string, params: readonly SqlValue[]): number {
-    if (PRECIOUS.test(sql)) this.#precious.push([sql, params]);
+    // (a write that may wait is not what the device did itself: a station's cursor written again alone, its burst
+    // rolled back, would say the events that burst lost were heard)
+    if (this.#soonMs === null && PRECIOUS.test(sql)) this.#precious.push([sql, params]);
     return this.sql.run(sql, params);
   }
 
+  /// The writer's turn for a burst that asked for its commit. One that waits asked for none: what is in the queue
+  /// then is of a burst committed before its turn (`commitNow`, `close`), and the wait's end or the next write asks.
   #commit(): void {
+    if (this.#inTx && this.#waits) return;
+    this.#commitTimed();
+  }
+
+  #commitTimed(): void {
     timed("db.commit", () => this.#commitNow());
   }
 
@@ -250,6 +347,8 @@ export class AccountDb {
     this.#changes = { topics: new Map(), chats: new Map(), readChats: new Map(), logs: new Map(), firstChats: new Set(), freed: [], came: [] };
     this.#precious = [];
     this.#inTx = false;
+    this.#waits = false;
+    this.#noTx = false;
     const failed = this.#failed;
     this.#failed = null;
     try {
@@ -266,6 +365,7 @@ export class AccountDb {
       }
     } catch (e) {
       const error = sqlError(e);
+      this.#lost = true;
       try {
         this.sql.exec("ROLLBACK");
       } catch {
@@ -299,10 +399,7 @@ export class AccountDb {
           this.#unwritten = again;
         }
       }
-      if (error.kind === "full" && !this.#full) {
-        this.#full = true;
-        this.onFull(true, error.message);
-      } else if (error.kind !== "full") console.error("still.fail core: a write failed:", error.message);
+      this.#said(error);
     }
     this.onCommit(changes);
     this.#settled();
@@ -318,6 +415,7 @@ export class AccountDb {
   get written(): Effect.Effect<void> {
     return Effect.suspend(() => {
       if (!this.#inTx) return Effect.void;
+      this.#hurry();
       return Effect.flatMap(Deferred.make<void>(), (d) => {
         this.#waiting.push(d);
         return Deferred.await(d);
@@ -389,7 +487,10 @@ export class AccountDb {
   /// remain, including when a write transaction is open so the writer commits before vacuum runs.
   giveBackRoomStep(pages?: number, minFree?: number): boolean {
     if (this.readOnly || this.#closed) return false;
-    if (this.#inTx) return true;
+    if (this.#inTx) {
+      this.#hurry();
+      return true;
+    }
     try {
       return giveBackRoomStep(this.sql, pages, minFree);
     } catch {
@@ -399,12 +500,12 @@ export class AccountDb {
 
   /// The burst under way committed now, not as its writer next runs: what a core closing wrote (Data.closing).
   commitNow(): void {
-    if (this.#inTx && !this.#closed) this.#commit();
+    if (this.#inTx && !this.#closed) this.#commitTimed();
   }
 
   close(): void {
     if (this.#closed) return;
-    if (this.#inTx) this.#commit();
+    if (this.#inTx) this.#commitTimed();
     this.#closed = true;
     this.#runner.interrupt(this.#writer as Fiber.Fiber<unknown, unknown>);
     this.sql.close();
@@ -439,6 +540,12 @@ export class AccountDb {
   putDraft(station: string, chat: string, value: J | undefined): void { this.#docs.putDraft(station, chat, value); }
   workspacePref(workspace: string, key: string): J { return this.#docs.workspacePref(workspace, key); }
   putWorkspacePref(workspace: string, key: string, value: J | undefined, topic: Topic | null = null): void { this.#docs.putWorkspacePref(workspace, key, value, topic); }
+  /// Where the device is in a station's events, kept as a workspace's value: its commit may wait up to `ms` (`soon`),
+  /// and it is not written once a write of this database was lost (`#lost`).
+  putCursor(ms: number, workspace: string, key: string, value: J, topic: Topic | null = null): void {
+    if (this.#lost) return;
+    this.soon(ms, () => this.#docs.putWorkspacePref(workspace, key, value, topic));
+  }
   locals(table: "outbox" | "pending" | "first" | "changing"): [string, string, J][] { return this.#docs.locals(table); }
   putLocal(table: "outbox" | "pending" | "first" | "changing", station: string, key: string, value: J | undefined): void { this.#docs.putLocal(table, station, key, value); }
 
@@ -683,6 +790,8 @@ export class AccountDb {
   logSpan(table: LogTable, station: string, id: string): { min: number; max: number; count: number } | null { return this.#logs.logSpan(table, station, id); }
   logCount(table: LogTable, station: string, id: string, from: number, to: number): number { return this.#logs.logCount(table, station, id, from, to); }
   putLog(table: LogTable, station: string, id: string, items: [number, J][], cutAfter: number | null = null, keep = false): void { this.#logs.putLog(table, station, id, items, cutAfter, keep); }
+  /// As `putLog`, its commit waiting up to `ms` (`soon`).
+  putLogSoon(ms: number, table: LogTable, station: string, id: string, items: [number, J][]): void { this.soon(ms, () => this.#logs.putLog(table, station, id, items, null)); }
   forgetLog(table: LogTable, station: string, id: string): void { this.#logs.forgetLog(table, station, id); }
   slackSaid(station: string, session: string): Said[] { return this.#slack.slackSaid(station, session); }
   slackNames(station: string): [string, string][] { return this.#slack.slackNames(station); }

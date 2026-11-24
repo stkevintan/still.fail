@@ -728,7 +728,7 @@ let browser_count_box : @ui.Style = @ui.css("w=S10 h=S10 align=ACenter justify=J
 
 ///|
 // kept across runs: a value (no field of it changes)
-let browser_count_square : @ui.Style = @ui.css("w=S5 h=S5 radius=Sm border=B1_5 border_color=Fg align=ACenter justify=JCenter")
+let browser_count_square : @ui.Style = @ui.css("w=S5 h=S5 align=ACenter justify=JCenter")
 
 ///|
 // kept across runs: a value (no field of it changes)

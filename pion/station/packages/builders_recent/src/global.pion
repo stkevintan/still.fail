@@ -1,0 +1,171 @@
+// The station-wide ordering's steps, 1:1 aligned with `station/mb/src/recent/global.mbt`.
+
+import "base_codec"
+import "builders_core"
+import "sql_db"
+
+/// At most `limit` old or changed chats accounted, with the cursor; old and changed work alternate while both exist,
+/// so new messages cannot postpone old chats. Whether all is accounted then.
+fn global_step(db : sql_db::Db, limit : Int) -> Result[Bool, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      let meta = match one(
+        tx_db,
+        "SELECT CAST(cursor AS TEXT) AS cursor, CAST(through AS TEXT) AS through, complete, prefer_dirty FROM recent_chat_meta WHERE id = 1",
+        [],
+      ) {
+        Ok(m) => m
+        Err(e) => return Err(e)
+      }
+      let lim = num(limit)
+      let pending = match tx_db.all(
+        "SELECT CAST(thread AS TEXT) AS tid FROM recent_chat_dirty ORDER BY thread LIMIT ?",
+        [lim],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let complete = sql_db::row_int(meta, "complete") == 1
+      let use_dirty = pending.length() > 0 &&
+      (complete || sql_db::row_int(meta, "prefer_dirty") == 1)
+      let cursor = sql_db::row_val(meta, "cursor")
+      let through = sql_db::row_val(meta, "through")
+      let old = if !use_dirty && !complete && !is_json_null(through) {
+        if is_json_null(cursor) {
+          match tx_db.all(
+            "SELECT CAST(id AS TEXT) AS tid FROM threads WHERE id <= CAST(? AS INTEGER) ORDER BY id LIMIT ?",
+            [through, lim],
+          ) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        } else {
+          match tx_db.all(
+            "SELECT CAST(id AS TEXT) AS tid FROM threads WHERE id > CAST(? AS INTEGER) AND id <= CAST(? AS INTEGER) ORDER BY id LIMIT ?",
+            [cursor, through, lim],
+          ) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+      } else {
+        []
+      }
+      let chats = if use_dirty { pending } else { old }
+      let mut delta = 0
+      for i in 0..<chats.length() {
+        let thread = sql_db::row_val(chats[i], "tid")
+        let had = match exists(
+          tx_db,
+          "SELECT 1 FROM recent_chat_rows WHERE thread = CAST(? AS INTEGER)",
+          [thread],
+        ) {
+          Ok(b) => b
+          Err(e) => return Err(e)
+        }
+        let chat_ok = match chat_exists(tx_db, thread) {
+          Ok(b) => b
+          Err(e) => return Err(e)
+        }
+        if !chat_ok {
+          if had {
+            match tx_db.run(
+              "DELETE FROM recent_chat_rows WHERE thread = CAST(? AS INTEGER)",
+              [thread],
+            ) {
+              Ok(_) => ()
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+            delta = delta - 1
+          }
+        } else {
+          match tx_db.run(
+            "INSERT INTO recent_chat_rows (thread, at, said_at, created_at) SELECT thread, at, said_at, created_at FROM (" +
+            current("?1") +
+            ") WHERE true ON CONFLICT (thread) DO UPDATE SET at = excluded.at, said_at = excluded.said_at, created_at = excluded.created_at WHERE at IS NOT excluded.at OR said_at IS NOT excluded.said_at OR created_at IS NOT excluded.created_at",
+            [thread],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          if !had {
+            delta = delta + 1
+          }
+        }
+        match tx_db.run(
+          "DELETE FROM recent_chat_dirty WHERE thread = CAST(? AS INTEGER)",
+          [thread],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      if use_dirty {
+        match tx_db.run(
+          "UPDATE recent_chat_meta SET total = total + ?, prefer_dirty = 0 WHERE id = 1",
+          [num(delta)],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        let reached = if chats.length() > 0 {
+          sql_db::row_val(chats[chats.length() - 1], "tid")
+        } else {
+          cursor
+        }
+        match tx_db.run(
+          "UPDATE recent_chat_meta SET cursor = CAST(? AS INTEGER), total = total + ?, complete = ?, prefer_dirty = 1 WHERE id = 1",
+          [
+            reached,
+            num(delta),
+            num(if complete || chats.length() < limit { 1 } else { 0 }),
+          ],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let done_meta = match one(tx_db, "SELECT complete FROM recent_chat_meta WHERE id = 1", []) {
+        Ok(m) => m
+        Err(e) => return Err(e)
+      }
+      if sql_db::row_int(done_meta, "complete") != 1 {
+        return Ok(false)
+      }
+      let any_dirty = match exists(tx_db, "SELECT 1 FROM recent_chat_dirty LIMIT 1", []) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      Ok(!any_dirty)
+    },
+    map_sql,
+  )
+}
+
+/// The station-wide page can be read (`readGlobalRecentChatIndex` gives one).
+fn global_ready(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  snapshot(
+    db,
+    "recent_chat_page",
+    fn(snap_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      match installed(snap_db, "global") {
+        Ok(true) => ()
+        Ok(false) => return Ok(false)
+        Err(e) => return Err(e)
+      }
+      let meta = match one(snap_db, "SELECT complete FROM recent_chat_meta WHERE id = 1", []) {
+        Ok(m) => m
+        Err(e) => return Err(e)
+      }
+      if sql_db::row_int(meta, "complete") != 1 {
+        return Ok(false)
+      }
+      let any_dirty = match exists(snap_db, "SELECT 1 FROM recent_chat_dirty LIMIT 1", []) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      Ok(!any_dirty)
+    },
+  )
+}

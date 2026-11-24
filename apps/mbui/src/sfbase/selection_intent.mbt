@@ -193,3 +193,134 @@ pub fn selection_intent_toggle_collapse(id : Int) -> Unit {
 pub fn pinned_intents_for(draft : String) -> Array[PinnedIntent] {
   pinned_intents.get().filter(fn(p) { p.draft == draft })
 }
+
+///|
+/// A 戳一下 kept on the words it was asked of, as a note in its chat's margin beside the message they are of (its row's
+/// key `row`, the list's): the words lit there, the answer beside them as it comes (asked of the core on its own, so
+/// that several stand at once, each with its answer), till it is taken off.
+#derive(Eq)
+pub(all) struct IntentNote {
+  id : Int
+  draft : String
+  row : String
+  station : String
+  thread : Double
+  selection : String
+  message_ts : String
+  author : String
+  loading : Bool
+  intent : String
+  reply : String
+  model : String
+  error : String
+}
+
+///|
+// kept across runs: reset by intent_notes_reset()
+pub let intent_notes : @signals.Signal[Array[IntentNote]] = @signals.signal([], same=fn(a, b) { a == b })
+
+///|
+// kept across runs: only counts on
+let intent_note_serial : Ref[Int] = Ref(0)
+
+///|
+pub fn intent_notes_reset() -> Unit {
+  intent_notes.set([])
+}
+
+///|
+/// Note `id` as `f` makes it of what it is, where it still is.
+fn intent_note_set(id : Int, f : (IntentNote) -> IntentNote) -> Unit {
+  let cur = @signals.untracked(fn() { intent_notes.get() })
+  intent_notes.set(cur.map(fn(n) { if n.id == id { f(n) } else { n } }))
+}
+
+///|
+/// Asks the core of note `id`'s words, its answer kept in it as it comes (none where it was taken off meanwhile).
+fn intent_note_run(src : Source, id : Int) -> Unit {
+  guard @signals.untracked(fn() { intent_notes.get() }).search_by(fn(n) { n.id == id }) is Some(i) else { return }
+  let n = @signals.untracked(fn() { intent_notes.get() })[i]
+  intent_note_set(id, fn(n) { { ..n, loading: true, intent: "", reply: "", model: "", error: "" } })
+  let params : Map[String, Json] = {
+    "station": Json::string(n.station),
+    "thread": Json::number(n.thread),
+    "selection": Json::string(n.selection),
+  }
+  if n.message_ts != "" {
+    params["messageTs"] = Json::string(n.message_ts)
+  }
+  if n.author != "" {
+    params["author"] = Json::string(n.author)
+  }
+  (src.call)("chat.selectionIntent", Json::object(params), fn(res) {
+    match res {
+      Ok(v) =>
+        intent_note_set(id, fn(n) {
+          { ..n, loading: false, intent: text(Some(v), "intent"), reply: text(Some(v), "reply"), model: text(Some(v), "model") }
+        })
+      Err(e) => intent_note_set(id, fn(n) { { ..n, loading: false, error: error_words(e) } })
+    }
+  })
+}
+
+///|
+/// A 戳一下 of `selection`, words of the message of row `row` in chat `draft` (chat `thread` of `station`; the message's
+/// ts and whose it is, as selection_intent_ask's), kept on those words as a note: asked of the core at once. Its id.
+pub fn intent_note_ask(
+  src : Source,
+  draft : String,
+  row : String,
+  station : String,
+  thread : Double,
+  selection : String,
+  message_ts : String,
+  author : String,
+) -> Int {
+  intent_note_serial.val = intent_note_serial.val + 1
+  let id = intent_note_serial.val
+  let cur = @signals.untracked(fn() { intent_notes.get() })
+  let next = cur.copy()
+  next.push({
+    id,
+    draft,
+    row,
+    station,
+    thread,
+    selection,
+    message_ts,
+    author,
+    loading: true,
+    intent: "",
+    reply: "",
+    model: "",
+    error: "",
+  })
+  intent_notes.set(next)
+  intent_note_run(src, id)
+  id
+}
+
+///|
+/// Asks again of note `id`'s words, after its answer failed.
+pub fn intent_note_retry(src : Source, id : Int) -> Unit {
+  intent_note_run(src, id)
+}
+
+///|
+/// Takes note `id` off its words.
+pub fn intent_note_remove(id : Int) -> Unit {
+  let cur = @signals.untracked(fn() { intent_notes.get() })
+  intent_notes.set(cur.filter(fn(n) { n.id != id }))
+}
+
+///|
+/// The notes of chat `draft`, in the order they were made.
+pub fn intent_notes_for(draft : String) -> Array[IntentNote] {
+  intent_notes.get().filter(fn(n) { n.draft == draft })
+}
+
+///|
+/// The notes on the message of row `row` of chat `draft`, in the order they were made.
+pub fn intent_notes_on(draft : String, row : String) -> Array[IntentNote] {
+  intent_notes.get().filter(fn(n) { n.draft == draft && n.row == row })
+}

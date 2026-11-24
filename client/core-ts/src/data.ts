@@ -40,9 +40,11 @@ export function num(n: number): string {
 
 /// How long a value changing as it is typed (a draft) waits before it is written.
 export const SOON_MS = 300;
-/// How long station event cursor (`heard`) writes coalesce before hitting SQLite.
+/// How long a station's event cursor (`heard`) written alone may wait for its commit (AccountDb `soon`): it is in the
+/// burst of what its events changed, and an event that changed nothing else asks for no commit of its own.
 export const HEARD_FLUSH_MS = 5_000;
-/// How long unshown background transcript writes coalesce before hitting SQLite.
+/// How long what is put in a transcript nothing shows may wait for its commit (AccountDb `soon`): a burst of live
+/// chunks of the agents at work is one commit.
 export const TRANSCRIPT_FLUSH_MS = 2_000;
 
 /// The topics whose values are held here.
@@ -348,17 +350,14 @@ export class Data {
   /// Values as typed, there at once and written a moment after their last change (drafts).
   readonly #soon = new Map<string, [Topic, unknown]>();
   #flushing = false;
-  /// Station event cursors (`heard`) waiting to be written in one batch (`HEARD_FLUSH_MS`), by station address.
-  readonly #pendingHeard = new Map<string, unknown>();
-  #heardFlushing = false;
-  /// Unshown background transcript chunks waiting to be written in one batch (`TRANSCRIPT_FLUSH_MS`), by `station\u0001id`.
-  readonly #pendingTranscripts = new Map<string, { station: string; id: string; items: Map<number, unknown> }>();
-  #transcriptFlushing = false;
   /// What each database's state says, by account.
   readonly notes = new Map<string, DbNote>();
   onNote: () => void = () => {};
   /// Told of an account signed out, with its last `/v1/me`, before its database goes.
   onSignedOut: (sub: string, me: unknown) => void = () => {};
+  /// A database is within its room again after it was past it with nothing left to let go (`transcriptOverBudget`):
+  /// told whether a station is kept in it, so the transcripts left as they were are read again (station/sync.ts).
+  onRoomAgain: (kept: (station: string) => boolean) => void = () => {};
   /// Told once an account's database is opened (a sign-in), to bring in what it may (db/import.ts).
   onOpened: (db: AccountDb) => Effect.Effect<void> = () => Effect.void;
   /// The marks of databases found damaged as the core ran, as they are written (damageKept).
@@ -375,6 +374,9 @@ export class Data {
   readonly #keptUntil = new WeakMap<AccountDb, number>();
   /// Last time runtime eviction ran `#giveBackRoom` for each db.
   readonly #gaveBackAt = new WeakMap<AccountDb, number>();
+  /// The databases a transcript was left as it was for want of room in (`transcriptOverBudget`): told once they have
+  /// room again (`onRoomAgain`), as any commit finds it.
+  readonly #roomOwed = new Set<AccountDb>();
   #roomWaiters: Deferred.Deferred<void>[] = [];
   #keptAt = -Infinity;
 
@@ -409,8 +411,6 @@ export class Data {
       for (const [sub, db] of [...this.#dbs]) {
         if (subs.includes(sub)) continue;
         this.onSignedOut(sub, db.accountDoc("me"));
-        for (const key of [...this.#pendingHeard.keys()]) if (this.of(key) === db) this.#pendingHeard.delete(key);
-        for (const [key, entry] of [...this.#pendingTranscripts]) if (this.of(entry.station) === db) this.#pendingTranscripts.delete(key);
         this.#dbs.delete(sub);
         this.#setNote(sub, null);
         db.close();
@@ -465,7 +465,7 @@ export class Data {
         }
       }
       if (db.readOnly) note = { kind: "newer", detail: null };
-      db.onCommit = (changes) => this.#committed(changes);
+      db.onCommit = (changes) => this.#committed(db, changes);
       for (const [d, maker] of this.#makers) db.kept.made(d, maker);
       db.onFull = (full, error) => this.#setNote(sub, full ? { kind: "full", detail: error } : null);
       this.#dbs.set(sub, db);
@@ -582,7 +582,16 @@ export class Data {
     return this.#ofWorkspace(workspaceOf(station));
   }
 
-  #committed(changes: Changes): void {
+  #committed(db: AccountDb, changes: Changes): void {
+    // (asked at each commit of its own while one is owed, a few numbers of SQLite's: the commit that made the room
+    // may be the last for long; never as another database commits, its own burst maybe still to be rolled back)
+    if (this.#roomOwed.has(db)) {
+      if (this.#dbs.get(db.sub) !== db) this.#roomOwed.delete(db);
+      else if (db.used() <= this.#kept) {
+        this.#roomOwed.delete(db);
+        this.onRoomAgain((station) => this.of(station) === db);
+      }
+    }
     if (changes.logs.size > 0) {
       const now = this.#host.nowMs();
       if (now - this.#keptAt >= KEPT_CHECK_MS) {
@@ -775,8 +784,6 @@ export class Data {
   /// Resolves once every write asked for so far is committed (what showing noted too, written now: `flushMd`).
   get written(): Effect.Effect<void> {
     return Effect.suspend(() => {
-      this.#flushHeard();
-      this.#flushTranscripts();
       this.flushMd();
       return Effect.all([...this.#dbs.values()].map((db) => db.written), { discard: true });
     });
@@ -1086,7 +1093,6 @@ export class Data {
   record(table: string, key: string): unknown {
     const [db, k] = this.#recordAt(table, key);
     this.#readQuery(this.#recordTopic(table, key, db, k));
-    if (table === "heard" && this.#pendingHeard.has(key)) return this.#pendingHeard.get(key);
     if (db === "device") return this.device.get(table, key);
     if (db === null) return undefined;
     if (table === "me") return db.accountDoc("me");
@@ -1099,24 +1105,8 @@ export class Data {
     if (db === null) return;
     const topic = this.#recordTopic(table, key, db, k);
     if (table === "me") return db.putAccountDoc("me", value, confirmed ? this.#host.nowMs() : null, topic);
-    if (table === "heard") {
-      const was = this.#pendingHeard.has(key) ? this.#pendingHeard.get(key) : db.workspacePref(k[0], k[1]);
-      if (equal(was, value)) return;
-      this.#pendingHeard.set(key, frozen(structuredClone(value)));
-      this.#tellQuery(topic);
-      if (!this.#heardFlushing) {
-        this.#heardFlushing = true;
-        this.#runner.fork(
-          Effect.sleep(HEARD_FLUSH_MS).pipe( // timer: coalesce station event cursor writes
-            Effect.andThen(Effect.sync(() => {
-              this.#heardFlushing = false;
-              this.#flushHeard();
-            })),
-          ),
-        );
-      }
-      return;
-    }
+    // (where the device is in a station's events: in the write of what they changed, never one of its own)
+    if (table === "heard" && value !== undefined) return db.putCursor(HEARD_FLUSH_MS, k[0], k[1], value, topic);
     db.putWorkspacePref(k[0], k[1], value, topic);
   }
 
@@ -1126,22 +1116,7 @@ export class Data {
     if (db === null) return;
     const topic = this.#recordTopic(table, key, db, k);
     if (table === "me") return db.dropAccountDoc("me", topic);
-    if (table === "heard") {
-      const hadPending = this.#pendingHeard.delete(key);
-      if (hadPending && db.workspacePref(k[0], k[1]) === undefined) this.#tellQuery(topic);
-    }
     db.putWorkspacePref(k[0], k[1], undefined, topic);
-  }
-
-  #flushHeard(): void {
-    if (this.#pendingHeard.size === 0) return;
-    const entries = [...this.#pendingHeard];
-    this.#pendingHeard.clear();
-    for (const [key, value] of entries) {
-      const [db, k] = this.#recordAt("heard", key);
-      if (db === null || db === "device") continue;
-      db.putWorkspacePref(k[0], k[1], value, this.#recordTopic("heard", key, db, k));
-    }
   }
 
   #recordTopic(table: string, key: string, db: AccountDb | "device" | null, k: [string, string]): Topic {
@@ -1206,8 +1181,6 @@ export class Data {
 
   /// What is held of a workspace goes (it is gone, or the account left it).
   dropWorkspace(id: string): void {
-    for (const key of [...this.#pendingHeard.keys()]) if (ofAddress(key) === id) this.#pendingHeard.delete(key);
-    for (const [key, entry] of [...this.#pendingTranscripts]) if (workspaceOf(entry.station) === id) this.#pendingTranscripts.delete(key);
     for (const db of this.#dbs.values()) if (db.workspace(id) !== undefined) db.dropWorkspace(id);
   }
 
@@ -1222,12 +1195,6 @@ export class Data {
   /// Keeps only the stations `keep` picks and, where given, the `workspaces`, each in the database of the account
   /// that reaches it: what no signed-in account reaches goes.
   retain(keep: (station: string) => boolean, workspaces: Set<string> | null): void {
-    for (const key of [...this.#pendingHeard.keys()]) {
-      if (!keep(key) || (workspaces !== null && !workspaces.has(ofAddress(key)))) this.#pendingHeard.delete(key);
-    }
-    for (const [key, entry] of [...this.#pendingTranscripts]) {
-      if (!keep(entry.station) || (workspaces !== null && !workspaces.has(workspaceOf(entry.station)))) this.#pendingTranscripts.delete(key);
-    }
     for (const [sub, db] of this.#dbs) {
       if (db.readOnly) continue;
       for (const id of db.workspaceIds()) if ((workspaces !== null && !workspaces.has(id)) || (this.#owner(id) !== null && this.#owner(id) !== sub)) db.dropWorkspace(id);
@@ -1766,17 +1733,30 @@ export class Data {
 
   // ── what is kept within the device's room ──
 
-  /// Whether a log's items were let go for room and its chat is not shown: the sync leaves it as it is.
+  /// Whether a log's items were let go for room and nothing shows or reads it: the sync leaves it as it is.
   evicted(kind: LogTable, station: string, id: string): boolean {
-    return !this.#shown.has(`${kind}\u0001${station}\u0001${id}`) && (this.of(station)?.evicted(kind, station, id) ?? false);
+    if (kind === "transcript" ? this.#transcriptRead(station, id) : this.#shown.has(`${kind}\u0001${station}\u0001${id}`)) return false;
+    return this.of(station)?.evicted(kind, station, id) ?? false;
   }
 
-  /// Whether `station`'s database is currently over its room cap with no unshown transcripts left to evict
-  /// (non-evictable tables alone exceed `kept`): background sync skips writing unshown transcripts until shown.
+  /// Whether something reads a session's transcript now: its history is shown, or a query reads its items or what it
+  /// said in Slack (a chat's page shows that of its agents without their histories open).
+  #transcriptRead(station: string, id: string): boolean {
+    return this.#shown.has(`transcript\u0001${station}\u0001${id}`) ||
+      this.#queryReads.has(topicKey({ topic: "$log", table: "transcript", station, id })) ||
+      this.#queryReads.has(topicKey({ topic: "$slack-said", station, session: id }));
+  }
+
+  /// Whether `station`'s database is past its room with no transcript left to let go (what is never let go alone is
+  /// past it) and nothing reads this one: the sync leaves it as it is, as one let go, rather than write what the next
+  /// check lets go again. Read again when its history is opened, and when there is room again (`onRoomAgain`).
   transcriptOverBudget(station: string, id: string): boolean {
-    if (this.#shown.has(`transcript\u0001${station}\u0001${id}`)) return false;
+    if (this.#transcriptRead(station, id)) return false;
     const db = this.of(station);
-    return db !== undefined && this.#keptUntil.has(db) && db.used() > this.#kept;
+    if (db === undefined || !this.#keptUntil.has(db) || db.used() <= this.#kept) return false;
+    // (owed a reading again once there is room, whatever becomes of the wait before the next try to make some)
+    this.#roomOwed.add(db);
+    return true;
   }
 
   /// A UI shows a log's chat (`open`), or no longer does: shown, it is the most recently opened and not let go. Answers
@@ -1786,7 +1766,6 @@ export class Data {
     const count = (this.#shown.get(key) ?? 0) + (open ? 1 : -1);
     if (count > 0) this.#shown.set(key, count);
     else this.#shown.delete(key);
-    if (open && kind === "transcript") this.#flushTranscript(station, id);
     const db = this.of(station);
     if (db === undefined || db.readOnly) return false;
     // Closing the last view of a transcript can unlock eviction after a cap-full backoff.
@@ -1815,12 +1794,19 @@ export class Data {
         this.flushMd();
         const to = this.#kept * KEPT_TO;
         const gone = new Set<string>();
+        // (how many are asked for at once: more where all of those are shown or read, until none is left to ask for)
+        let most = 50;
         for (;;) {
-          const logs = db.transcriptsByUse(50).filter((l) => {
+          const asked = db.transcriptsByUse(most);
+          const logs = asked.filter((l) => {
             const key = `transcript\u0001${l.station}\u0001${l.id}`;
-            return !this.#shown.has(key) && !gone.has(key);
+            return !this.#shown.has(key) && !gone.has(key) && !this.#transcriptRead(l.station, l.id);
           });
           if (logs.length === 0) {
+            if (asked.length >= most) {
+              most *= 4;
+              continue;
+            }
             exhausted = true;
             return;
           }
@@ -1828,9 +1814,8 @@ export class Data {
             if (this.#dbs.get(db.sub) !== db) return;
             const key = `transcript\u0001${l.station}\u0001${l.id}`;
             // A chat may have opened since this list was read.
-            if (this.#shown.has(key)) continue;
+            if (this.#transcriptRead(l.station, l.id)) continue;
             gone.add(key);
-            this.#pendingTranscripts.delete(`${l.station}\u0001${l.id}`);
             db.evict(l.station, l.id);
             evicted = true;
             if (db.used() <= to) return;
@@ -2030,44 +2015,15 @@ export class Data {
 
   // ── logs: a thread's entries, a session's transcript ──
 
-  #flushTranscript(station: string, id: string): void {
-    const key = `${station}\u0001${id}`;
-    const entry = this.#pendingTranscripts.get(key);
-    if (entry === undefined) return;
-    this.#pendingTranscripts.delete(key);
-    if (entry.items.size === 0) return;
-    this.of(station)?.putLog("transcript", station, id, [...entry.items], null);
-  }
-
-  #flushTranscripts(): void {
-    if (this.#pendingTranscripts.size === 0) return;
-    const entries = [...this.#pendingTranscripts.values()];
-    this.#pendingTranscripts.clear();
-    for (const entry of entries) {
-      if (entry.items.size === 0) continue;
-      this.of(entry.station)?.putLog("transcript", entry.station, entry.id, [...entry.items], null);
-    }
-  }
-
   logNumbers(table: LogTable, station: string, id: string): readonly number[] {
     this.#readQuery({ topic: "$log", table, station, id });
-    const base = this.of(station)?.logNumbers(table, station, id) ?? [];
-    if (table !== "transcript") return base;
-    const pending = this.#pendingTranscripts.get(`${station}\u0001${id}`);
-    if (pending === undefined || pending.items.size === 0) return base;
-    const added = [...pending.items.keys()].sort((a, b) => a - b);
-    if (base.length === 0) return added;
-    if (added[0]! > base[base.length - 1]!) return [...base, ...added];
-    const merged = new Set<number>(base);
-    for (const n of added) merged.add(n);
-    return [...merged].sort((a, b) => a - b);
+    return this.of(station)?.logNumbers(table, station, id) ?? [];
   }
 
   /// The numbers put in a log since change `since`, and the change it is at now (AccountDb.logPutSince); `put` null:
   /// not known, all of it to be read again.
   logPutSince(table: LogTable, station: string, id: string, since: number): { rev: number; put: number[] | null } {
     this.#readQuery({ topic: "$log", table, station, id });
-    if (table === "transcript") this.#flushTranscript(station, id);
     return this.of(station)?.logPutSince(table, station, id, since) ?? { rev: 0, put: null };
   }
 
@@ -2085,22 +2041,12 @@ export class Data {
 
   logRange(table: LogTable, station: string, id: string, from: number, to: number): Map<number, unknown> {
     this.#readQuery({ topic: "$log", table, station, id });
-    const out = this.of(station)?.logRange(table, station, id, from, to) ?? new Map();
-    if (table === "transcript") {
-      const pending = this.#pendingTranscripts.get(`${station}\u0001${id}`);
-      if (pending !== undefined && pending.items.size > 0) {
-        const merged = new Map(out);
-        for (const [n, value] of pending.items) if (n >= from && n <= to) merged.set(n, frozen(structuredClone(value)));
-        return merged;
-      }
-    }
-    return out;
+    return this.of(station)?.logRange(table, station, id, from, to) ?? new Map();
   }
 
   /// What a session said in Slack and heard from it, as read from its transcript when it was written (elsewhere.ts).
   slackSaid(station: string, session: string): ReturnType<AccountDb["slackSaid"]> {
     this.#readQuery({ topic: "$slack-said", station, session });
-    this.#flushTranscript(station, session);
     return this.of(station)?.slackSaid(station, session) ?? [];
   }
 
@@ -2121,90 +2067,27 @@ export class Data {
 
   logSpan(table: LogTable, station: string, id: string): { min: number; max: number; count: number } | null {
     this.#readQuery({ topic: "$log", table, station, id });
-    const db = this.of(station);
-    const base = db?.logSpan(table, station, id) ?? null;
-    if (table !== "transcript") return base;
-    const pending = this.#pendingTranscripts.get(`${station}\u0001${id}`);
-    if (pending === undefined || pending.items.size === 0) return base;
-    let pMin = Infinity;
-    let pMax = -Infinity;
-    for (const n of pending.items.keys()) {
-      if (n < pMin) pMin = n;
-      if (n > pMax) pMax = n;
-    }
-    if (base === null) return { min: pMin, max: pMax, count: pending.items.size };
-    if (pMin > base.max || pMax < base.min) {
-      return { min: Math.min(base.min, pMin), max: Math.max(base.max, pMax), count: base.count + pending.items.size };
-    }
-    this.#flushTranscript(station, id);
-    return db?.logSpan(table, station, id) ?? null;
+    return this.of(station)?.logSpan(table, station, id) ?? null;
   }
 
   logCount(table: LogTable, station: string, id: string, from: number, to: number): number {
     this.#readQuery({ topic: "$log", table, station, id });
-    const db = this.of(station);
-    if (table === "transcript") {
-      const pending = this.#pendingTranscripts.get(`${station}\u0001${id}`);
-      if (pending !== undefined && pending.items.size > 0) {
-        const baseSpan = db?.logSpan(table, station, id) ?? null;
-        let pMin = Infinity;
-        let pMax = -Infinity;
-        let inRange = 0;
-        for (const n of pending.items.keys()) {
-          if (n < pMin) pMin = n;
-          if (n > pMax) pMax = n;
-          if (n >= from && n <= to) inRange++;
-        }
-        if (baseSpan === null) return inRange;
-        if (pMin > baseSpan.max || pMax < baseSpan.min) return (db?.logCount(table, station, id, from, to) ?? 0) + inRange;
-        this.#flushTranscript(station, id);
-      }
-    }
-    return db?.logCount(table, station, id, from, to) ?? 0;
+    return this.of(station)?.logCount(table, station, id, from, to) ?? 0;
   }
 
   /// Items into a log, by number (an entry's `n`, a transcript item's index). `cutAfter`: nothing past it is kept.
   putItems(table: LogTable, station: string, id: string, items: [number, unknown][], cutAfter: number | null = null): void {
-    if (table === "transcript") this.#flushTranscript(station, id);
     this.of(station)?.putLog(table, station, id, items, cutAfter);
   }
 
-  /// Appends items to an unshown background transcript, coalescing bursts across `TRANSCRIPT_FLUSH_MS` into one
-  /// transaction (`setSoon`'s counterpart for background transcript streams). Shown or observed transcripts write at once.
-  putItemsSoon(table: LogTable, station: string, id: string, items: [number, unknown][]): void {
-    if (
-      table === "transcript" &&
-      items.length > 0 &&
-      !this.#shown.has(`transcript\u0001${station}\u0001${id}`) &&
-      !this.#queryReads.has(topicKey({ topic: "$log", table: "transcript", station, id })) &&
-      !this.#queryReads.has(topicKey({ topic: "$slack-said", station, session: id }))
-    ) {
-      if (this.of(station) === undefined) return;
-      const key = `${station}\u0001${id}`;
-      let entry = this.#pendingTranscripts.get(key);
-      if (entry === undefined) {
-        entry = { station, id, items: new Map() };
-        this.#pendingTranscripts.set(key, entry);
-      }
-      for (const [n, value] of items) entry.items.set(n, value);
-      if (!this.#transcriptFlushing) {
-        this.#transcriptFlushing = true;
-        this.#runner.fork(
-          Effect.sleep(TRANSCRIPT_FLUSH_MS).pipe( // timer: coalesce unshown background transcript writes
-            Effect.andThen(Effect.sync(() => {
-              this.#transcriptFlushing = false;
-              this.#flushTranscripts();
-            })),
-          ),
-        );
-      }
-      return;
-    }
-    this.putItems(table, station, id, items, null);
+  /// Items onto a transcript as the sync brings them: where nothing reads it, their commit may wait
+  /// (TRANSCRIPT_FLUSH_MS), so a burst of chunks is one; they are written at once either way, and read as any other.
+  putItemsSoon(station: string, id: string, items: [number, unknown][]): void {
+    if (this.#transcriptRead(station, id)) return this.putItems("transcript", station, id, items);
+    this.of(station)?.putLogSoon(TRANSCRIPT_FLUSH_MS, "transcript", station, id, items);
   }
 
   forgetLog(table: LogTable, station: string, id: string): void {
-    if (table === "transcript") this.#pendingTranscripts.delete(`${station}\u0001${id}`);
     this.of(station)?.forgetLog(table, station, id);
   }
 
@@ -2225,7 +2108,6 @@ export class Data {
 
   /// Forgets what is kept of a chat (AccountDb.forgetChat).
   forgetChat(station: string, thread: number): void {
-    for (const session of this.threadSessions(station, thread)) this.#pendingTranscripts.delete(`${station}\u0001${session}`);
     this.of(station)?.forgetChat(station, thread);
   }
 
@@ -2340,8 +2222,6 @@ export class Data {
   /// The core closing (core.ts `close`): what is pending of the trees written and every database's burst committed,
   /// so what was read is kept by the core that follows.
   closing(): void {
-    this.#flushHeard();
-    this.#flushTranscripts();
     this.flushMd();
     for (const db of this.#dbs.values()) db.commitNow();
   }

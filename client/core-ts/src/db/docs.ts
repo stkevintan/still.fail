@@ -321,7 +321,11 @@ export class DocsStore {
       const put = () => {
         this.#env.run(
           doc.confirmed === undefined
-            ? `INSERT OR REPLACE INTO ${doc.table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`
+            // (a workspace's value kept in place: a station's cursor is written with every burst of its events, and
+            // REPLACE would write its row's index again each time)
+            ? doc.table === "workspace_pref"
+              ? `INSERT INTO ${doc.table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")}) ON CONFLICT (${doc.keys.join(", ")}) DO UPDATE SET json = excluded.json`
+              : `INSERT OR REPLACE INTO ${doc.table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`
             : `INSERT INTO ${doc.table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")}) ON CONFLICT (${doc.keys.join(", ")}) DO UPDATE SET json = excluded.json, confirmed = coalesce(excluded.confirmed, confirmed)`,
           values,
         );

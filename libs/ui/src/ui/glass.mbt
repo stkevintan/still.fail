@@ -58,6 +58,8 @@ priv struct GlassPaint {
   mut ink_x : Double
   mut ink_y : Double
   mut ink_r : Double
+  // true when the active adaptive ink scope is bare text (`View::adaptive_ink`, no glass capsule)
+  mut ink_bare : Bool
   // true while painting a cached block inside an adaptive glass scope so emit_text records line centerline in slot 7 and emit_bands records icon center in slots 6-7
   mut ink_line : Bool
 }
@@ -81,6 +83,7 @@ let glass_paint : GlassPaint = {
   ink_x: 0.0,
   ink_y: 0.0,
   ink_r: 0.0,
+  ink_bare: false,
   ink_line: false,
 }
 
@@ -121,6 +124,7 @@ fn reset_glass() -> Unit {
   @signals.untracked(fn() { glass_frost_said.val.set(0.0) })
   glass_paint.in_group = 0
   glass_paint.ink_r = 0.0
+  glass_paint.ink_bare = false
   glass_paint.ink_line = false
 }
 
@@ -191,6 +195,7 @@ fn Ctx::glass_frame(self : Ctx) -> Unit {
   glass_paint.run_len = 0
   glass_paint.in_group = 0
   glass_paint.ink_r = 0.0
+  glass_paint.ink_bare = false
   glass_paint.ink_line = false
   glass_paint.frost = glass_frost_said.val.get()
   glass_paint.contrast = more_contrast()

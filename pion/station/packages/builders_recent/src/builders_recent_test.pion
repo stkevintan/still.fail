@@ -1,0 +1,92 @@
+fn expect(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+fn opt_str_eq(a : Option[String], b : Option[String]) -> Bool {
+  match (a, b) {
+    (None, None) => true
+    (Some(x), Some(y)) => x == y
+    _ => false
+  }
+}
+
+test "parse_recent_scope accepts all 4 valid forms and rejects invalid inputs including lone surrogates" {
+  let valid_cases : Array[(String, Option[String], Option[String])] = [
+    ("[null,null]", None, None),
+    ("[null,\"home\"]", None, Some("home")),
+    ("[\"ws\",null]", Some("ws"), None),
+    ("[\"ws\",\"home\"]", Some("ws"), Some("home")),
+    ("[\"same\",\"same\"]", Some("same"), Some("same")),
+    ("[\"\\uD83D\\uDE80\",\"ok\"]", Some("🚀"), Some("ok")),
+  ]
+  for i in 0..<valid_cases.length() {
+    let (raw, want_ws, want_home) = valid_cases[i]
+    match parse_recent_scope(raw) {
+      Ok(sc) => {
+        expect(opt_str_eq(sc.ws, want_ws), "ws mismatch for " + raw)
+        expect(opt_str_eq(sc.home, want_home), "home mismatch for " + raw)
+      }
+      Err(_) => panic("expected valid scope: " + raw)
+    }
+  }
+
+  let invalid_cases : Array[String] = [
+    "",
+    "not-json",
+    "null",
+    "{}",
+    "[]",
+    "[\"only-one\"]",
+    "[\"a\",\"b\",\"c\"]",
+    "[1,2]",
+    "[true,null]",
+    "[null,123]",
+    "[\"{}\",{}]",
+    "[\"\\uD800\",null]",
+    "[null,\"\\uDFFF\"]",
+    "[\"\\uD800\\u0041\",\"home\"]",
+  ]
+  for i in 0..<invalid_cases.length() {
+    let raw = invalid_cases[i]
+    match parse_recent_scope(raw) {
+      Err(builders_core::StepError::App(msg)) => {
+        expect(msg == "invalid recent chat scope", "exact error message for " + raw + ", got: " + msg)
+      }
+      _ => panic("expected App(invalid recent chat scope) for " + raw)
+    }
+  }
+}
+
+test "scope_key and next_turn_index isolate per-scope keys and wrap lane indices" {
+  expect(scope_key(false, "A") == "w:A", "workspace key")
+  expect(scope_key(true, "A") == "h:A", "home key")
+  expect(scope_key(false, "A") != scope_key(true, "A"), "workspace and home keys distinct")
+  expect(next_turn_index(0, 0, 7) == 0, "ws start")
+  expect(next_turn_index(5, 3, 7) == 1, "ws wrap-around")
+  expect(next_turn_index(11, 4, 13) == 2, "home wrap-around")
+}
+
+test "component mapping and schema DDL generation cover all 4 parts" {
+  expect(component("global") == "recent_chat_meta", "global component")
+  expect(component("scope") == "recent_scope_tracked", "scope component")
+  expect(component("home") == "recent_home_meta", "home component")
+  expect(component("overlap") == "recent_home_overlap_meta", "overlap component")
+
+  let g = global_schema()
+  expect(str_contains(g, "CREATE TABLE recent_chat_rows"), "global rows table")
+  expect(str_contains(g, "CREATE TRIGGER recent_chat_entry_drop"), "global trigger")
+
+  let s = scope_schema()
+  expect(str_contains(s, "CREATE TABLE recent_scope_tracked"), "scope tracked table")
+  expect(str_contains(s, "CREATE TRIGGER recent_scope_order_entry_drop"), "scope trigger")
+
+  let h = home_schema()
+  expect(str_contains(h, "CREATE TABLE recent_home_meta"), "home meta table")
+  expect(str_contains(h, "CREATE TRIGGER recent_home_entry_drop"), "home trigger")
+
+  let o = overlap_schema()
+  expect(str_contains(o, "CREATE TABLE recent_home_overlap_meta"), "overlap meta table")
+  expect(str_contains(o, "CREATE TRIGGER recent_home_overlap_home_drop"), "overlap trigger")
+}

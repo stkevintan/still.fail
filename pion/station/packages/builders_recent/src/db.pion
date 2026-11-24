@@ -1,0 +1,117 @@
+// Shared SQLite helpers for `builders_recent`, 1:1 aligned with `station/mb/src/recent/db.mbt`.
+// All read snapshots and nested contribution rollbacks go through `sql_db::Db::savepoint_err`
+// (never raw `SAVEPOINT`/`RELEASE`/`ROLLBACK` SQL).
+
+import "base_codec"
+import "builders_core"
+import "sql_db"
+
+fn map_sql(e : sql_db::SqlError) -> builders_core::StepError {
+  builders_core::StepError::Sql(e)
+}
+
+fn is_json_null(j : base_codec::Json) -> Bool {
+  match j {
+    base_codec::Json::Null => true
+    _ => false
+  }
+}
+
+fn is_json_str(j : base_codec::Json) -> Bool {
+  match j {
+    base_codec::Json::Str(_) => true
+    _ => false
+  }
+}
+
+fn str_contains(haystack : String, needle : String) -> Bool {
+  let h = haystack.to_bytes()
+  let n = needle.to_bytes()
+  if n.length() == 0 {
+    return true
+  }
+  if n.length() > h.length() {
+    return false
+  }
+  let last = h.length() - n.length()
+  for i in 0..<(last + 1) {
+    let mut matched = true
+    for j in 0..<n.length() {
+      if h[i + j] != n[j] {
+        matched = false
+        break
+      }
+    }
+    if matched {
+      return true
+    }
+  }
+  false
+}
+
+fn join_lines(parts : Array[String]) -> String {
+  let sb = StringBuilder::new()
+  for i in 0..<parts.length() {
+    if i > 0 {
+      sb.write_string("\n")
+    }
+    sb.write_string(parts[i])
+  }
+  sb.to_string()
+}
+
+/// A statement's one row (an aggregate's, a meta table's).
+fn one(
+  db : sql_db::Db,
+  sql : String,
+  params : Array[base_codec::Json],
+) -> Result[Map[String, base_codec::Json], builders_core::StepError] {
+  match db.first(sql, params) {
+    Ok(Some(r)) => Ok(r)
+    Ok(None) => Err(builders_core::StepError::App("recent chat index row missing: " + sql))
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn exists(
+  db : sql_db::Db,
+  sql : String,
+  params : Array[base_codec::Json],
+) -> Result[Bool, builders_core::StepError] {
+  match db.first(sql, params) {
+    Ok(Some(_)) => Ok(true)
+    Ok(None) => Ok(false)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn text(s : String) -> base_codec::Json {
+  base_codec::json_str(s)
+}
+
+fn num(n : Int) -> base_codec::Json {
+  base_codec::json_num(n.to_double())
+}
+
+/// `f` on one read snapshot (or inside the caller's transaction) via `Db::savepoint_err`.
+fn snapshot[T](
+  db : sql_db::Db,
+  name : String,
+  f : (sql_db::Db) -> Result[T, builders_core::StepError],
+) -> Result[T, builders_core::StepError] {
+  db.savepoint_err(name, f, map_sql)
+}
+
+/// A chat's place in the order: its selected message's time, else its creation (`?N` is the chat, as text).
+fn current(param : String) -> String {
+  "SELECT t.id AS thread, COALESCE(e.at, t.created_at) AS at, COALESCE(e.at, 0) AS said_at, t.created_at AS created_at FROM threads t LEFT JOIN thread_state s ON s.thread = t.id LEFT JOIN entries e ON e.thread = t.id AND e.n = s.said_n AND e.kind = 'message' WHERE t.id = CAST(" +
+  param +
+  " AS INTEGER)"
+}
+
+fn chat_exists(
+  db : sql_db::Db,
+  thread : base_codec::Json,
+) -> Result[Bool, builders_core::StepError] {
+  exists(db, "SELECT 1 FROM threads WHERE id = CAST(? AS INTEGER)", [thread])
+}

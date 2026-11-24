@@ -1791,6 +1791,7 @@ fn md_image_rows_node(p : @view.View, md : MdNode, images : () -> Array[(String,
 
 ///|
 /// Passages what holds a Markdown text marks on its paragraphs where they have them, each with its ground (a reader's
-/// notes kept on its words: reader_marks), read as a paragraph's marks are drawn.
+/// notes kept on its words: reader_marks; a chat message's words a note was asked of), read as a paragraph's marks are
+/// drawn.
 // kept across runs: what each node lends (View::lends), let go with it
-let md_lits : @view.Lent[() -> Array[(String, Int64)]] = @view.Lent::new()
+pub let md_lits : @view.Lent[() -> Array[(String, Int64)]] = @view.Lent::new()

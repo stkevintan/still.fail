@@ -31,7 +31,7 @@ pub fn liquid_scroll_edge_fill_decorate(
 /// Native four-platform progressive variable-blur scroll-edge backdrop (`UIScrollEdgeEffect.soft`, `progressive=true`)
 /// anchored to the `Top` or `Bottom` edge of `parent`.
 ///
-/// Blurs and veils scrolled content smoothly over `fade_h` within a `base_h`-tall band, emits zero hidden glass
+/// Blurs scrolled content smoothly over `fade_h` within a `base_h`-tall band, emits zero hidden glass
 /// instances when `base_h(fill) <= 0.0`, and when `shield=true` (default) blocks click-through onto scrolled content
 /// behind floating top/bottom bars without affecting hover.
 #callsite(autofill(loc))
@@ -44,6 +44,7 @@ pub fn liquid_scroll_edge_node(
   bg_by? : (@view.View) -> Int64,
   from_top? : Bool = false,
   shield? : Bool = true,
+  pure? : Bool = false,
   loc~ : SourceLoc,
 ) -> @view.View {
   let build_scrim = fn(scrim : @view.View) {
@@ -76,7 +77,7 @@ pub fn liquid_scroll_edge_node(
                   None => clear
                 }
             }
-            Some(liquid_scroll_edge_glass(bg=color))
+            Some(liquid_scroll_edge_glass(bg=color, pure~))
           } else {
             None
           }

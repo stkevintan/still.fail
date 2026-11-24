@@ -1960,6 +1960,137 @@ int main(void) {
           CHECK(h_mono_ok);
         }
       }
+      // Progressive blur zero-tint regression: dark background (0.15, 0.15, 0.16) under kind==5 progressive blur
+      // with blur=8.5, saturation=1.0, tint=(1.0, 1.0, 1.0, 0.0) must stay pure dark (~38, 38, 41) at r=1.0
+      // without any contrast-boosted white veil.
+      {
+        mb_render_set_size(400, 300, 2);
+        double zt[2 * MB_INST];
+        rect_at(zt, 0, 0, 400, 300, 0, 0.15, 0.15, 0.16, 0);
+        rect_at(zt + MB_INST, 0, 0, 400, 68.0, 5, 1.0, 1.0, 1.0, -42);
+        zt[MB_INST + 6] = 1.0;   // saturation=1.0
+        zt[MB_INST + 7] = 8.5;   // blur=8.5
+        zt[MB_INST + 11] = 0.0;  // tint alpha=0.0 (clear)
+        zt[MB_INST + 15] = 1.0;
+        zt[MB_INST + 22] = -1.0; // progressive
+        zt[MB_INST + 54] = 68.0;
+        zt[MB_INST + 55] = 40.0; // y in [0, 28] has fade_r == 1.0
+        glass_forget();
+        mb_host_render_dirty(0, 0, 400, 300);
+        mb_render_present(zt, 2, 0.15, 0.15, 0.16);
+        present_drain();
+        int zcw = 0, zch = 0;
+        uint8_t *zpx = read_texture(canvas, &zcw, &zch);
+        int zidx = (20 * zcw + 400) * 4; // (200pt, 10pt) at 2x scale, r=1.0
+        int zr = zpx[zidx + 2], zg = zpx[zidx + 1], zb = zpx[zidx + 0]; // BGRA
+        printf("apple_render: prog-blur zero-tint rgb=(%d,%d,%d)\n", zr, zg, zb);
+        CHECK(abs(zr - 38) <= 2 && abs(zg - 38) <= 2 && abs(zb - 41) <= 2);
+        free(zpx);
+      }
+      // Bare-text kind==7 (negative pad.w) bidirectional adaptive ink over kind==5 zero-tint progressive blur
+      // with non-uniform left/right backdrop (left kind==6 pill over opposite luminance from right bare text,
+      // proving grab_of actually expands to cover bare text instead of UV-clamping the pill):
+      // (a) left bright / right dark + bare dark text -> flips light (>= 0.70 luma)
+      // (b) left dark / right bright + bare light text -> flips dark (<= 0.30 luma)
+      // Plus WCAG >= 4.5:1 contrast on mid-gray sRGB 0.45, 0.60, 0.77 for both dark and light origin bare text,
+      // and capsule white text (pad.w > 0) over ad_n == 0 bright backdrop staying white (>= 0.90 luma).
+      {
+        mb_render_set_size(400, 300, 2);
+        struct { double l_bg, r_bg, txt; int expect_light; } bi_cases[2] = {
+          { 0.96, 0.12, 0.11, 1 },
+          { 0.12, 0.96, 0.95, 0 },
+        };
+        for (int ci = 0; ci < 2; ci++) {
+          double bi[5 * MB_INST];
+          rect_at(bi, 0, 0, 140, 300, 0, bi_cases[ci].l_bg, bi_cases[ci].l_bg, bi_cases[ci].l_bg, 0);
+          rect_at(bi + MB_INST, 140, 0, 260, 300, 0, bi_cases[ci].r_bg, bi_cases[ci].r_bg, bi_cases[ci].r_bg, 0);
+          rect_at(bi + 2 * MB_INST, 0, 0, 400, 68.0, 5, 1.0, 1.0, 1.0, -43);
+          bi[2 * MB_INST + 6] = 1.0; bi[2 * MB_INST + 7] = 8.5; bi[2 * MB_INST + 11] = 0.0; bi[2 * MB_INST + 15] = 1.0;
+          bi[2 * MB_INST + 22] = -1.0; bi[2 * MB_INST + 54] = 68.0; bi[2 * MB_INST + 55] = 40.0;
+          rect_at(bi + 3 * MB_INST, 12, 8, 60, 28, 6, 253.0/255.0, 252.0/255.0, 253.0/255.0, -44);
+          bi[3 * MB_INST + 4] = 14.0; bi[3 * MB_INST + 6] = 1.0; bi[3 * MB_INST + 7] = 2.0;
+          bi[3 * MB_INST + 11] = 0x67 / 255.0; bi[3 * MB_INST + 14] = -1.0; bi[3 * MB_INST + 15] = 1.0;
+          rect_at(bi + 4 * MB_INST, 252, 12, 16, 16, 7, bi_cases[ci].txt, bi_cases[ci].txt, bi_cases[ci].txt, 0);
+          bi[4 * MB_INST + 12] = 16.0; bi[4 * MB_INST + 13] = 16.0;
+          bi[4 * MB_INST + 14] = 16.0; bi[4 * MB_INST + 15] = 16.0;
+          bi[4 * MB_INST + 21] = 260.0; bi[4 * MB_INST + 22] = 20.0; bi[4 * MB_INST + 23] = -16.0;
+          glass_forget();
+          mb_host_render_dirty(0, 0, 400, 300);
+          mb_render_present(bi, 5, bi_cases[ci].r_bg, bi_cases[ci].r_bg, bi_cases[ci].r_bg);
+          present_drain();
+          int bcw = 0, bch = 0;
+          uint8_t *bpx = read_texture(canvas, &bcw, &bch);
+          int bidx = (40 * bcw + 520) * 4; // (260pt, 20pt) at 2x scale
+          double lum = (0.2126 * bpx[bidx + 2] + 0.7152 * bpx[bidx + 1] + 0.0722 * bpx[bidx + 0]) / 255.0;
+          printf("apple_render: bare-text adaptive ink non-uniform case %d: rgb=(%d,%d,%d) luma=%.3f\n",
+                 ci, bpx[bidx + 2], bpx[bidx + 1], bpx[bidx + 0], lum);
+          if (bi_cases[ci].expect_light) {
+            CHECK(lum >= 0.70);
+          } else {
+            CHECK(lum <= 0.30);
+          }
+          free(bpx);
+        }
+        // Mid-gray WCAG >= 4.5:1 contrast check on 8 mid-grays x 5 primary/muted inks (40 cases)
+        double mid_bgs[8] = { 0.45, 0.47, 0.50, 0.53, 0.60, 0.63, 0.70, 0.77 };
+        double mid_txts[5] = { 0.11, 0.40, 0.67, 0.95, 1.00 };
+        for (int mi = 0; mi < 8; mi++) {
+          double bg = mid_bgs[mi];
+          double bg_lin = bg <= 0.04045 ? bg / 12.92 : pow((bg + 0.055) / 1.055, 2.4);
+          for (int ti = 0; ti < 5; ti++) {
+            double mc[3 * MB_INST];
+            rect_at(mc, 0, 0, 400, 300, 0, bg, bg, bg, 0);
+            rect_at(mc + MB_INST, 0, 0, 400, 68.0, 5, 1.0, 1.0, 1.0, -45);
+            mc[MB_INST + 6] = 1.0; mc[MB_INST + 7] = 8.5; mc[MB_INST + 11] = 0.0; mc[MB_INST + 15] = 1.0;
+            mc[MB_INST + 22] = -1.0; mc[MB_INST + 54] = 68.0; mc[MB_INST + 55] = 40.0;
+            rect_at(mc + 2 * MB_INST, 192, 12, 16, 16, 7, mid_txts[ti], mid_txts[ti], mid_txts[ti], 0);
+            mc[2 * MB_INST + 12] = 16.0; mc[2 * MB_INST + 13] = 16.0;
+            mc[2 * MB_INST + 14] = 16.0; mc[2 * MB_INST + 15] = 16.0;
+            mc[2 * MB_INST + 21] = 200.0; mc[2 * MB_INST + 22] = 20.0; mc[2 * MB_INST + 23] = -16.0;
+            glass_forget();
+            mb_host_render_dirty(0, 0, 400, 300);
+            mb_render_present(mc, 3, bg, bg, bg);
+            present_drain();
+            int mcw = 0, mch = 0;
+            uint8_t *mpx = read_texture(canvas, &mcw, &mch);
+            int midx = (40 * mcw + 400) * 4;
+            double tr = mpx[midx + 2] / 255.0, tg = mpx[midx + 1] / 255.0, tb = mpx[midx + 0] / 255.0;
+            double rl = 0.2126 * (tr <= 0.04045 ? tr / 12.92 : pow((tr + 0.055) / 1.055, 2.4))
+                      + 0.7152 * (tg <= 0.04045 ? tg / 12.92 : pow((tg + 0.055) / 1.055, 2.4))
+                      + 0.0722 * (tb <= 0.04045 ? tb / 12.92 : pow((tb + 0.055) / 1.055, 2.4));
+            double hi = rl > bg_lin ? rl : bg_lin, lo = rl > bg_lin ? bg_lin : rl;
+            double cr = (hi + 0.05) / (lo + 0.05);
+            printf("apple_render: bare-text mid-gray bg=%.2f txt=%.2f -> rgb=(%d,%d,%d) cr=%.2f\n",
+                   bg, mid_txts[ti], mpx[midx + 2], mpx[midx + 1], mpx[midx + 0], cr);
+            CHECK(cr >= 4.5);
+            free(mpx);
+          }
+        }
+        // Capsule white text (pad.w > 0) over ad_n == 0 bright backdrop must NOT flip dark
+        {
+          double cw[3 * MB_INST];
+          rect_at(cw, 0, 0, 400, 300, 0, 0.96, 0.96, 0.96, 0);
+          rect_at(cw + MB_INST, 0, 0, 400, 68.0, 5, 1.0, 1.0, 1.0, -46);
+          cw[MB_INST + 6] = 1.0; cw[MB_INST + 7] = 8.5; cw[MB_INST + 11] = 0.0; cw[MB_INST + 15] = 1.0;
+          cw[MB_INST + 22] = -1.0; cw[MB_INST + 54] = 68.0; cw[MB_INST + 55] = 40.0;
+          rect_at(cw + 2 * MB_INST, 192, 12, 16, 16, 7, 0.95, 0.95, 0.95, 0);
+          cw[2 * MB_INST + 12] = 16.0; cw[2 * MB_INST + 13] = 16.0;
+          cw[2 * MB_INST + 14] = 16.0; cw[2 * MB_INST + 15] = 16.0;
+          cw[2 * MB_INST + 21] = 200.0; cw[2 * MB_INST + 22] = 20.0; cw[2 * MB_INST + 23] = 16.0; // positive = capsule
+          glass_forget();
+          mb_host_render_dirty(0, 0, 400, 300);
+          mb_render_present(cw, 3, 0.96, 0.96, 0.96);
+          present_drain();
+          int ccw = 0, cch = 0;
+          uint8_t *cpx = read_texture(canvas, &ccw, &cch);
+          int cidx = (40 * ccw + 400) * 4;
+          double lum = (0.2126 * cpx[cidx + 2] + 0.7152 * cpx[cidx + 1] + 0.0722 * cpx[cidx + 0]) / 255.0;
+          printf("apple_render: capsule white text ad_n=0 bright bg: rgb=(%d,%d,%d) luma=%.3f\n",
+                 cpx[cidx + 2], cpx[cidx + 1], cpx[cidx + 0], lum);
+          CHECK(lum >= 0.90);
+          free(cpx);
+        }
+      }
       mb_render_set_size(400, 300, 2);
       glass_forget();
     }

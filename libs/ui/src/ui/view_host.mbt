@@ -1781,8 +1781,8 @@ fn Ctx::view_paint(self : Ctx, root : Int) -> Unit {
       }
     }
   }
-  // (adaptive liquid glass ink scopes active during the tree walk, innermost last: saved prior (ink_x, ink_y, ink_r))
-  let ink_stack : Array[(@view.NodeId, Double, Double, Double)] = []
+  // (adaptive liquid glass / bare adaptive ink scopes active during the tree walk, innermost last: saved prior (ink_x, ink_y, ink_r, ink_bare))
+  let ink_stack : Array[(@view.NodeId, Double, Double, Double, Bool)] = []
   // (covered beside pages clipped horizontally during parallax push/pop: (pv_id, cut_left, cut_right, runs0))
   if dr.mode != mode_hits {
     nav_clips_now.clear()
@@ -2012,10 +2012,11 @@ fn Ctx::view_paint(self : Ctx, root : Int) -> Unit {
       unveiling.pop() |> ignore
     }
     while ink_stack.length() > 0 && !tree.holds_in_order(ink_stack[ink_stack.length() - 1].0, c.id) {
-      let (_, ox, oy, or_) = ink_stack.pop().unwrap()
+      let (_, ox, oy, or_, ob) = ink_stack.pop().unwrap()
       glass_paint.ink_x = ox
       glass_paint.ink_y = oy
       glass_paint.ink_r = or_
+      glass_paint.ink_bare = ob
     }
     while nav_clipping.length() > 0 && !tree.holds_in_order(nav_clipping[nav_clipping.length() - 1].0, c.id) {
       let (_, cut_l, cut_r, runs0) = nav_clipping.pop().unwrap()
@@ -2293,7 +2294,7 @@ fn Ctx::view_paint(self : Ctx, root : Int) -> Unit {
     }
     match c.glass {
       Some(gl) if gl.liquid && gl.adaptive && gl.strength > 0.001 && !glass_paint.solid && c.bones == 0L => {
-        ink_stack.push((c.id, glass_paint.ink_x, glass_paint.ink_y, glass_paint.ink_r))
+        ink_stack.push((c.id, glass_paint.ink_x, glass_paint.ink_y, glass_paint.ink_r, glass_paint.ink_bare))
         let gx = x + ground_drawn.dx * s
         let gy = y + ground_drawn.dy * s
         let gw = dmax(0.0, c.w + ground_drawn.dw) * s
@@ -2301,11 +2302,24 @@ fn Ctx::view_paint(self : Ctx, root : Int) -> Unit {
         glass_paint.ink_x = gx + gw / 2.0
         glass_paint.ink_y = gy + gh / 2.0
         glass_paint.ink_r = dmax(dmin(gw, gh) / 2.0, 1.0)
+        glass_paint.ink_bare = false
+      }
+      _ if c.adaptive_ink && !glass_paint.solid && c.bones == 0L => {
+        ink_stack.push((c.id, glass_paint.ink_x, glass_paint.ink_y, glass_paint.ink_r, glass_paint.ink_bare))
+        let gx = x + ground_drawn.dx * s
+        let gy = y + ground_drawn.dy * s
+        let gw = dmax(0.0, c.w + ground_drawn.dw) * s
+        let gh = dmax(0.0, c.h + ground_drawn.dh) * s
+        glass_paint.ink_x = gx + gw / 2.0
+        glass_paint.ink_y = gy + gh / 2.0
+        glass_paint.ink_r = dmax(dmin(gw, gh) / 2.0, 1.0)
+        glass_paint.ink_bare = true
       }
       _ =>
         if glass_paint.ink_r > 0.0 && c.ground != 0L && (c.ground & 0xFFL) >= 0xC0L {
-          ink_stack.push((c.id, glass_paint.ink_x, glass_paint.ink_y, glass_paint.ink_r))
+          ink_stack.push((c.id, glass_paint.ink_x, glass_paint.ink_y, glass_paint.ink_r, glass_paint.ink_bare))
           glass_paint.ink_r = 0.0
+          glass_paint.ink_bare = false
         }
     }
     let ring_at = if c.hosted && c.bones != 0L {
@@ -2646,10 +2660,11 @@ fn Ctx::view_paint(self : Ctx, root : Int) -> Unit {
     nav_clip_trim(runs0, cut_l, cut_r)
   }
   while ink_stack.length() > 0 {
-    let (_, ox, oy, or_) = ink_stack.pop().unwrap()
+    let (_, ox, oy, or_, ob) = ink_stack.pop().unwrap()
     glass_paint.ink_x = ox
     glass_paint.ink_y = oy
     glass_paint.ink_r = or_
+    glass_paint.ink_bare = ob
   }
   close_to(None)
   close_fast_fade(None)
@@ -3943,12 +3958,13 @@ fn Ctx::view_blit(
         s.unsafe_set(b + 5, 7.0)
         s.unsafe_set(b + 21, glass_paint.ink_x)
         s.unsafe_set(b + 22, glass_paint.ink_y)
-        s.unsafe_set(b + 23, glass_paint.ink_r)
-      } else if kind == 10.0 || kind == 11.0 {
+        s.unsafe_set(b + 23, if glass_paint.ink_bare { -glass_paint.ink_r } else { glass_paint.ink_r })
+      } else if !glass_paint.ink_bare && (kind == 10.0 || kind == 11.0) {
         s.unsafe_set(b + 21, glass_paint.ink_x)
         s.unsafe_set(b + 22, glass_paint.ink_y)
         s.unsafe_set(b + 23, glass_paint.ink_r)
-      } else if kind == 0.0 &&
+      } else if !glass_paint.ink_bare &&
+        kind == 0.0 &&
         s.unsafe_get(b + 6) <= 0.0 &&
         s.unsafe_get(b + 22) <= 0.0 &&
         s.unsafe_get(b + 11) > 0.0 &&

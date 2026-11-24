@@ -287,7 +287,7 @@ export const foundOf = (rows: readonly SqlRow[]): ChatFound[] => rows.map((r) =>
 /// The statement that puts a chat's record: the columns every core writes, `state` and `made` this core's, and those
 /// SQLite makes of its JSON (schema.ts CHAT_COLUMNS), of the JSON given last. Uses `ON CONFLICT DO UPDATE` rather than
 /// `INSERT OR REPLACE` so updating an existing chat keeps its `rowid` and skips rewriting unchanged secondary indexes
-/// (`chat_ord`, `chat_thread`, `chat_session`, `chat_client`, `chat_marks`, `chat_made`, `chat_agent`).
+/// (`chat_ord`, `chat_thread`, `chat_session`, `chat_client`, `chat_marks`, `chat_unmade`, `chat_agent`).
 export const PUT_CHAT = `INSERT INTO chat (station, id, archived, ord, thread, session, client_key, last_active, pinned_at, unread, mine, running, tone, asks, state, watched, made, json, ${CHAT_COLUMNS.map(([c]) => c).join(", ")})
   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CHAT_MADE}, r.json, ${CHAT_COLUMNS.map(([, of]) => of("r.json")).join(", ")} FROM (SELECT ? AS json) AS r WHERE true
   ON CONFLICT (station, archived, id) DO UPDATE SET
