@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { dbName } from "../src/data.ts";
 import type { Changes } from "../src/db/account.ts";
-import { PART_COLUMNS, partRev } from "../src/db/schema.ts";
+import { HOT_PART_COLUMNS, PART_COLUMNS, PROFILE_PART_COLUMNS, partRev } from "../src/db/schema.ts";
 import { NodeSql } from "../src/hosts/node-sql.ts";
 import { holdLanguage } from "../src/i18n.ts";
 import type { FakeHost } from "../src/testing.ts";
@@ -39,8 +39,13 @@ const CHANGE: Record<string, (o: J, n: number) => J> = {
 
 const station = UP[0]!;
 const sqlOf = (host: FakeHost) => host.sqls.get(dbName("s1"))!;
-/// Each column of a station's part as SQLite holds it.
-const texts = (host: FakeHost, at: string) => sqlOf(host).all(`SELECT ${PART_COLUMNS.map(([c]) => c).join(", ")} FROM station_part WHERE address = ?`, [at])[0]!;
+const PROFILE_COLS = new Set(PROFILE_PART_COLUMNS.map(([c]) => c));
+/// Each column of a station's part as SQLite holds it (hot columns in `station_part`, profile columns in `station_part_profiles`).
+const texts = (host: FakeHost, at: string) =>
+  sqlOf(host).all(
+    `SELECT ${PART_COLUMNS.map(([c]) => `${PROFILE_COLS.has(c) ? "pp" : "sp"}.${c}`).join(", ")} FROM station_part AS sp LEFT JOIN station_part_profiles AS pp ON pp.address = sp.address WHERE sp.address = ?`,
+    [at],
+  )[0]!;
 
 // The text of every cell SQLite gives back (NodeSql's `all`, as the test's host makes it), while `seen` is set.
 let seen: string[] | null = null;
@@ -111,8 +116,11 @@ test("an_overview_written_by_a_core_that_knows_nothing_of_the_revisions_has_its_
   const again = await held(false, { host, cold: true });
   again.t.store.runner.shutdown();
   const made = sql.all(`SELECT st.address, ${PART_COLUMNS.map(([, of]) => of("st.json")).join(", ")} FROM station AS st WHERE st.kind = 'overview' ORDER BY st.address`);
-  const kept = sql.all(`SELECT address, ${PART_COLUMNS.map(([c]) => c).join(", ")} FROM station_part ORDER BY address`);
+  const kept = sql.all(
+    `SELECT sp.address, ${PART_COLUMNS.map(([c]) => `${PROFILE_COLS.has(c) ? "pp" : "sp"}.${c}`).join(", ")} FROM station_part AS sp LEFT JOIN station_part_profiles AS pp ON pp.address = sp.address ORDER BY sp.address`,
+  );
   assert.ok(made.length > 0);
   assert.deepEqual(kept, made, "each part as its overview makes it");
-  assert.deepEqual(sql.all(`SELECT count(*) FROM station_part WHERE ${PART_COLUMNS.map(([c]) => `${partRev(c)} IS NULL`).join(" OR ")}`)[0], [0], "every column counted");
+  assert.deepEqual(sql.all(`SELECT count(*) FROM station_part WHERE ${HOT_PART_COLUMNS.map(([c]) => `${partRev(c)} IS NULL`).join(" OR ")}`)[0], [0], "every hot column counted");
+  assert.deepEqual(sql.all(`SELECT count(*) FROM station_part_profiles WHERE ${PROFILE_PART_COLUMNS.map(([c]) => `${partRev(c)} IS NULL`).join(" OR ")}`)[0], [0], "every profile column counted");
 });

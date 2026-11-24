@@ -385,6 +385,8 @@ export class Handover {
   /// wait for a placing under way).
   readonly #dropping = new Set<string>();
   readonly #runs = new Map<string, Promise<void>>();
+  /// The hand-overs from here under way in this process (`handOver`, begun to its end, gone or stayed), by id.
+  readonly #active = new Map<string, Out>();
   readonly #again = new Map<string, () => void>();
   readonly #tries = new Map<string, number>();
   readonly #work: NonNullable<HandoverDeps["work"]>;
@@ -748,6 +750,13 @@ export class Handover {
   #look(kind: string, n: number): void {
     if (n > 0) this.#looked.set(kind, (this.#looked.get(kind) ?? 0) + n);
   }
+  /// The chats going from here now (`handOver` under way, its first pass with the chat working or held), each with
+  /// its sessions, where it goes and whether it is held yet: the overview's `move.chats`, which a device's chat page
+  /// shows over a composer shut till it ends. One at a time as a turn moves them; a handful at most.
+  moving(): { sessions: string[]; ws: string; to: string; toName: string; held: boolean }[] {
+    return [...this.#active.values()].map((o) => ({ sessions: [...o.keys], ws: o.ws, to: o.to, toName: o.toName, held: o.held === true }));
+  }
+
   /// The latest hand-over of session `key` from here (none: never).
   outOf(key: string): Out | null {
     return this.#outsOf.get(key)?.[0] ?? null;
@@ -885,67 +894,74 @@ export class Handover {
       sent: {}, counts: null, there: {}, routes: [], routed: 0, shown: false, done: 0, total: 0, held: false, v: 2,
     };
     this.#keepOut(o);
+    // (said as moving from here on, its page's composer shut, till it went or stayed: `moving`)
+    this.#active.set(o.id, o);
     await this.#save(o);
-    let begun: Json;
     try {
-      // A first pass, the chat working all along: begun there, its files sent and placed, so that the second, held,
-      // sends only what changed since (its pause does not grow with its room).
-      this.#given(o);
-      this.#mark(o, "begin");
-      begun = await this.#beginThere(o, opts.stoppedFor ?? null);
-      // (one from before calls went with a chat takes none: they stay here, and go as it is heard from once it does,
-      // `#syncHandedUsage`)
-      o.usage = begun?.usage === true;
-      o.batched = begun?.rows === ROWS_BATCHED;
-      this.#mark(o, "first");
-      await this.#files(o, begun, opts.progress, false);
-      this.#mark(o, "turn");
-      for (const k of keys) {
-        if (!this.#d.hub.busy(k)) continue;
-        if (opts.wait !== true) throw new Said(why("inTurn", { chat: this.#chatName(k) }));
-        let late: () => void = () => {};
-        const deadline = new Promise<"late">((resolve) => (late = this.#d.fibers.after(TURN_WAIT_MS, () => resolve("late")))); // timer: a deadline for the turn's end
-        this.#waitingTurn.add(o.id);
-        const ended = await Promise.race([this.#d.hub.turnEnded(k).then(() => "ended" as const), deadline]).finally(() => this.#waitingTurn.delete(o.id));
-        late();
-        if (ended === "late") throw new Said(why("turnLate", { chat: this.#chatName(k), minutes: TURN_WAIT_MS / 60_000 }));
+      let begun: Json;
+      try {
+        // A first pass, the chat working all along: begun there, its files sent and placed, so that the second, held,
+        // sends only what changed since (its pause does not grow with its room).
+        this.#given(o);
+        this.#mark(o, "begin");
+        begun = await this.#beginThere(o, opts.stoppedFor ?? null);
+        // (one from before calls went with a chat takes none: they stay here, and go as it is heard from once it does,
+        // `#syncHandedUsage`)
+        o.usage = begun?.usage === true;
+        o.batched = begun?.rows === ROWS_BATCHED;
+        this.#mark(o, "first");
+        await this.#files(o, begun, opts.progress, false);
+        this.#mark(o, "turn");
+        for (const k of keys) {
+          if (!this.#d.hub.busy(k)) continue;
+          if (opts.wait !== true) throw new Said(why("inTurn", { chat: this.#chatName(k) }));
+          let late: () => void = () => {};
+          const deadline = new Promise<"late">((resolve) => (late = this.#d.fibers.after(TURN_WAIT_MS, () => resolve("late")))); // timer: a deadline for the turn's end
+          this.#waitingTurn.add(o.id);
+          const ended = await Promise.race([this.#d.hub.turnEnded(k).then(() => "ended" as const), deadline]).finally(() => this.#waitingTurn.delete(o.id));
+          late();
+          if (ended === "late") throw new Said(why("turnLate", { chat: this.#chatName(k), minutes: TURN_WAIT_MS / 60_000 }));
+        }
+      } catch (e) {
+        const error = sayOf(e, `chat ${keys[0] ?? ""}`);
+        if (this.#closed) throw new Refused(tr(stationLang(), "station.move.stoppedMidway", { station: name || to.slice(0, 12) }));
+        await this.#fail(o, error);
+        throw new Refused(tr(stationLang(), "station.move.chatStayed", { station: name || to.slice(0, 12), why: error }));
       }
-    } catch (e) {
-      const error = sayOf(e, `chat ${keys[0] ?? ""}`);
-      if (this.#closed) throw new Refused(tr(stationLang(), "station.move.stoppedMidway", { station: name || to.slice(0, 12) }));
-      await this.#fail(o, error);
-      throw new Refused(tr(stationLang(), "station.move.chatStayed", { station: name || to.slice(0, 12), why: error }));
+      try {
+        this.#given(o);
+      } catch (e) {
+        const error = sayOf(e, `chat ${keys[0] ?? ""}`);
+        await this.#fail(o, error);
+        throw new Refused(tr(stationLang(), "station.move.chatStayed", { station: name || to.slice(0, 12), why: error }));
+      }
+      this.#mark(o, "hold");
+      for (const k of keys) await this.#d.hub.holdChat(k, `moving to ${name || to.slice(0, 8)}`);
+      o.held = true;
+      o.step = "held";
+      o.jobs = this.#d.jobs.of(keys);
+      await this.#save(o);
+      this.#d.fail?.("held");
+      await this.#d.jobs.stop(keys, `its chat is being handed to ${name || "another station"}`);
+      try {
+        await this.#send(o, opts.progress, begun);
+      } catch (e) {
+        const error = sayOf(e, `chat ${keys[0] ?? ""}`);
+        // (this process stopping: the next goes on from where it stood, `start`)
+        if (this.#closed) throw new Refused(tr(stationLang(), "station.move.stoppedHeld", { station: name || to.slice(0, 12) }));
+        await this.#fail(o, error);
+        throw new Refused(tr(stationLang(), "station.move.chatStayed", { station: name || to.slice(0, 12), why: error }));
+      }
+      // (what is told after it went is told until it answers: by itself, on failure with a backoff)
+      await this.#afterGone(o).catch((e) => {
+        log.warn("handover", "a chat that went is not all told there yet", { id: o.id, error: (e as Error).message });
+        this.#retry(o);
+      });
+      return o;
+    } finally {
+      this.#active.delete(o.id);
+      this.#d.changed?.(o.id);
     }
-    try {
-      this.#given(o);
-    } catch (e) {
-      const error = sayOf(e, `chat ${keys[0] ?? ""}`);
-      await this.#fail(o, error);
-      throw new Refused(tr(stationLang(), "station.move.chatStayed", { station: name || to.slice(0, 12), why: error }));
-    }
-    this.#mark(o, "hold");
-    for (const k of keys) await this.#d.hub.holdChat(k, `moving to ${name || to.slice(0, 8)}`);
-    o.held = true;
-    o.step = "held";
-    o.jobs = this.#d.jobs.of(keys);
-    await this.#save(o);
-    this.#d.fail?.("held");
-    await this.#d.jobs.stop(keys, `its chat is being handed to ${name || "another station"}`);
-    try {
-      await this.#send(o, opts.progress, begun);
-    } catch (e) {
-      const error = sayOf(e, `chat ${keys[0] ?? ""}`);
-      // (this process stopping: the next goes on from where it stood, `start`)
-      if (this.#closed) throw new Refused(tr(stationLang(), "station.move.stoppedHeld", { station: name || to.slice(0, 12) }));
-      await this.#fail(o, error);
-      throw new Refused(tr(stationLang(), "station.move.chatStayed", { station: name || to.slice(0, 12), why: error }));
-    }
-    // (what is told after it went is told until it answers: by itself, on failure with a backoff)
-    await this.#afterGone(o).catch((e) => {
-      log.warn("handover", "a chat that went is not all told there yet", { id: o.id, error: (e as Error).message });
-      this.#retry(o);
-    });
-    return o;
   }
 
   /// Begun there: its accounts there, its connects as they are known there, said first (refused there in words).

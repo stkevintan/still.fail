@@ -1,4 +1,5 @@
-import { MbBackfill, readerBinary } from "../read/mb-reader.ts";
+import { MbBackfill, resolveReaderSelection } from "../read/mb-reader.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import { log } from "../ops/log.ts";
 import { releaseStoppedBackfill } from "../store/backfill.ts";
 import { chatShareIndexReady, hasChatShareIndex, refreshChatShareIndex, SHARE_MANY } from "../store/chat-share-index.ts";
@@ -13,10 +14,12 @@ export class ChatShareIndexBuilder {
   private readonly previous: Promise<boolean>;
   private readonly store: Store;
   private readonly binary: string | undefined;
+  private readonly readers: (() => ReaderSelectConfig) | undefined;
 
-  constructor(store: Store, previous: Promise<void>, binary?: string) {
+  constructor(store: Store, previous: Promise<void>, binary?: string, readers?: () => ReaderSelectConfig) {
     this.store = store;
     this.binary = binary;
+    this.readers = readers;
     this.previous = previous.then(() => true, (error) => {
       log.warn("xshare", "could not wait for the previous station before preparing shares", { error: (error as Error).message });
       return false;
@@ -54,7 +57,10 @@ export class ChatShareIndexBuilder {
     return new Promise<boolean>((resolve) => {
       // (by the MoonBit builder, station/mb's src/activity, share.mbt: `MbBackfill`)
       let worker: MbBackfill;
-      try { worker = new MbBackfill(this.binary ?? readerBinary(), ["--builder", "session-backfill", "--db", path], this.store.backfillPriority, 20); }
+      try {
+        const bin = resolveReaderSelection("session-backfill", { binary: this.binary, config: this.readers, logAt: "readers" }).primaryBinary;
+        worker = new MbBackfill(bin, ["--builder", "session-backfill", "--db", path], this.store.backfillPriority, 20);
+      }
       catch (error) { log.warn("xshare", "the share worker could not start", { error: (error as Error).message }); resolve(false); return; }
       const owner = worker.threadId;
       let done = false;

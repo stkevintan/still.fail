@@ -65,12 +65,14 @@ const USAGE_EVERY_MS = 60_000;
 const OVERVIEW_SOON_MS = 10_000;
 /// Low-disk warning threshold matching client/core-ts/src/views/models.ts (`<= 10 GiB` or `<= 10%` of totalBytes).
 const LOW_DISK_BYTES = 10 * 1024 * 1024 * 1024;
-/// Bucket size for free-disk bytes while in the low-disk warning zone so displayed space updates without per-write churn.
-const LOW_DISK_STEP = 128 * 1024 * 1024;
+/// Bucket size for free-disk bytes when truly low (`<= 10 GiB`): matches whole-GB display without per-write churn.
+const LOW_DISK_STEP = 512 * 1024 * 1024;
+/// Minimum bucket size for large drives above 10 GiB free that are still `<= 10%` free (e.g. 94 GiB / 1858 GiB).
+const PCT_DISK_MIN_STEP = 2 * 1024 * 1024 * 1024;
 
-/// Comparable snapshot of an overview for `overviewTold` deduplication: omits volatile machine telemetry and process
-/// RSS drift, and normalizes ample free-disk bytes while preserving low-disk warning transitions. The emitted event
-/// still carries the exact overview.
+/// Comparable snapshot of an overview for `overviewTold` deduplication: omits volatile machine telemetry, process
+/// RSS drift, and healthy backup progress ticks, and normalizes free-disk bytes while preserving low-disk warning
+/// transitions. The emitted event still carries the exact overview.
 export function overviewComparable(value: unknown): string {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return JSON.stringify(value);
   const src = value as Record<string, unknown>;
@@ -82,8 +84,11 @@ export function overviewComparable(value: unknown): string {
     const free = d.freeBytes;
     if (typeof free === "number") {
       const total = typeof d.totalBytes === "number" ? d.totalBytes : 0;
-      const low = total > 0 ? free * 10 <= total || free <= LOW_DISK_BYTES : free <= LOW_DISK_BYTES;
-      out.disk = { ...d, freeBytes: low ? Math.floor(free / LOW_DISK_STEP) : "ok" };
+      let bucket: string;
+      if (free <= LOW_DISK_BYTES) bucket = `low:${Math.floor(free / LOW_DISK_STEP)}`;
+      else if (total > 0 && free * 10 <= total) bucket = `pct:${Math.floor(free / Math.max(PCT_DISK_MIN_STEP, Math.floor(total / 100)))}`;
+      else bucket = "ok";
+      out.disk = { ...d, freeBytes: bucket };
     }
   }
   if (Array.isArray(src.processes)) {
@@ -92,6 +97,26 @@ export function overviewComparable(value: unknown): string {
       const { rssMb: _, ...rest } = p as Record<string, unknown>;
       return rest;
     });
+  }
+  const copies = src.copies;
+  if (copies !== null && typeof copies === "object" && !Array.isArray(copies)) {
+    const c = copies as Record<string, unknown>;
+    const headTo = typeof c.to === "number" ? c.to : 0;
+    const normTarget = (item: unknown) => {
+      if (item === null || typeof item !== "object" || Array.isArray(item)) return item;
+      const t = item as Record<string, unknown>;
+      const { to: tTo, at: tAt, ...rest } = t;
+      const synced = typeof tTo === "number" && headTo > 0 ? tTo >= headTo : tTo === headTo;
+      return { ...rest, synced, hasAt: tAt !== null && tAt !== undefined };
+    };
+    const { to: _to, chats: _chats, ...restCopies } = c;
+    const normCopies: Record<string, unknown> = { ...restCopies, hasData: headTo > 0 };
+    if (Array.isArray(c.keepers)) normCopies.keepers = c.keepers.map(normTarget);
+    if (c.backup !== null && typeof c.backup === "object" && !Array.isArray(c.backup)) {
+      const b = c.backup as Record<string, unknown>;
+      normCopies.backup = Array.isArray(b.s3) ? { ...b, s3: b.s3.map(normTarget) } : b;
+    }
+    out.copies = normCopies;
   }
   return JSON.stringify(out);
 }

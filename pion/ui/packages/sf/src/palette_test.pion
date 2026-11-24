@@ -1,0 +1,13 @@
+// Unit tests for `sf::palette_alpha` (aligned to `libs/ui/src/controls/tokens.mbt:1540-1543`).
+
+test "palette_alpha scales existing alpha channel for translucent and opaque colors" {
+  // Translucent color: alpha 0x24 (36) * 0.5 = 18 (0x12)
+  debug_assert(palette_alpha(0x322D2424L, 0.5) == 0x322D2412L, "translucent alpha scaled")
+  // Opaque color: alpha 0xFF (255) * 0.5 = 128 (0x80)
+  debug_assert(palette_alpha(0x112233FFL, 0.5) == 0x11223380L, "opaque alpha scaled")
+  // Boundary shares: 0.0, 1.0, and clamp
+  debug_assert(palette_alpha(0x112233FFL, 0.0) == 0x11223300L, "zero share yields 0 alpha")
+  debug_assert(palette_alpha(0x322D2424L, 1.0) == 0x322D2424L, "unit share preserves alpha")
+  debug_assert(palette_alpha(0x112233FFL, 2.0) == 0x112233FFL, "share > 1 clamps to 255")
+  debug_assert(palette_alpha(0x112233FFL, -0.5) == 0x11223300L, "negative share clamps to 0")
+}

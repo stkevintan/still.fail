@@ -53,7 +53,7 @@ let knob_lens_grow : Double = 1.25
 
 ///|
 /// A lens's shadow, held all the way: its blur and how far down (kit's toggle.mbt's, a sliding group's lens's).
-let lens_shadow : Double = 6.0
+let lens_shadow : Double = 0.0
 
 ///|
-let lens_shadow_y : Double = 2.0
+let lens_shadow_y : Double = 0.0

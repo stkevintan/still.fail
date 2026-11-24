@@ -330,3 +330,22 @@ test "profiles side widths: unrelated profile fields (usedCount / checkText) do 
   assert_eq(laid, 0)
   assert_eq(measured, 0)
 }
+
+///|
+test "profiles: 多选 in the bar stays as 概览 shows, and pressed there shows the list with 多选 begun" {
+  new_run()
+  let src = fixture_app("place-profiles-sum-a")
+  let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=390.0, h=844.0, platform=2)
+  t.run_for(@ui.move_most_ms)
+  t.tap_text("概览")
+  t.run_for(@ui.move_most_ms)
+  assert_true(t.find("额度与恢复") is Some(_))
+  t.click(Button, label="多选")
+  t.run_for(@ui.move_most_ms)
+  assert_true(t.find("额度与恢复") is None, msg="the list shown again")
+  assert_true(t.find("已选 0 项") is Some(_), msg="多选 begun")
+  // (概览 again: 多选 over)
+  t.tap_text("概览")
+  t.run_for(@ui.move_most_ms)
+  assert_true(t.find("已选 0 项") is None)
+}

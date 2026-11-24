@@ -207,7 +207,7 @@ test "e2e_4_403_refusal_atomic_rollback_and_recovery_notice" {
   h.ctrl.start_live()
   h.rt.advance(30)
 
-  h.station.reject_path_prefix = Some("/chats/c-1/rename")
+  h.station.reject_path_prefix = Some("/sessions/c-1/title")
   h.station.reject_code = "read_only_member"
   h.station.reject_recovery = "Ask a workspace owner to upgrade your role before renaming."
 
@@ -238,7 +238,7 @@ test "e2e_4_403_refusal_atomic_rollback_and_recovery_notice" {
   debug_assert(t.find("RECOVERY:NONE").is_some(), "dismiss_notice cleared recovery_sig")
 
   // Also verify archive_chat 403 atomic rollback
-  h.station.reject_path_prefix = Some("/chats/c-1/archive")
+  h.station.reject_path_prefix = Some("/sessions/c-1/archive")
   h.station.reject_code = "archive_denied"
   h.station.reject_recovery = "Only workspace admins can archive pinned chats."
   h.ctrl.archive_chat("c-1")

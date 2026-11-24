@@ -776,13 +776,7 @@ fn bar_lens_node(holder : @view.View) -> Unit {
           }
         },
         fn(g) {
-          @sf.tab_lens_surface_decorate(g, fn() { held(g) })
-          .shadow(By(fn() {
-            let r = @sf.tab_lens_raised_for(@sf.theme().dark)
-            (r.sigma, r.dy, r.color)
-          }))
-          .shadow_outside(Is(true))
-          |> ignore
+          @sf.tab_lens_surface_decorate(g, fn() { held(g) }) |> ignore
         },
       )
     })

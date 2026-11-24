@@ -7,7 +7,10 @@ base_codec = { workspace = true }
 host_shim = { workspace = true }
 sqlite_ffi = { workspace = true }
 sql_db = { workspace = true }
+js_json = { workspace = true }
 builders_core = { workspace = true }
+builders_index = { workspace = true }
+builders_stateful = { workspace = true }
 footprint = { workspace = true }
 memory = { workspace = true }
 packed = { workspace = true }

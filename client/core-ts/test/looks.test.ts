@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { holdLanguage } from "../src/i18n.ts";
-import { answer, doing, face, glyph, linkShown, listNote, memorySections, outboxWaits, stationLine, stationUpdate, waitNote } from "../src/looks.ts";
+import { answer, doing, face, glyph, linkShown, listNote, memorySections, movingOf, outboxWaits, stationLine, stationUpdate, waitNote } from "../src/looks.ts";
 
 holdLanguage();
 // deno-lint-ignore no-explicit-any
@@ -224,4 +224,14 @@ test("availability_explains_deferral_only_when_automatic_updates_are_enabled", (
   assert.ok(stationUpdate(overview, null, null, false, true).detail.includes("空闲时自动更新"));
   overview.updates[0].auto = false;
   assert.equal(stationUpdate(overview, null, null, false, true).detail, "可立即更新");
+});
+
+test("a chat going to another station is said by any of its sessions, by the name the workspace has for where it goes; one not going is said nothing", () => {
+  const chats = [{ sessions: ["cl:C1:1", "gpt:C1:1"], to: "st2", toName: "Maple old", held: false }, { sessions: ["chat:x"], to: "st3abcdef123456", toName: "", held: true }];
+  const named = (id: string) => (id === "st2" ? "Maple" : id);
+  assert.deepEqual(movingOf(chats, ["gpt:C1:1"], named), { to: "Maple", text: "正在迁移到「Maple」，迁完前暂不能发送", held: false });
+  // (one the workspace does not name: the overview's name, else its id's start)
+  assert.deepEqual(movingOf(chats, ["chat:x"], named), { to: "st3abcdef123", text: "正在迁移到「st3abcdef123」，迁完前暂不能发送", held: true });
+  assert.equal(movingOf(chats, ["chat:y", ""], named), null);
+  assert.equal(movingOf(undefined, ["chat:x"], named), null);
 });

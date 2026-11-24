@@ -1,0 +1,10 @@
+// Native/headless asset profile installer for `sf`.
+
+import "sf"
+
+pub fn install_native_assets() -> Unit {
+  sf::register_faces(code_face_ttf)
+  sf::register_math_glyphs(math_glyphs_gz, fn() -> Unit { () })
+  sf::register_icons(icon_data())
+  sf::register_palettes(web_light_palette(), web_dark_palette())
+}

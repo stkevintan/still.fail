@@ -15,7 +15,7 @@ import { AdminApi, ControlPlane, Events, Key, MeshNative, MeshSide, Own, Parts, 
 import { DeviceTools, accessOf } from "../device/tools.ts";
 import { TOOLS_ALPN, adminSessions, presenceTools, serveTools } from "./tools.ts";
 import { PEER_ALPN, PEER_BYTES_ALPN, STOPPING, peerCall, servePeer } from "./peer.ts";
-import { DeviceRefused, PEER_HTTP_ALPN, PeerHttp, serveHttp } from "./peer-http.ts";
+import { DeviceRefused, PEER_HTTP_ALPN, PeerHttp, rigAllowed, serveHttp } from "./peer-http.ts";
 import { followLock } from "./lock-sync.ts";
 import { followPersons } from "./person-sync.ts";
 import { tellLocks } from "./lock-events.ts";
@@ -290,7 +290,7 @@ export const MeshLive = Layer.effectDiscard(
         serve: (conn) =>
           conn.alpn().equals(PEER_BYTES_ALPN) || conn.alpn().equals(PEER_ALPN) ? servePeer(conn, cloud.state, peers, meshDirectory ? (peer, workspace, request) => meshDirectory.answer(peer, workspace, request) : undefined)
           : conn.alpn().equals(PEER_HTTP_ALPN) ? serveHttp(conn, cloud.state, {
-              allowed: (peer, workspace) => cloud.state.rigIn(workspace) !== null ? (rigSide.current?.stationRefusal(peer, workspace) ?? "the rig is starting") : null,
+              allowed: rigAllowed(rigSide, (workspace) => cloud.state.rigIn(workspace) !== null),
               forwarded: (port) => side.forwarded(port),
               device: (peer, workspace, session, device, probe) =>
                 cloud.state.rigIn(workspace) !== null

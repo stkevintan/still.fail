@@ -102,6 +102,140 @@ test "format_step_response matches MB builder protocol and never retries App err
     "{\"done\":false,\"error\":\"archive mark index version \\\"is locked\\\" is incompatible with 1\"}",
     "App error mentioning 'is locked' must NOT be treated as busy",
   )
+  expect(
+    format_step_response("legacy edits", Err(StepError::Fallback)) == "{\"fallback\":true}",
+    "Fallback emits {\"fallback\":true}",
+  )
+}
+
+struct MockIo {
+  lines : Array[String]
+  mut idx : Int
+  out : Array[String]
+}
+
+fn is_turn_req(obj : base_codec::Json) -> Bool {
+  json_has_key(obj, "session") || json_has_key(obj, "cancel")
+}
+
+fn is_said_req(obj : base_codec::Json) -> Bool {
+  json_has_key(obj, "thread") || json_has_key(obj, "cancel")
+}
+
+test "Permit handles mode-request deferral, malformed/empty/foreign/lone-surrogate rejection, valid-surrogate permit, EOF draining, and repeat take" {
+  // 1. Mode requests (including null-valued mode key) deferred FIFO while waiting for permit;
+  //    permit object with a valid surrogate pair in an unrelated field parses and grants.
+  let io1 = MockIo::{
+    lines: ["{\"session\":\"B\"}", "{\"session\":null}", "{\"permit\":true,\"note\":\"\\uD83D\\uDE80\"}", "{\"session\":\"C\"}"],
+    idx: 0,
+    out: [],
+  }
+  let read1 = fn() -> Option[String] {
+    if io1.idx < io1.lines.length() {
+      let l = io1.lines[io1.idx]
+      io1.idx = io1.idx + 1
+      Some(l)
+    } else {
+      None
+    }
+  }
+  let write1 = fn(s : String) -> Bool {
+    io1.out.push(s)
+    true
+  }
+  let p1 = Permit::new(LineQueue::new(), is_turn_req)
+  expect(p1.take_with(read1, write1), "grant after deferred mode requests")
+  expect(p1.is_holding(), "holding after grant")
+  // Repeat take while holding does not send another take
+  expect(p1.take_with(read1, write1), "repeat take returns true")
+  expect(io1.out.length() == 1 && io1.out[0] == "{\"take\":true}", "only 1 take sent")
+  p1.give_with(write1)
+  expect(!p1.is_holding(), "not holding after give")
+  expect(io1.out.length() == 2 && io1.out[1] == "{\"give\":true}", "give sent")
+  // Deferred lines drained in FIFO order before reading next stdin line
+  match p1.next_line_with(read1) {
+    Some(l) => expect(l == "{\"session\":\"B\"}", "deferred 1")
+    None => panic("expected B")
+  }
+  match p1.next_line_with(read1) {
+    Some(l) => expect(l == "{\"session\":null}", "deferred 2")
+    None => panic("expected session:null")
+  }
+  match p1.next_line_with(read1) {
+    Some(l) => expect(l == "{\"session\":\"C\"}", "stdin C")
+    None => panic("expected C")
+  }
+
+  // 2. Empty line, malformed JSON, non-object JSON, foreign object {"foo":1}, lone surrogate in permit
+  //    object, and bad permit value each consume once and immediately reject without hanging or replaying.
+  let bad_replies = [
+    "",
+    "{bad",
+    "123",
+    "null",
+    "{\"foo\":1}",
+    "{\"permit\":true,\"note\":\"\\uD800\"}",
+    "{\"permit\":\"bad\"}",
+  ]
+  for i in 0..<bad_replies.length() {
+    let io2 = MockIo::{
+      lines: [bad_replies[i], "{\"thread\":42}"],
+      idx: 0,
+      out: [],
+    }
+    let read2 = fn() -> Option[String] {
+      if io2.idx < io2.lines.length() {
+        let l = io2.lines[io2.idx]
+        io2.idx = io2.idx + 1
+        Some(l)
+      } else {
+        None
+      }
+    }
+    let write2 = fn(s : String) -> Bool {
+      io2.out.push(s)
+      true
+    }
+    let p2 = Permit::new(LineQueue::new(), is_said_req)
+    expect(!p2.take_with(read2, write2), "bad reply must reject immediately: " + bad_replies[i])
+    expect(!p2.is_holding() && !p2.is_eof(), "not holding, not eof")
+    p2.give_with(write2) // no-op when not holding
+    expect(io2.out.length() == 1, "no give emitted when denied")
+    match p2.next_line_with(read2) {
+      Some(l) => expect(l == "{\"thread\":42}", "next line intact without replaying bad reply")
+      None => panic("expected next line")
+    }
+  }
+
+  // 3. Deferred request followed by EOF: take returns false, eof=true, deferred still drained,
+  //    subsequent take returns false without writing {"take":true}.
+  let io3 = MockIo::{ lines: ["{\"session\":\"B\"}"], idx: 0, out: [] }
+  let read3 = fn() -> Option[String] {
+    if io3.idx < io3.lines.length() {
+      let l = io3.lines[io3.idx]
+      io3.idx = io3.idx + 1
+      Some(l)
+    } else {
+      None
+    }
+  }
+  let write3 = fn(s : String) -> Bool {
+    io3.out.push(s)
+    true
+  }
+  let p3 = Permit::new(LineQueue::new(), is_turn_req)
+  expect(!p3.take_with(read3, write3), "EOF rejects take")
+  expect(p3.is_eof() && !p3.is_holding(), "eof set")
+  match p3.next_line_with(read3) {
+    Some(l) => expect(l == "{\"session\":\"B\"}", "deferred B drained after EOF")
+    None => panic("expected deferred B")
+  }
+  expect(!p3.take_with(read3, write3), "take after EOF returns false immediately")
+  expect(io3.out.length() == 1, "no second take written after EOF")
+  match p3.next_line_with(read3) {
+    None => ()
+    Some(l) => panic("expected None after draining, got " + l)
+  }
 }
 
 test "archive_marks_part and archive_marks_complete" {

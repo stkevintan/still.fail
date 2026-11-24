@@ -41,6 +41,21 @@ priv struct ChatRead {
 }
 
 ///|
+/// Last wholly-read message sequence at or before the last occurrence of `w` in `rs`.
+/// A multi-slice message at `w` counts only when `whole_slice` reaches its last slice.
+fn chat_read_whole_seq(rs : ChatBodyNow, w : String, whole_slice : Int) -> Double {
+  let mut i = rs.last_index_of(w).unwrap_or(-1)
+  while i >= 0 {
+    match rs.get(rs.keys[i]) {
+      Some({ entry: Said(m), .. }) if rs.keys[i] != w || whole_slice >= rs.slices(w) - 1 =>
+        return m.notice_last_seq
+      _ => i = i - 1
+    }
+  }
+  -1.0
+}
+
+///|
 /// What each chat open on a page made as nodes was told, by its key (station + "\u{1}" + session): taken as the chat
 /// is left (chat_read_left).
 let chat_reads : Map[String, ChatRead] = Map([])
@@ -120,7 +135,7 @@ fn chat_read_node(
     // ChatView arriving before a stale `on_sight` callback never advances `endSeq` past what was actually laid out;
     // folded notices carry `notice_last_seq`)
     let mut end_seq = -1.0
-    match rs.keys.search(s.last) {
+    match rs.index_of(s.last) {
       Some(idx) => {
         let mut k = idx
         while k >= 0 {
@@ -146,21 +161,9 @@ fn chat_read_node(
     // long message seen whole is not the message seen whole but where it is its last
     match s.whole {
       Some(w) if !cv.newer => {
-        let mut i = rs.keys.length() - 1
-        while i >= 0 && rs.keys[i] != w {
-          i = i - 1
-        }
-        while i >= 0 {
-          match rs.get(rs.keys[i]) {
-            Some({ entry: Said(m), .. }) if rs.keys[i] != w || s.whole_slice >= rs.slices(w) - 1 => {
-              // (a notice folding several is read to its last: notice_last_seq)
-              if m.notice_last_seq > a.whole {
-                a.whole = m.notice_last_seq
-              }
-              break
-            }
-            _ => i = i - 1
-          }
+        let seq = chat_read_whole_seq(rs, w, s.whole_slice)
+        if seq > a.whole {
+          a.whole = seq
         }
       }
       _ => ()
@@ -395,7 +398,7 @@ fn chat_nodes_find_list(r : ChatRef) -> FindList {
           _ => None
         }
       }
-      let (from, to) = match (rs.keys.search(s.first), rs.keys.search(s.last)) {
+      let (from, to) = match (rs.index_of(s.first), rs.index_of(s.last)) {
         (Some(a), Some(b)) => (a, b)
         _ => return (-1.0, -1.0)
       }

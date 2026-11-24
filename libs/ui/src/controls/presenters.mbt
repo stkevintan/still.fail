@@ -179,6 +179,9 @@ priv struct PanelOf {
   along : @ui.Along
   offset : Double
   match_panel : Int
+  /// beside what opened it, the page under it scrolled by the wheel while it stays open, its presses and keys still the
+  /// panel's (panel_nodes' `scrolls_under`)
+  scrolls_under : Bool
   /// what back does on its first step where its steps follow a flow kept elsewhere (panel_nodes' `back`)
   on_back : (() -> Unit)?
   /// what it holds and its foot as nodes of the window's tree
@@ -594,6 +597,8 @@ pub fn pick(
 /// picture (the card to share's looks).
 /// `popover`: opt in to opening as an anchored popover on Small when triggered in the upper half of the window
 /// (non-stage, non-form, non-steps, non-growing, anchored); default `false` opens as a bottom sheet on Small.
+/// `scrolls_under`: beside what opened it, a wheel that nothing in it moves goes on to the page under it, which scrolls
+/// while the panel stays where it stands (a reading aid beside what is read); a press outside still closes it.
 /// `head_end`: on a sheet, what stands at the end of its title's line (a quiet action of the whole panel's, as a panel
 /// that heads itself beside what opened it has at its own head's end); not drawn where the panel has no such head.
 pub fn panel_nodes(
@@ -628,6 +633,7 @@ pub fn panel_nodes(
   stage? : Bool = false,
   above? : (@view.View) -> Unit,
   head_end? : (@view.View) -> Unit,
+  scrolls_under? : Bool = false,
 ) -> Unit {
   present(
     Panel({
@@ -651,6 +657,7 @@ pub fn panel_nodes(
       along,
       offset,
       match_panel,
+      scrolls_under,
       on_back: back,
       nodes: { body, foot, hugs, hugs_centred, steps, sheet_heads: false, heads: heads_itself, top: top_share, most, flush: false, head_end },
     }),

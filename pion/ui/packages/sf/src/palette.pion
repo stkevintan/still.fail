@@ -1,0 +1,91 @@
+// App-agnostic palette contract for `sf` (mirrors `libs/ui/src/controls/palette_data.mbt`).
+
+pub struct Palette {
+  pub bg : Int64
+  pub canvas : Int64
+  pub raised : Int64
+  pub sidebar : Int64
+  pub list : Int64
+  pub text : Int64
+  pub muted : Int64
+  pub subtle : Int64
+  pub line : Int64
+  pub line_strong : Int64
+  pub hover : Int64
+  pub selected : Int64
+  pub paper : Int64
+  pub accent : Int64
+  pub accent_text : Int64
+  pub accent_bg : Int64
+  pub green : Int64
+  pub green_ink : Int64
+  pub warn_ink : Int64
+  pub red : Int64
+  pub red_bg : Int64
+  pub green_bg : Int64
+  pub blue_bg : Int64
+  pub amber_bg : Int64
+  pub online : Int64
+  pub neutral_bg : Int64
+  pub secondary_bg : Int64
+  pub overlay : Int64
+  pub shadow : Int64
+  pub primary : Int64
+  pub primary_hover : Int64
+  pub on_primary : Int64
+  pub card : Int64
+  pub card2 : Int64
+  pub chip : Int64
+  pub blue : Int64
+  pub code_ink : Int64
+  pub code_ground : Int64
+}
+
+pub fn palette_alpha(rgba : Int64, share : Double) -> Int64 {
+  let a = ((rgba & 0xFFL).to_double() * share + 0.5).to_int64()
+  let clamped = if a < 0L { 0L } else if a > 255L { 255L } else { a }
+  (rgba & 0xFFFFFF00L) | clamped
+}
+
+pub fn empty_palette() -> Palette {
+  Palette::{
+    bg: 0L,
+    canvas: 0L,
+    raised: 0L,
+    sidebar: 0L,
+    list: 0L,
+    text: 0L,
+    muted: 0L,
+    subtle: 0L,
+    line: 0L,
+    line_strong: 0L,
+    hover: 0L,
+    selected: 0L,
+    paper: 0L,
+    accent: 0L,
+    accent_text: 0L,
+    accent_bg: 0L,
+    green: 0L,
+    green_ink: 0L,
+    warn_ink: 0L,
+    red: 0L,
+    red_bg: 0L,
+    green_bg: 0L,
+    blue_bg: 0L,
+    amber_bg: 0L,
+    online: 0L,
+    neutral_bg: 0L,
+    secondary_bg: 0L,
+    overlay: 0L,
+    shadow: 0L,
+    primary: 0L,
+    primary_hover: 0L,
+    on_primary: 0L,
+    card: 0L,
+    card2: 0L,
+    chip: 0L,
+    blue: 0L,
+    code_ink: 0L,
+    code_ground: 0L,
+  }
+}

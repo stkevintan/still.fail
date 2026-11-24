@@ -51,7 +51,7 @@ const HOW: Record<string, { asked: string; owners: (sql: Sql) => Owner[]; write:
   },
   profileRow: {
     asked: "profiles",
-    owners: (sql) => sql.all("SELECT address FROM station_part").map((r) => [String(r[0])]),
+    owners: (sql) => sql.all("SELECT address FROM station_part_profiles").map((r) => [String(r[0])]),
     write: (t, [station], n) => {
       const o = t.data.shared(overview(station)) as J;
       t.set(overview(station), { ...o, profiles: o.profiles.map((p: J, i: number) => (i === 0 ? { ...p, name: `${p.name}·${n}` } : p)) });

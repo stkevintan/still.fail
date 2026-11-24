@@ -115,3 +115,69 @@ test "主题色 自定义: a hue of one's own, its slider under the dots; a step
     assert_eq(@sf.accent_key(), "custom:215")
   }
 }
+
+///|
+test "主题色 五彩色: chosen saves rainbow and applies its picked hue in light and dark; each page open picks a colour from the clock" {
+  for case in [(390.0, 2), (1280.0, 0)] {
+    let (w, platform) = case
+    let calls : Array[Made] = []
+    let t = wide_tester(calls, w~, h=844.0, platform~)
+    app.nav.push(Settings)
+    app.nav.push(Setting(@settings.Route::Appearance))
+    t.draw()
+    t.run_for(@ui.move_most_ms)
+    t.click(Radio, label="五彩色")
+    t.frame()
+    t.frame()
+    let set = named(calls, "prefs.set")
+    assert_eq(text(Some(set[set.length() - 1].params), "accent"), "rainbow", msg="\{w}")
+    assert_eq(@sf.accent_key(), "rainbow", msg="\{w}")
+    assert_eq(t.get(Radio, label="五彩色").selected, Some(true), msg="\{w}")
+    assert_true(t.query(Slider, label="色相") is None, msg="\{w}: no hue slider under 五彩色")
+    let picked = @sf.custom_tone(@sf.rainbow_hue_now())
+    assert_eq(@sf.theme().p.accent, picked.light, msg="\{w}")
+    assert_eq(@sf.theme().p.bg, picked.light_grounds.unwrap().bg, msg="\{w}")
+    assert_eq(@sf.ui_theme().accent, picked.light, msg="\{w}")
+    @sf.set_dark(Some(true))
+    assert_eq(@sf.theme().p.accent, picked.dark, msg="\{w}")
+    assert_eq(@sf.theme().p.bg, picked.dark_grounds.unwrap().bg, msg="\{w}")
+    @sf.set_dark(Some(false))
+  }
+  // Opening the app at two different times with prefs.accent == "rainbow" automatically picks two distinct colours.
+  let open_at = fn(ms : Double) -> (Int, Int64) raise {
+    new_run()
+    @settings.reset()
+    let base = @sffixture.fixture("settings")
+    let src : Source = {
+      ..base,
+      now: fn() { ms },
+      topic_read: fn(name, params) {
+        let got = (base.topic_read)(name, params)
+        if name == "prefs" {
+          match got.value {
+            Some(Object(m)) => {
+              let next = m.copy()
+              next["accent"] = Json::string("rainbow")
+              { ..got, value: Some(Json::object(next)) }
+            }
+            _ => got
+          }
+        } else {
+          got
+        }
+      },
+    }
+    let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=1280.0, h=800.0, platform=0)
+    t.draw()
+    assert_eq(@sf.accent_key(), "rainbow")
+    let h = @sf.rainbow_hue_now()
+    assert_eq(h, @sf.rainbow_hue_of_seed(ms.to_int64()))
+    let accent = @sf.theme().p.accent
+    assert_eq(accent, @sf.custom_tone(h).light)
+    (h, accent)
+  }
+  let (h_a, accent_a) = open_at(1795530806000.0)
+  let (h_b, accent_b) = open_at(1795530807000.0)
+  assert_true(h_a != h_b, msg="different opens pick different hues: \{h_a} vs \{h_b}")
+  assert_true(accent_a != accent_b)
+}

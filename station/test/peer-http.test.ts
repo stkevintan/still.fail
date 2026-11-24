@@ -9,7 +9,7 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import WebSocket, { WebSocketServer } from "ws";
 import { Cloud } from "../src/cloud/state.ts";
-import { PEER_HTTP_ALPN, PeerHttp, serveHttp } from "../src/mesh/peer-http.ts";
+import { type HereLocal, PEER_HTTP_ALPN, PeerHttp, rigAllowed, serveHttp } from "../src/mesh/peer-http.ts";
 import { PEER_ALPN } from "../src/mesh/peer.ts";
 import type { Endpoint } from "../src/mesh/native.ts";
 import { type AgentsDoor, openAgentsDoor, peerTarget } from "../src/tools/http.ts";
@@ -40,8 +40,9 @@ async function service(handle: (req: IncomingMessage, res: ServerResponse) => vo
   return { port: (server.address() as AddressInfo).port, server };
 }
 
-/// Two stations (and one from before web requests), this one's door, and its way to the others.
-async function stations() {
+/// Two stations (and one from before web requests), this one's door, and its way to the others. `local`: the other's
+/// machine as its requests reach it (who may, a rig's grants: rig/main.ts and mesh.ts).
+async function stations(local: HereLocal = {}) {
   const mesh = memoryMesh();
   const bind = (alpns: Buffer[]) => mesh.bind({ secretKey: randomBytes(32), alpns, relayUrls: [], discovery: false, bindAddr: "127.0.0.1:0" });
   const [here, there, old, gone] = await Promise.all([bind([PEER_HTTP_ALPN, PEER_ALPN]), bind([PEER_HTTP_ALPN, PEER_ALPN]), bind([PEER_ALPN]), bind([PEER_HTTP_ALPN])]);
@@ -55,16 +56,16 @@ async function stations() {
   const hereCloud = cloudOf(here.id(), "Here", roster);
   const thereCloud = cloudOf(there.id(), "Studio", [...roster]);
   const served: Promise<void>[] = [];
-  const accept = (endpoint: Endpoint, cloud: any) =>
+  const accept = (endpoint: Endpoint, cloud: any, local: HereLocal = {}) =>
     void (async () => {
       for (;;) {
         const conn = await endpoint.accept();
         if (!conn) return;
         // As the mesh does (mesh.ts): a connection that is not served is closed.
-        if (conn.alpn().equals(PEER_HTTP_ALPN)) served.push(serveHttp(conn, cloud).catch(() => conn.close(0, "refused")));
+        if (conn.alpn().equals(PEER_HTTP_ALPN)) served.push(serveHttp(conn, cloud, local).catch(() => conn.close(0, "refused")));
       }
     })();
-  accept(there, thereCloud);
+  accept(there, thereCloud, local);
   accept(old, cloudOf(old.id(), "old", roster));
   const http = new PeerHttp(here, hereCloud, (id) => ({ id }));
   const mcp = new McpEndpoint(() => undefined, []);
@@ -280,6 +281,48 @@ test("only the roster's stations, by a name that tells one; the station's own po
   } finally {
     web.server.close();
     await s.close();
+  }
+});
+
+test("a rig's web services: a station a grant or 免批准 lets through reaches them, alone or beside whole workspaces; others are refused", async () => {
+  const web = await service((_req, res) => res.end("ok"));
+  // The rig as rig/module.ts answers for a station (rig/grants.ts `stationRefusal`): null lets it through.
+  const granted = new Set<string>();
+  const rig = { stationRefusal: (peer: string, _workspace: string) => (granted.has(peer) ? null : "no chat of that station has a grant of this one") };
+  const side: { current: typeof rig | null } = { current: null };
+  const rigIn = new Set(["ws"]);
+  const say = async (url: string) => {
+    const r = await fetch(url);
+    return `${r.status} ${await r.text()}`;
+  };
+  try {
+    // A rig alone (rig/main.ts), and a station that is a rig in this workspace beside whole ones (mesh.ts).
+    for (const allowed of [rigAllowed(side), rigAllowed(side, (workspace) => rigIn.has(workspace))]) {
+      side.current = null;
+      granted.clear();
+      const s = await stations({ allowed });
+      try {
+        assert.equal(await say(`${s.base}/Studio/${web.port}/`), "403 that machine refused: the rig is starting");
+        side.current = rig;
+        assert.equal(await say(`${s.base}/Studio/${web.port}/`), "403 that machine refused: no chat of that station has a grant of this one");
+        // A chat of this station granted the rig (or 免批准 on): its requests reach the service.
+        granted.add(s.here.id());
+        assert.equal(await say(`${s.base}/Studio/${web.port}/`), "200 ok");
+      } finally {
+        await s.close();
+      }
+    }
+    // A whole workspace of a machine that is a rig in another refuses none of its stations, its rig started or not.
+    side.current = null;
+    rigIn.clear();
+    const s = await stations({ allowed: rigAllowed(side, (workspace) => rigIn.has(workspace)) });
+    try {
+      assert.equal(await say(`${s.base}/Studio/${web.port}/`), "200 ok");
+    } finally {
+      await s.close();
+    }
+  } finally {
+    web.server.close();
   }
 });
 

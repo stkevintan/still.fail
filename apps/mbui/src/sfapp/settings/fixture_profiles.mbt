@@ -8,7 +8,10 @@
 /// What a list's row of an account carries (the core's `profiles` items, ProfileRow), but what the core works out of
 /// the rest (`several`, `usedCount`: profile_row_said).
 // kept across runs: a table, never written
-let profile_row_fields : Array[String] = ["key", "group", "groupTitle", "station", "profile", "title", "usable", "state", "look", "where"]
+let profile_row_fields : Array[String] = [
+  "key", "group", "groupTitle", "station", "profile", "title", "usable", "state", "look", "where", "shared", "shareAuto", "canBatchShare",
+  "batchShareAllowAuto", "batchShareWhy",
+]
 
 ///|
 /// What a row's profile carries (RowProfile).

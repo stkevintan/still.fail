@@ -834,6 +834,10 @@ test("prefs_are_kept_on_the_device_and_moved_in_once_without_writing_over", asyn
   await host.settle();
   apply(host, values);
   assert.equal(v(values, 1).accent, "custom:210");
+  set(38, { accent: "rainbow" });
+  await host.settle();
+  apply(host, values);
+  assert.equal(v(values, 1).accent, "rainbow");
   set(37, { accent: "custom:360" });
   await host.settle();
   assert.equal(host.takeEmitted().filter(([, m]) => "error" in m && m.id === 37).length, 1);

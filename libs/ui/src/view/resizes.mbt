@@ -24,6 +24,7 @@ pub fn View::resizes(
   spec? : (Double, (Double) -> Double),
   foot? : Bool = false,
   uncut? : Bool = false,
+  open_top? : Bool = false,
   loc~ : SourceLoc,
 ) -> View {
   guard self.live() is Some(n) else { return self }
@@ -42,7 +43,7 @@ pub fn View::resizes(
   let from = if n.placed { n.lh } else { n.flex.height }
   // (its way and its foot said with it: told outside a change, what comes is measured and its end fixed in
   // View::comes itself)
-  guard self.comes(self, from, 1.0, spec?, foot~, uncut~) else { return self }
+  guard self.comes(self, from, 1.0, spec?, foot~, uncut~, open_top~) else { return self }
   let at = st.come_at
   // (in a page's list's foot on no way said: what a flight that carries a key in at this moment rises by, if one does
   // (Tree::feet_carried); those of another moment forgotten as one is said)

@@ -13,6 +13,16 @@
 // show and how far down one is, which the list does not say yet.
 
 ///|
+/// Resolved viewport key window for `page_shows_lent`: `Unknown` before first sight (`true`),
+/// `Unresolved` when sight was set but endpoints are absent with no prior `Window` (`false`),
+/// or `Window` holding the display keys snapshot, cached index map, and inclusive `[a..b]` slice bounds.
+priv enum ChatSightWindow {
+  Unknown
+  Unresolved
+  Window(Array[String], Map[String, Int], Int, Int, Int, Int)
+}
+
+///|
 /// What a chat's list shows for each of its rows (chat_body_rows'): its key, what it is, the room over it.
 priv struct ChatBodyRows {
   keys : Array[String]
@@ -913,6 +923,12 @@ fn chat_body_node(
         None => (whole.keys)()
       }
     },
+    keys_index: fn(ks) {
+      match by_key() {
+        Some(l) => (l.keys_index)(ks)
+        None => (whole.keys_index)(ks)
+      }
+    },
     row: fn(k) {
       match by_key() {
         Some(l) => (l.row)(k)
@@ -1111,177 +1127,193 @@ fn chat_body_node(
   })
   // (what the list worked out that nothing follows let go of: below, once all of it is made)
   let rest_body : Ref[() -> Unit] = Ref(fn() {  })
+  let staged_keys = fn() -> Array[String] {
+    held_told.get() |> ignore
+    let base_ks = (listed.keys)()
+    let fb = has_feedback()
+    let raw_ks = if fb && !base_ks.contains("feedback") {
+      match raw_cache.val {
+        Some((prev_base, cached)) if physical_equal(prev_base, base_ks) => cached
+        _ => {
+          let copied = base_ks.copy()
+          copied.push("feedback")
+          raw_cache.val = Some((base_ks, copied))
+          copied
+        }
+      }
+    } else {
+      base_ks
+    }
+    if !physical_equal(raw_ks, raw_ingested.val) {
+      listed_was.val = base_ks
+      raw_ingested.val = raw_ks
+      let now = v.cause_at()
+      let can_stage = !@view.answering_now() && !reopening.val
+      if can_stage {
+        let over = out_plans.iter().filter(fn(e) { !e.1.has_face && e.1.spit_end <= now }).map(fn(e) { e.0 }).collect()
+        for k in over {
+          out_plans.remove(k)
+        }
+      }
+      let pending_faces : Array[(String, AgentFace, AgentOutPlan)] = []
+      let step = stage.ingest(raw_ks, now, can_stage, fn(k) {
+        let row_opt = @signals.untracked(fn() { row_of_listed(k) })
+        match row_opt {
+          None =>
+            {
+              policy: {
+                lane: Content,
+                during_barrier: Keep,
+                rekey_on_prev_change: false,
+                hold_as_anchor: true,
+                live_removable: true,
+              },
+              starts_barrier_until: None,
+              custom_hold: None,
+            }
+          Some({ entry, .. }) => {
+            let pol = chat_entry_policy(entry)
+            let follows = can_stage &&
+              @signals.untracked(fn() { chat_follows_foot(scroll) }) &&
+              !@ui.reduced_motion()
+            let starts_barrier_until = match entry {
+              Out(_) | Said(_) if can_stage && @sfbase.sent_from_waits(k) =>
+                Some(now + @sfbase.flight_desk_ms)
+              _ => None
+            }
+            let custom_hold : @motion.StageHoldPlan? = match entry {
+              Said(m) if follows &&
+                !m.mine &&
+                !out_taken.contains(k) &&
+                ((m.author_kind == "agent" && pol.comes) || stage.barrier_until() > now) => {
+                let face = if m.author_kind == "agent" {
+                  keeps.faces.get(@signals.untracked(fn() { message_agent_of(here, m.by.agent) }))
+                } else {
+                  None
+                }
+                let agent = @signals.untracked(fn() { message_agent_of(here, m.by.agent) })
+                let from = @sf.dmax(now, stage.barrier_until())
+                let plan = match face {
+                  Some(f) => agent_out_plan(f, queue.next_at(agent, from, lead=@sfbase.Pose::Fold.ms()))
+                  None => agent_out_plan_faceless(queue.next_at(agent, from))
+                }
+                queue.commit(agent, plan.spit_end)
+                out_plans[k] = plan
+                if face is Some(_) || plan.float_at > now {
+                  let ends = if face is Some(_) && m.ending != "" && !m.system {
+                    chat_agent_of(here, m)
+                  } else {
+                    None
+                  }
+                  match face {
+                    Some(f) => {
+                      held_by[k] = (f, ends)
+                      pending_faces.push((k, f, plan))
+                    }
+                    None => ()
+                  }
+                  let linger_key = match ends {
+                    Some(a) => {
+                      let ak = "act:" + a.key
+                      let row = match @signals.untracked(fn() { (listed.row)(ak) }) {
+                        Some(r) => Some(r)
+                        None => act_rows.get(ak)
+                      }
+                      match row {
+                        Some(r) => {
+                          linger_rows[ak] = r
+                          Some(ak)
+                        }
+                        None => None
+                      }
+                    }
+                    None => None
+                  }
+                  Some({ release_at: plan.float_at, has_custom_plan: face is Some(_), linger_key })
+                } else {
+                  None
+                }
+              }
+              _ => None
+            }
+            let stage_policy = if follows {
+              pol.stage
+            } else {
+              { ..pol.stage, during_barrier: Keep }
+            }
+            { policy: stage_policy, starts_barrier_until, custom_hold }
+          }
+        }
+      })
+      let dropped_faces : Array[AgentFace] = []
+      for dk in step.dropped_held {
+        match held_by.get(dk) {
+          Some((face, _)) => dropped_faces.push(face)
+          None => ()
+        }
+        held_by.remove(dk)
+      }
+      for lk in step.dropped_lingers {
+        linger_rows.remove(lk)
+      }
+      recompute_bridged_pairs()
+      if !pending_faces.is_empty() || !step.newly_held.is_empty() || !step.dropped_held.is_empty() {
+        @signals.after_computing(fn() {
+          for face in dropped_faces {
+            face.last.val = None
+            face.away.set(false)
+            // det-ok(motion-length): emit.mbt's Return, restoring ring and line if held message was dropped during Fold
+            face.ring_alpha.go(1.0, @motion.tween(@sfbase.Pose::Return.ms(), ease=Out), at=now)
+            face.fold.go(1.0, @motion.tween(@sfbase.Pose::Return.ms(), ease=Out), at=now)
+          }
+          for pf in pending_faces {
+            let (pk, face, plan) = pf
+            if plan.folds {
+              // det-ok(motion-length): emit.mbt's Fold, the line folding to its picture from the plan's start
+              face.fold.go(0.0, @motion.tween(@sfbase.Pose::Fold.ms(), ease=Out, delay=plan.came - now), at=now)
+              (face.bind_ring)()
+              // det-ok(motion-length): emit.mbt's Fold, fading the spinning ring out smoothly with the line
+              face.ring_alpha.go(0.0, @motion.tween(@sfbase.Pose::Fold.ms(), ease=Out, delay=plan.came - now), at=now)
+            }
+            v.at_moment(plan.spit_end, fn() {
+              guard !stage.is_flushed(pk) else { return }
+              out_plans.remove(pk)
+              let ending = match (listed.row)(pk) {
+                Some({ entry: Said(m), .. }) => m.ending != ""
+                _ => true
+              }
+              agent_out_return(face, plan, ending)
+            })
+            |> ignore
+          }
+          arm_stage_due()
+        })
+      }
+    }
+    stage.visible_keys()
+  }
+  // (the same keys the same object as before: worked out anew as its page is woken from rest, what lays them out finds
+  // them as it left them)
+  let keys = @signals.computed(
+    fn(was) {
+      let ks = staged_keys()
+      match was {
+        Some(prev) if physical_equal(prev, ks) || prev == ks => prev
+        _ => ks
+      }
+    },
+    same=fn(a, b) { physical_equal(a, b) || a == b },
+  )
+  let (list_keys_index, clear_list_keys_index) = chat_keys_index_cache()
+  let rest_sight : Ref[() -> Unit] = Ref(fn() {  })
   let list : ChatBodyList = {
     rest_unwatched: fn() {
       place.rest_unwatched()
       (rest_body.val)()
     },
     taken: listed.taken,
-    keys: fn() {
-      held_told.get() |> ignore
-      let base_ks = (listed.keys)()
-      let fb = has_feedback()
-      let raw_ks = if fb && !base_ks.contains("feedback") {
-        match raw_cache.val {
-          Some((prev_base, cached)) if physical_equal(prev_base, base_ks) => cached
-          _ => {
-            let copied = base_ks.copy()
-            copied.push("feedback")
-            raw_cache.val = Some((base_ks, copied))
-            copied
-          }
-        }
-      } else {
-        base_ks
-      }
-      if !physical_equal(raw_ks, raw_ingested.val) {
-        listed_was.val = base_ks
-        raw_ingested.val = raw_ks
-        let now = v.cause_at()
-        let can_stage = !@view.answering_now() && !reopening.val
-        if can_stage {
-          let over = out_plans.iter().filter(fn(e) { !e.1.has_face && e.1.spit_end <= now }).map(fn(e) { e.0 }).collect()
-          for k in over {
-            out_plans.remove(k)
-          }
-        }
-        let pending_faces : Array[(String, AgentFace, AgentOutPlan)] = []
-        let step = stage.ingest(raw_ks, now, can_stage, fn(k) {
-          let row_opt = @signals.untracked(fn() { row_of_listed(k) })
-          match row_opt {
-            None =>
-              {
-                policy: {
-                  lane: Content,
-                  during_barrier: Keep,
-                  rekey_on_prev_change: false,
-                  hold_as_anchor: true,
-                  live_removable: true,
-                },
-                starts_barrier_until: None,
-                custom_hold: None,
-              }
-            Some({ entry, .. }) => {
-              let pol = chat_entry_policy(entry)
-              let follows = can_stage &&
-                @signals.untracked(fn() { chat_follows_foot(scroll) }) &&
-                !@ui.reduced_motion()
-              let starts_barrier_until = match entry {
-                Out(_) | Said(_) if can_stage && @sfbase.sent_from_waits(k) =>
-                  Some(now + @sfbase.flight_desk_ms)
-                _ => None
-              }
-              let custom_hold : @motion.StageHoldPlan? = match entry {
-                Said(m) if follows &&
-                  !m.mine &&
-                  !out_taken.contains(k) &&
-                  ((m.author_kind == "agent" && pol.comes) || stage.barrier_until() > now) => {
-                  let face = if m.author_kind == "agent" {
-                    keeps.faces.get(@signals.untracked(fn() { message_agent_of(here, m.by.agent) }))
-                  } else {
-                    None
-                  }
-                  let agent = @signals.untracked(fn() { message_agent_of(here, m.by.agent) })
-                  let from = @sf.dmax(now, stage.barrier_until())
-                  let plan = match face {
-                    Some(f) => agent_out_plan(f, queue.next_at(agent, from, lead=@sfbase.Pose::Fold.ms()))
-                    None => agent_out_plan_faceless(queue.next_at(agent, from))
-                  }
-                  queue.commit(agent, plan.spit_end)
-                  out_plans[k] = plan
-                  if face is Some(_) || plan.float_at > now {
-                    let ends = if face is Some(_) && m.ending != "" && !m.system {
-                      chat_agent_of(here, m)
-                    } else {
-                      None
-                    }
-                    match face {
-                      Some(f) => {
-                        held_by[k] = (f, ends)
-                        pending_faces.push((k, f, plan))
-                      }
-                      None => ()
-                    }
-                    let linger_key = match ends {
-                      Some(a) => {
-                        let ak = "act:" + a.key
-                        let row = match @signals.untracked(fn() { (listed.row)(ak) }) {
-                          Some(r) => Some(r)
-                          None => act_rows.get(ak)
-                        }
-                        match row {
-                          Some(r) => {
-                            linger_rows[ak] = r
-                            Some(ak)
-                          }
-                          None => None
-                        }
-                      }
-                      None => None
-                    }
-                    Some({ release_at: plan.float_at, has_custom_plan: face is Some(_), linger_key })
-                  } else {
-                    None
-                  }
-                }
-                _ => None
-              }
-              let stage_policy = if follows {
-                pol.stage
-              } else {
-                { ..pol.stage, during_barrier: Keep }
-              }
-              { policy: stage_policy, starts_barrier_until, custom_hold }
-            }
-          }
-        })
-        let dropped_faces : Array[AgentFace] = []
-        for dk in step.dropped_held {
-          match held_by.get(dk) {
-            Some((face, _)) => dropped_faces.push(face)
-            None => ()
-          }
-          held_by.remove(dk)
-        }
-        for lk in step.dropped_lingers {
-          linger_rows.remove(lk)
-        }
-        recompute_bridged_pairs()
-        if !pending_faces.is_empty() || !step.newly_held.is_empty() || !step.dropped_held.is_empty() {
-          @signals.after_computing(fn() {
-            for face in dropped_faces {
-              face.last.val = None
-              face.away.set(false)
-              // det-ok(motion-length): emit.mbt's Return, restoring ring and line if held message was dropped during Fold
-              face.ring_alpha.go(1.0, @motion.tween(@sfbase.Pose::Return.ms(), ease=Out), at=now)
-              face.fold.go(1.0, @motion.tween(@sfbase.Pose::Return.ms(), ease=Out), at=now)
-            }
-            for pf in pending_faces {
-              let (pk, face, plan) = pf
-              if plan.folds {
-                // det-ok(motion-length): emit.mbt's Fold, the line folding to its picture from the plan's start
-                face.fold.go(0.0, @motion.tween(@sfbase.Pose::Fold.ms(), ease=Out, delay=plan.came - now), at=now)
-                (face.bind_ring)()
-                // det-ok(motion-length): emit.mbt's Fold, fading the spinning ring out smoothly with the line
-                face.ring_alpha.go(0.0, @motion.tween(@sfbase.Pose::Fold.ms(), ease=Out, delay=plan.came - now), at=now)
-              }
-              v.at_moment(plan.spit_end, fn() {
-                guard !stage.is_flushed(pk) else { return }
-                out_plans.remove(pk)
-                let ending = match (listed.row)(pk) {
-                  Some({ entry: Said(m), .. }) => m.ending != ""
-                  _ => true
-                }
-                agent_out_return(face, plan, ending)
-              })
-              |> ignore
-            }
-            arm_stage_due()
-          })
-        }
-      }
-      stage.visible_keys()
-    },
+    keys: fn() { keys.get() },
+    keys_index: list_keys_index,
     row: fn(k) {
       let lk = stage.unalias(k)
       let r = match row_of_listed(lk) {
@@ -1313,18 +1345,6 @@ fn chat_body_node(
       }
     },
   }
-  // (the same keys the same object as before: worked out anew as its page is woken from rest, what lays them out finds
-  // them as it left them)
-  let keys = @signals.computed(
-    fn(was) {
-      let ks = (list.keys)()
-      match was {
-        Some(prev) if physical_equal(prev, ks) || prev == ks => prev
-        _ => ks
-      }
-    },
-    same=fn(a, b) { physical_equal(a, b) || a == b },
-  )
   // (judged as the list reads its keys, in the read that takes them: what the change moves in the list is that
   // cause's from its first frame, no other reader of the keys put before the list's)
   let live_causes = chat_live_causes(v, here, list, shows, reopening, fn(k) { stage.unalias(k) })
@@ -1339,12 +1359,14 @@ fn chat_body_node(
   // (as its page is put by at rest, and once as it is let go: what nothing follows of what the list worked out, read
   // untracked as it was laid out and told what is in sight, let go of what it read; View::on_rest)
   rest_body.val = fn() {
+    (rest_sight.val)()
     if !keys.watched() {
       keys.dispose()
     }
     if !taken_over.watched() {
       taken_over.dispose()
     }
+    clear_list_keys_index()
     (listed.rest_unwatched)()
   }
   v.on_rest(
@@ -1498,28 +1520,60 @@ fn chat_body_node(
   // (a row's block in `slot`, of the slice `slice` of the row whose key `key` says, each as it is now: chat_body_row's)
   // (the keys its list has in sight, from the first to the last, as it last told them (ListPlace::on_sight): a row out of
   // them shows not, though the page does, what it previews stopped then (page_shows_lent))
-  let sight_range : Ref[(Int, Int, Int, Int)?] = Ref(None)
-  let sight_ver = @signals.signal(0)
+  let sight_ends : @signals.Signal[(String, Int, String, Int)?] = @signals.signal(None, same=fn(a, b) { a == b })
   place.on_sight(fn(s) {
-    let ks = keys.untracked()
-    let a = ks.search(s.first).unwrap_or(-1)
-    let b = ks.search(s.last).unwrap_or(-1)
-    sight_range.val = if a >= 0 && b >= 0 { Some((a, s.slice, b, s.last_slice)) } else { None }
-    sight_ver.set(sight_ver.untracked() + 1)
+    sight_ends.set(Some((s.first, s.slice, s.last, s.last_slice)))
   })
+  // (holds the current display keys array and its cached key->index map together with resolved range indices;
+  // compared by physical_equal on the keys array + range integers so pixel scrolling with unchanged ends never wakes rows;
+  // if a key update temporarily removes or reorders an endpoint before the next `on_sight`, keep previous `Window` when
+  // available or stay `Unresolved` (false) rather than falling back to `Unknown` (true) so off-screen rows never flash visible)
+  let sight_window : @signals.Computed[ChatSightWindow] = @signals.computed_by(
+    fn(was) {
+      let ks = keys.get()
+      match sight_ends.get() {
+        Some((first, first_sl, last, last_sl)) => {
+          let (idx, _) = (list.keys_index)(ks)
+          match (idx.get(first), idx.get(last)) {
+            (Some(a), Some(b)) if a < b || (a == b && first_sl <= last_sl) =>
+              Window(ks, idx, a, first_sl, b, last_sl)
+            _ =>
+              match was {
+                Some(Window(_, _, _, _, _, _) as prev) => prev
+                _ => Unresolved
+              }
+          }
+        }
+        None => Unknown
+      }
+    },
+    same=fn(x, y) {
+      match (x, y) {
+        (Unknown, Unknown) | (Unresolved, Unresolved) => true
+        (Window(k1, _, a1, as1, b1, bs1), Window(k2, _, a2, as2, b2, bs2)) =>
+          physical_equal(k1, k2) && a1 == a2 && as1 == as2 && b1 == b2 && bs1 == bs2
+        _ => false
+      }
+    },
+  )
+  rest_sight.val = fn() {
+    if !sight_window.watched() {
+      sight_window.dispose()
+    }
+  }
   let row_of = fn(slot : @view.View, key : () -> String, slice : () -> Int) {
     slot.lends(@sfbase.page_shows_lent, fn() {
-      sight_ver.get() |> ignore
       guard shows() else { return false }
-      match sight_range.val {
-        Some((a, a_sl, b, b_sl)) => {
+      match sight_window.get() {
+        Window(_, idx, a, a_sl, b, b_sl) => {
           let sl = slice()
-          match keys.untracked().search(key()) {
+          match idx.get(key()) {
             Some(i) => (i > a || (i == a && sl >= a_sl)) && (i < b || (i == b && sl <= b_sl))
             None => false
           }
         }
-        None => true
+        Unknown => true
+        Unresolved => false
       }
     })
     |> ignore

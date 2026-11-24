@@ -1,0 +1,78 @@
+fn expect(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+fn count_substr(haystack : String, needle : String) -> Int {
+  let h = haystack.to_bytes()
+  let n = needle.to_bytes()
+  if n.length() == 0 || n.length() > h.length() {
+    return 0
+  }
+  let mut count = 0
+  let mut i = 0
+  let last = h.length() - n.length()
+  while i <= last {
+    let mut matched = true
+    for j in 0..<n.length() {
+      if h[i + j] != n[j] {
+        matched = false
+        break
+      }
+    }
+    if matched {
+      count = count + 1
+      i = i + n.length()
+    } else {
+      i = i + 1
+    }
+  }
+  count
+}
+
+test "outflow_schema generates all tables, index, and 20 triggers" {
+  let s = outflow_schema()
+  expect(count_substr(s, "CREATE TABLE ") == 2, "expected 2 CREATE TABLE statements")
+  expect(count_substr(s, "CREATE INDEX ") == 1, "expected 1 CREATE INDEX statement")
+  expect(count_substr(s, "CREATE TRIGGER ") == 20, "expected 20 CREATE TRIGGER statements")
+}
+
+test "search_scope_schema generates all 7 tables and 17 triggers" {
+  let s = search_scope_schema()
+  expect(count_substr(s, "CREATE TABLE ") == 7, "expected 7 CREATE TABLE statements")
+  expect(count_substr(s, "CREATE TRIGGER ") == 17, "expected 17 CREATE TRIGGER statements")
+}
+
+test "workspace_old_rowids builds exact first and next queries" {
+  let q1 = workspace_old_rowids("last_rowid", "running_end", true)
+  let q2 = workspace_old_rowids("last_rowid", "running_end", false)
+  expect(
+    q1 ==
+    "SELECT j.rowid,NULL FROM jobs j INDEXED BY jobs_state WHERE j.state=? AND j.rowid<=(SELECT running_end FROM workspace_up_meta WHERE id=1) ORDER BY j.rowid LIMIT ?",
+    "exact first query",
+  )
+  expect(
+    q2 ==
+    "SELECT j.rowid,NULL FROM jobs j INDEXED BY jobs_state WHERE j.state=? AND j.rowid<=(SELECT running_end FROM workspace_up_meta WHERE id=1) AND j.rowid>(SELECT last_rowid FROM workspace_up_meta WHERE id=1) ORDER BY j.rowid LIMIT ?",
+    "exact next query",
+  )
+}
+
+test "double_to_i64_sat saturates bounds and NaN like MoonBit Double::to_int64" {
+  let max64 = (0x7FFFFFFF.to_int64() << 32.to_int64()) | (0xFFFF.to_int64() << 16.to_int64()) | 0xFFFF.to_int64()
+  let min64 = -max64 - 1.to_int64()
+  let nan = 0.0 / 0.0
+  expect(double_to_i64_sat(nan) == 0.to_int64(), "NaN -> 0")
+  expect(double_to_i64_sat(9223372036854775808.0) == max64, "2^63 -> INT64_MAX")
+  expect(double_to_i64_sat(1.0 / 0.0) == max64, "+Inf -> INT64_MAX")
+  expect(double_to_i64_sat(-9223372036854775808.0) == min64, "-2^63 -> INT64_MIN")
+  expect(double_to_i64_sat(-1.0 / 0.0) == min64, "-Inf -> INT64_MIN")
+  expect(double_to_i64_sat(42.0) == 42.to_int64(), "42 -> 42")
+}
+
+test "TurnCell mutates in place" {
+  let cell = TurnCell::{ current: 0 }
+  cell.current = (cell.current + 1) % 5
+  expect(cell.current == 1, "turn advanced to 1")
+}

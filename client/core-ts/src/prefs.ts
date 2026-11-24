@@ -50,9 +50,9 @@ function boardDraftsOf(v: unknown): Map_[] | null {
   return out.slice(0, BOARD_DRAFTS_KEPT);
 }
 const PREFS = { topic: "prefs" };
-/// The app's colour themes other than still.fail's orange (`accent`; none: the orange), or a hue of one's own
-/// (`custom:<0..359>`, the app makes the theme of it).
-const ACCENTS = ["blue", "teal", "purple", "pink"];
+/// The app's colour themes other than still.fail's orange (`accent`; none: the orange), `rainbow` (picks a colour
+/// automatically each time the app opens), or a hue of one's own (`custom:<0..359>`, the app makes the theme of it).
+const ACCENTS = ["blue", "teal", "purple", "pink", "rainbow"];
 const CUSTOM = /^custom:([0-9]{1,3})$/;
 
 function customHue(v: unknown): number | null {

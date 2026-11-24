@@ -112,27 +112,15 @@ pub let shadow_thumb : (Double, Double, Int64) = (2.0, 4.0 / 6.0, 0x0000000DL)
 pub let shadow_none : (Double, Double, Int64) = (0.0, 0.0, 0x00000000L)
 
 ///|
-/// Dynamic outer lift shadow for Slider / Switch thumb as press progresses from 0.0 (rest) to 1.0 (lifted droplet).
-pub fn thumb_lift_shadow(press : Double) -> (Double, Double, Int64) {
-  let p = clamp(press, 0.0, 1.0)
-  if is_dark() {
-    (lerp(3.0, 8.0, p), lerp(1.5, 4.5, p), alpha(black, lerp(0.26, 0.38, p)))
-  } else {
-    (lerp(2.5, 6.0, p), lerp(1.0, 4.0, p), alpha(black, lerp(0.10, 0.11, p)))
-  }
+/// Outer lift shadow for Slider / Switch thumb: removed (`shadow_none`) for shadow-free lifted transparent droplets.
+pub fn thumb_lift_shadow(_press : Double) -> (Double, Double, Int64) {
+  shadow_none
 }
 
 ///|
-/// Dynamic floating shadow for Segmented control's lifted clear lens (`shadow_none` at rest).
-pub fn seg_lens_shadow(press : Double) -> (Double, Double, Int64) {
-  let p = clamp(press, 0.0, 1.0)
-  if p <= 0.001 {
-    shadow_none
-  } else if is_dark() {
-    (8.0 * p, 4.5 * p, alpha(black, 0.36 * p))
-  } else {
-    (6.0 * p, 4.0 * p, alpha(black, 0.10 * p))
-  }
+/// Outer lift shadow for Segmented control's lifted clear lens: removed (`shadow_none`).
+pub fn seg_lens_shadow(_press : Double) -> (Double, Double, Int64) {
+  shadow_none
 }
 
 // Sizes (dp, mbui's points).

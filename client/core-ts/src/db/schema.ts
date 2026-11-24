@@ -217,12 +217,12 @@ export const overviewRowOf = (j: string) => `CASE WHEN json_type(${j}) = 'object
 /// are not in it: each agent's own profile is read alone (overviewProfilesOf).
 export const overviewChatOf = (j: string) => `CASE WHEN json_type(${j}) = 'object'
     THEN json((SELECT json_group_object(o.key, ${j} -> o.fullkey) FROM json_each(${j}) AS o
-      WHERE o.key IN ('connects', 'disk', 'slackUsers', 'updates', 'feedback', 'context', 'features')))
+      WHERE o.key IN ('connects', 'disk', 'slackUsers', 'updates', 'feedback', 'context', 'features', 'move')))
     END`;
 
 /// The fields of an overview a chat's page reads (overviewChatOf), for where it is made of an overview in the core (one
 /// shown with what is being done to it here: data.ts overviewChat).
-export const OVERVIEW_CHAT = ["connects", "disk", "slackUsers", "updates", "feedback", "context", "features"] as const;
+export const OVERVIEW_CHAT = ["connects", "disk", "slackUsers", "updates", "feedback", "context", "features", "move"] as const;
 
 /// An overview's profiles (the JSON `j`), each whole, by its id, as SQL: what a chat's agent reads of the one it runs
 /// on, read by its key (account.ts overviewProfile: `profiles -> '$."<id>"'`, SQLite taking that one of them), never
@@ -243,13 +243,14 @@ export const overviewFormerlyOf = (j: string) => `CASE WHEN json_type(${j}, '$.c
 
 /// What the workspace's profiles read of a station's overview, the JSON `j` (views.ts `#profilesView`: profiles.ts
 /// `workspaceProfiles`, and the machines' own logins offered beside them), as SQL: its `profiles` in their order, its
-/// `sharing`, its `mesh` (whether still.fail cloud reached it) and its `machineLogins`, each as the overview has it, one
+/// `sharing` (and whether a share can follow the workspace's whitelist, `shareAllowAuto`, and whether it is on that whitelist,
+/// `autoChats`), its `mesh` (whether still.fail cloud reached it) and its `machineLogins`, each as the overview has it, one
 /// absent left out; NULL where the overview is not an object. Kept in a column of its own (`station_part.profiled`):
 /// the list read every station's whole overview and decorated a copy of it for these (15 of the 32 ms the core spent
 /// after a workspace was switched to on 小屏, in Hermes on a Mac Studio, 2026-11-12).
 export const overviewProfiledOf = (j: string) => `CASE WHEN json_type(${j}) = 'object'
     THEN json((SELECT json_group_object(o.key, ${j} -> o.fullkey) FROM json_each(${j}) AS o
-      WHERE o.key IN ('profiles', 'sharing', 'mesh', 'machineLogins')))
+      WHERE o.key IN ('profiles', 'sharing', 'shareAllowAuto', 'autoChats', 'mesh', 'machineLogins')))
     END`;
 
 /// The station's own software of an overview, the JSON `j` (its `updates`' entry of id `station`), as SQL: what the
@@ -265,7 +266,7 @@ export const overviewSoftwareOf = (j: string) => `(SELECT json_object('version',
 
 /// The fields of an overview the workspace's profiles read (overviewProfiledOf), for where they are made of an overview
 /// in the core (one shown with what is being done to it here: data.ts overviewProfiled).
-export const OVERVIEW_PROFILED = ["profiles", "sharing", "mesh", "machineLogins"] as const;
+export const OVERVIEW_PROFILED = ["profiles", "sharing", "shareAllowAuto", "autoChats", "mesh", "machineLogins"] as const;
 
 /// What the connects' list and a connect's page read of a station's overview, the JSON `j` (views.ts connectsPartOf,
 /// #connectOf), as SQL: its `connects` and `slackApps` (each `[]` where not a list), whether it has a profile
@@ -294,39 +295,76 @@ export const overviewSettingsOf = (j: string) => `CASE WHEN json_type(${j}) = 'o
 /// core (one shown with what is being done to it here: data.ts overviewSettings).
 export const OVERVIEW_SETTINGS = ["automaticDecisions", "archiving"] as const;
 
-/// Each column of an overview's part (`station_part`) and how SQLite makes it of the overview's JSON.
+/// Small, frequently changing columns of an overview's part kept in `station_part`.
+export const HOT_PART_COLUMNS: [string, (j: string) => string][] = [
+  ["part", overviewPartOf],
+  ["row", overviewRowOf],
+  ["chat", overviewChatOf],
+  ["formerly", overviewFormerlyOf],
+  ["software", overviewSoftwareOf],
+  ["connects", overviewConnectsOf],
+  ["settings", overviewSettingsOf],
+];
+/// Large, cold profile columns kept apart in `station_part_profiles` so high-frequency `part`/`row`/`chat` updates
+/// never rewrite 100–200 KB of unchanged profile overflow pages.
+export const PROFILE_PART_COLUMNS: [string, (j: string) => string][] = [
+  ["profiles", overviewProfilesOf],
+  ["profiled", overviewProfiledOf],
+];
+/// Each column of an overview's part (`station_part` and `station_part_profiles`) and how SQLite makes it of the overview's JSON.
 export const PART_COLUMNS: [string, (j: string) => string][] = [["part", overviewPartOf], ["row", overviewRowOf], ["chat", overviewChatOf], ["formerly", overviewFormerlyOf], ["profiles", overviewProfilesOf], ["profiled", overviewProfiledOf], ["software", overviewSoftwareOf], ["connects", overviewConnectsOf], ["settings", overviewSettingsOf]];
+export const PROFILE_PART_SET = new Set(PROFILE_PART_COLUMNS.map(([c]) => c));
+export const partTableOf = (column: string): "station_part" | "station_part_profiles" => (PROFILE_PART_SET.has(column) ? "station_part_profiles" : "station_part");
 /// The revision of a column of the part (`<column>_rev`), beside it: raised by the triggers as its text changes, so that
 /// a write is told what of the part changed by a few numbers, the texts not read (account.ts #overviewWritten). NULL
 /// where no trigger of this core counted it (a row a core that knows nothing of them put in).
 export const partRev = (column: string) => `${column}_rev`;
-/// What makes each column of a station's part of the overview `j` (`address` its station, `from` what the overview is
-/// read of; `key` the station as the second statement says it), the triggers' and where one is missing: the row kept in
-/// place where there is one, each column's revision raised where its text is another; one put in now counted from 0.
-const partPut = (j: string, address: string, from: string, key: string): [string, string] => [
-  `INSERT INTO station_part (address, ${PART_COLUMNS.map(([c]) => c).join(", ")}) SELECT ${address}, ${PART_COLUMNS.map(([, of]) => of(j)).join(", ")} ${from}
-        ON CONFLICT (address) DO UPDATE SET ${PART_COLUMNS.map(([c]) => `${c} = excluded.${c}, ${partRev(c)} = coalesce(station_part.${partRev(c)}, 0) + (station_part.${c} IS NOT excluded.${c})`).join(", ")}
-        WHERE ${PART_COLUMNS.map(([c]) => `station_part.${c} IS NOT excluded.${c}`).join(" OR ")}`,
-  `UPDATE station_part SET ${PART_COLUMNS.map(([c]) => `${partRev(c)} = 0`).join(", ")} WHERE address = ${key} AND ${partRev(PART_COLUMNS[0][0])} IS NULL`,
+/// What makes each column of one part table (`station_part` or `station_part_profiles`) of the overview `j` (`address`
+/// its station, `from` what the overview is read of; `key` the station as the second statement says it): the row kept
+/// in place where there is one, each column's revision raised where its text is another; one put in now counted from 0.
+const partPutTable = (table: string, cols: [string, (j: string) => string][], j: string, address: string, from: string, key: string): [string, string] => [
+  `INSERT INTO ${table} (address, ${cols.map(([c]) => c).join(", ")}) SELECT ${address}, ${cols.map(([, of]) => of(j)).join(", ")} ${from}
+        ON CONFLICT (address) DO UPDATE SET ${cols.map(([c]) => `${c} = excluded.${c}, ${partRev(c)} = coalesce(${table}.${partRev(c)}, 0) + (${table}.${c} IS NOT excluded.${c})`).join(", ")}
+        WHERE ${cols.map(([c]) => `${table}.${c} IS NOT excluded.${c}`).join(" OR ")}`,
+  `UPDATE ${table} SET ${cols.map(([c]) => `${partRev(c)} = 0`).join(", ")} WHERE address = ${key} AND ${partRev(cols[0][0])} IS NULL`,
 ];
-const triggerPut = () => partPut("new.json", "new.address", "WHERE json_valid(new.json)", "new.address").map((s) => `${s};`).join("\n        ");
+const triggerPutTable = (table: string, cols: [string, (j: string) => string][]) =>
+  partPutTable(table, cols, "new.json", "new.address", "WHERE json_valid(new.json)", "new.address").map((s) => `${s};`).join("\n        ");
 
-/// The triggers keeping each overview's part (station_part) as it changes or goes, whoever writes it, by name, as sqlite_master keeps them (no `IF NOT EXISTS`: SQLite keeps the
+/// Guard for `station_part_profiles_set`: skip parsing/updating profile columns entirely when none of the fields
+/// `overviewProfilesOf` / `overviewProfiledOf` read changed.
+/// (each field of OVERVIEW_PROFILED, which holds `profiles` too: one added there is watched here, else the part would
+/// keep what it was, a station's whitelist turned on never reaching the profiles)
+const PROFILE_FIELDS_CHANGED =
+  "(NOT json_valid(old.json) OR NOT json_valid(new.json) OR json_type(old.json) IS NOT 'object' OR json_type(new.json) IS NOT 'object'" +
+  OVERVIEW_PROFILED.map((k) => ` OR (old.json -> '$.${k}') IS NOT (new.json -> '$.${k}')`).join("") + ")";
+
+/// The triggers keeping each overview's hot (`station_part`) and cold profile (`station_part_profiles`) parts as it
+/// changes or goes, whoever writes it, by name, as sqlite_master keeps them (no `IF NOT EXISTS`: SQLite keeps the
 /// statement without it). An overview that is not JSON has none.
 const overviewTriggers = (): [string, string][] => [
   ["station_part_put", `CREATE TRIGGER station_part_put AFTER INSERT ON station WHEN new.kind = 'overview'
       BEGIN
         DELETE FROM station_part WHERE address = new.address AND NOT json_valid(new.json);
-        ${triggerPut()}
+        DELETE FROM station_part_profiles WHERE address = new.address AND NOT json_valid(new.json);
+        ${triggerPutTable("station_part", HOT_PART_COLUMNS)}
+        ${triggerPutTable("station_part_profiles", PROFILE_PART_COLUMNS)}
       END`],
   ["station_part_set", `CREATE TRIGGER station_part_set AFTER UPDATE OF json ON station WHEN new.kind = 'overview' AND old.json IS NOT new.json
       BEGIN
         DELETE FROM station_part WHERE address = new.address AND NOT json_valid(new.json);
-        ${triggerPut()}
+        DELETE FROM station_part_profiles WHERE address = new.address AND NOT json_valid(new.json);
+        ${triggerPutTable("station_part", HOT_PART_COLUMNS)}
+      END`],
+  ["station_part_profiles_set", `CREATE TRIGGER station_part_profiles_set AFTER UPDATE OF json ON station WHEN new.kind = 'overview' AND old.json IS NOT new.json AND ${PROFILE_FIELDS_CHANGED}
+      BEGIN
+        DELETE FROM station_part_profiles WHERE address = new.address AND NOT json_valid(new.json);
+        ${triggerPutTable("station_part_profiles", PROFILE_PART_COLUMNS)}
       END`],
   ["station_part_drop", `CREATE TRIGGER station_part_drop AFTER DELETE ON station WHEN old.kind = 'overview'
       BEGIN
         DELETE FROM station_part WHERE address = old.address;
+        DELETE FROM station_part_profiles WHERE address = old.address;
       END`],
 ];
 
@@ -335,12 +373,13 @@ const spaced = (s: string) => s.replace(/\s+/g, " ").trim();
 
 /// Each station's overview's part the chat list reads (overviewPartOf), what a station's row reads (overviewRowOf, its
 /// own column), what a chat's page reads (overviewChatOf), the stations it took the place of (overviewFormerlyOf), its
-/// profiles by id (overviewProfilesOf) and what the workspace's profiles read of it (overviewProfiledOf), each its own
-/// column, beside it in a table of its own: they
+/// profiles by id (overviewProfilesOf) and what the workspace's profiles read of it (overviewProfiledOf), kept beside
+/// it in `station_part` (small, frequent columns) and `station_part_profiles` (large, cold profile columns): they
 /// read a few hundred bytes, or a chat's page some of the overview, not an overview of some 150 KB (nor walk its pages
-/// to a column after it). Kept by triggers on `station`, as `said` is, so a core that knows nothing of it (a web page
-/// still open from before, an app put back to an older one) keeps it too: nothing it holds is older than its overview.
-/// Its row is kept in place as the overview is written, each column beside its revision (partRev), raised where its
+/// to a column after it, nor rewrite 100–200 KB of unchanged profiles on every hot-column tick). Kept by triggers on
+/// `station`, as `said` is, so a core that knows nothing of it (a web page still open from before, an app put back to
+/// an older one) keeps it too: nothing it holds is older than its overview.
+/// Each row is kept in place as the overview is written, each column beside its revision (partRev), raised where its
 /// text is another, so a write is told what changed without a text read; an older core's triggers put the row in anew,
 /// its revisions none, and what reads them takes that as anything changed.
 /// (What is made of an overview and kept beside it, whether this core can read it, is db/kept.ts's.) Made where missing
@@ -356,14 +395,21 @@ export function ensureOverviewParts(sql: Sql): void {
   try {
     sql.exec(`
       CREATE TABLE IF NOT EXISTS station_part (address TEXT PRIMARY KEY, part TEXT NOT NULL, row TEXT, chat TEXT, formerly TEXT, profiles TEXT);
+      CREATE TABLE IF NOT EXISTS station_part_profiles (address TEXT PRIMARY KEY, profiles TEXT, profiles_rev INTEGER, profiled TEXT, profiled_rev INTEGER);
     `);
     const had = new Map(sql.all("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'station'").map((r) => [String(r[0]), String(r[1])]));
     let remade = false;
     // (a table an earlier core made: the columns it has not added, every part made again with them)
     const columns = sql.all("PRAGMA table_info(station_part)").map((r) => r[1]);
-    for (const [column, type] of PART_COLUMNS.flatMap(([c]) => [[c, "TEXT"], [partRev(c), "INTEGER"]])) {
+    for (const [column, type] of HOT_PART_COLUMNS.flatMap(([c]) => [[c, "TEXT"], [partRev(c), "INTEGER"]])) {
       if (columns.includes(column)) continue;
       sql.exec(`ALTER TABLE station_part ADD COLUMN ${column} ${type}`);
+      remade = true;
+    }
+    const profileCols = sql.all("PRAGMA table_info(station_part_profiles)").map((r) => r[1]);
+    for (const [column, type] of PROFILE_PART_COLUMNS.flatMap(([c]) => [[c, "TEXT"], [partRev(c), "INTEGER"]])) {
+      if (profileCols.includes(column)) continue;
+      sql.exec(`ALTER TABLE station_part_profiles ADD COLUMN ${column} ${type}`);
       remade = true;
     }
     for (const [name, statement] of overviewTriggers()) {
@@ -375,14 +421,23 @@ export function ensureOverviewParts(sql: Sql): void {
       }
       sql.exec(statement);
     }
-    // (an earlier core's parts: all made again, of the overviews, by SQLite)
-    if (remade) sql.exec("DELETE FROM station_part");
+    // (an earlier core's parts: all made again, of the overviews, by SQLite, also shedding legacy profiles blobs from station_part)
+    if (remade) {
+      sql.exec("DELETE FROM station_part");
+      sql.exec("DELETE FROM station_part_profiles");
+    }
     // (asked first by the rows' keys alone: an overview is read only where its part is missing)
-    const missing = sql.all("SELECT s.address FROM station s WHERE s.kind = 'overview' AND NOT EXISTS (SELECT 1 FROM station_part p WHERE p.address = s.address)");
-    const [put, counted] = partPut("st.json", "st.address", "FROM station AS st WHERE st.address = ? AND st.kind = 'overview' AND json_valid(st.json)", "?");
-    for (const [address] of missing) {
-      sql.run(put, [address]);
-      sql.run(counted, [address]);
+    const missingHot = sql.all("SELECT s.address FROM station s WHERE s.kind = 'overview' AND NOT EXISTS (SELECT 1 FROM station_part p WHERE p.address = s.address)");
+    const [putHot, countedHot] = partPutTable("station_part", HOT_PART_COLUMNS, "st.json", "st.address", "FROM station AS st WHERE st.address = ? AND st.kind = 'overview' AND json_valid(st.json)", "?");
+    for (const [address] of missingHot) {
+      sql.run(putHot, [address]);
+      sql.run(countedHot, [address]);
+    }
+    const missingProfiles = sql.all("SELECT s.address FROM station s WHERE s.kind = 'overview' AND NOT EXISTS (SELECT 1 FROM station_part_profiles p WHERE p.address = s.address)");
+    const [putProfiles, countedProfiles] = partPutTable("station_part_profiles", PROFILE_PART_COLUMNS, "st.json", "st.address", "FROM station AS st WHERE st.address = ? AND st.kind = 'overview' AND json_valid(st.json)", "?");
+    for (const [address] of missingProfiles) {
+      sql.run(putProfiles, [address]);
+      sql.run(countedProfiles, [address]);
     }
     sql.exec("COMMIT");
   } catch (e) {
@@ -397,7 +452,11 @@ export function ensureOverviewParts(sql: Sql): void {
 
 /// How this core derives a chat record's columns beyond those every core writes (CHAT_COLUMNS, `state`): another number
 /// whenever one of them would come out otherwise of the same record, so that rows derived before are derived again.
+/// `CHAT_MADE_ALT` is an equivalent marker that `PUT_CHAT`'s `ON CONFLICT DO UPDATE` alternates with `CHAT_MADE` so
+/// `chat_made_set` (`WHEN old.made IS new.made`) skips this core's own upserts while still catching in-place JSON
+/// updates from older cores that leave `made` untouched.
 export const CHAT_MADE = 2;
+export const CHAT_MADE_ALT = -2;
 
 /// The columns of a chat's record that SQLite makes of its JSON (`j`, an expression of it), as the record is put and as a
 /// row another core put is derived again: whether it is hidden; whether an agent leads it (chat_create for itself: its
@@ -418,28 +477,36 @@ export const CHAT_COLUMNS: [name: string, of: (j: string) => string][] = [
 /// The chats each agent's session is among the agents of (its row's `agents[].key`), listed or archived: what finds the
 /// chat a session takes part in without reading the station's rows (screens.ts chatOf, views.ts #ranFrom, fleet.ts).
 /// Kept by triggers on `chat`, as `chat_row` is, so whoever writes a record (an older core too) keeps it.
-const chatAgentsOf = (row: "new" | "old") => `INSERT OR IGNORE INTO chat_agent (station, session, archived, id)
-        SELECT ${row}.station, json_extract(a.value, '$.key'), ${row}.archived, ${row}.id
+const chatAgentKeysOf = (row: "new" | "old") => `SELECT json_extract(a.value, '$.key')
         FROM json_each(CASE json_type(${row}.json, '$.agents') WHEN 'array' THEN ${row}.json ELSE '{"agents":[]}' END, '$.agents') AS a
-        WHERE json_type(CASE a.type WHEN 'object' THEN a.value ELSE '{}' END, '$.key') = 'text';`;
+        WHERE json_type(CASE a.type WHEN 'object' THEN a.value ELSE '{}' END, '$.key') = 'text'`;
+const chatAgentsOf = (row: "new" | "old") => `INSERT INTO chat_agent (station, session, archived, id)
+        SELECT DISTINCT ${row}.station, json_extract(a.value, '$.key'), ${row}.archived, ${row}.id
+        FROM json_each(CASE json_type(${row}.json, '$.agents') WHEN 'array' THEN ${row}.json ELSE '{"agents":[]}' END, '$.agents') AS a
+        WHERE json_type(CASE a.type WHEN 'object' THEN a.value ELSE '{}' END, '$.key') = 'text'
+          AND NOT EXISTS (SELECT 1 FROM chat_agent WHERE station = ${row}.station AND session = json_extract(a.value, '$.key') AND archived = ${row}.archived AND id = ${row}.id);`;
 const chatTriggers = (): [string, string][] => [
   ["chat_agent_put", `CREATE TRIGGER chat_agent_put AFTER INSERT ON chat
       BEGIN
-        DELETE FROM chat_agent WHERE station = new.station AND archived = new.archived AND id = new.id;
+        DELETE FROM chat_agent WHERE station = new.station AND archived = new.archived AND id = new.id AND session NOT IN (${chatAgentKeysOf("new")});
         ${chatAgentsOf("new")}
       END`],
   ["chat_agent_set", `CREATE TRIGGER chat_agent_set AFTER UPDATE OF station, archived, id, json ON chat
+      WHEN old.station IS NOT new.station OR old.archived IS NOT new.archived OR old.id IS NOT new.id OR (old.json -> '$.agents') IS NOT (new.json -> '$.agents')
       BEGIN
-        DELETE FROM chat_agent WHERE station = old.station AND archived = old.archived AND id = old.id;
+        DELETE FROM chat_agent WHERE station = old.station AND archived = old.archived AND id = old.id
+          AND (old.station IS NOT new.station OR old.archived IS NOT new.archived OR old.id IS NOT new.id OR session NOT IN (${chatAgentKeysOf("new")}));
         ${chatAgentsOf("new")}
       END`],
   ["chat_agent_drop", `CREATE TRIGGER chat_agent_drop AFTER DELETE ON chat
       BEGIN
         DELETE FROM chat_agent WHERE station = old.station AND archived = old.archived AND id = old.id;
       END`],
-  // (a record's JSON changed in place: never by this core's writer, which puts it whole; by another core, its columns
-  // made of it again at once, and it marked to be derived again at the next open)
+  // (a record's JSON changed in place: this core's writer alternates `made` between CHAT_MADE and CHAT_MADE_ALT so
+  // `old.made IS NOT new.made`; another core leaves `made` untouched, so its columns are made of it again at once, and
+  // it is marked to be derived again at the next open)
   ["chat_made_set", `CREATE TRIGGER chat_made_set AFTER UPDATE OF json ON chat
+      WHEN old.made IS new.made
       BEGIN
         UPDATE chat SET made = NULL, ${CHAT_COLUMNS.map(([c, of]) => `${c} = ${of("new.json")}`).join(", ")} WHERE rowid = new.rowid;
       END`],
@@ -486,9 +553,14 @@ export function ensureChatColumns(sql: Sql, derive: (agents: unknown) => { state
     // archive's place on a phone, 2026-11-19. Made again partial and covering)
     const archiveWas = sql.all("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'chat_archive'");
     if (archiveWas.length > 0 && !/\bstation\b/.test(String(archiveWas[0]![0]))) sql.exec("DROP INDEX chat_archive");
+    // (`chat_made` as a partial index over unmade rows alone: 0 index writes on steady-state chat upserts that alternate
+    // `made` between CHAT_MADE and CHAT_MADE_ALT, and an empty covering index to check at open)
+    const unmade = `made IS NULL OR made NOT IN (${CHAT_MADE}, ${CHAT_MADE_ALT})`;
+    const madeWas = sql.all("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'chat_made'");
+    if (madeWas.length > 0 && !/WHERE /.test(String(madeWas[0]![0]))) sql.exec("DROP INDEX chat_made");
     sql.exec(`
       CREATE INDEX IF NOT EXISTS chat_recent ON chat (archived, pinned_at DESC, last_active DESC, station, ord, id, mine, hidden, led, watched, thread, session) WHERE archived = 0;
-      CREATE INDEX IF NOT EXISTS chat_made ON chat (made);
+      CREATE INDEX IF NOT EXISTS chat_made ON chat (made) WHERE ${unmade};
       CREATE INDEX IF NOT EXISTS chat_archived_at ON chat (station, archived, archived_mark, archived_at DESC, thread, session) WHERE archived_mark = 1;
       CREATE INDEX IF NOT EXISTS chat_archive ON chat (archived, archived_mark, coalesce(archived_at, 0) DESC, station, ord, id, thread, session) WHERE archived = 1 AND archived_mark = 1;
       CREATE INDEX IF NOT EXISTS chat_listed ON chat (station, archived, state, mine, hidden, led, watched, last_active, thread, session, id) WHERE archived = 0;
@@ -517,14 +589,13 @@ export function ensureChatColumns(sql: Sql, derive: (agents: unknown) => { state
         WHERE json_type(CASE a.type WHEN 'object' THEN a.value ELSE '{}' END, '$.key') = 'text'`);
     }
     const out: ChatColumnsMade = { rows: 0, read: 0, bytes: 0 };
-    // (by the index on `made` alone: no row read)
-    const unmade = "made IS NULL OR made < ? OR made > ?";
-    const any = sql.all(`SELECT 1 FROM chat WHERE made IS NULL UNION ALL SELECT 1 FROM chat WHERE made < ? UNION ALL SELECT 1 FROM chat WHERE made > ? LIMIT 1`, [CHAT_MADE, CHAT_MADE]).length > 0;
+    // (by the partial covering index `chat_made` alone: literal predicate matches the index WHERE, no table row read)
+    const any = sql.all(`SELECT 1 FROM chat WHERE ${unmade} LIMIT 1`).length > 0;
     if (any) {
-      out.rows = sql.run(`UPDATE chat SET ${CHAT_COLUMNS.map(([c, of]) => `${c} = ${of("chat.json")}`).join(", ")} WHERE ${unmade}`, [CHAT_MADE, CHAT_MADE]);
+      out.rows = sql.run(`UPDATE chat SET ${CHAT_COLUMNS.map(([c, of]) => `${c} = ${of("chat.json")}`).join(", ")} WHERE ${unmade}`);
       for (;;) {
         // (of each its agents alone, as SQLite reads them of its JSON)
-        const page = sql.all(`SELECT rowid, json_extract(json, '$.agents') FROM chat WHERE ${unmade} LIMIT 256`, [CHAT_MADE, CHAT_MADE]);
+        const page = sql.all(`SELECT rowid, json_extract(json, '$.agents') FROM chat WHERE ${unmade} LIMIT 256`);
         if (page.length === 0) break;
         for (const [rowid, agents] of page) {
           out.read++;

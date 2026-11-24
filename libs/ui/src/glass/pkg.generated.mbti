@@ -120,7 +120,7 @@ pub fn liquid_sheet_glass(solid? : Int64) -> @paint.Glass
 pub fn liquid_sheet_surface_decorate(@view.View, radius? : Double, active? : () -> Bool, solid? : () -> Int64, shadow? : () -> (Double, Double, Int64), solid_edge? : () -> (Double, Int64)) -> @view.View
 
 #callsite(autofill(loc))
-pub fn liquid_slider_node(@view.View, () -> Double, (Double) -> Unit, () -> String, least? : Double, most? : Double, step? : Double, threshold? : Double, disabled? : () -> Bool, track_h? : Double, track_held_grow? : Double, thumb_w_px? : Double, thumb_h_px? : Double, track_color? : () -> Int64, fill_color? : () -> Int64, stops? : Int32, thumb_label? : (Double) -> String, value_text? : (Double) -> String, flush? : Bool, value_bubble? : ((Double) -> String)?, drag? : DampedDrag, loc~ : SourceLoc) -> @view.View
+pub fn liquid_slider_node(@view.View, () -> Double, (Double) -> Unit, () -> String, least? : Double, most? : Double, step? : Double, threshold? : Double, disabled? : () -> Bool, track_h? : Double, track_held_grow? : Double, thumb_w_px? : Double, thumb_h_px? : Double, track_color? : () -> Int64, fill_color? : () -> Int64, stops? : Int32, thumb_label? : (Double) -> String, stop_labels? : () -> Array[String], value_text? : (Double) -> String, flush? : Bool, value_bubble? : ((Double) -> String)?, drag? : DampedDrag, loc~ : SourceLoc) -> @view.View
 
 pub fn liquid_solid_edge() -> (Double, Int64)
 
@@ -234,6 +234,8 @@ pub let shadow_default : (Double, Double, Int64)
 pub let shadow_none : (Double, Double, Int64)
 
 pub let shadow_thumb : (Double, Double, Int64)
+
+pub fn slider_held_reach(Double) -> Double
 
 pub let slider_thumb_h : Double
 

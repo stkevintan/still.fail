@@ -274,9 +274,23 @@ test "a station's part as nodes (under its agent's, in one card): what it says i
 }
 
 ///|
-test "a station's card as nodes, its 屏幕 rested on: its menu beside it, with the fixture's screens and with one" {
+test "a station's card as nodes, its 屏幕 rested on: its menu beside it, with the fixture's screens, with one and with one and its browser" {
   let faults = []
-  for case in peek_cases().filter(fn(c) { c.0 == "as the fixture" || c.0 == "with screens" }) {
+  let with_browser = (
+    "with screens and its browser",
+    fn(topic : String, v : Json?) -> Json? {
+      if topic == "screens" {
+        Some({
+          "screens": [{ "id": "desktop", "title": "Willow 的屏幕", "kind": "desktop" }],
+          "browser": true,
+          "control": true,
+        })
+      } else {
+        v
+      }
+    },
+  )
+  for case in peek_cases().filter(fn(c) { c.0 == "as the fixture" || c.0 == "with screens" }) + [with_browser] {
     let (name, change) = case
     // (its 屏幕's words read once the run's Tester is made: peek_rest_on's)
     let menu = "android-misc.screen.section"
@@ -291,10 +305,20 @@ test "a station's card as nodes, its 屏幕 rested on: its menu beside it, with 
     // pages agents drive in it)
     let items = if name == "with screens" {
       ["Willow 的屏幕"]
+    } else if name == "with screens and its browser" {
+      ["Willow 的屏幕", "打开浏览器"]
     } else {
       ["Willow 的屏幕", "浏览器", "发布清单 - 文档"]
     }
     let rows = t.words().filter(fn(w) { w.0 == "机器详情" })
+    // (no heading where no agent drives pages: each part one kind of row, its icon telling it, and 屏幕 the row rested on)
+    if name == "with screens and its browser" {
+      for heading in ["屏幕", "浏览器"] {
+        if t.words().any(fn(w) { w.0 == heading && w.5 > 0.0 && rows.any(fn(r) { w.1 > r.1 }) }) {
+          faults.push("\{name}: heading \{heading} drawn beside the card")
+        }
+      }
+    }
     for item in items {
       match (t.words().filter(fn(w) { w.0 == item && w.5 > 0.0 }), rows) {
         ([w, ..], [r, ..]) =>

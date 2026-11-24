@@ -1185,6 +1185,7 @@ web-pages.appearance.accent.hue
 web-pages.appearance.accent.orange
 web-pages.appearance.accent.pink
 web-pages.appearance.accent.purple
+web-pages.appearance.accent.rainbow
 web-pages.appearance.accent.teal
 web-pages.appearance.accent.title
 web-pages.appearance.archive.description

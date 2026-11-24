@@ -335,6 +335,7 @@ fn play_list_sheet_node(parent : @view.View, pn : PlayerNode, loc~ : SourceLoc) 
     along: Start,
     offset: panel_offset,
     match_panel: 0,
+    scrolls_under: false,
     on_back: None,
     nodes: {
       body: fn(col, _) {

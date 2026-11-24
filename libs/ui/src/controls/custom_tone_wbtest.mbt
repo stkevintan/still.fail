@@ -20,11 +20,31 @@ test "a theme of any hue: its ink reads on its page and on what is chosen, white
 }
 
 ///|
-test "a theme's key: one of the five, custom:<0..359>, nothing else" {
+test "a theme's key: one of the five, rainbow, custom:<0..359>, nothing else" {
   assert_true(tone_of("teal") is Some(_))
+  assert_eq(tone_of("rainbow").map(fn(a) { a.key }), Some("rainbow"))
   assert_eq(tone_of("custom:0").map(fn(a) { a.key }), Some("custom:0"))
   assert_eq(tone_of("custom:359").map(fn(a) { a.key }), Some("custom:359"))
   for bad in ["custom:360", "custom:", "custom:-1", "custom:1a", "custom:0123", "indigo"] {
     assert_true(tone_of(bad) is None, msg=bad)
   }
+}
+
+///|
+test "rainbow accent: deterministic seed mixing into 0..359 and reactive theme resolution" {
+  let h0 = rainbow_hue_of_seed(1790000000000L)
+  let h1 = rainbow_hue_of_seed(1790000000001L)
+  assert_true(h0 >= 0 && h0 < 360)
+  assert_true(h1 >= 0 && h1 < 360)
+  assert_eq(rainbow_hue_of_seed(1790000000000L), h0)
+  assert_true(h0 != h1)
+  set_accent(rainbow_accent_key)
+  set_rainbow_hue(h0)
+  assert_eq(accent_key(), rainbow_accent_key)
+  assert_eq(theme().p.accent, custom_tone(h0).light)
+  assert_eq(palette_of(true).accent, custom_tone(h0).dark)
+  set_rainbow_hue(h1)
+  assert_eq(theme().p.accent, custom_tone(h1).light)
+  assert_eq(palette_of(true).accent, custom_tone(h1).dark)
+  set_accent("")
 }

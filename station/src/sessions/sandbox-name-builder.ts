@@ -1,4 +1,5 @@
-import { MbBackfill, readerBinary } from "../read/mb-reader.ts";
+import { MbBackfill, resolveReaderSelection } from "../read/mb-reader.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import { log } from "../ops/log.ts";
 import { releaseStoppedBackfill } from "../store/backfill.ts";
 import { runnerNameSessions, runnerTakeUpSessions, sandboxIndexEnabled, sandboxIndexReady, sandboxSessions } from "../store/sandbox-index.ts";
@@ -16,10 +17,11 @@ export class SandboxNameBuilder {
   private readonly store: Store;
   private readonly previous: Promise<boolean>;
   private readonly binary: string | undefined;
+  private readonly readers: (() => ReaderSelectConfig) | undefined;
   private readonly enabled: () => boolean;
   private previousReady = false;
 
-  constructor(store: Store, previous: Promise<void>, enabled: () => boolean = () => true, binary?: string) {
+  constructor(store: Store, previous: Promise<void>, enabled: () => boolean = () => true, binary?: string, readers?: () => ReaderSelectConfig) {
     this.store = store;
     this.previous = previous.then(() => { this.previousReady = true; return true; }, (error) => {
       log.warn("hub", "could not wait for the previous station before preparing sandbox names", { error: (error as Error).message });
@@ -27,6 +29,7 @@ export class SandboxNameBuilder {
     });
     this.enabled = enabled;
     this.binary = binary;
+    this.readers = readers;
   }
 
   async sessions(names: readonly string[]): Promise<Map<string, string> | "fallback" | null> {
@@ -148,7 +151,10 @@ export class SandboxNameBuilder {
     return new Promise<boolean>((resolve) => {
       // (by the MoonBit builder, station/mb's src/activity sandbox.mbt: `MbBackfill`)
       let current: MbBackfill;
-      try { current = new MbBackfill(this.binary ?? readerBinary(), ["--builder", "session-backfill", "--db", path], this.store.backfillPriority, 20); }
+      try {
+        const bin = resolveReaderSelection("session-backfill", { binary: this.binary, config: this.readers, logAt: "readers" }).primaryBinary;
+        current = new MbBackfill(bin, ["--builder", "session-backfill", "--db", path], this.store.backfillPriority, 20);
+      }
       catch (error) {
         log.warn("hub", "the sandbox name worker could not start", { error: (error as Error).message });
         resolve(false);

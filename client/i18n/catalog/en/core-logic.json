@@ -415,6 +415,7 @@
   "core-logic.looks.link.reconnecting.named": "Reconnecting to “{name}”",
   "core-logic.looks.none_running": "No agents running",
   "core-logic.looks.offline.station": "“{name}” is offline. Showing previously loaded content; messages you send are delivered when it is back.",
+  "core-logic.looks.moving": "Moving to “{station}”: you can send once it is there",
   "core-logic.looks.offline.network": "No network connection. Showing previously loaded content; messages you send go to “{name}” once connected.",
   "core-logic.looks.offline.unreached": "Can't reach “{name}” right now. Showing previously loaded content; messages you send are delivered once it is reached.",
   "core-logic.looks.offline.lock": "Security mode is blocking “{name}”: {reason}",

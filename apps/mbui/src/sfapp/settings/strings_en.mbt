@@ -1221,6 +1221,7 @@ let en : Map[String, String] = {
   "web-pages.appearance.accent.orange": "Orange",
   "web-pages.appearance.accent.pink": "Pink",
   "web-pages.appearance.accent.purple": "Purple",
+  "web-pages.appearance.accent.rainbow": "Multicolor",
   "web-pages.appearance.accent.teal": "Teal",
   "web-pages.appearance.accent.title": "Accent color",
   "web-pages.appearance.archive.description": "Whether a finished chat suggests archiving it: faded in the sidebar. Only on this device; the archive button in the bar, its shortcut and the context menu stay either way.",

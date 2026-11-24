@@ -234,11 +234,11 @@ fn peek_screen_items(core : Core, address : String, screens : Json?, close : () 
   let can_open = flag(screens, "browser") && flag(screens, "control")
   let has_user = !user_tabs.is_empty() || can_open
   // (its browser one part, as a chat's 远程 menu has it: the pages an agent drives in it and the way to its own tabs,
-  // under 浏览器)
-  let groups = (if has_user || !agent_tabs.is_empty() { 1 } else { 0 }) +
-    (if !other_screens.is_empty() { 1 } else { 0 })
+  // under 浏览器. Headed only while an agent drives pages, which need it said what they are: else each part is one kind
+  // of row its icon tells, and a heading 屏幕 would only say again the row this menu came out of)
+  let headed = !agent_tabs.is_empty() && !other_screens.is_empty()
   if !other_screens.is_empty() {
-    if groups > 1 {
+    if headed {
       screen_items.push(Some(@sf.menu_item_of(tr("android-misc.screen.section"), heading=true, fn() { })))
     }
     for screen in other_screens {
@@ -254,7 +254,7 @@ fn peek_screen_items(core : Core, address : String, screens : Json?, close : () 
     if !screen_items.is_empty() {
       screen_items.push(None)
     }
-    if groups > 1 {
+    if headed {
       screen_items.push(Some(@sf.menu_item_of(tr("web-pages.screen.browser"), heading=true, fn() { })))
     }
     for screen in agent_tabs {

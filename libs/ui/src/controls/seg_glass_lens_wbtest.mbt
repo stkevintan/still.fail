@@ -49,6 +49,11 @@ fn seg_glass_assert_cycle(
     assert_eq(lenses[0][14], 0.0, msg="\{label}: clear lens must have blur == 0")
     assert_true((lenses[0][7] - -48.0).abs() < 0.01, msg="\{label}: segmented lens must emit droplet_role=3 (slot 7 == -48.0), got \{lenses[0][7]}")
     assert_true(lenses[0][21] > 0.0, msg="\{label}: clear lens must have refraction > 0")
+    let p_press = lenses[0][12]
+    assert_true(
+      (lenses[0][22] - 0.04 * p_press).abs() < 1.0e-4,
+      msg="\{label}: segmented lens must emit chroma == 0.04 * p (p=\{p_press}), got \{lenses[0][22]}",
+    )
   }
   let pressed_audits = t.audit()
   assert_eq(pressed_audits, [], msg="\{label}: pressed audit: \{Repr(pressed_audits)}")

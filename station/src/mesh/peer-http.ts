@@ -422,6 +422,21 @@ export type HereLocal = {
   device?: (peer: string, workspace: string, session: string, device: string, probe: boolean) => Promise<Duplex | null>;
 };
 
+/// `HereLocal.allowed` of a machine that is a rig in some workspace: in one `isRig` names (every one of a pure rig's,
+/// rig/main.ts), what the rig says (null lets the station through: a grant of a chat of it, or 免批准, rig/grants.ts),
+/// or before the rig has started, that it is starting; elsewhere nothing is refused. The rig's null is its answer, not
+/// its absence: never fold it into the starting refusal (`??`), which refused every granted station.
+export function rigAllowed(
+  side: { current: { stationRefusal(peer: string, workspace: string): string | null } | null },
+  isRig: (workspace: string) => boolean = () => true,
+): (peer: string, workspace: string) => string | null {
+  return (peer, workspace) => {
+    if (!isRig(workspace)) return null;
+    const rig = side.current;
+    return rig === null ? "the rig is starting" : rig.stationRefusal(peer, workspace);
+  };
+}
+
 /// Why a chat may not reach a device here (its HTTP status: 403 not let through, 404 no such device).
 export class DeviceRefused extends Error {
   readonly status: number;

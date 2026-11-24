@@ -11,7 +11,8 @@ import { Effect, Exit, Scope } from "effect";
 import { TestClock } from "effect/testing";
 import type { Pressure } from "../src/jobs/admit.ts";
 import { type NodeMemory, SelfMemoryGovernor, hardFrontOf, hardRssOf, softLimitOf } from "../src/ops/self-memory.ts";
-import { MbProcess, MbReader, mbReaderBinary } from "../src/read/mb-reader.ts";
+import { MbProcess, MbReader, STDIN_BEHIND, mbReaderBinary } from "../src/read/mb-reader.ts";
+import { type Line, hearLines } from "../src/ops/log.ts";
 import { sep } from "node:path";
 import { frontIn, programsIn } from "../src/resources/module.ts";
 import { Store, newMessage } from "../src/store/store.ts";
@@ -54,6 +55,28 @@ test("a program that stops reading its stdin is ended, not let grow the station'
   let serializedAfter = 0;
   p.postMessage({ toJSON() { serializedAfter++; return { after: true }; } });
   assert.equal(serializedAfter, 0, "messages dropped after exit are not serialized");
+});
+
+test("a program falling behind its stdin is said once, and its end says what it read meanwhile", { skip: unix ? false : "no /bin/sleep here" }, async () => {
+  const lines: Line[] = [];
+  hearLines((l) => void (l.at === "readers" && lines.push(l)));
+  try {
+    // (sleep never reads its stdin: what it read since it was found behind is only what the pipe itself took)
+    const p = new MbProcess("/bin/sleep", ["30"], { stdinMost: STDIN_BEHIND * 2 });
+    const end = ended(p);
+    p.postLine(JSON.stringify({ big: "x".repeat(STDIN_BEHIND + MiB) }));
+    p.postLine(JSON.stringify({ more: "y" }));
+    const behind = lines.filter((l) => l.message === "a MoonBit program is behind what it is asked");
+    assert.equal(behind.length, 1, "said once while it stays behind");
+    assert.ok(MbProcess.live().some((l) => l.pid === behind[0]!.fields.pid), "behind, not ended");
+    p.postLine(JSON.stringify({ big: "z".repeat(STDIN_BEHIND) }));
+    assert.equal(await end, 1, "ended past stdinMost");
+    const gone = lines.find((l) => l.message === "a MoonBit program stopped reading what it is asked; ending it")!;
+    assert.ok(typeof gone.fields.behindMs === "number" && gone.fields.behindMs >= 0);
+    assert.ok(typeof gone.fields.readBytes === "number" && gone.fields.readBytes < MiB, `read next to nothing: ${gone.fields.readBytes}`);
+  } finally {
+    hearLines(null);
+  }
 });
 
 test("trimming lets idle readers go and never a read under way", { skip: binary === null ? "the MoonBit program is not built here" : false }, async () => {

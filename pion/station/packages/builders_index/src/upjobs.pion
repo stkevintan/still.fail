@@ -1,0 +1,540 @@
+// Session up-jobs, workspace up-jobs, and job-name-first SQLite builders, 1:1 aligned with
+// `station/mb/src/upjobs/upjobs.mbt` and `station/mb/src/reader/main.mbt:887-896`.
+// All write transactions go exclusively through `db.tx_err(...)` (never raw transaction SQL).
+
+import "base_codec"
+import "builders_core"
+import "sql_db"
+
+let SESSION_UP_JOBS_VERSION : Int = 1
+
+let UP_CONDITION : String = "(j.state = 'running' OR (j.state = 'exited' AND j.port IS NOT NULL))"
+
+let SESSION_UP_FIRST : String = "SELECT CAST(rowid AS TEXT) AS position FROM jobs INDEXED BY jobs_by_session WHERE session_key = ? AND rowid <= CAST(? AS INTEGER) ORDER BY rowid LIMIT ?"
+
+let SESSION_UP_NEXT : String = "SELECT CAST(rowid AS TEXT) AS position FROM jobs INDEXED BY jobs_by_session WHERE session_key = ? AND rowid > CAST(? AS INTEGER) AND rowid <= CAST(? AS INTEGER) ORDER BY rowid LIMIT ?"
+
+fn is_num_one(v : Option[base_codec::Json]) -> Bool {
+  match v {
+    Some(base_codec::Json::Num(n, _)) => n == 1.0
+    _ => false
+  }
+}
+
+fn row_num_int(row : Map[String, base_codec::Json], key : String) -> Int {
+  match row.get(key) {
+    Some(base_codec::Json::Num(n, _)) => n.to_int()
+    _ => 0
+  }
+}
+
+fn session_up_jobs_ready(db : sql_db::Db, session : String) -> Result[Bool, builders_core::StepError] {
+  let meta_rows = match db.all("SELECT version, fresh FROM session_up_job_meta WHERE id = 1", []) {
+    Ok(r) => r
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ver_ok = meta_rows.length() > 0 &&
+  match meta_rows[0].get("version") {
+    Some(base_codec::Json::Num(v, _)) => v.to_int() == SESSION_UP_JOBS_VERSION
+    _ => false
+  }
+  if !ver_ok {
+    let had = if meta_rows.length() > 0 {
+      sql_db::stringify_json(sql_db::row_val(meta_rows[0], "version"))
+    } else {
+      "missing"
+    }
+    return Err(
+      builders_core::StepError::App(
+        "session up jobs index version " +
+        had +
+        " is incompatible with " +
+        SESSION_UP_JOBS_VERSION.to_string(),
+      ),
+    )
+  }
+  if is_num_one(meta_rows[0].get("fresh")) {
+    return Ok(true)
+  }
+  let sc_rows = match db.all(
+    "SELECT complete FROM session_up_job_scopes WHERE session = ?",
+    [base_codec::json_str(session)],
+  ) {
+    Ok(r) => r
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  Ok(sc_rows.length() > 0 && is_num_one(sc_rows[0].get("complete")))
+}
+
+/// One batch of at most `limit` of `session`'s old jobs; whether all of its are prepared then.
+pub fn session_up_jobs_step(
+  db : sql_db::Db,
+  session : String,
+  limit : Int = 256,
+) -> Result[Bool, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      match session_up_jobs_ready(tx_db, session) {
+        Ok(true) => return Ok(true)
+        Ok(false) => ()
+        Err(e) => return Err(e)
+      }
+      let s = base_codec::json_str(session)
+      let _ = match tx_db.run(
+        "INSERT INTO session_up_job_scopes (session, last_rowid, end_rowid, complete) SELECT ?, NULL, (SELECT rowid FROM jobs INDEXED BY jobs_by_session WHERE session_key = ? ORDER BY rowid DESC LIMIT 1), 0 WHERE NOT EXISTS (SELECT 1 FROM session_up_job_scopes WHERE session = ?)",
+        [s, s, s],
+      ) {
+        Ok(n) => n
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let scope_rows = match tx_db.all(
+        "SELECT CAST(last_rowid AS TEXT) AS last_rowid, CAST(end_rowid AS TEXT) AS end_rowid FROM session_up_job_scopes WHERE session = ?",
+        [s],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if scope_rows.length() == 0 {
+        return Err(builders_core::StepError::App("session up jobs scope is missing"))
+      }
+      let sc_row = scope_rows[0]
+      let last = sql_db::row_val(sc_row, "last_rowid")
+      let end = sql_db::row_val(sc_row, "end_rowid")
+      let lim = base_codec::json_int(limit)
+      let rows = match last {
+        base_codec::Json::Null => {
+          match tx_db.all(SESSION_UP_FIRST, [s, end, lim]) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        _ => {
+          match tx_db.all(SESSION_UP_NEXT, [s, last, end, lim]) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+      }
+      let put = "INSERT INTO session_up_job_rows (session, job_rowid) SELECT j.session_key, j.rowid FROM jobs j WHERE j.rowid = CAST(? AS INTEGER) AND " +
+      UP_CONDITION +
+      " AND NOT EXISTS (SELECT 1 FROM session_up_job_rows i WHERE i.session = j.session_key AND i.job_rowid = j.rowid)"
+      for i in 0..<rows.length() {
+        let _ = match tx_db.run(put, [sql_db::row_val(rows[i], "position")]) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let done = rows.length() < limit
+      let reached = if rows.length() > 0 {
+        sql_db::row_val(rows[rows.length() - 1], "position")
+      } else {
+        last
+      }
+      let _ = match tx_db.run(
+        "UPDATE session_up_job_scopes SET last_rowid = CAST(? AS INTEGER), complete = ? WHERE session = ?",
+        [reached, base_codec::json_int(if done { 1 } else { 0 }), s],
+      ) {
+        Ok(n) => n
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      Ok(done)
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+// ── Workspace up-jobs (station/src/store/workspace-up-jobs.ts) ──
+
+let WORKSPACE_UP_JOBS_VERSION : Int = 1
+
+let PORT_BATCHES_PER_GUARD : Int = 8
+
+fn workspace_fields_sql() -> String {
+  let odd = "(typeof(j.session_key) <> 'text' OR instr(CAST(j.session_key AS BLOB), x'00') > 0 OR j.session_key GLOB '*[^ -~]*' OR (s.ws IS NOT NULL AND (typeof(s.ws) <> 'text' OR instr(CAST(s.ws AS BLOB), x'00') > 0 OR s.ws GLOB '*[^ -~]*')))"
+  "CASE WHEN " + odd + " THEN 2 WHEN s.ws IS NULL THEN 1 ELSE 0 END, CASE WHEN " + odd + " OR s.ws IS NULL THEN '' ELSE s.ws END"
+}
+
+fn workspace_old_rowids(cursor : String, end : String, first : Bool) -> String {
+  let after = if first {
+    ""
+  } else {
+    " AND j.rowid>(SELECT " + cursor + " FROM workspace_up_meta WHERE id=1)"
+  }
+  "SELECT j.rowid,NULL FROM jobs j INDEXED BY jobs_state WHERE j.state=? AND j.rowid<=(SELECT " +
+  end +
+  " FROM workspace_up_meta WHERE id=1)" +
+  after +
+  " ORDER BY j.rowid LIMIT ?"
+}
+
+fn count_workspace_batch(db : sql_db::Db) -> Result[Int, builders_core::StepError] {
+  match db.all("SELECT COUNT(*) AS n FROM workspace_up_batch", []) {
+    Ok(rows) => {
+      if rows.length() > 0 {
+        Ok(row_num_int(rows[0], "n"))
+      } else {
+        Ok(0)
+      }
+    }
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+/// One batch of the old up jobs copied into the station-wide lookup (`workspaceUpJobsStep`); whether it is complete.
+pub fn workspace_up_jobs_step(
+  db : sql_db::Db,
+  limit : Int = 256,
+) -> Result[Bool, builders_core::StepError] {
+  if limit < 1 {
+    return Err(builders_core::StepError::App("workspace up job batch must be positive"))
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      let meta_rows = match tx_db.all("SELECT version, ready FROM workspace_up_meta WHERE id = 1", []) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let ver_ok = meta_rows.length() > 0 &&
+      match meta_rows[0].get("version") {
+        Some(base_codec::Json::Num(v, _)) => v.to_int() == WORKSPACE_UP_JOBS_VERSION
+        _ => false
+      }
+      if !ver_ok {
+        let had = if meta_rows.length() > 0 {
+          sql_db::stringify_json(sql_db::row_val(meta_rows[0], "version"))
+        } else {
+          "missing"
+        }
+        return Err(
+          builders_core::StepError::App(
+            "workspace up jobs index version " +
+            had +
+            " is incompatible with " +
+            WORKSPACE_UP_JOBS_VERSION.to_string(),
+          ),
+        )
+      }
+      if is_num_one(meta_rows[0].get("ready")) {
+        return Ok(true)
+      }
+      let cursor_rows = match tx_db.all(
+        "SELECT phase, port_batches, last_rowid IS NULL AS first, guard_last IS NULL AS guard_first FROM workspace_up_meta WHERE id=1",
+        [],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if cursor_rows.length() == 0 {
+        return Err(builders_core::StepError::App("workspace up jobs index has no cursor"))
+      }
+      let cursor = cursor_rows[0]
+      let phase = row_num_int(cursor, "phase")
+      let port_batches = row_num_int(cursor, "port_batches")
+      let is_first = row_num_int(cursor, "first") == 1
+      let is_guard_first = row_num_int(cursor, "guard_first") == 1
+      let guard_scan = phase == 1 && port_batches >= PORT_BATCHES_PER_GUARD
+      let lim = base_codec::json_int(limit)
+
+      match tx_db.exec("CREATE TEMP TABLE IF NOT EXISTS workspace_up_batch(job_rowid INTEGER PRIMARY KEY,port); DELETE FROM workspace_up_batch;") {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+
+      if phase == 0 {
+        let _ = match tx_db.run(
+          "INSERT INTO workspace_up_batch " + workspace_old_rowids("last_rowid", "running_end", is_first),
+          [base_codec::json_str("running"), lim],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else if guard_scan {
+        let _ = match tx_db.run(
+          "INSERT INTO workspace_up_batch " + workspace_old_rowids("guard_last", "guard_end", is_guard_first),
+          [base_codec::json_str("exited"), lim],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else if is_first {
+        let _ = match tx_db.run(
+          "INSERT INTO workspace_up_batch SELECT j.rowid,j.port FROM jobs j INDEXED BY jobs_up WHERE j.state='exited' AND j.port IS NOT NULL ORDER BY j.port,j.rowid LIMIT ?",
+          [lim],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        let _ = match tx_db.run(
+          "INSERT INTO workspace_up_batch SELECT j.rowid,j.port FROM jobs j INDEXED BY jobs_up WHERE j.state=? AND j.port=(SELECT last_port FROM workspace_up_meta WHERE id=1) AND j.rowid>(SELECT last_rowid FROM workspace_up_meta WHERE id=1) ORDER BY j.rowid LIMIT ?",
+          [base_codec::json_str("exited"), lim],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let same = match count_workspace_batch(tx_db) {
+          Ok(n) => n
+          Err(e) => return Err(e)
+        }
+        if same < limit {
+          let _ = match tx_db.run(
+            "INSERT INTO workspace_up_batch SELECT j.rowid,j.port FROM jobs j INDEXED BY jobs_up WHERE j.state=? AND j.port>(SELECT last_port FROM workspace_up_meta WHERE id=1) ORDER BY j.port,j.rowid LIMIT ?",
+            [base_codec::json_str("exited"), base_codec::json_int(limit - same)],
+          ) {
+            Ok(n) => n
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+      }
+
+      let count = match count_workspace_batch(tx_db) {
+        Ok(n) => n
+        Err(e) => return Err(e)
+      }
+      let copy_sql = "INSERT INTO session_up_job_rows(session,job_rowid) SELECT j.session_key,j.rowid FROM workspace_up_batch b CROSS JOIN jobs j ON j.rowid=b.job_rowid WHERE " +
+      UP_CONDITION +
+      " AND NOT EXISTS (SELECT 1 FROM session_up_job_rows u WHERE u.session=j.session_key AND u.job_rowid=j.rowid); INSERT INTO workspace_up_sessions(session,scope,ws) SELECT DISTINCT j.session_key, " +
+      workspace_fields_sql() +
+      " FROM workspace_up_batch b CROSS JOIN jobs j ON j.rowid=b.job_rowid LEFT JOIN sessions s ON s.key=j.session_key WHERE " +
+      UP_CONDITION +
+      " ON CONFLICT(session) DO UPDATE SET scope=excluded.scope, ws=excluded.ws WHERE scope IS NOT excluded.scope OR ws IS NOT excluded.ws;"
+      match tx_db.exec(copy_sql) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+
+      let done = phase == 1 && count < limit
+      if count < limit {
+        let _ = match tx_db.run(
+          "UPDATE workspace_up_meta SET phase=?,last_port=NULL,last_rowid=NULL,ready=? WHERE id=1",
+          [base_codec::json_int(phase + 1), base_codec::json_int(if done { 1 } else { 0 })],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else if phase == 0 {
+        match tx_db.exec("UPDATE workspace_up_meta SET last_rowid=(SELECT MAX(job_rowid) FROM workspace_up_batch) WHERE id=1") {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else if guard_scan {
+        match tx_db.exec("UPDATE workspace_up_meta SET port_batches=0, guard_last=(SELECT MAX(job_rowid) FROM workspace_up_batch) WHERE id=1") {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx_db.exec("UPDATE workspace_up_meta SET port_batches=port_batches+1, last_port=(SELECT port FROM workspace_up_batch ORDER BY port DESC,job_rowid DESC LIMIT 1), last_rowid=(SELECT job_rowid FROM workspace_up_batch ORDER BY port DESC,job_rowid DESC LIMIT 1) WHERE id=1") {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      if done {
+        match tx_db.exec("DROP TRIGGER workspace_up_copy_moved") {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(done)
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+// ── Job-name-first (station/src/store/job-name-first.ts) ──
+
+let JOB_NAME_FIRST_VERSION : Int = 1
+
+let BATCH_BEST : String = "(SELECT rowid FROM thread_sessions WHERE rowid IN (SELECT member FROM job_name_first_batch) ORDER BY joined_at,rowid LIMIT 1)"
+
+/// Saturating Double -> Int64 conversion matching MoonBit `Double::to_int64()`:
+/// NaN -> 0, >= 2^63 -> INT64_MAX, <= -2^63 -> INT64_MIN.
+pub fn double_to_i64_sat(d : Double) -> Int64 {
+  if d != d {
+    return 0.to_int64()
+  }
+  let max64 = (0x7FFFFFFF.to_int64() << 32.to_int64()) | (0xFFFF.to_int64() << 16.to_int64()) | 0xFFFF.to_int64()
+  let min64 = -max64 - 1.to_int64()
+  if d >= 9223372036854775808.0 {
+    return max64
+  }
+  if d <= -9223372036854775808.0 {
+    return min64
+  }
+  d.to_int64()
+}
+
+/// One batch of `thread`'s members for `owner`'s job's name (`jobNameFirstStep`); whether it is prepared then.
+pub fn job_name_first_step(
+  db : sql_db::Db,
+  owner : String,
+  thread : Int64,
+  limit : Int = 64,
+) -> Result[Bool, builders_core::StepError] {
+  if limit < 1 || limit > 128 {
+    return Err(builders_core::StepError::App("invalid job name first batch"))
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      let meta_rows = match tx_db.all("SELECT version FROM job_name_first_meta WHERE id=1", []) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let ver_ok = meta_rows.length() > 0 &&
+      match meta_rows[0].get("version") {
+        Some(base_codec::Json::Num(v, _)) => v.to_int() == JOB_NAME_FIRST_VERSION
+        _ => false
+      }
+      if !ver_ok {
+        let had = if meta_rows.length() > 0 {
+          sql_db::stringify_json(sql_db::row_val(meta_rows[0], "version"))
+        } else {
+          "missing"
+        }
+        return Err(
+          builders_core::StepError::App(
+            "job name first index version " +
+            had +
+            " is incompatible with " +
+            JOB_NAME_FIRST_VERSION.to_string(),
+          ),
+        )
+      }
+      let o = base_codec::json_str(owner)
+      let t = base_codec::json_num(thread.to_double())
+      let _ = match tx_db.run(
+        "INSERT OR IGNORE INTO job_name_first(owner,thread,through_session) SELECT ?1,?2,(SELECT session FROM thread_sessions WHERE thread=?2 ORDER BY session DESC LIMIT 1) WHERE EXISTS (SELECT 1 FROM session_up_job_rows WHERE session=?1 LIMIT 1)",
+        [o, t],
+      ) {
+        Ok(n) => n
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let current = match tx_db.all("SELECT thread=?2 AS same, ready FROM job_name_first WHERE owner=?1", [o, t]) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let should_work = current.length() > 0 &&
+      is_num_one(current[0].get("same")) &&
+      !is_num_one(current[0].get("ready"))
+      if !should_work {
+        return Ok(true)
+      }
+      let _ = match tx_db.run(
+        "UPDATE job_name_first SET restart=0,ready=0,best=NULL,after_session=NULL, through_session=(SELECT session FROM thread_sessions WHERE thread=?2 ORDER BY session DESC LIMIT 1) WHERE owner=?1 AND thread=?2 AND restart=1",
+        [o, t],
+      ) {
+        Ok(n) => n
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let first_rows = match tx_db.all("SELECT after_session IS NULL AS first FROM job_name_first WHERE owner=?", [o]) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let is_first = if first_rows.length() > 0 {
+        is_num_one(first_rows[0].get("first"))
+      } else {
+        true
+      }
+      let after = if is_first {
+        ""
+      } else {
+        " AND session > (SELECT after_session FROM job_name_first WHERE owner=?2)"
+      }
+      match tx_db.exec("CREATE TEMP TABLE IF NOT EXISTS job_name_first_batch(member INTEGER PRIMARY KEY); DELETE FROM job_name_first_batch;") {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let count = match tx_db.run(
+        "INSERT INTO job_name_first_batch SELECT rowid FROM thread_sessions WHERE thread=?1 AND session <= (SELECT through_session FROM job_name_first WHERE owner=?2)" +
+        after +
+        " ORDER BY session LIMIT ?3",
+        [t, o, base_codec::json_int(limit)],
+      ) {
+        Ok(n) => n
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if count > 0 {
+        let _ = match tx_db.run(
+          "UPDATE job_name_first SET best=" +
+          BATCH_BEST +
+          " WHERE owner=?1 AND best IS NOT " +
+          BATCH_BEST +
+          " AND (best IS NULL OR (SELECT rowid FROM thread_sessions WHERE rowid IN (best," +
+          BATCH_BEST +
+          ") ORDER BY joined_at,rowid LIMIT 1)=" +
+          BATCH_BEST +
+          ")",
+          [o],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let _ = match tx_db.run(
+          "UPDATE job_name_first SET after_session=(SELECT session FROM thread_sessions WHERE rowid IN (SELECT member FROM job_name_first_batch) ORDER BY session DESC LIMIT 1) WHERE owner=?1",
+          [o],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let done = count < limit
+      if done {
+        let _ = match tx_db.run("UPDATE job_name_first SET ready=1 WHERE owner=?", [o]) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(done)
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+/// Request dispatcher for `--builder session-up-jobs` (matches `main.mbt:889-894`).
+pub fn session_up_jobs_dispatch(
+  db : sql_db::Db,
+  ask : base_codec::Json,
+) -> Result[Option[Bool], builders_core::StepError] {
+  match builders_core::json_get_last(ask, "session") {
+    Some(base_codec::Json::Str(session)) => {
+      match builders_core::json_get_last(ask, "first") {
+        Some(base_codec::Json::Num(thread, _)) => {
+          match job_name_first_step(db, session, double_to_i64_sat(thread), limit=64) {
+            Ok(done) => Ok(Some(done))
+            Err(e) => Err(e)
+          }
+        }
+        _ => {
+          match session_up_jobs_step(db, session, limit=256) {
+            Ok(done) => Ok(Some(done))
+            Err(e) => Err(e)
+          }
+        }
+      }
+    }
+    _ => Ok(None)
+  }
+}
+
+/// Request dispatcher for `--builder workspace-up-jobs` (matches `main.mbt:895-896`).
+pub fn workspace_up_jobs_dispatch(
+  db : sql_db::Db,
+  ask : base_codec::Json,
+) -> Result[Option[Bool], builders_core::StepError] {
+  match builders_core::json_get_last(ask, "scope") {
+    Some(base_codec::Json::Str("all")) => {
+      match workspace_up_jobs_step(db, limit=256) {
+        Ok(done) => Ok(Some(done))
+        Err(e) => Err(e)
+      }
+    }
+    _ => Ok(None)
+  }
+}
+
+pub fn run_session_up_jobs(db_path : String) -> Int {
+  builders_core::builder_loop(db_path, "session up jobs", session_up_jobs_dispatch)
+}
+
+pub fn run_workspace_up_jobs(db_path : String) -> Int {
+  builders_core::builder_loop(db_path, "workspace up jobs", workspace_up_jobs_dispatch)
+}

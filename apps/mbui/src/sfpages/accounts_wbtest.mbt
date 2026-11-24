@@ -344,7 +344,8 @@ test "sharing an account with three stations starts all off, supports partial pi
   for case in page_cases {
     let (w, platform) = case
     let asked : Array[Json] = []
-    let t = setting_tester(Profile("ws1/st1", "cc"), w, platform~, over=fn(base) {
+    // (tall enough that the dialog's rows, the whitelist's among them, need no scrolling)
+    let t = setting_tester(Profile("ws1/st1", "cc"), w, platform~, h=2400.0, over=fn(base) {
       let s = with_share_stations(unshared_claude(base), three)
       { ..s, call: fn(name, params, done) {
         if name == "profile.share" {
@@ -1526,4 +1527,267 @@ test "a key's profile with no allowance shown, wide: the connect using it sits i
   let off = y - (c.1 + c.3 / 2.0)
   assert_true(off.abs() < 0.5, msg="its name \{off} off its card's middle: \{Repr(c)}, at \{y}")
   assert_eq(t.audit(), [])
+}
+
+///|
+/// The fixture with each of its overviews' sharing said by a station from before `shareAllowAuto` (`auto_ok` false), or
+/// its Claude subscription's share following the workspace's whitelist (`follows`).
+fn with_share_auto(s : Source, auto_ok? : Bool = true, follows? : Bool = false) -> Source {
+  fn shaped(v : Json, auto_ok : Bool, follows : Bool) -> Json {
+    match v {
+      Object(o) => {
+        let p = o.copy()
+        for k, x in o {
+          p[k] = shaped(x, auto_ok, follows)
+        }
+        if !auto_ok {
+          p.remove("shareAllowAuto")
+        }
+        if follows && o.get("id") == Some(Json::string("cc")) && o.get("share") is Some(Object(sh)) {
+          let share = sh.copy()
+          share["allowAuto"] = Json::boolean(true)
+          share["allow"] = Json::array([Json::string("st1"), Json::string("st2")])
+          p["share"] = Json::object(share)
+        }
+        Json::object(p)
+      }
+      Array(a) => Json::array(a.map(fn(x) { shaped(x, auto_ok, follows) }))
+      _ => v
+    }
+  }
+  {
+    ..s,
+    topic_read: fn(name, params) {
+      let v = s.topic(name, params).get().snapshot()
+      match v.value {
+        Some(x) => { ..v, value: Some(shaped(x, auto_ok, follows)) }
+        None => v
+      }
+    },
+  }
+}
+
+///|
+/// Three stations of the workspace, Maple alone on its whitelist (it takes automatically assigned chats).
+let whitelisted_three : Array[Json] = [
+  { "id": "st1", "name": "Willow", "online": true, "acceptAutoChats": false },
+  { "id": "st2", "name": "Maple", "online": true, "acceptAutoChats": true },
+  { "id": "st3", "name": "Birch", "online": true, "acceptAutoChats": false },
+]
+
+///|
+test "可用的 station follows the workspace's whitelist: the rows show those on it, one ticked by hand chooses by hand" {
+  for case in page_cases {
+    let (w, platform) = case
+    let asked : Array[Json] = []
+    let t = setting_tester(Profile("ws1/st1", "cc"), w, platform~, h=2400.0, over=fn(base) {
+      let s = with_share_stations(with_share_auto(base), whitelisted_three)
+      { ..s, call: fn(name, params, done) {
+        if name == "profile.share" {
+          asked.push(params)
+          done(Ok(obj([])))
+        } else {
+          (s.call)(name, params, done)
+        }
+      } }
+    })
+    let at = "\{w} platform \{platform}"
+    scrolled_to(t, w, "可用的 station")
+    t.tap_text("可用的 station")
+    presented_in(t)
+    assert_eq(t.get(Switch, label="全部 station").check, Some(On), msg=at)
+    assert_eq(t.get(Switch, label="跟随工作区白名单").check, Some(Off), msg=at)
+    assert_false(t.get(Switch, label="跟随工作区白名单").disabled, msg=at)
+    assert_true(t.find("白名单内现有 1 台 station，随白名单同步") is Some(_), msg=at)
+    // On: every station off, the rows those on the whitelist (and this one, always)
+    t.click(Switch, label="跟随工作区白名单")
+    t.run_for(@ui.move_most_ms)
+    assert_eq(t.get(Switch, label="跟随工作区白名单").check, Some(On), msg=at)
+    assert_eq(t.get(Switch, label="全部 station").check, Some(Off), msg=at)
+    assert_eq(t.get(Switch, label="Willow").check, Some(On), msg=at)
+    assert_eq(t.get(Switch, label="Maple").check, Some(On), msg=at)
+    assert_eq(t.get(Switch, label="Birch").check, Some(Off), msg=at)
+    assert_eq(t.audit(), [], msg="\{at}: " + t.audit().join("; "))
+    t.click(Button, label="完成")
+    t.run_for(@motion.presence_out_ms)
+    assert_eq(asked.length(), 1, msg=at)
+    assert_eq(field(Some(asked[0]), "allowAuto"), Some(Json::boolean(true)), msg=at)
+    assert_eq(field(Some(asked[0]), "allow"), None, msg="\{at}: a rule, no list")
+    assert_eq(field(Some(asked[0]), "among"), None, msg=at)
+    // Following it, then Maple ticked off by hand: chosen by hand, the rest as it was
+    t.tap_text("可用的 station")
+    presented_in(t)
+    t.click(Switch, label="跟随工作区白名单")
+    t.frame()
+    t.click(Switch, label="Maple")
+    t.run_for(@ui.move_most_ms)
+    assert_eq(t.get(Switch, label="跟随工作区白名单").check, Some(Off), msg=at)
+    assert_eq(t.get(Switch, label="Maple").check, Some(Off), msg=at)
+    t.click(Button, label="完成")
+    t.run_for(@motion.presence_out_ms)
+    assert_eq(asked.length(), 2, msg=at)
+    assert_eq(field(Some(asked[1]), "allowAuto"), None, msg=at)
+    assert_eq(field(Some(asked[1]), "allow"), Some(Json::array([Json::string("st1")])), msg=at)
+  }
+}
+
+///|
+test "a share following the whitelist says so on its page and opens following it; a station from before offers it not, saying why" {
+  for case in page_cases {
+    let (w, platform) = case
+    let at = "\{w} platform \{platform}"
+    let t = setting_tester(Profile("ws1/st1", "cc"), w, platform~, h=2400.0, over=fn(base) {
+      with_share_stations(with_share_auto(base, follows=true), whitelisted_three)
+    })
+    scrolled_to(t, w, "可用的 station")
+    assert_true(t.find("跟随工作区白名单") is Some(_), msg="\{at}: its row's value")
+    t.tap_text("可用的 station")
+    presented_in(t)
+    assert_eq(t.get(Switch, label="跟随工作区白名单").check, Some(On), msg=at)
+    assert_eq(t.get(Switch, label="Maple").check, Some(On), msg=at)
+    assert_eq(t.get(Switch, label="Birch").check, Some(Off), msg=at)
+    assert_eq(t.audit(), [], msg="\{at}: " + t.audit().join("; "))
+    let old = setting_tester(Profile("ws1/st1", "cc"), w, platform~, h=2400.0, over=fn(base) {
+      with_share_stations(with_share_auto(base, auto_ok=false), whitelisted_three)
+    })
+    scrolled_to(old, w, "可用的 station")
+    old.tap_text("可用的 station")
+    presented_in(old)
+    assert_true(old.get(Switch, label="跟随工作区白名单").disabled, msg=at)
+    assert_true(old.find("该 station 版本较旧，更新后可用") is Some(_), msg=at)
+  }
+}
+
+///|
+test "多选 shares several accounts and sets their stations at once, and stops sharing those shared, once asked" {
+  for case in page_cases {
+    let (w, platform) = case
+    let at = "\{w} platform \{platform}"
+    let asked : Array[Json] = []
+    let t = setting_tester(Profiles(""), w, platform~, h=1400.0, over=fn(base) {
+      let s = with_titled(with_share_auto(base), "cc", "lin@claude.example")
+      { ..s, call: fn(name, params, done) {
+        if name == "profile.share" {
+          asked.push(params)
+          done(Ok(obj([])))
+        } else {
+          (s.call)(name, params, done)
+        }
+      } }
+    })
+    t.click(Button, label="多选")
+    t.run_for(@ui.move_most_ms)
+    assert_true(t.find("已选 0 项") is Some(_), msg=at)
+    // (each row named as it was out of 多选: its profile's name, not the account's title)
+    assert_true(t.find("Claude 主账号") is Some(_) && t.find("lin@claude.example") is None, msg="\{at}: a row keeps its name")
+    assert_true(t.get(Button, label="分享与 station").disabled, msg="\{at}: nothing picked")
+    assert_true(t.get(Button, label="停止分享").disabled, msg=at)
+    // a key and the shared subscription: 分享与 station
+    t.tap_text("Claude 主账号")
+    t.tap_text("备用 key")
+    t.run_for(@ui.move_most_ms)
+    assert_true(t.find("已选 2 项") is Some(_), msg=at)
+    assert_false(t.get(Button, label="分享与 station").disabled, msg=at)
+    assert_false(t.get(Button, label="停止分享").disabled, msg=at)
+    assert_eq(t.audit(), [], msg="\{at}: " + t.audit().join("; "))
+    t.click(Button, label="分享与 station")
+    presented_in(t)
+    assert_true(t.find("将应用于 2 个 Profile") is Some(_), msg=at)
+    assert_true(t.find("将为未分享的账号开启分享，并统一设置可用 station") is Some(_), msg=at)
+    t.click(Switch, label="跟随工作区白名单")
+    t.run_for(@ui.move_most_ms)
+    assert_eq(t.audit(), [], msg="\{at}: " + t.audit().join("; "))
+    t.click(Button, label="完成")
+    t.run_for(@motion.presence_out_ms)
+    assert_eq(asked.length(), 2, msg=at)
+    for a in asked {
+      assert_eq(text(Some(a), "station"), "ws1/st1", msg=at)
+      assert_eq(field(Some(a), "allowAuto"), Some(Json::boolean(true)), msg=at)
+    }
+    assert_true(t.find("已更新 2 个 Profile") is Some(_) || t.query(Button, label="多选") is Some(_), msg="\{at}: done, 多选 over")
+    // stopping: only those shared asked, after a confirmation
+    t.click(Button, label="多选")
+    t.run_for(@ui.move_most_ms)
+    t.tap_text("Claude 主账号")
+    t.tap_text("备用 key")
+    t.frame()
+    t.click(Button, label="停止分享")
+    presented_in(t)
+    assert_eq(asked.length(), 2, msg="\{at}: asked first")
+    assert_true(t.find("停止分享 1 个账号？") is Some(_), msg="\{at}: the key not shared is left as it is")
+    // (the confirmation's own 停止分享: the last of them, over the bar's)
+    let stops = t.all(Button, label="停止分享")
+    let (x, y, bw, bh) = stops[stops.length() - 1].rect
+    t.tap(x + bw / 2.0, y + bh / 2.0)
+    t.run_for(@motion.presence_out_ms)
+    assert_eq(asked.length(), 3, msg=at)
+    assert_eq(field(Some(asked[2]), "on"), Some(Json::boolean(false)), msg=at)
+    assert_eq(text(Some(asked[2]), "id"), "cc", msg=at)
+  }
+}
+
+///|
+/// The fixture's `profiles` rows with the account of profile `id` titled `title` (an account's email, not its profile's
+/// name), and that row made one 多选 cannot take on the workspace's list (signed in on several stations), as the core
+/// says it of one: `several`.
+fn with_titled(s : Source, id : String, title : String, several? : Bool = false) -> Source {
+  fn shaped(v : Json, id : String, title : String, several : Bool) -> Json {
+    match v {
+      Object(o) => {
+        let p = o.copy()
+        for k, x in o {
+          p[k] = shaped(x, id, title, several)
+        }
+        if o.contains("canBatchShare") && text(field(Some(v), "profile"), "id") == id {
+          p["title"] = Json::string(title)
+          if several {
+            p["canBatchShare"] = Json::boolean(false)
+            p["batchShareWhy"] = Json::string("several")
+          }
+        }
+        Json::object(p)
+      }
+      Array(a) => Json::array(a.map(fn(x) { shaped(x, id, title, several) }))
+      _ => v
+    }
+  }
+  {
+    ..s,
+    topic_read: fn(name, params) {
+      let v = s.topic(name, params).get().snapshot()
+      match v.value {
+        Some(x) if name == "profiles" => { ..v, value: Some(shaped(x, id, title, several)) }
+        _ => v
+      }
+    },
+  }
+}
+
+///|
+test "多选 is over as 概览 is shown, and a station's own page takes its account though the workspace's list cannot (signed in on several)" {
+  for case in page_cases {
+    let (w, platform) = case
+    let at = "\{w} platform \{platform}"
+    let t = setting_tester(Profiles(""), w, platform~, h=1400.0, over=fn(base) { with_share_auto(base) })
+    t.click(Button, label="多选")
+    t.run_for(@ui.move_most_ms)
+    assert_true(t.find("已选 0 项") is Some(_), msg=at)
+    // (概览 shown, as its tab says it once its pools are read: the page's own signal, then back to 账号)
+    @settings.profiles_narrow_overview.set(true)
+    t.run_for(@ui.move_most_ms)
+    @settings.profiles_narrow_overview.set(false)
+    t.run_for(@ui.move_most_ms)
+    assert_true(t.find("已选 0 项") is None, msg="\{at}: 多选 over with 概览")
+    // a station's own page: its own profile, whatever the workspace's list says of the account
+    let one = setting_tester(Profiles("ws1/st1"), w, platform~, h=1400.0, over=fn(base) {
+      with_titled(with_share_auto(base), "cc", "Claude 主账号", several=true)
+    })
+    one.click(Button, label="多选")
+    one.run_for(@ui.move_most_ms)
+    one.tap_text("Claude 主账号")
+    one.run_for(@ui.move_most_ms)
+    assert_true(one.find("已选 1 项") is Some(_), msg="\{at}: this station's own, taken here")
+    assert_true(one.find("多台 station 独立登录，请点进分别设置") is None, msg=at)
+    assert_eq(one.audit(), [], msg="\{at}: " + one.audit().join("; "))
+  }
 }

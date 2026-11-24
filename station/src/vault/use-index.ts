@@ -7,7 +7,8 @@ import { releaseStoppedBackfill } from "../store/backfill.ts";
 import { backfillPendingPreparation, pendingPreparationComplete } from "./pending-index.ts";
 import { initializeReboxIndex } from "./rebox-index.ts";
 import { installSchema } from "./schema-install.ts";
-import { readerBinary } from "../read/mb-reader.ts";
+import { resolveReaderSelection } from "../read/mb-reader.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import { MbUseReader } from "./use-reader-mb.ts";
 
 // JSON paths use the first duplicate key and truncate keys at NUL; JavaScript does neither. A lone UTF-16
@@ -323,6 +324,8 @@ export class UseIndex {
   readonly #path: string | null;
   readonly #previousGone: Promise<void> | null;
   readonly #priority: SharedArrayBuffer | undefined;
+  readonly #binary: string | undefined;
+  readonly #readers: (() => ReaderSelectConfig) | undefined;
   #worker: MbUseReader | null = null;
   #closed = false;
   #stopped!: () => void;
@@ -331,11 +334,13 @@ export class UseIndex {
   #waiting = new Map<number, { resolve: (answer: UseAnswer) => void; reject: (error: Error) => void }>();
 
   /// `options.after`: the timer of IDLE_MS (a test's own; else the wall's).
-  constructor(db: DatabaseSync, options: { previousGone?: Promise<void>; priority?: SharedArrayBuffer; after?: (ms: number, f: () => void) => () => void } = {}) {
+  constructor(db: DatabaseSync, options: { previousGone?: Promise<void>; priority?: SharedArrayBuffer; binary?: string; readers?: () => ReaderSelectConfig; after?: (ms: number, f: () => void) => () => void } = {}) {
     this.#db = db;
     this.#after = options.after ?? wall.after;
     this.#previousGone = options.previousGone ?? null;
     this.#priority = options.priority;
+    this.#binary = options.binary;
+    this.#readers = options.readers;
     initializeUseIndex(db);
     initializeReboxIndex(db);
     this.#path = db.location();
@@ -350,7 +355,8 @@ export class UseIndex {
   #start(): MbUseReader {
     if (this.#worker !== null) return this.#worker;
     // (by the MoonBit program, station/mb's src/vaultuses)
-    const worker = new MbUseReader(readerBinary(), this.#path!, this.#priority, this.#known);
+    const bin = resolveReaderSelection("vault-uses", { binary: this.#binary, config: this.#readers, logAt: "readers" }).primaryBinary;
+    const worker = new MbUseReader(bin, this.#path!, this.#priority, this.#known);
     const owner = worker.threadId;
     worker.once("exit", () => releaseStoppedBackfill(this.#priority, owner));
     this.#worker = worker;

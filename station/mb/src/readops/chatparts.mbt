@@ -105,6 +105,52 @@ fn said_of(db : @sql.Db, legacy : Bool, thread : Json) -> Json raise {
   { "n": field(r, "n"), "authorKind": field(r, "author_kind"), "author": field(r, "author"), "other": other }
 }
 
+///|
+/// Batched `said_of` for non-legacy stores: one query fetches each thread's latest message, `thread_state` and
+/// `said_state_guard`; only threads whose person boundary is unknown fall back to per-thread `said_scan_sql`.
+fn said_of_batch(db : @sql.Db, threads : Array[Json]) -> (Map[String, Json], Array[Json]) raise {
+  let out : Map[String, Json] = Map([])
+  let need : Array[Json] = []
+  if threads.length() == 0 {
+    return (out, need)
+  }
+  for r in db.all(said_batch_sql, [ids_json(threads)]) {
+    if field(r, "n") is Null {
+      continue
+    }
+    let thread = field(r, "thread")
+    let person = field(r, "author_kind") == Json::string("person")
+    let (bknown, bother) = if !person {
+      (true, field(r, "n"))
+    } else if field(r, "said_n") == field(r, "n") && field(r, "said_other_known") == Json::number(1.0) {
+      (true, field(r, "said_other_n"))
+    } else if field(r, "guard_ready") == Json::number(1.0) && field(r, "guard_author") == field(r, "author") {
+      (true, field(r, "guard_other_n"))
+    } else {
+      (false, Json::null())
+    }
+    let mut other = bother
+    if !bknown {
+      let nearby = db.all(said_scan_sql, [thread, field(r, "n"), Json::number(64.0)])
+      match nearby.search_by(p => field(p, "author_kind") != Json::string("person") || field(p, "author") != field(r, "author")) {
+        Some(i) => other = field(nearby[i], "n")
+        None =>
+          if nearby.length() == 64 {
+            need.push(thread)
+            continue
+          }
+      }
+    }
+    out[thread.stringify()] = {
+      "n": field(r, "n"),
+      "authorKind": field(r, "author_kind"),
+      "author": field(r, "author"),
+      "other": other,
+    }
+  }
+  (out, need)
+}
+
 // ── sessions' turns and watches ──
 
 ///|

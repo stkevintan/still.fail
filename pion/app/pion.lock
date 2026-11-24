@@ -11,8 +11,8 @@ subdir = "packages/base64"
 [[package]]
 name = "crypto"
 git = "https://github.com/AFK-surf/pion-packages.git"
-ref = "tag:crypto-v0.2.0"
-rev = "b14e5abe6451c18c887e6b65574b327e88655ebb"
+ref = "tag:crypto-v0.4.1"
+rev = "2ecdcb749583446735af60504930bf1f63649f70"
 subdir = "packages/crypto"
 
 [[package]]
@@ -44,10 +44,45 @@ rev = "45bc3e471b522dce1e8461a3b5e6e6a1f97ca6b0"
 subdir = "packages/json5"
 
 [[package]]
+name = "markdown"
+git = "https://github.com/AFK-surf/pion-packages.git"
+ref = "tag:markdown-v0.3.0"
+rev = "d6aae63cdf1ee91d45f5317c37218eab21bd0076"
+subdir = "packages/markdown"
+
+[[package]]
+name = "mbt_compat"
+git = "https://github.com/AFK-surf/pion.git"
+ref = "rev:6d22ff1f90bd19012a5997f7fdfdc56ee3012408"
+rev = "6d22ff1f90bd19012a5997f7fdfdc56ee3012408"
+subdir = "tools/mbt_compat"
+
+[[package]]
+name = "paint"
+git = "https://github.com/AFK-surf/invar.git"
+ref = "rev:339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
+rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
+subdir = "packages/paint"
+
+[[package]]
+name = "pixels"
+git = "https://github.com/AFK-surf/invar.git"
+ref = "rev:339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
+rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
+subdir = "packages/pixels"
+
+[[package]]
+name = "regex"
+git = "https://github.com/AFK-surf/pion-packages.git"
+ref = "tag:regex-v0.1.0"
+rev = "4ce48156c89247768863a28d5d64f2df2feabee0"
+subdir = "packages/regex"
+
+[[package]]
 name = "signals"
 git = "https://github.com/AFK-surf/invar.git"
-ref = "rev:ae44931399a65d6ce68c59544216e359cc29b8db"
-rev = "ae44931399a65d6ce68c59544216e359cc29b8db"
+ref = "rev:339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
+rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
 subdir = "packages/signals"
 
 [[package]]
@@ -60,8 +95,8 @@ subdir = "packages/time"
 [[package]]
 name = "ui"
 git = "https://github.com/AFK-surf/invar.git"
-ref = "rev:ae44931399a65d6ce68c59544216e359cc29b8db"
-rev = "ae44931399a65d6ce68c59544216e359cc29b8db"
+ref = "rev:339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
+rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
 subdir = "packages/ui"
 
 [[package]]
@@ -74,6 +109,13 @@ subdir = "packages/url"
 [[package]]
 name = "view"
 git = "https://github.com/AFK-surf/invar.git"
-ref = "rev:ae44931399a65d6ce68c59544216e359cc29b8db"
-rev = "ae44931399a65d6ce68c59544216e359cc29b8db"
+ref = "rev:339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
+rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
 subdir = "packages/view"
+
+[[package]]
+name = "zip"
+git = "https://github.com/AFK-surf/invar.git"
+ref = "rev:339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
+rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
+subdir = "packages/zip"

@@ -90,6 +90,7 @@ fn sheet_nodes_panel(title : String, tall : Double, body : (@view.View, () -> Un
     along: Start,
     offset: panel_offset,
     match_panel: 0,
+    scrolls_under: false,
     on_back: None,
     nodes: {
       body,

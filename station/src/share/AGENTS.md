@@ -19,3 +19,8 @@
 - Cap kept deletions per owner using `goneKept` (`client/core-ts/src/preset-records.ts`, grouping ownerless deletions together). `Presets.carry` ignores PUTs whose deletions would drop immediately so deletions do not loop. Include ownerless deletions in every `GET /presets/kept` so the creator's device claims them.
 - Agents see all presets on the station (`chat_create`). People see their own by default and others on demand (`GET /presets/others`). That is a UI filter, not a permission boundary.
 - A person's drafts of the board's 待派发 are carried the same way (`station/src/sessions/board-drafts.ts`, the rule `client/core-ts/src/board-drafts.ts`; `GET` and `PUT /board/drafts`), their files kept only by the station each draft is to run on and given to that person's devices alone (`GET /board/files`).
+
+## Profiles following the workspace's whitelist
+
+- A shared profile with `allowAuto` reaches its host and every station that says it takes automatically assigned chats (`acceptAutoChats`, not task-only). Stations push that as it changes (`share.autoChats`, sent on config and cloud changes); a host asks one it has not heard from this run with `describe`, never on a timer. A station never heard from is left out (no credentials go out on a guess); one that does not answer keeps what it said last and is refused for now, never with `NOT_FOR_IT`, so its copy is not dropped.
+- What goes out (`share.changed`, `share.get`, the overview's `allow`) is always the station list it makes now, so older stations and apps read a plain list; `allow` in config then holds only stations a move lent it to besides (`lendTo`).

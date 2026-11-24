@@ -16,6 +16,7 @@
 pub fn accent_pick_node(
   parent : @view.View,
   names : () -> Array[String],
+  rainbow : () -> String,
   custom : () -> String,
   hue : () -> String,
   chosen : () -> String,
@@ -60,13 +61,13 @@ pub fn accent_pick_node(
       .gap(Is(8.0))
       .lines_up(Is(Some(Middle)))
       |> ignore
-      let a_dot = fn(key : () -> String, ink : () -> Int64?, name : () -> String) {
+      let a_dot = fn(key : () -> String, ink : () -> Int64?, name : () -> String, wheel : Bool) {
         rg.item(row, key, name, fn(d, item) {
           let on = fn() { item.chosen() }
           let side = dot_side(theme())
           let mark = side * accent_check_part
           let ring = fn() {
-            if ink() is None {
+            if !wheel && ink() is None {
               alpha(theme().p.text, accent_open_line)
             } else if lit_node(d) && !on() {
               alpha(theme().p.text, accent_lit_line)
@@ -81,9 +82,25 @@ pub fn accent_pick_node(
           .radius(Is(1.0e6))
           .lines_up(Is(Some(Middle)))
           .lies_along(Is(Middle))
-          .ground(By(fn() { ink().unwrap_or(accent_no_ring) }))
-          .edge(By(fn() { (2.0, ring()) }))
           |> ignore
+          if wheel {
+            // Backing ground matches the wheel's OKLCH lightness (for contrast audit under the white check) while the
+            // clipped conic rainbow image covers the whole disc with no extra census colour.
+            d
+            .clips(Is(true))
+            .ground(By(fn() { ink_of(accents[0]) }))
+            .image(By(fn() { Some((rainbow_dot(theme().dark), "", hue_strip_most)) }))
+            |> ignore
+            d.box(fn(o) {
+              o.over(Is(true)).radius(Is(1.0e6)).edge(By(fn() { (2.0, ring()) })) |> ignore
+            })
+            |> ignore
+          } else {
+            d
+            .ground(By(fn() { ink().unwrap_or(accent_no_ring) }))
+            .edge(By(fn() { (2.0, ring()) }))
+            |> ignore
+          }
           // (the pointer over it unchosen: its colour shown a moment; off it again, the chosen one's, unless another
           // was shown since)
           match preview {
@@ -101,18 +118,22 @@ pub fn accent_pick_node(
             None => ()
           }
           d.show(on, fn(c) { icon_node(c, "check", mark, Is(0xFFFFFFFFL)) |> ignore })
-          d.show(fn() { !on() && ink() is None }, fn(c) { icon_node(c, "plus", mark, By(fn() { theme().p.muted })) |> ignore })
+          d.show(fn() { !wheel && !on() && ink() is None }, fn(c) {
+            icon_node(c, "plus", mark, By(fn() { theme().p.muted })) |> ignore
+          })
         })
         |> ignore
       }
       for i, a in accents {
         let key = a.key
-        a_dot(fn() { key }, fn() { Some(ink_of(a)) }, fn() { names().get(i).unwrap_or(key) })
+        a_dot(fn() { key }, fn() { Some(ink_of(a)) }, fn() { names().get(i).unwrap_or(key) }, false)
       }
+      a_dot(fn() { rainbow_accent_key }, fn() { None }, rainbow, true)
       a_dot(
         fn() { "custom:" + own().unwrap_or(custom_hue_kept.val).to_string() },
         fn() { own().map(fn(h) { ink_of(custom_tone(h)) }) },
         custom,
+        false,
       )
     })
     |> ignore
@@ -141,7 +162,7 @@ fn hue_slider_node(
   step_to : (Int) -> Unit,
   loc~ : SourceLoc,
 ) -> Unit {
-  let n = (accents.length() + 1).to_double()
+  let n = (accents.length() + 2).to_double()
   let wide = fn() {
     let side = dot_side(theme())
     n * side + (n - 1.0) * 8.0
@@ -296,3 +317,36 @@ let accent_no_ring : Int64 = 0L
 ///|
 /// The most pixels the hues' picture is asked at (mark_node's pictures').
 let hue_strip_most : Int = 8192
+
+///|
+/// Pixel size of the conic rainbow disc for 五彩色 (20×20 RGBA PNG = 1,688 B: smooth under GPU bilinear filtering
+/// while both light and dark copies plus hue_strip stay under host_image_bytes_free).
+let rainbow_dot_px : Int = 20
+
+///|
+/// The conic OKLCH rainbow wheel for 五彩色 by day or by night, cached by key as hue_strip is.
+fn rainbow_dot(dark : Bool) -> String {
+  let key = "mem:sf-rainbow/\{dark}/\{rainbow_dot_px}"
+  if !@ui.has_image(key) {
+    let n = rainbow_dot_px
+    let mid = (n - 1).to_double() / 2.0
+    let px = FixedArray::make(n * n * 4, b'\x00')
+    let deg_per_rad = 180.0 / @math.PI
+    for y in 0..<n {
+      let dy = y.to_double() - mid
+      for x in 0..<n {
+        let dx = x.to_double() - mid
+        let deg = @dmath.atan2(dy, dx) * deg_per_rad + 115.0
+        let h = ((deg.round().to_int() % 360) + 360) % 360
+        let a = custom_tone(h)
+        let ink = if dark { a.dark } else { a.light }
+        let at = (y * n + x) * 4
+        for k in 0..<4 {
+          px[at + k] = ((ink >> (24 - k * 8)) & 0xFFL).to_int().to_byte()
+        }
+      }
+    }
+    @ui.add_image(key, @pixels.png(n, n, px))
+  }
+  key
+}

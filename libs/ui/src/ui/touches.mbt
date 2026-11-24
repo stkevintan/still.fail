@@ -16,6 +16,8 @@
 // in the batch find the tree as the first did, till the last is taken: one layout a batch, not one a sample (每帧安卓送
 // 2-4 个采样时整棵树排了 2-4 遍, 2026-11-16). What is laid out so is so as of the last's moment, the batch one input;
 // a tape keeps which moves had more after them (inputrec.mbt), so a replay does the same at any rate of frames.
+// A frame boundary (app.mbt's `on_frame`) or an unrouted trailing sample (`!more && kind < 0`, taped as
+// `pointer-flush`) also closes an open batch and flushes deferred pointing/layout.
 
 ///|
 /// The system's ids of the app's two fingers (any number, a negative one too), and whether each is there.
@@ -230,6 +232,10 @@ fn touch_in(phase : Int, id : Int, x : Double, y : Double) -> Unit {
     if kind >= 0 {
       // (in this event: at its moment)
       pointer_in(kind, x, y, extra_slot, if kind == 0 { mods_held() } else { 0 }, by=1, more~)
+    } else if !more && moves_batched.val {
+      moves_batched.val = false
+      view_pointed(bring=true)
+      input_taped("pointer-flush", h_event_time(), [])
     }
-  }, what~)
+  }, what~, more~)
 }

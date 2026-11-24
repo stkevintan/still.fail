@@ -338,7 +338,7 @@ export class StationsSync {
   }
 
   #transcriptLetGo(address: string, key: string): boolean {
-    return this.#core.data.evicted("transcript", address, key) || this.#transcriptSpared(address, key);
+    return this.#core.data.evicted("transcript", address, key) || this.#core.data.transcriptOverBudget(address, key) || this.#transcriptSpared(address, key);
   }
 
   /// A stream opened going on from where the device was in its station's events: nothing is read again but the

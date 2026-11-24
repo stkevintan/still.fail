@@ -22,6 +22,8 @@ priv struct SettingsFixture {
   mut logs : Bool
   /// whether this station accepts automatically assigned new chats and presets
   mut accept_auto_chats : Bool
+  /// whether 公司 Claude's share follows the workspace's whitelist (`profile.share` `allowAuto` said so)
+  mut cc_follows : Bool
   /// a Windows station's running as administrator, as the core shows it (its overview's `elevation`), as a test sets
   /// it; none: not a Windows station
   mut elevation : Json?
@@ -205,6 +207,7 @@ let fx : SettingsFixture = {
   afresh_above: 1.0,
   logs: true,
   accept_auto_chats: false,
+  cc_follows: false,
   elevation: None,
   screen_service: None,
   copies: None,
@@ -581,6 +584,7 @@ fn fixture_reset() -> Unit {
   fx.afresh_above = 1.0
   fx.logs = true
   fx.accept_auto_chats = false
+  fx.cc_follows = false
   fx.elevation = None
   fx.screen_service = None
   fx.copies = None
@@ -1560,7 +1564,7 @@ fn fx_cc_name() -> String {
 fn fx_profiles() -> Array[Json] {
   let profiles = [
     fx_profile("cc", fx_cc_name(), "subscription", fx_cc_tone(), "可用", "claude", "Claude 订阅", fx_cc_with([
-      ("share", obj([("id", str("sh1")), ("role", str("host")), ("host", str("st1")), ("users", ["st2"])])),
+      ("share", obj([("id", str("sh1")), ("role", str("host")), ("host", str("st1")), ("users", ["st2"]), ..fx_cc_follows()])),
       ("fast", Json::boolean(false)),
       ("backgroundOnMessage", Json::boolean(true)),
       ("maxConcurrentSessions", fx.cc_max_sessions),
@@ -2854,6 +2858,7 @@ fn fx_station(address : String) -> Json {
           ("move", fx_move_offer()),
           ("features", fx_station_features()),
           ("sharing", Json::boolean(true)),
+          ("shareAllowAuto", Json::boolean(true)),
           (
             "machineLogins",
             [
@@ -4173,11 +4178,17 @@ pub fn fixture_topic(mode : String, name : String, params : Map[String, Json]) -
           ("state", state),
           ("look", Json::boolean(look)),
           ("where", str(if fx.trouble == "quota-login" && text(pv, "id") == "cx" { "Willow" } else { "Willow 可用" })),
+          // (what the list's 多选 reads of it, as views/profiles.ts says it: Willow's own, up, sharing)
+          ("shared", Json::boolean(field(pv, "share") is Some(Object(_)))),
+          ("shareAuto", Json::boolean(flag(field(pv, "share"), "allowAuto"))),
+          ("canBatchShare", Json::boolean(fx_batch_why(pv) == "")),
+          ("batchShareAllowAuto", Json::boolean(true)),
+          ..if fx_batch_why(pv) == "" { [] } else { [("batchShareWhy", str(fx_batch_why(pv)))] },
           (
             "stations",
             [
-              obj([("id", str("st1")), ("name", str("Willow")), ("online", Json::boolean(true))]),
-              obj([("id", str("st2")), ("name", str("Maple")), ("online", Json::boolean(fx.mba_online))]),
+              obj([("id", str("st1")), ("name", str("Willow")), ("online", Json::boolean(true)), ("acceptAutoChats", Json::boolean(fx.accept_auto_chats))]),
+              obj([("id", str("st2")), ("name", str("Maple")), ("online", Json::boolean(fx.mba_online)), ("acceptAutoChats", Json::boolean(true))]),
             ],
           ),
           (
@@ -4208,6 +4219,8 @@ pub fn fixture_topic(mode : String, name : String, params : Map[String, Json]) -
           ("items", Json::array(list)),
           ("attention", Json::number(attention.to_double())),
           ("wait", obj([("reading", Json::boolean(false)), ("failing", []), ("empty", Json::boolean(false))])),
+          // (the workspace's owner's: its `workspace` says so)
+          ("manages", Json::boolean(true)),
         ]),
       )
     }
@@ -4651,7 +4664,13 @@ pub fn fixture_call(name : String, params : Json) -> Result[Json, Json]? {
       fx_changed()
       Some(Ok(obj([])))
     }
-    "profile.quota" | "profile.check" | "profile.put" => Some(Ok(obj([])))
+    // (公司 Claude set to follow the whitelist or not, as the station keeps it: its share's `allowAuto`)
+    "profile.share" if text(p, "id") == "cc" && flag(p, "on") => {
+      fx.cc_follows = flag(p, "allowAuto")
+      fx_changed()
+      Some(Ok(obj([])))
+    }
+    "profile.quota" | "profile.check" | "profile.put" | "profile.share" => Some(Ok(obj([])))
     // the subscription's sign-in begun: as settings-profile-login has it, waiting on the code
     "profile.login" => {
       fx.login = "needs_code"
@@ -6594,4 +6613,28 @@ pub fn fixture_pending_set(ids : Array[String]) -> Unit {
   fx.pending.clear()
   fx.pending.append(ids)
   fx_changed()
+}
+
+///|
+/// Why the list's 多选 cannot take the made-up account `pv` (views/profiles.ts `batchWhy`): another station's copy, or
+/// its kind of login that cannot be lent yet; "" where it can.
+fn fx_batch_why(pv : Json?) -> String {
+  if text(field(pv, "share"), "role") == "user" {
+    "borrowed"
+  } else if !(field(pv, "share") is Some(Object(_))) && field(pv, "shareable") is Some(False) {
+    "unshareable"
+  } else {
+    ""
+  }
+}
+
+///|
+/// What 公司 Claude's share says of following the workspace's whitelist (the station's profileView): its rule, and the
+/// stations it makes now (Willow and Maple, on it).
+fn fx_cc_follows() -> Array[(String, Json)] {
+  if fx.cc_follows {
+    [("allowAuto", Json::boolean(true)), ("allow", ["st1", "st2"])]
+  } else {
+    []
+  }
 }

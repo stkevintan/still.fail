@@ -1,0 +1,216 @@
+// Session list index and search audit SQLite builder (`--builder session-list`), 1:1 aligned with
+// `station/mb/src/sessions/sessions.mbt` and `station/mb/src/reader/main.mbt:1148-1154`.
+// All write transactions go exclusively through `db.tx_err(...)` (never raw transaction SQL).
+
+import "base_codec"
+import "builders_core"
+import "sql_db"
+
+let SESSION_LIST_VERSION : Int = 1
+
+let SESSION_LIST_FIRST : String = "SELECT CAST(rowid AS TEXT) AS position FROM sessions WHERE rowid <= CAST(? AS INTEGER) ORDER BY rowid LIMIT ?"
+
+let SESSION_LIST_NEXT : String = "SELECT CAST(rowid AS TEXT) AS position FROM sessions WHERE rowid > CAST(? AS INTEGER) AND rowid <= CAST(? AS INTEGER) ORDER BY rowid LIMIT ?"
+
+let SESSION_LIST_VALUES : String = "s.key, CASE WHEN s.ws IS NULL THEN 0 ELSE 1 END, COALESCE(s.ws, ''), (s.archived_at IS NOT NULL), s.connect"
+
+let SESSION_LIST_MATCHES : String = "i.kind = CASE WHEN s.ws IS NULL THEN 0 ELSE 1 END AND i.ws = COALESCE(s.ws, '') AND i.archived = (s.archived_at IS NOT NULL) AND i.connect = s.connect AND i.session = s.key"
+
+fn session_list_see_position() -> String {
+  "INSERT INTO session_list_rows (session, kind, ws, archived, connect) SELECT " +
+  SESSION_LIST_VALUES +
+  " FROM sessions s WHERE s.key = (SELECT key FROM sessions WHERE rowid = CAST(? AS INTEGER)) AND NOT EXISTS (SELECT 1 FROM session_list_rows i WHERE " +
+  SESSION_LIST_MATCHES +
+  ")"
+}
+
+fn session_list_walk(
+  db : sql_db::Db,
+  table : String,
+  meta : Map[String, base_codec::Json],
+  limit : Int,
+) -> Result[Bool, builders_core::StepError] {
+  match meta.get("complete") {
+    Some(base_codec::Json::Num(n, _)) => {
+      if n == 1.0 {
+        return Ok(true)
+      }
+    }
+    _ => ()
+  }
+  let last = sql_db::row_val(meta, "last_rowid")
+  let end = sql_db::row_val(meta, "end_rowid")
+  let lim = base_codec::json_int(limit)
+  let rows = match last {
+    base_codec::Json::Null => {
+      match db.all(SESSION_LIST_FIRST, [end, lim]) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+    }
+    _ => {
+      match db.all(SESSION_LIST_NEXT, [last, end, lim]) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+    }
+  }
+  let see_pos = session_list_see_position()
+  for i in 0..<rows.length() {
+    let _ = match db.run(see_pos, [sql_db::row_val(rows[i], "position")]) {
+      Ok(n) => n
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  }
+  let done = rows.length() < limit
+  let reached = if rows.length() > 0 {
+    sql_db::row_val(rows[rows.length() - 1], "position")
+  } else {
+    last
+  }
+  let _ = match db.run(
+    "UPDATE " + table + " SET last_rowid = CAST(? AS INTEGER), complete = ? WHERE id = 1",
+    [reached, base_codec::json_int(if done { 1 } else { 0 })],
+  ) {
+    Ok(n) => n
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  Ok(done)
+}
+
+fn session_list_meta_of(
+  db : sql_db::Db,
+  table : String,
+) -> Result[Option[Map[String, base_codec::Json]], builders_core::StepError] {
+  match db.all(
+    "SELECT version, CAST(last_rowid AS TEXT) AS last_rowid, CAST(end_rowid AS TEXT) AS end_rowid, complete FROM " +
+    table +
+    " WHERE id = 1",
+    [],
+  ) {
+    Ok(rows) => if rows.length() > 0 { Ok(Some(rows[0])) } else { Ok(None) }
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn session_list_meta(db : sql_db::Db) -> Result[Map[String, base_codec::Json], builders_core::StepError] {
+  let meta = match session_list_meta_of(db, "session_list_meta") {
+    Ok(Some(m)) => m
+    Ok(None) => return Err(builders_core::StepError::App("session list index version marker is missing"))
+    Err(e) => return Err(e)
+  }
+  let ver_ok = match meta.get("version") {
+    Some(base_codec::Json::Num(v, _)) => v.to_int() == SESSION_LIST_VERSION
+    _ => false
+  }
+  if !ver_ok {
+    return Err(
+      builders_core::StepError::App(
+        "session list index version " +
+        sql_db::stringify_json(sql_db::row_val(meta, "version")) +
+        " is incompatible with " +
+        SESSION_LIST_VERSION.to_string(),
+      ),
+    )
+  }
+  Ok(meta)
+}
+
+/// One batch of at most `limit` old sessions; whether all are copied then.
+pub fn session_list_step(
+  db : sql_db::Db,
+  limit : Int = 256,
+) -> Result[Bool, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      let meta = match session_list_meta(tx_db) {
+        Ok(m) => m
+        Err(e) => return Err(e)
+      }
+      session_list_walk(tx_db, "session_list_meta", meta, limit)
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+/// One batch of at most `limit` sessions visited again for search, once the list is prepared; whether all are then.
+pub fn session_list_audit(
+  db : sql_db::Db,
+  limit : Int = 256,
+) -> Result[Bool, builders_core::StepError] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      let lmeta = match session_list_meta(tx_db) {
+        Ok(m) => m
+        Err(e) => return Err(e)
+      }
+      let list_complete = match lmeta.get("complete") {
+        Some(base_codec::Json::Num(n, _)) => n == 1.0
+        _ => false
+      }
+      if !list_complete {
+        return Ok(false)
+      }
+      match tx_db.exec(
+        "CREATE TABLE IF NOT EXISTS search_job_session_audit (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL, last_rowid INTEGER, end_rowid INTEGER, complete INTEGER NOT NULL) WITHOUT ROWID; INSERT INTO search_job_session_audit (id, version, last_rowid, end_rowid, complete) SELECT 1, 1, NULL, (SELECT rowid FROM sessions ORDER BY rowid DESC LIMIT 1), NOT EXISTS (SELECT 1 FROM sessions LIMIT 1) WHERE NOT EXISTS (SELECT 1 FROM search_job_session_audit WHERE id = 1)",
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let ameta = match session_list_meta_of(tx_db, "search_job_session_audit") {
+        Ok(Some(m)) => m
+        Ok(None) => return Err(builders_core::StepError::App("search job session audit is missing"))
+        Err(e) => return Err(e)
+      }
+      let ver_ok = match ameta.get("version") {
+        Some(base_codec::Json::Num(n, _)) => n == 1.0
+        _ => false
+      }
+      if !ver_ok {
+        return Err(
+          builders_core::StepError::App(
+            "search job session audit version " +
+            sql_db::stringify_json(sql_db::row_val(ameta, "version")) +
+            " is incompatible with 1",
+          ),
+        )
+      }
+      session_list_walk(tx_db, "search_job_session_audit", ameta, limit)
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+/// Request dispatcher for `--builder session-list` (matches `main.mbt:1148-1154`).
+/// For `scope == "search"`, short-circuits `session_list_step(db) && session_list_audit(db)`.
+pub fn session_list_dispatch(
+  db : sql_db::Db,
+  ask : base_codec::Json,
+) -> Result[Option[Bool], builders_core::StepError] {
+  match builders_core::json_get_last(ask, "scope") {
+    Some(base_codec::Json::Str("all")) => {
+      match session_list_step(db, limit=256) {
+        Ok(done) => Ok(Some(done))
+        Err(e) => Err(e)
+      }
+    }
+    Some(base_codec::Json::Str("search")) => {
+      let list_done = match session_list_step(db, limit=256) {
+        Ok(d) => d
+        Err(e) => return Err(e)
+      }
+      if !list_done {
+        return Ok(Some(false))
+      }
+      match session_list_audit(db, limit=256) {
+        Ok(done) => Ok(Some(done))
+        Err(e) => Err(e)
+      }
+    }
+    _ => Ok(None)
+  }
+}
+
+pub fn run_session_list(db_path : String) -> Int {
+  builders_core::builder_loop(db_path, "session list", session_list_dispatch)
+}

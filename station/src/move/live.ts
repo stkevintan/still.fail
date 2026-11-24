@@ -171,9 +171,14 @@ export const MovesLive = Layer.effectDiscard(
       here: () => key.id,
       rig: () => cloud.state?.rig !== undefined,
       refusal: (ws, station, lang) => moves.refusal(ws, station, lang),
+      chatOf: (k) => moves.handover.chatOf(k),
     }));
     // (whether the app offers moving here: the switch; GET /move answers either way)
-    parts.overview("move", () => ({ offered: moves.on() }));
+    // (whether it takes moves; the chats going from here now, each a device's chat page says so over its composer, shut)
+    parts.overview("move", (viewer) => {
+      const ws = viewer.workspace ?? cloud.home();
+      return { offered: moves.on(), chats: moves.handover.moving().filter((c) => c.ws === ws).map(({ ws: _, ...c }) => c) };
+    });
     parts.cardChoice("move", { may: (viewer, card, at) => asks.may(viewer, card, at), chosen: (viewer, card, option, at) => asks.chosen(viewer, card, option, at) });
     // (station_move is an agent's only where moving is on here)
     parts.tools(moveTools(asks), () => moves.on());

@@ -45,6 +45,7 @@ const CHAT_ITEM: Parameters<typeof struct>[0] = [
   ["tone", opt("String"), { doc: "Its mark, the most urgent first: alert (an agent failed), wait (a card or need waits for the viewer to decide,\nnot dismissed by them), busy (at work, or waiting on someone else's decision), done (something unread). Absent for none." }],
   ["xshare", opt("RowShare"), { doc: "The other workspaces it is shared with. Absent when none, and from stations before sharing." }],
   ["mayShare", opt("bool"), { doc: "Its menu's 分享给其他 workspace, as its page's (`ChatView.xshare.may`): the viewer is in another workspace and\nstarted it or is an owner or admin of its own. Absent otherwise." }],
+  ["mayMove", opt("bool"), { doc: "Its menu's 迁移到其他 station: the viewer is one of the workspace's owners and admins (the station's\n`POST /move` takes theirs alone). Absent otherwise." }],
   ["mayPublish", opt("bool"), { doc: "Its menu's 分享图片, as its page's (`ChatView.publish.may`): a chat, the viewer not a read-only member. Absent otherwise." }],
   ["slackUrl", opt("String"), { doc: "A Slack thread's link in Slack, as its page's (`ChatView.slackUrl`), while its connect is signed in. Absent otherwise." }],
   ["slackApp", opt("String"), { doc: "With `slackUrl`: the same in Slack's app." }],
@@ -332,6 +333,7 @@ export const CHAT_SHAPES: Record<string, Shape> = {
     ["stateRest", opt("String"), { said: true, doc: "What follows the lead in `stateText` (watching: the whole line). Absent without `stateLead`." }],
     ["askClear", opt("bool"), { doc: "One of `asks` is not at the end of its messages (something comes after its post): the bell leading to it\nmay float over the list's end while the end shows, so the end keeps clear of it. Absent when every ask is the end\nitself (`stateAsk`'s line, or the last post with nothing after it), which shows whenever the end does." }],
     ["stateAsk", opt("i64"), { client: opt("I54"), doc: "What an agent needs a person for, as `stateText` says it (lead need), not decided and not let go by the\nviewer: the post that asks it (a seq), let go (`decision.dismiss`) right after the line rather than under that post.\nAbsent otherwise." }],
+    ["moving", opt("ChatMoving"), { doc: "It is going to another station of the workspace now (its station's overview `move.chats`): the composer\nshut, saying so in its place, till it is there (the page follows it) or stayed. Absent otherwise, and from a station\nbefore it." }],
     ["cacheCold", opt("ChatCacheCold"), { doc: "Its agent at rest has a large context whose prompt cache is over: the line over the composer that says what\ngoing on would cost and offers a fresh context instead. Absent otherwise, and from a core before it." }],
     ["archivable", opt("bool"), { doc: "Nothing is left in it (as its row's `settled`), and it is not archived: offer to archive it with one tap\n(`chat.archive`). Absent otherwise." }],
     ["xshare", opt("ChatShare"), { doc: "Its sharing with the viewer's other workspaces; absent while it has no chat or agent, or\nthe viewer is in no other workspace." }],
@@ -353,6 +355,11 @@ export const CHAT_SHAPES: Record<string, Shape> = {
   ThreadLast: struct([
     ["time", opt(map("SaidAt")), { doc: "When it was said, in words (`createdAt`)." }],
   ], { doc: "A chat's last message as its page's info says it: when." }),
+  ChatMoving: struct([
+    ["to", "String", { said: true, doc: "The station it goes to, by its name." }],
+    ["text", "String", { said: true, doc: "What its composer says in its place: where it goes, and that nothing is sent till it is there." }],
+    ["held", "bool", { doc: "Its agent stopped for the last of it to go (the pause of seconds): before, the chat still works there." }],
+  ], { doc: "A chat going to another station (ChatView::moving)." }),
   ChatCacheCold: struct([
     ["session", "String", { doc: "The agent's session: `session.settings` with `afresh` switches whether it goes on afresh." }],
     ["status", "String", { said: true, doc: "The cache's state, separately from its reread cost, for a compact notice." }],

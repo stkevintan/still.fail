@@ -1,0 +1,607 @@
+// Stateful page-letters shadow-index builder (`--builder page-letters`), 1:1 aligned with
+// `station/mb/src/letters/letters.mbt` and `station/mb/src/reader/main.mbt:1101-1118`.
+// All write transactions go exclusively through `db.tx_err(...)` (never raw transaction SQL).
+
+import "base_codec"
+import "builders_core"
+import "sql_db"
+
+let PAGE_LETTER_VERSION : Int = 1
+
+let PAGE_LETTER_MARK : String = "page_letter_v1"
+
+fn page_letter_tables() -> Array[String] {
+  [
+    "page_letter_meta",
+    "page_letter_scopes",
+    "page_letter_rows",
+    "page_letter_dirty",
+    "page_letter_garbage",
+  ]
+}
+
+fn page_letter_names() -> Array[String] {
+  [
+    "page_letter_insert",
+    "page_letter_update",
+    "page_letter_delete",
+    "page_letter_thread_delete",
+  ]
+}
+
+fn page_letter_triggers() -> Array[String] {
+  [
+    "CREATE TRIGGER page_letter_insert BEFORE INSERT ON entries WHEN EXISTS (SELECT 1 FROM page_letter_scopes WHERE thread=NEW.thread) OR EXISTS (SELECT 1 FROM entries e JOIN page_letter_scopes s ON s.thread=e.thread WHERE e.rowid=NEW.rowid) BEGIN -- page_letter_v1\nINSERT INTO page_letter_dirty(thread,token,n) SELECT k.thread,s.token,k.n FROM (SELECT NEW.thread AS thread,NEW.n AS n WHERE NEW.kind='message' AND NEW.letter IS NOT NULL UNION SELECT e.thread,e.n FROM ( SELECT rowid AS id FROM entries WHERE thread=NEW.thread AND n=NEW.n UNION SELECT rowid FROM entries WHERE NEW.ts IS NOT NULL AND thread=NEW.thread AND ts=NEW.ts UNION SELECT rowid FROM entries WHERE rowid=NEW.rowid ) p CROSS JOIN entries e ON e.rowid=p.id WHERE e.kind='message' AND e.letter IS NOT NULL) k CROSS JOIN page_letter_scopes s ON s.thread=k.thread CROSS JOIN page_letter_meta m ON m.id=1 AND s.epoch=m.epoch WHERE NOT EXISTS (SELECT 1 FROM page_letter_dirty d WHERE d.thread=k.thread AND d.token=s.token AND d.n=k.n); END;",
+    "CREATE TRIGGER page_letter_update BEFORE UPDATE ON entries WHEN (OLD.thread IS NOT NEW.thread OR OLD.n IS NOT NEW.n OR OLD.rowid IS NOT NEW.rowid OR OLD.kind IS NOT NEW.kind OR OLD.letter IS NOT NEW.letter OR OLD.ts IS NOT NEW.ts) AND ((EXISTS (SELECT 1 FROM page_letter_scopes WHERE thread=NEW.thread) OR EXISTS (SELECT 1 FROM entries e JOIN page_letter_scopes s ON s.thread=e.thread WHERE e.rowid=NEW.rowid)) OR EXISTS (SELECT 1 FROM page_letter_scopes WHERE thread=OLD.thread)) BEGIN -- page_letter_v1\nINSERT INTO page_letter_dirty(thread,token,n) SELECT k.thread,s.token,k.n FROM (SELECT OLD.thread AS thread,OLD.n AS n WHERE OLD.kind='message' AND OLD.letter IS NOT NULL UNION SELECT NEW.thread AS thread,NEW.n AS n WHERE NEW.kind='message' AND NEW.letter IS NOT NULL UNION SELECT e.thread,e.n FROM ( SELECT rowid AS id FROM entries WHERE thread=NEW.thread AND n=NEW.n UNION SELECT rowid FROM entries WHERE NEW.ts IS NOT NULL AND thread=NEW.thread AND ts=NEW.ts UNION SELECT rowid FROM entries WHERE rowid=NEW.rowid ) p CROSS JOIN entries e ON e.rowid=p.id WHERE e.kind='message' AND e.letter IS NOT NULL) k CROSS JOIN page_letter_scopes s ON s.thread=k.thread CROSS JOIN page_letter_meta m ON m.id=1 AND s.epoch=m.epoch WHERE NOT EXISTS (SELECT 1 FROM page_letter_dirty d WHERE d.thread=k.thread AND d.token=s.token AND d.n=k.n); END;",
+    "CREATE TRIGGER page_letter_delete BEFORE DELETE ON entries WHEN OLD.kind='message' AND OLD.letter IS NOT NULL AND EXISTS (SELECT 1 FROM page_letter_scopes WHERE thread=OLD.thread) BEGIN -- page_letter_v1\nINSERT INTO page_letter_dirty(thread,token,n) SELECT k.thread,s.token,k.n FROM (SELECT OLD.thread AS thread,OLD.n AS n WHERE OLD.kind='message' AND OLD.letter IS NOT NULL) k CROSS JOIN page_letter_scopes s ON s.thread=k.thread CROSS JOIN page_letter_meta m ON m.id=1 AND s.epoch=m.epoch WHERE NOT EXISTS (SELECT 1 FROM page_letter_dirty d WHERE d.thread=k.thread AND d.token=s.token AND d.n=k.n); END;",
+    "CREATE TRIGGER page_letter_thread_delete AFTER DELETE ON threads BEGIN -- page_letter_v1\nINSERT INTO page_letter_garbage(thread,token) SELECT s.thread,s.token FROM page_letter_scopes s WHERE s.thread=OLD.id AND NOT EXISTS (SELECT 1 FROM page_letter_garbage g WHERE g.thread=s.thread AND g.token=s.token); DELETE FROM page_letter_scopes WHERE thread=OLD.id; END;",
+  ]
+}
+
+fn page_letter_current(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  let tables = page_letter_tables()
+  for i in 0..<tables.length() {
+    match db.sqlite_master_sql("table", tables[i]) {
+      Ok(Some(_)) => ()
+      Ok(None) => return Ok(false)
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  }
+  match db.sqlite_master_sql("index", "page_letter_scope_epoch") {
+    Ok(Some(_)) => ()
+    Ok(None) => return Ok(false)
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let meta = match db.first("SELECT version FROM page_letter_meta WHERE id=1", []) {
+    Ok(Some(m)) => m
+    Ok(None) => return Ok(false)
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ver = sql_db::row_val(meta, "version")
+  let ver_ok = match ver {
+    base_codec::Json::Num(n, _) => n.to_int() == PAGE_LETTER_VERSION
+    _ => false
+  }
+  if !ver_ok {
+    return Err(
+      builders_core::StepError::App(
+        "page letter version " + sql_db::stringify_json(ver) + " is incompatible",
+      ),
+    )
+  }
+  let names = page_letter_names()
+  for i in 0..<names.length() {
+    match db.sqlite_master_sql("trigger", names[i]) {
+      Ok(Some(sql)) => {
+        if !str_contains(sql, PAGE_LETTER_MARK) {
+          return Ok(false)
+        }
+      }
+      Ok(None) => return Ok(false)
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  }
+  Ok(true)
+}
+
+/// The builder's state: the schema version its install was checked at.
+pub struct Letters {
+  db : sql_db::Db
+  mut checked : Option[base_codec::Json]
+}
+
+pub fn Letters::new(db : sql_db::Db) -> Letters {
+  Letters::{ db: db, checked: None }
+}
+
+fn Letters::install(self : Letters) -> Result[Bool, builders_core::StepError] {
+  let db = self.db
+  let initial = match db.schema_version() {
+    Ok(v) => v
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if opt_json_eq(self.checked, initial) {
+    return Ok(true)
+  }
+  match page_letter_current(db) {
+    Ok(true) => {
+      self.checked = Some(initial)
+      return Ok(true)
+    }
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  match db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      let cur = match page_letter_current(tx_db) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      if !cur {
+        match tx_db.exec(
+          "CREATE TABLE IF NOT EXISTS page_letter_meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL, epoch INTEGER NOT NULL) WITHOUT ROWID; CREATE TABLE IF NOT EXISTS page_letter_scopes(thread INTEGER PRIMARY KEY,token TEXT NOT NULL,epoch INTEGER NOT NULL, cursor_n INTEGER,end_n INTEGER,complete INTEGER NOT NULL) WITHOUT ROWID; CREATE INDEX IF NOT EXISTS page_letter_scope_epoch ON page_letter_scopes(epoch,thread); CREATE TABLE IF NOT EXISTS page_letter_rows(thread INTEGER NOT NULL,token TEXT NOT NULL,n INTEGER NOT NULL, PRIMARY KEY(thread,token,n)) WITHOUT ROWID; CREATE TABLE IF NOT EXISTS page_letter_dirty(thread INTEGER NOT NULL,token TEXT NOT NULL,n INTEGER NOT NULL, PRIMARY KEY(thread,token,n)) WITHOUT ROWID; CREATE TABLE IF NOT EXISTS page_letter_garbage(thread INTEGER NOT NULL,token TEXT NOT NULL, PRIMARY KEY(thread,token)) WITHOUT ROWID;",
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx_db.first("SELECT version FROM page_letter_meta WHERE id=1", []) {
+          Ok(Some(m)) => {
+            let ver = sql_db::row_val(m, "version")
+            let ok_ver = match ver {
+              base_codec::Json::Num(n, _) => n.to_int() == PAGE_LETTER_VERSION
+              _ => false
+            }
+            if !ok_ver {
+              return Err(
+                builders_core::StepError::App(
+                  "page letter version " + sql_db::stringify_json(ver) + " is incompatible",
+                ),
+              )
+            }
+          }
+          Ok(None) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let _ = match tx_db.run(
+          "INSERT INTO page_letter_meta VALUES(1,?,1) ON CONFLICT(id) DO UPDATE SET epoch=epoch+1",
+          [base_codec::json_num(PAGE_LETTER_VERSION.to_double())],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let names = page_letter_names()
+        for i in 0..<names.length() {
+          match tx_db.exec("DROP TRIGGER IF EXISTS " + names[i]) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        let trigs = page_letter_triggers()
+        for i in 0..<trigs.length() {
+          match tx_db.exec(trigs[i]) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+      }
+      Ok(())
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  ) {
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  let after_ver = match db.schema_version() {
+    Ok(v) => v
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  self.checked = Some(after_ver)
+  Ok(true)
+}
+
+fn page_letter_dirty_overflow(
+  db : sql_db::Db,
+  thread : base_codec::Json,
+  token : base_codec::Json,
+) -> Result[Bool, builders_core::StepError] {
+  match db.all(
+    "SELECT 1 FROM page_letter_dirty WHERE thread=? AND token=? LIMIT 1 OFFSET 64",
+    [thread, token],
+  ) {
+    Ok(rows) => Ok(rows.length() > 0)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn page_letter_scope_of(
+  db : sql_db::Db,
+  thread : base_codec::Json,
+) -> Result[Option[Map[String, base_codec::Json]], builders_core::StepError] {
+  match db.first(
+    "SELECT token,epoch, CAST(cursor_n AS TEXT) AS cursor_n,CAST(end_n AS TEXT) AS end_n,complete FROM page_letter_scopes WHERE thread=?",
+    [thread],
+  ) {
+    Ok(r) => Ok(r)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+/// Scans at most `limit` (64 at most) source keys or reconciles at most `limit` changes;
+/// returns whether the chat's keys are ready then.
+pub fn Letters::step(
+  self : Letters,
+  thread : Int64,
+  limit : Int = 64,
+) -> Result[Bool, builders_core::StepError] {
+  if limit < 1 || limit > 64 {
+    return Err(builders_core::StepError::App("page letter batch must be 1–64"))
+  }
+  let db = self.db
+  match self.install() {
+    Ok(true) => ()
+    Ok(false) => return Ok(false)
+    Err(e) => return Err(e)
+  }
+  let t = base_codec::json_num(thread.to_double())
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      let epoch = match tx_db.first("SELECT epoch FROM page_letter_meta WHERE id=1", []) {
+        Ok(Some(r)) => sql_db::row_val(r, "epoch")
+        Ok(None) => base_codec::json_null()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let existing_scope = match page_letter_scope_of(tx_db, t) {
+        Ok(s) => s
+        Err(e) => return Err(e)
+      }
+      let s = match existing_scope {
+        Some(cur_s) => {
+          if base_codec::json_eq(sql_db::row_val(cur_s, "epoch"), epoch) {
+            cur_s
+          } else {
+            let old_token = sql_db::row_val(cur_s, "token")
+            let _ = match tx_db.run(
+              "INSERT INTO page_letter_garbage(thread,token) SELECT ?,? WHERE NOT EXISTS (SELECT 1 FROM page_letter_garbage WHERE thread=? AND token=?)",
+              [t, old_token, t, old_token],
+            ) {
+              Ok(n) => n
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+            let _ = match tx_db.run("DELETE FROM page_letter_scopes WHERE thread=?", [t]) {
+              Ok(n) => n
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+            let _ = match tx_db.run(
+              "INSERT INTO page_letter_scopes(thread,token,epoch,cursor_n,end_n,complete) VALUES(?,lower(hex(randomblob(16))),?,NULL,(SELECT n FROM entries WHERE thread=? ORDER BY n DESC LIMIT 1),0)",
+              [t, epoch, t],
+            ) {
+              Ok(n) => n
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+            match page_letter_scope_of(tx_db, t) {
+              Ok(Some(ns)) => ns
+              Ok(None) => return Err(builders_core::StepError::App("page letter scope is missing"))
+              Err(e) => return Err(e)
+            }
+          }
+        }
+        None => {
+          let _ = match tx_db.run(
+            "INSERT INTO page_letter_scopes(thread,token,epoch,cursor_n,end_n,complete) VALUES(?,lower(hex(randomblob(16))),?,NULL,(SELECT n FROM entries WHERE thread=? ORDER BY n DESC LIMIT 1),0)",
+            [t, epoch, t],
+          ) {
+            Ok(n) => n
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          match page_letter_scope_of(tx_db, t) {
+            Ok(Some(ns)) => ns
+            Ok(None) => return Err(builders_core::StepError::App("page letter scope is missing"))
+            Err(e) => return Err(e)
+          }
+        }
+      }
+      let token = sql_db::row_val(s, "token")
+      let lim = base_codec::json_num(limit.to_double())
+      let is_incomplete = match sql_db::row_val(s, "complete") {
+        base_codec::Json::Num(n, _) => n == 0.0
+        _ => false
+      }
+      if is_incomplete {
+        let indexed = match tx_db.sqlite_master_sql("index", "entries_letters") {
+          Ok(Some(_)) => true
+          Ok(None) => false
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let cursor = sql_db::row_val(s, "cursor_n")
+        let cursor_null = is_json_null(cursor)
+        let sql = "SELECT CAST(e.n AS TEXT) AS n,e.kind,e.letter FROM entries e " +
+        (if indexed { "INDEXED BY entries_letters" } else { "" }) +
+        " WHERE e.thread=?1 AND e.n<=CAST(?2 AS INTEGER) " +
+        (if cursor_null { "" } else { "AND e.n>CAST(?3 AS INTEGER)" }) +
+        " " +
+        (if indexed { "AND e.letter IS NOT NULL" } else { "" }) +
+        " ORDER BY e.n LIMIT ?" +
+        (if cursor_null { "3" } else { "4" })
+        let rows = if cursor_null {
+          match tx_db.all(sql, [t, sql_db::row_val(s, "end_n"), lim]) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        } else {
+          match tx_db.all(sql, [t, sql_db::row_val(s, "end_n"), cursor, lim]) {
+            Ok(r) => r
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        for i in 0..<rows.length() {
+          let row = rows[i]
+          let is_msg = match sql_db::row_val(row, "kind") {
+            base_codec::Json::Str("message") => true
+            _ => false
+          }
+          if is_msg && !is_json_null(sql_db::row_val(row, "letter")) {
+            let _ = match tx_db.run(
+              "INSERT INTO page_letter_rows(thread,token,n) VALUES(?,?,CAST(? AS INTEGER)) ON CONFLICT(thread,token,n) DO NOTHING",
+              [t, token, sql_db::row_val(row, "n")],
+            ) {
+              Ok(n) => n
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+        }
+        let reached = if rows.length() > 0 {
+          sql_db::row_val(rows[rows.length() - 1], "n")
+        } else {
+          cursor
+        }
+        let _ = match tx_db.run(
+          "UPDATE page_letter_scopes SET cursor_n=CAST(? AS INTEGER),complete=? WHERE thread=? AND token=?",
+          [
+            reached,
+            base_codec::json_num(if rows.length() < limit { 1.0 } else { 0.0 }),
+            t,
+            token,
+          ],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        if rows.length() < limit {
+          let overflow = match page_letter_dirty_overflow(tx_db, t, token) {
+            Ok(b) => b
+            Err(e) => return Err(e)
+          }
+          return Ok(!overflow)
+        }
+        return Ok(false)
+      }
+      let keys = match tx_db.all(
+        "SELECT CAST(d.n AS TEXT) AS n FROM page_letter_dirty d WHERE d.thread=? AND d.token=? ORDER BY d.n LIMIT ?",
+        [t, token, lim],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      for i in 0..<keys.length() {
+        let n = sql_db::row_val(keys[i], "n")
+        let _ = match tx_db.run(
+          "DELETE FROM page_letter_rows WHERE thread=? AND token=? AND n=CAST(? AS INTEGER)",
+          [t, token, n],
+        ) {
+          Ok(c) => c
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let _ = match tx_db.run(
+          "INSERT INTO page_letter_rows(thread,token,n) SELECT e.thread,?,e.n FROM entries e WHERE e.thread=? AND e.n=CAST(? AS INTEGER) AND e.kind='message' AND e.letter IS NOT NULL",
+          [token, t, n],
+        ) {
+          Ok(c) => c
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let _ = match tx_db.run(
+          "DELETE FROM page_letter_dirty WHERE thread=? AND token=? AND n=CAST(? AS INTEGER)",
+          [t, token, n],
+        ) {
+          Ok(c) => c
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let overflow = match page_letter_dirty_overflow(tx_db, t, token) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      Ok(!overflow)
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+/// One batch of reclaiming orphaned scopes and rows (`pageLetterGcStep`, matching
+/// `station/mb/src/letters/letters.mbt:225-264`): queues one stale-epoch scope into
+/// `page_letter_garbage`, deletes at most `limit` (1–64) rows across `page_letter_rows`
+/// and `page_letter_dirty` for one garbage scope, and returns whether nothing remains.
+pub fn Letters::gc_step(
+  self : Letters,
+  limit : Int = 64,
+) -> Result[Bool, builders_core::StepError] {
+  if limit < 1 || limit > 64 {
+    return Err(builders_core::StepError::App("page letter batch must be 1–64"))
+  }
+  let db = self.db
+  match self.install() {
+    Ok(true) => ()
+    Ok(false) => return Ok(true)
+    Err(e) => return Err(e)
+  }
+  let older = "FROM page_letter_scopes WHERE epoch<(SELECT epoch FROM page_letter_meta WHERE id=1)"
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      match tx_db.first(
+        "SELECT CAST(thread AS TEXT) AS thread,token " +
+        older +
+        " ORDER BY page_letter_scopes.epoch,page_letter_scopes.thread LIMIT 1",
+        [],
+      ) {
+        Ok(Some(stale)) => {
+          let stale_key = [sql_db::row_val(stale, "thread"), sql_db::row_val(stale, "token")]
+          let _ = match tx_db.run(
+            "INSERT INTO page_letter_garbage(thread,token) SELECT CAST(?1 AS INTEGER),?2 WHERE NOT EXISTS (SELECT 1 FROM page_letter_garbage WHERE thread=CAST(?1 AS INTEGER) AND token=?2)",
+            stale_key,
+          ) {
+            Ok(n) => n
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+          let _ = match tx_db.run(
+            "DELETE FROM page_letter_scopes WHERE thread=CAST(? AS INTEGER) AND token=?",
+            stale_key,
+          ) {
+            Ok(n) => n
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        Ok(None) => ()
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let garbage = match tx_db.first(
+        "SELECT CAST(thread AS TEXT) AS thread,token FROM page_letter_garbage ORDER BY page_letter_garbage.thread,page_letter_garbage.token LIMIT 1",
+        [],
+      ) {
+        Ok(Some(g)) => g
+        Ok(None) => return Ok(true)
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let g_thread = sql_db::row_val(garbage, "thread")
+      let g_token = sql_db::row_val(garbage, "token")
+      let rows = match tx_db.run(
+        "DELETE FROM page_letter_rows WHERE thread=CAST(?1 AS INTEGER) AND token=?2 AND n IN (SELECT n FROM page_letter_rows WHERE thread=CAST(?1 AS INTEGER) AND token=?2 ORDER BY n LIMIT ?3)",
+        [g_thread, g_token, base_codec::json_num(limit.to_double())],
+      ) {
+        Ok(n) => n
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let dirty = if rows < limit {
+        match tx_db.run(
+          "DELETE FROM page_letter_dirty WHERE thread=CAST(?1 AS INTEGER) AND token=?2 AND n IN (SELECT n FROM page_letter_dirty WHERE thread=CAST(?1 AS INTEGER) AND token=?2 ORDER BY n LIMIT ?3)",
+          [g_thread, g_token, base_codec::json_num((limit - rows).to_double())],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        0
+      }
+      if rows + dirty < limit {
+        let _ = match tx_db.run(
+          "DELETE FROM page_letter_garbage WHERE thread=CAST(? AS INTEGER) AND token=?",
+          [g_thread, g_token],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let has_garbage = match tx_db.first("SELECT 1 FROM page_letter_garbage LIMIT 1", []) {
+        Ok(Some(_)) => true
+        Ok(None) => false
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let remaining = if has_garbage {
+        true
+      } else {
+        match tx_db.first("SELECT 1 " + older + " ORDER BY epoch,thread LIMIT 1", []) {
+          Ok(Some(_)) => true
+          Ok(None) => false
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok(!remaining)
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+/// Real-SQLite self-test for `Letters::gc_step` (bounds check, stale-epoch queuing, bounded rows+dirty deletion).
+pub fn run_gc_selftest() -> Result[Unit, String] {
+  let db = match sql_db::Db::create(":memory:", wait_ms=250) {
+    Ok(d) => d
+    Err(e) => return Err("gc_selftest create db: " + e.message)
+  }
+  let schema = "CREATE TABLE threads (id INTEGER PRIMARY KEY);" +
+  "CREATE TABLE entries (thread INTEGER, n INTEGER, kind TEXT, letter TEXT, ts TEXT);"
+  match db.exec(schema) {
+    Ok(_) => ()
+    Err(e) => { db.close(); return Err("gc_selftest schema: " + e.message) }
+  }
+  let l = Letters::new(db)
+  // 1. Out-of-bounds limit returns StepError::App("page letter batch must be 1–64").
+  match l.gc_step(limit=0) {
+    Err(builders_core::StepError::App(msg)) => {
+      if msg != "page letter batch must be 1–64" {
+        db.close()
+        return Err("gc_step limit=0 msg mismatch: " + msg)
+      }
+    }
+    _ => { db.close(); return Err("gc_step limit=0 should fail with App error") }
+  }
+  match l.gc_step(limit=65) {
+    Err(builders_core::StepError::App(msg)) => {
+      if msg != "page letter batch must be 1–64" {
+        db.close()
+        return Err("gc_step limit=65 msg mismatch: " + msg)
+      }
+    }
+    _ => { db.close(); return Err("gc_step limit=65 should fail with App error") }
+  }
+  // 2. Empty DB installs cleanly and returns Ok(true).
+  match l.gc_step(limit=4) {
+    Ok(true) => ()
+    _ => { db.close(); return Err("gc_step empty should return Ok(true)") }
+  }
+  // 3. Seed stale-epoch scope (epoch=1 while meta epoch=2) with 3 rows + 2 dirty = 5 items.
+  let _ = match db.run("UPDATE page_letter_meta SET epoch=2 WHERE id=1", []) {
+    Ok(n) => n
+    Err(e) => { db.close(); return Err(e.message) }
+  }
+  let _ = match db.run("INSERT INTO page_letter_scopes VALUES(7,'oldtok',1,3,3,1)", []) {
+    Ok(n) => n
+    Err(e) => { db.close(); return Err(e.message) }
+  }
+  for i in 1..<4 {
+    let _ = match db.run("INSERT INTO page_letter_rows VALUES(7,'oldtok',?)", [base_codec::json_int(i)]) {
+      Ok(n) => n
+      Err(e) => { db.close(); return Err(e.message) }
+    }
+  }
+  for i in 1..<3 {
+    let _ = match db.run("INSERT INTO page_letter_dirty VALUES(7,'oldtok',?)", [base_codec::json_int(i)]) {
+      Ok(n) => n
+      Err(e) => { db.close(); return Err(e.message) }
+    }
+  }
+  // Step 1 (limit=4): moves stale scope to garbage, deletes 3 rows + 1 dirty = 4 (not < 4 -> garbage kept, returns false).
+  match l.gc_step(limit=4) {
+    Ok(false) => ()
+    _ => { db.close(); return Err("gc_step batch 1 should return Ok(false)") }
+  }
+  // Step 2 (limit=4): deletes remaining 1 dirty (< 4 -> removes garbage, returns true).
+  match l.gc_step(limit=4) {
+    Ok(true) => ()
+    _ => { db.close(); return Err("gc_step batch 2 should return Ok(true)") }
+  }
+  if !db.autocommit() {
+    db.close()
+    return Err("gc_selftest left transaction open")
+  }
+  db.close()
+  Ok(())
+}
+
+struct LettersCell {
+  mut state : Option[Letters]
+}
+
+pub fn run_page_letters(db_path : String) -> Int {
+  let cell = LettersCell::{ state: None }
+  builders_core::builder_loop(
+    db_path,
+    "old page letters",
+    fn(db : sql_db::Db, ask : base_codec::Json) -> Result[Option[Bool], builders_core::StepError] {
+      let l = match cell.state {
+        Some(existing) => existing
+        None => {
+          let created = Letters::new(db)
+          cell.state = Some(created)
+          created
+        }
+      }
+      match builders_core::json_get_last(ask, "thread") {
+        Some(base_codec::Json::Num(thread, _)) => {
+          match l.step(builders_core::double_to_i64_saturating(thread), limit=64) {
+            Ok(done) => Ok(Some(done))
+            Err(e) => Err(e)
+          }
+        }
+        _ => Ok(None)
+      }
+    },
+  )
+}

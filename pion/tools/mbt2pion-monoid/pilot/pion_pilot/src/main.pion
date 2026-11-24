@@ -1,0 +1,487 @@
+// Pure-Pion Vertical Pilot driver running on BOTH `pionc run` (native) and
+// `pionc run --target wasm32` (Node.js), wired to real `invar@339c271e`,
+// real `mbt_compat`, real `sf`, AND live `mbt2pion`-generated `pilot_core.pion` + `00_init_order.pion`.
+
+import "mbt_compat" as mc
+import "sf"
+import "signals"
+import "ui"
+import "view"
+
+fn trace(world : World, k : String, v : String) -> Unit {
+  io_println(world, "T " + k + "=" + v)
+}
+
+fn check(world : World, id : String, ok : Bool) -> Unit {
+  if !ok {
+    panic("assertion failed: " + id)
+  }
+  io_println(world, "A " + id)
+}
+
+// --- 1. Real `signals::signal_by` custom tolerance (controls/tab_strip_node.mbt:110) ---
+fn case_signal_by(world : World) -> Unit {
+  let bar_w = signals::signal_by(0.0, fn(a : Double, b : Double) {
+    let d = a - b
+    let ad = if d < 0.0 { -d } else { d }
+    ad <= 0.5
+  })
+  let wakes = signals::ref_new(0)
+  let _eff = signals::effect(fn() {
+    let _ = bar_w.get()
+    wakes.v = wakes.v + 1
+  })
+  // Reset initial effect run count so we measure subsequent wakes only
+  wakes.v = 0
+  bar_w.set(0.3)
+  check(world, "sig.no_wake_within_tol", wakes.v == 0)
+  trace(world, "sig.wakes_after_0_3", wakes.v.to_string())
+  bar_w.set(1.2)
+  check(world, "sig.one_wake_past_tol", wakes.v == 1)
+  trace(world, "sig.wakes_after_1_2", wakes.v.to_string())
+  bar_w.set(1.5)
+  check(world, "sig.no_wake_delta_0_3", wakes.v == 1)
+  bar_w.set(2.5)
+  check(world, "sig.second_wake_past_tol", wakes.v == 2)
+  trace(world, "sig.final_val", mc::double_to_string(bar_w.get()))
+}
+
+// --- 2. Real `ui::window_kept(take, fresh)` A->B->A aliasing & cross-window signal isolation ---
+struct WinSlot {
+  mut label : String
+  sig : signals::Signal[Int]
+  wakes : signals::Ref[Int]
+}
+
+fn case_window_kept(world : World) -> Unit {
+  let slot_a = WinSlot::{ label: "winA", sig: signals::signal(10), wakes: signals::ref_new(0) }
+  let _eff_a = signals::effect(fn() {
+    let _ = slot_a.sig.get()
+    slot_a.wakes.v = slot_a.wakes.v + 1
+  })
+  slot_a.wakes.v = 0
+
+  let current = signals::ref_new(slot_a)
+  ui::window_kept(
+    fn() {
+      let saved = current.v
+      fn() { current.v = saved }
+    },
+    fn() {
+      current.v = WinSlot::{ label: "winB", sig: signals::signal(99), wakes: signals::ref_new(0) }
+    },
+  )
+
+  ui::in_window(1, fn() {
+    current.v.sig.set(100)
+    current.v.wakes.v = current.v.wakes.v + 1
+    check(world, "win.b_isolated_from_a", slot_a.sig.get() == 10 && slot_a.wakes.v == 0)
+    trace(world, "win.b_state", current.v.label + ":" + current.v.sig.get().to_string())
+  })
+
+  // Back in window 0: container identity alias preserved & zero spurious wake from B!
+  let wakes_before_set = slot_a.wakes.v
+  current.v.sig.set(11)
+  check(world, "win.a_alias_preserved", slot_a.sig.get() == 11)
+  check(world, "win.a_no_spurious_wake", wakes_before_set == 0)
+  trace(world, "win.a_restored", current.v.label + ":" + current.v.sig.get().to_string())
+}
+
+// --- 3. Real Pion `sf::css_read` (`pion/ui/packages/sf/src/style_css.pion`) parity ---
+fn case_style_css(world : World) -> Unit {
+  match sf::css_read("row h=S7 px=S2 radius=Lg hovered{bg=Hover}") {
+    Ok(st) => {
+      let row_ok = st.base.row is Some(true)
+      let h_ok = st.base.h is Some(ui::Len::S7)
+      let px_ok = st.base.px is Some(ui::Space::S2)
+      let rad_ok = st.base.radius is Some(ui::Radius::Lg)
+      let hov_ok = match st.hovered {
+        Some(h) => h.bg is Some(ui::Color::Hover)
+        None => false
+      }
+      check(world, "css.valid1_ok", row_ok && h_ok && px_ok && rad_ok && hov_ok)
+      trace(world, "css.valid1", "row=true;h=S7;px=S2;radius=Lg;hovered.bg=Hover")
+    }
+    Err(_) => check(world, "css.valid1_ok", false)
+  }
+  match sf::css_read("w=Grow(1.0) radius=Exact(3.5) pressed{bg=Over(Card, A(Fg, O5))}") {
+    Ok(st) => {
+      let w_ok = match st.base.w {
+        Some(ui::Len::Grow(g)) => g == 1.0
+        _ => false
+      }
+      let rad_ok = match st.base.radius {
+        Some(ui::Radius::Exact(r)) => r == 3.5
+        _ => false
+      }
+      let pr_ok = match st.pressed {
+        Some(pr) =>
+        match pr.bg {
+          Some(ui::Color::Over(ui::Color::Card, ui::Color::A(ui::Color::Fg, ui::Opacity::O5))) => true
+          _ => false
+        }
+        None => false
+      }
+      check(world, "css.valid2_ok", w_ok && rad_ok && pr_ok)
+      trace(world, "css.valid2", "w=Grow(1);radius=Exact(3.5);pressed.bg=Over(Card,A(Fg,O5))")
+    }
+    Err(_) => check(world, "css.valid2_ok", false)
+  }
+  match sf::css_read("row h=S7 badprop=1") {
+    Err(e) => {
+      check(world, "css.err_prop_loc", e == "css: no property badprop at 17 in \"row h=S7 badprop=1\"")
+      trace(world, "css.err_prop", e)
+    }
+    Ok(_) => check(world, "css.err_prop_loc", false)
+  }
+  match sf::css_read("row h=NOPE") {
+    Err(e) => {
+      check(world, "css.err_val_loc", e == "css: no Len NOPE at 10 in \"row h=NOPE\"")
+      trace(world, "css.err_val", e)
+    }
+    Ok(_) => check(world, "css.err_val_loc", false)
+  }
+  match sf::css_read("hovered{bg=Hover") {
+    Err(e) => {
+      check(world, "css.err_unclosed_loc", e == "css: a block not closed at 16 in \"hovered{bg=Hover\"")
+      trace(world, "css.err_unclosed", e)
+    }
+    Ok(_) => check(world, "css.err_unclosed_loc", false)
+  }
+  // Known Layer 2 blocker: Pion sf::css_read must fail loudly on AFirstLine (zero silent downgrade to Align::Start)
+  match sf::css_read("row align=AFirstLine") {
+    Err(e) => {
+      check(
+        world,
+        "css.afirstline_blocker_tracked",
+        e == "css: unsupported Align AFirstLine (missing in invar ui::Align) at 20 in \"row align=AFirstLine\"",
+      )
+      trace(world, "css.afirstline", "known_invar_blocker:ui::Align::FirstLine")
+    }
+    Ok(_) => check(world, "css.afirstline_blocker_tracked", false)
+  }
+}
+
+// --- 4. Live mbt2pion-generated guard + 00_init_order + cross-pkg invar-before-sf init ---
+// Verify invar (`ui::current_window_id()`, `sf::sf_version_tag()`) globals initialized before pilot globals!
+let cross_pkg_invar_ready : Bool = ui::current_window_id() == 0 && sf::sf_version_tag() == "sf-m1.1-prep"
+
+fn case_guard_init_order(world : World) -> Unit {
+  check(world, "guard.false_branch", film_facts_guard(0.0, 10.0) == "")
+  check(world, "guard.true_branch", film_facts_guard(1920.0, 1080.0) == "ok")
+  check(world, "init.fwd_scalar", fwd_scalar == 43)
+  check(world, "init.fwd_heap", fwd_heap[0] == "alpha" && fwd_heap[1] == "beta")
+  check(world, "init.fn_init_ran", init_log.length() == 1 && init_log[0] == "init_ran:43:alpha:beta")
+  check(world, "init.cross_pkg_invar_first", cross_pkg_invar_ready)
+  trace(world, "guard.false", film_facts_guard(0.0, 10.0))
+  trace(world, "guard.true", film_facts_guard(1920.0, 1080.0))
+  trace(world, "init.log0", init_log[0])
+}
+
+// --- 5. Live mbt2pion-generated relay(x?) -> tally(x?) lazy default & L->R order ---
+fn case_opt_param_relay(world : World) -> Unit {
+  reset_opt_logs()
+  let r1 = relay(record_arg("a1", 10))
+  check(world, "opt.none_default_val", r1 == 27)
+  check(world, "opt.none_eval_once", get_default_eval_count() == 1)
+  let r2 = relay(record_arg("a2", 10), x=record_arg("x2", 5))
+  check(world, "opt.some_no_default", r2 == 15 && get_default_eval_count() == 1)
+  let none_v : Option[Int] = None
+  let r3 = relay(record_arg("a3", 20), x?=none_v)
+  check(world, "opt.forward_none", r3 == 37 && get_default_eval_count() == 2)
+  let log = get_eval_order_log()
+  check(world, "opt.lr_order", log == "a1,default,a2,x2,a3,default")
+  trace(world, "opt.order", log)
+}
+
+// --- 6. UTF-16 CJK+emoji + api_map unit boundary conversions ---
+fn case_utf16_boundary(world : World) -> Unit {
+  let s = "A中😀B"
+  check(world, "utf16.len", mc::utf16_len(s) == 5)
+  check(world, "utf16.cu1", mc::utf16_code_unit_at(s, 1) == 20013)
+  let ev = mc::utf16_exact_view(s, 2, 4)
+  check(world, "utf16.exact_emoji", ev == "😀")
+  let sc_buf = signals::ref_new("")
+  mc::str_iter_scalar_indexed(s, fn(idx : Int, cp : Char) {
+    if idx > 0 {
+      sc_buf.v = sc_buf.v + ","
+    }
+    sc_buf.v = sc_buf.v + idx.to_string() + ":" + cp.to_int().to_string()
+  })
+  check(world, "utf16.scalar_iter", sc_buf.v == "0:65,1:20013,2:128512,3:66")
+  let u8_off = mc::utf16_to_utf8_off(s, 4)
+  let back_u16 = mc::utf8_to_utf16_off(s, u8_off)
+  let sc_off = mc::utf16_to_scalar_off(s, 4)
+  let back_sc = mc::scalar_to_utf16_off(s, sc_off)
+  trace(world, "utf16.len", mc::utf16_len(s).to_string())
+  trace(world, "utf16.scalars", sc_buf.v)
+  trace(world, "utf16.boundary_u8", u8_off.to_string())
+  trace(world, "utf16.boundary_sc", sc_off.to_string())
+  check(world, "utf16.boundary_conv", u8_off == 8 && back_u16 == 4 && sc_off == 3 && back_sc == 4)
+}
+
+// --- 7. ArrayView pre-grow / post-256-push backing isolation (2 vs 3) ---
+fn case_arrayview_isolation(world : World) -> Unit {
+  let a = mc::ArrayBuf::from_array([1, 20, 30])
+  let v = a.view(0, 2)
+  a.set(0, 2)
+  check(world, "av.pre_grow_visible", v.get(0) == 2)
+  for i in 0..<256 {
+    a.push(i)
+  }
+  a.set(0, 3)
+  check(world, "av.post_grow_isolated", v.get(0) == 2 && a.get(0) == 3)
+  trace(world, "av.pair", v.get(0).to_string() + ":" + a.get(0).to_string())
+}
+
+// --- 8. OrderedMap insertion order + Double::to_string ---
+fn case_ordered_map_double(world : World) -> Unit {
+  let m : mc::OrderedMap[String, Int] = mc::ordered_map_new()
+  m.set("zeta", 1)
+  m.set("alpha", 2)
+  m.set("mid", 3)
+  m.set("beta", 4)
+  m.set("k9", 5)
+  let keys = signals::ref_new("")
+  let first = signals::ref_new(true)
+  m.each(fn(k : String, _v : Int) {
+    if !first.v {
+      keys.v = keys.v + " "
+    }
+    first.v = false
+    keys.v = keys.v + k
+  })
+  check(world, "map.insert_order", keys.v == "zeta alpha mid beta k9")
+  trace(world, "map.keys", keys.v)
+
+  let d1 = mc::double_to_string(1.5e-7)
+  let d2 = mc::double_to_string(-0.0)
+  let d3 = mc::double_to_string(0.0 / 0.0)
+  let d4 = mc::double_to_string(1.0e20)
+  check(world, "dbl.1_5e_7", d1 == "1.5e-7")
+  check(world, "dbl.neg_zero", d2 == "0")
+  check(world, "dbl.nan", d3 == "NaN")
+  check(world, "dbl.1e20", d4 == "100000000000000000000")
+  trace(world, "dbl.vals", d1 + "|" + d2 + "|" + d3 + "|" + d4)
+}
+
+// --- 9. Signed & unsigned / and % via mbt_compat::div_checked_* / mod_checked_* ---
+fn case_div_mod_nonzero(world : World) -> Unit {
+  let i32_q = mc::div_checked_i32(-7, 2)
+  let i32_r = mc::mod_checked_i32(-7, 2)
+  let i64_q = mc::div_checked_i64(-100L, 7L)
+  let i64_r = mc::mod_checked_i64(-100L, 7L)
+  let u32_q = mc::div_checked_u32(4000000000U, 3U)
+  let u32_r = mc::mod_checked_u32(4000000000U, 3U)
+  let u64_q = mc::div_checked_u64(1000000000000UL, 9UL)
+  let u64_r = mc::mod_checked_u64(1000000000000UL, 9UL)
+  let b_q = mc::div_checked_byte(255.to_byte(), 10.to_byte())
+  let b_r = mc::mod_checked_byte(255.to_byte(), 10.to_byte())
+  check(world, "div.i32_nz", i32_q == -3 && i32_r == -1)
+  check(world, "div.i64_nz", i64_q == -14L && i64_r == -2L)
+  check(world, "div.u32_nz", u32_q == 1333333333U && u32_r == 1U)
+  check(world, "div.u64_nz", u64_q == 111111111111UL && u64_r == 1UL)
+  check(world, "div.byte_nz", b_q == 25.to_byte() && b_r == 5.to_byte())
+  trace(world, "div.nz", i32_q.to_string() + "," + i32_r.to_string() + "," + u32_q.to_string() + "," + b_q.to_int().to_string())
+}
+
+fn runtime_zero_i32(n : Int) -> Int {
+  n - n
+}
+
+fn runtime_zero_u32(n : UInt) -> UInt {
+  n - n
+}
+
+fn runtime_zero_i64(n : Int64) -> Int64 {
+  n - n
+}
+
+fn case_div_trap(world : World, which : String) -> Unit {
+  trace(world, "div.trap", which)
+  if which == "div_i32_const_zero" {
+    let _ : Int = mc::trap_div_zero()
+  } else if which == "div_i32_rt_zero" {
+    let _ = mc::div_checked_i32(10, runtime_zero_i32(7))
+  } else if which == "mod_i32_rt_zero" {
+    let _ = mc::mod_checked_i32(10, runtime_zero_i32(7))
+  } else if which == "div_u32_rt_zero" {
+    let _ = mc::div_checked_u32(10U, runtime_zero_u32(7U))
+  } else if which == "mod_u32_rt_zero" {
+    let _ = mc::mod_checked_u32(10U, runtime_zero_u32(7U))
+  } else if which == "div_i64_rt_zero" {
+    let _ = mc::div_checked_i64(10L, runtime_zero_i64(7L))
+  } else if which == "div_i32_ovf" {
+    let min_i32 = -2147483647 - 1
+    let neg_one = runtime_zero_i32(5) - 1
+    let _ = mc::div_checked_i32(min_i32, neg_one)
+  }
+}
+
+// --- 10. Cross-pkg .Is/.Middle + anonymous record + signals::Ref aliasing + 2 distinct SourceLoc ---
+struct Pt {
+  x : Int
+  y : Int
+}
+
+fn accept_live_align(lv : view::Live[Double], al : view::Along) -> String {
+  let ls = match lv {
+    view::Live::Is(v) => "Is(" + mc::double_to_string(v) + ")"
+    view::Live::By(_) => "By"
+  }
+  let als = match al {
+    view::Along::Middle => "Middle"
+    _ => "Other"
+  }
+  ls + "|" + als
+}
+
+fn case_cross_pkg_ref_sourceloc(world : World) -> Unit {
+  let pt : Pt = { x: 10, y: 20 }
+  let r : signals::Ref[Pt] = signals::ref_new(pt)
+  let alias_r = r
+  alias_r.v = { x: 30, y: 40 }
+  check(world, "ref.alias_updated", r.v.x == 30 && r.v.y == 40)
+  let (raw_a, raw_b) = audit_fault_pair()
+  let loc_a = view::source_place(raw_a)
+  let loc_b = view::source_place(raw_b)
+  check(
+    world,
+    "loc.distinct",
+    loc_a != loc_b &&
+    mc::str_has_prefix(loc_a, "ui/src/controls/pilot_core.mbt:") &&
+    mc::str_has_prefix(loc_b, "ui/src/controls/pilot_core.mbt:"),
+  )
+  let layout = accept_live_align(.Is(1.0), .Middle)
+  check(world, "xpkg.is_middle", layout == "Is(1)|Middle")
+  trace(world, "loc.a", loc_a)
+  trace(world, "loc.b", loc_b)
+  trace(world, "xpkg.ref", r.v.x.to_string() + "," + r.v.y.to_string())
+  trace(world, "xpkg.layout", layout)
+}
+
+// --- 11. REAL transpiled `libs/ui/src/controls/{numbers,marked}.mbt` ---
+fn case_real_controls_numbers_marked(world : World) -> Unit {
+  let nan = 0.0 / 0.0
+  let mn1 = dmin(3.5, 2.0)
+  let mn_nan = dmin(nan, 5.0)
+  let mx1 = dmax(3.5, 2.0)
+  let cl_hi = dclamp(15.0, 0.0, 10.0)
+  let cl_lo = dclamp(-2.0, 0.0, 10.0)
+  let cl_mid = dclamp(4.5, 0.0, 10.0)
+  check(world, "real.dmin_basic", mn1 == 2.0)
+  check(world, "real.dmin_nan_rhs", mn_nan == 5.0)
+  check(world, "real.dmax_basic", mx1 == 3.5)
+  check(world, "real.dclamp_bounds", cl_hi == 10.0 && cl_lo == 0.0 && cl_mid == 4.5)
+  let meta = join_meta(["a", "", "b"])
+  check(world, "real.join_meta", meta == "a · b")
+  let icons = kind_icon("file") + "," + kind_icon("job") + "," + kind_icon("station") + "," + kind_icon("member") + "," + kind_icon("other")
+  check(world, "real.kind_icon", icons == "file,web,server,user,search")
+  trace(
+    world,
+    "real.nums",
+    mc::double_to_string(mn1) + "|" + mc::double_to_string(mn_nan) + "|" +
+    mc::double_to_string(mx1) + "|" + mc::double_to_string(cl_hi) + "|" +
+    mc::double_to_string(cl_lo),
+  )
+  trace(world, "real.meta", meta)
+  trace(world, "real.icons", icons)
+}
+
+// --- 12. REAL transpiled `libs/ui/src/controls/tokens_data.mbt` ---
+fn case_real_controls_tokens_layout(world : World) -> Unit {
+  check(world, "real.token_wide_body", token_wide_body == 14.0)
+  check(world, "real.token_pane_corner", token_pane_corner == 42.0)
+  trace(
+    world,
+    "real.tokens",
+    mc::double_to_string(token_wide_body) + "|" + mc::double_to_string(token_pane_corner),
+  )
+}
+
+// --- Hot-path overhead micro-benchmarks (informative, recorded in report) ---
+fn run_bench(world : World) -> Unit {
+  let n_div = 500000
+  let t0 = clock_now_ms(world)
+  let mut acc = 0
+  for i in 1..<(n_div + 1) {
+    acc = acc + mc::div_checked_i32(i * 17 + 3, (i % 7) + 1)
+  }
+  let t1 = clock_now_ms(world)
+
+  let n_raw = 500000
+  let t2 = clock_now_ms(world)
+  let mut acc2 = 0
+  for i in 1..<(n_raw + 1) {
+    acc2 = acc2 + (i * 17 + 3) / ((i % 7) + 1)
+  }
+  let t3 = clock_now_ms(world)
+
+  let n_map = 20000
+  let t4 = clock_now_ms(world)
+  let m : mc::OrderedMap[String, Int] = mc::ordered_map_new()
+  for i in 0..<256 {
+    m.set("key_" + i.to_string(), i)
+  }
+  let mut msum = 0
+  for i in 0..<n_map {
+    match m.get("key_" + (i % 256).to_string()) {
+      Some(v) => msum = msum + v
+      None => ()
+    }
+  }
+  let t5 = clock_now_ms(world)
+
+  let sample = "A中😀B_hello_世界_🚀_test"
+  let n_u16 = 200000
+  let t6 = clock_now_ms(world)
+  let mut u16_sum = 0
+  for _i in 0..<n_u16 {
+    u16_sum = u16_sum + mc::utf16_len(sample)
+  }
+  let t7 = clock_now_ms(world)
+
+  io_println(world, "BENCH div_checked_i32 iters=" + n_div.to_string() + " ms=" + (t1 - t0).to_string() + " raw_ms=" + (t3 - t2).to_string() + " sink=" + (acc - acc2).to_string())
+  io_println(world, "BENCH ordered_map_get iters=" + n_map.to_string() + " ms=" + (t5 - t4).to_string() + " sink=" + msum.to_string())
+  io_println(world, "BENCH utf16_len iters=" + n_u16.to_string() + " ms=" + (t7 - t6).to_string() + " sink=" + u16_sum.to_string())
+}
+
+pub fn main(world : World) -> Int {
+  let args = world_args(world)
+  if args.length() < 2 {
+    panic("abort: missing case argument")
+  }
+  let c = args[1]
+  if c == "signal_by" {
+    case_signal_by(world)
+  } else if c == "window_kept" {
+    case_window_kept(world)
+  } else if c == "style_css" {
+    case_style_css(world)
+  } else if c == "guard_init_order" {
+    case_guard_init_order(world)
+  } else if c == "opt_param_relay" {
+    case_opt_param_relay(world)
+  } else if c == "utf16_boundary" {
+    case_utf16_boundary(world)
+  } else if c == "arrayview_isolation" {
+    case_arrayview_isolation(world)
+  } else if c == "ordered_map_double" {
+    case_ordered_map_double(world)
+  } else if c == "div_mod_nonzero" {
+    case_div_mod_nonzero(world)
+  } else if c == "cross_pkg_ref_sourceloc" {
+    case_cross_pkg_ref_sourceloc(world)
+  } else if c == "real_controls_numbers_marked" {
+    case_real_controls_numbers_marked(world)
+  } else if c == "real_controls_tokens_layout" {
+    case_real_controls_tokens_layout(world)
+  } else if c == "bench" {
+    run_bench(world)
+  } else if mc::str_has_prefix(c, "div_") || mc::str_has_prefix(c, "mod_") {
+    case_div_trap(world, c)
+  } else {
+    panic("abort: unknown case: " + c)
+  }
+  0
+}

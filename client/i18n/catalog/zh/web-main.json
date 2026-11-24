@@ -50,6 +50,8 @@
   "web-main.chat.archiveFailed": "无法归档：{error}",
   "web-main.chat.asks.dismiss": "忽略",
   "web-main.chat.asks.go": "跳转到待决策的消息",
+  "web-main.chat.moveStarted": "开始迁移到「{station}」",
+  "web-main.chat.movingTo": "迁移到 {station}",
   "web-main.chat.openOpener": "打开「{title}」",
   "web-main.chat.copyLink": "复制会话链接",
   "web-main.chat.copyMessage": "复制消息",

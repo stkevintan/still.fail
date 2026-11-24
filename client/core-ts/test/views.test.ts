@@ -1885,7 +1885,8 @@ test("a_database_from_before_the_rows_part_and_verdicts_is_brought_to_them_and_l
   assert.deepEqual(parts(), ["ws/a object", "ws/b object", "ws/c object"]);
   // (what the chat list reads, and an older core reads, as it was)
   assert.deepEqual(sql.all("SELECT address, part FROM station_part ORDER BY address"), partsBefore);
-  assert.ok(String(sql.all("SELECT sql FROM sqlite_master WHERE name = 'station_part_set'")[0]?.[0]).includes("(address, part, row, chat, formerly, profiles, profiled, software, connects, settings)"));
+  assert.ok(String(sql.all("SELECT sql FROM sqlite_master WHERE name = 'station_part_set'")[0]?.[0]).includes("(address, part, row, chat, formerly, software, connects, settings)"));
+  assert.ok(String(sql.all("SELECT sql FROM sqlite_master WHERE name = 'station_part_profiles_set'")[0]?.[0]).includes("(address, profiles, profiled)"));
   assert.equal(again.made.overviewsRead, 3, "read only to be judged");
   assert.deepEqual(rowsOf(again.list), rowsOf(first.list));
   await again.t.host.time.pass(100);
@@ -4622,4 +4623,27 @@ test("a_chat_link_an_agent_names_is_titled_as_its_stations_list_has_it", () => {
   // A page naming no station: one of the station the history is on.
   assert.equal(t.views.chatTitleOfLink("https://app.still.fail/chats/c-90f6", "ws/st"), "安卓启动超时");
   assert.equal(t.views.chatTitleOfLink("https://app.still.fail/chats/c-90f6"), undefined);
+});
+
+test("a_chat_going_to_another_station_shuts_its_composer_saying_where_till_it_is_there", async () => {
+  const t = setup();
+  const u = ui();
+  t.subscribe(1, chatTopic("ws/a", 7));
+  const now = t.host.nowMs();
+  t.set(sessions("ws/a"), [fullSession("k", { connect: "ember" })]);
+  t.set(threads("ws/a"), [thread(7, ["k"], now)]);
+  t.set(pageOf("ws/a", 7), page(1, ["开始吧"], null));
+  t.set(overview("ws/a"), overviewOf([], []));
+  await t.read(u, 1);
+  assert.equal(u.value.moving, undefined, "going nowhere");
+  // (another chat of its station going: not this one)
+  t.set(overview("ws/a"), { ...overviewOf([], []), move: { offered: true, chats: [{ sessions: ["other"], to: "b", toName: "beta", held: false }] } });
+  await t.read(u, 1);
+  assert.equal(u.value.moving, undefined, "another goes");
+  t.set(overview("ws/a"), { ...overviewOf([], []), move: { offered: true, chats: [{ sessions: ["k"], to: "b", toName: "beta", held: true }] } });
+  await t.read(u, 1);
+  assert.deepEqual(u.value.moving, { to: "beta", text: "正在迁移到「beta」，迁完前暂不能发送", held: true });
+  t.set(overview("ws/a"), { ...overviewOf([], []), move: { offered: true, chats: [] } });
+  await t.read(u, 1);
+  assert.equal(u.value.moving, undefined, "there, or stayed");
 });

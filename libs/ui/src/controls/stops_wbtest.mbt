@@ -247,3 +247,113 @@ test "stops_node: zero hidden glass at rest, clear refraction lens while pressed
   }
   set_dark(None)
 }
+
+///|
+/// The middle of the thumb, where its name is drawn, while the level `i` of `labels` is shown.
+fn stops_middle(t : @ui.Tester, labels : Array[String], i : Int) -> Double {
+  let (nx, _, nw, _) = t.rect_of(labels[i]).unwrap()
+  nx + nw / 2.0
+}
+
+///|
+test "stops: every stop as far from the next, the first and last too, the thumb as wide on each, meeting the track's ends at the first and last, and the dots under its middle" {
+  let labels = ["低", "中", "高", "超高", "最高"]
+  let (chosen, state, picks) = (@signals.signal(0), Stops::new(), [])
+  let t = stops_run(labels, chosen, state, picks)
+  let (x, _, w, h) = t.get(@ui.Role::Slider, label="思考深度").rect
+  let middles = []
+  let widths = []
+  // (its thumb, white over the track, as wide at every stop)
+  let thumb = fn() {
+    t.drawn_rects().filter(fn(r) { r.4 == 0xFFFFFFFFL && r.3 == h }).map(fn(r) { (r.0, r.2) })
+  }
+  for i in 0..<labels.length() {
+    stops_told(t, fn() { chosen.set(i) })
+    t.draw()
+    t.run_for(@ui.move_most_ms)
+    middles.push(stops_middle(t, labels, i))
+    let th = thumb()
+    assert_eq(th.length(), 1, msg="\{Repr(t.drawn_rects())}")
+    let (tx, tw) = th[0]
+    widths.push(tw)
+    // (meeting the track's start at the first stop and its end at the last, a stop's middle its own)
+    if i == 0 {
+      assert_true((tx - x).abs() < 0.5, msg="first stop's thumb at \{tx}, the track at \{x}")
+      // (no fill at the first stop: the track alone, as high as it is, its round end under the thumb's)
+      let bars = t.drawn_rects().filter(fn(r) { r.3 == 10.0 && r.2 > 0.0 && (r.4 & 0xFFL) > 0L })
+      assert_eq(bars.length(), 1, msg="\{Repr(bars)}")
+      assert_true(bars[0].0 >= tx + 5.0, msg="track from \{bars[0].0}, the thumb from \{tx}")
+    }
+    if i == labels.length() - 1 {
+      assert_true((tx + tw - x - w).abs() < 0.5, msg="last stop's thumb to \{tx + tw}, the track to \{x + w}")
+      let track = t.drawn_rects().filter(fn(r) { r.3 == 10.0 && r.2 > w / 2.0 })
+      assert_true(track.iter().all(fn(r) { r.0 + r.2 <= tx + tw - 5.0 }), msg="\{Repr(track)} past the thumb to \{tx + tw}")
+      // (the fill on under the thumb: no track seen between the two)
+      assert_true(track.iter().any(fn(r) { (r.4 & 0xFFL) > 0L && r.0 + r.2 >= tx + 5.0 && r.0 + r.2 < x + w - 7.0 }), msg="\{Repr(track)} with the thumb from \{tx}")
+    }
+    assert_true((tx + tw / 2.0 - middles[i]).abs() < 0.5, msg="stop \{i}: thumb \{Repr(th)}, its name at \{middles[i]}")
+  }
+  assert_true(widths.iter().all(fn(tw) { (tw - widths[0]).abs() < 0.01 }), msg="\{Repr(widths)}")
+  let step = (middles[labels.length() - 1] - middles[0]) / (labels.length() - 1).to_double()
+  for i in 0..<labels.length() {
+    let want = middles[0] + step * i.to_double()
+    assert_true((middles[i] - want).abs() < 0.5, msg="stop \{i} at \{middles[i]}, not \{want}: \{Repr(middles)}")
+  }
+  // (a dot of each stop between the ends under where the thumb's middle is on it)
+  let dots = t.drawn_rects().filter(fn(r) { r.2 == 4.0 && r.3 == 4.0 }).map(fn(r) { r.0 + 2.0 })
+  assert_eq(dots.length(), labels.length() - 2)
+  for i in 1..<(labels.length() - 1) {
+    assert_true(dots.iter().any(fn(d) { (d - middles[i]).abs() < 0.5 }), msg="stop \{i} \{middles[i]}: dots \{Repr(dots)}")
+  }
+}
+
+///|
+test "stops: held and dragged fast, its thumb drawn whole down a box that cuts what is past it, as a sheet that scrolls does" {
+  let labels = ["低", "中", "高", "超高", "最高"]
+  let chosen = @signals.signal(4)
+  let state = Stops::new()
+  let t = @ui.Tester::new(fn(_c) {  }, w=360.0, h=200.0, platform=2)
+  t.check_looks(false)
+  @ui.set_view_app(fn(root) {
+    root.padding(Is((20.0, 20.0, 20.0, 20.0))) |> ignore
+    root.box(fn(cut) {
+      cut.clip() |> ignore
+      cut.box(fn(r) {
+        r.row(Is(true)) |> ignore
+        stops_node(r, fn() { labels }, fn() { chosen.get() }, state, said="思考深度", on_pick=fn(i) { chosen.set(i) })
+        |> ignore
+      })
+      |> ignore
+    })
+    |> ignore
+  })
+  t.draw()
+  t.run_for(@ui.move_most_ms)
+  let (x, y, w, h) = t.get(@ui.Role::Slider, label="思考深度").rect
+  let mid = y + h / 2.0
+  let whole = fn(at : String) raise {
+    let drawn = t.drawn_glass()
+    let cut = t.drawn_glass_cut()
+    assert_eq(drawn.length(), cut.length(), msg="\{at}: \{Repr(drawn)} cut to \{Repr(cut)}")
+    for i, g in drawn {
+      let (_, cy, _, ch) = cut[i]
+      assert_true(
+        (cy - g.1).abs() < 0.01 && (ch - g.3).abs() < 0.01,
+        msg="\{at}: \{Repr(g)} cut to \{Repr(cut[i])}",
+      )
+    }
+  }
+  t.touch(0, x + w - 20.0, mid)
+  t.run_for(@ui.move_most_ms)
+  whole("held")
+  // (along to its first stop fast: the thumb squeezed tallest by how fast it goes)
+  let xs = [x + w * 0.6, x + w * 0.3, x + 10.0]
+  for to in xs {
+    t.touch(1, to, mid)
+    t.frame()
+    whole("dragged to \{to}")
+  }
+  t.touch(2, x + 10.0, mid)
+  t.run_for(@ui.move_most_ms * 2.0)
+  assert_eq(chosen.get(), 0)
+}

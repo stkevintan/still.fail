@@ -1629,6 +1629,7 @@ fn reader_sheets(parent : @view.View, r : Reading, paper : () -> ReaderPaper, lo
       along: Start,
       offset: panel_offset,
       match_panel: 0,
+      scrolls_under: false,
       on_back: None,
       nodes: {
         body: fn(col, _) {

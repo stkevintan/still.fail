@@ -257,6 +257,7 @@ fn chat_head_same(a : ChatView, b : ChatView) -> Bool {
   a.offline == b.offline &&
   a.offline_note == b.offline_note &&
   a.updating == b.updating &&
+  a.moving == b.moving &&
   a.cache_cold == b.cache_cold &&
   a.state == b.state &&
   a.state_ask == b.state_ask &&

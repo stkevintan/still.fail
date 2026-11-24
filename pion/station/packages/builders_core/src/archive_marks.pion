@@ -224,6 +224,7 @@ pub fn run_builders_selftest() -> Result[Unit, String] {
       }
     }
     Err(StepError::Sql(e)) => { db.close(); return Err("expected App error, got Sql: " + e.message) }
+    Err(StepError::Fallback) => { db.close(); return Err("expected App error, got Fallback") }
   }
 
   // 2. Seed rows + incompatible version -> App error & autocommit still true.
@@ -248,6 +249,7 @@ pub fn run_builders_selftest() -> Result[Unit, String] {
       }
     }
     Err(StepError::Sql(e)) => { db.close(); return Err("expected App error, got Sql: " + e.message) }
+    Err(StepError::Fallback) => { db.close(); return Err("expected App error, got Fallback") }
   }
 
   // 2b. P1-1: kept.version = 'is locked' must return App error (never misclassified as SQLITE_BUSY).
@@ -293,6 +295,7 @@ pub fn run_builders_selftest() -> Result[Unit, String] {
       Ok(d) => finished = d
       Err(StepError::App(m)) => { db.close(); return Err("batch app failed: " + m) }
       Err(StepError::Sql(e)) => { db.close(); return Err("batch sql failed: " + e.message) }
+      Err(StepError::Fallback) => { db.close(); return Err("batch unexpected fallback") }
     }
   }
   if !finished || batches != 5 {

@@ -397,6 +397,7 @@ fn accents_node(v : @view.View) -> Unit {
   @sf.accent_pick_node(
     v,
     fn() { accent_names },
+    fn() { "五彩色" },
     fn() { "自定义" },
     fn() { "色相" },
     fn() { @sf.accent_key() },

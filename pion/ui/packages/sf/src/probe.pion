@@ -1,0 +1,18 @@
+// Minimal cross-workspace probe entrypoint for `pion/app` to verify zero
+// same-name `signals` / `view` / `ui` dependency conflicts across workspaces.
+
+import "signals"
+import "view"
+
+pub fn sf_version_tag() -> String {
+  "sf-m1.1-prep"
+}
+
+pub fn sf_probe_badge(
+  parent : view::View,
+  label : signals::Signal[String],
+) -> view::View {
+  parent.box(fn(b : view::View) {
+    let _ = b.words(view::Live::By(fn() { label.get() }), look=view::words_plain)
+  })
+}

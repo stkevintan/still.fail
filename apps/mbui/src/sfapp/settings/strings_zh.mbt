@@ -1194,6 +1194,7 @@ let zh : Map[String, String] = {
   "web-pages.appearance.accent.orange": "橙色",
   "web-pages.appearance.accent.pink": "粉色",
   "web-pages.appearance.accent.purple": "紫色",
+  "web-pages.appearance.accent.rainbow": "五彩色",
   "web-pages.appearance.accent.teal": "青色",
   "web-pages.appearance.accent.title": "主题色",
   "web-pages.appearance.archive.description": "做完的 chat 要不要提示你归档：侧栏里变淡。只对这台设备生效；顶栏的归档按钮、快捷键和右键菜单都不受影响。",

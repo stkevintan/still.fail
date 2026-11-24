@@ -359,14 +359,11 @@ fn parity_scene(dark : Bool) -> (@view.View) -> Unit {
           // Active tab 0 pressed 1.16x lifted clear glass lens (p = 1.0)
           bar.box(fn(lens) {
             let r = lens_h / 2.0
-            let shadow_col = if dark { 0x0000003CL } else { 0x00000018L }
             lens
             .over(Is(true))
             .width(Is(Some(tab_w)))
             .height(Is(Some(bar_h)))
             .glass(By(fn() { Some(@glass.liquid_tab_lens_glass(1.0)) }))
-            .shadow(Is((if dark { 10.0 } else { 8.0 }, 4.0, shadow_col)))
-            .shadow_outside(Is(true))
             .ground_drawn(By(fn() {
               {
                 dx: (tab_w - lens_w) / 2.0,
@@ -403,6 +400,8 @@ fn main {
   let mode_filter = @ui.env("MBUI_EVIDENCE_MODE")
   let prefix_env = @ui.env("MBUI_EVIDENCE_PREFIX")
   let prefix = if prefix_env == "" { "wave3c-ios27-parity" } else { prefix_env }
+  let scale_env = @ui.env("MBUI_EVIDENCE_SCALE")
+  let scale = if scale_env == "3" || scale_env == "3.0" { 3.0 } else { 2.0 }
   for dark in [false, true] {
     let mode = if dark { "dark" } else { "light" }
     if mode_filter != "" && mode_filter != mode {
@@ -413,7 +412,7 @@ fn main {
       path="\{dir}/\{prefix}-\{mode}-\{backend}.png",
       w=390.0,
       h=844.0,
-      scale=2.0,
+      scale~,
       dark~,
       theme=@sf.ui_theme_now,
       script="wait 350\n",

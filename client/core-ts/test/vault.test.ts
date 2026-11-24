@@ -3982,3 +3982,140 @@ test("askAnswers and vaultsView report noKey on a !keyed device for encrypted us
   d1.core.close();
   d2.core.close();
 });
+
+/// Android's secure storage after the screen lock was taken off (apps/mbui/android CoreHost.java): what was kept for
+/// the person (`user: true`) before can never be read again (`key_invalidated`, said before anyone is asked); a value
+/// kept since is (`PERSON` made anew as it is kept), while there is a screen lock again (`screen.on`), else keeping one
+/// fails `no_device_lock`.
+function screenLockTakenOff(host: FakeHost) {
+  const dead = new Set([...host.secure].filter(([, v]) => v.user).map(([k]) => k));
+  const screen = { on: true };
+  const get = host.secureGet!, many = host.secureGetMany!, set = host.secureSet!;
+  host.secureGet = (k, o) => (o.user && dead.has(k) ? Effect.fail(new HostError("key_invalidated")) : get(k, o));
+  host.secureGetMany = (ks, o) => (o.user && ks.some((k) => dead.has(k)) ? Effect.fail(new HostError("key_invalidated")) : many(ks, o));
+  host.secureSet = (k, v, o) =>
+    o.user && !screen.on ? Effect.fail(new HostError("no_device_lock")) : Effect.tap(set(k, v, o), () => Effect.sync(() => void dead.delete(k)));
+  return screen;
+}
+
+const boxPub = (r: { host: FakeHost }) => {
+  const b = r.host.storage.get(BOX_PUB);
+  return b === undefined ? null : new TextDecoder().decode(b);
+};
+
+test("FB-51: the box key the screen lock taken off ended is made anew as it is read: no key to the vaults shown here (申请授权, the recovery words), not a key it cannot open; the recovery words key it back in and a vault made since opens", async () => {
+  const r = await rig();
+  r.putLock();
+  const { words, made: id } = await r.ask("vault.setup", {});
+  const put = await r.ask("vault.putItem", { vault: id, plain: { kind: "token", name: "GitHub", fields: { value: "ghp_x" } }, listing: { name: "gh", kind: "token", modes: ["proxy"], hosts: ["api.github.com"] } });
+  await r.ask("vault.lock", {});
+  const vaults = await r.watch(1, { topic: "vaults", workspace: "ws" });
+  const was = r.st.boxes.get("ab".repeat(32))!;
+  const dead = boxPub(r);
+  assert.equal(was.box, dead);
+  screenLockTakenOff(r.host);
+  // Opening the item: the key cannot be read; the person told it was made anew and the ways back.
+  await assert.rejects(r.ask("vault.open", { item: put.id }), (e: Error & { code?: string }) => {
+    assert.equal(e.code, "key_invalidated");
+    assert.equal(e.message, t("core-misc.vault.keyRenewed"));
+    return true;
+  });
+  await r.host.time.pass(500);
+  r.take();
+  // A new box key, kept for the person; its certificate published anew (dated later, the same recovery key).
+  const fresh = boxPub(r);
+  assert.ok(fresh !== null && fresh !== dead, "a new box key");
+  assert.equal(boxPublic(r.host.secure.get(BOX_KEY)!.value), fresh);
+  assert.ok(r.host.secure.get(BOX_KEY)!.user);
+  const cert = r.st.boxes.get("ab".repeat(32))!;
+  assert.deepEqual([cert.box, cert.recovery, cert.at > was.at, signedOk(cert, TAG.box)], [fresh, was.recovery, true, true]);
+  // Set up, no key to the vault: its page offers 申请授权 and the recovery words (vault_no_key_node), never 「已授权」.
+  assert.equal(vaults().setUp, true);
+  assert.deepEqual(vaults().vaults.map((v: any) => [v.id, v.keyed, v.recoverable]), [[id, false, true]]);
+  // The recovery words: the vault's key sealed to the new box key, the item opened with it.
+  assert.deepEqual(await r.ask("vault.recover", { words }), { recovered: 1, others: 0 });
+  const v = r.st.vaults.get(id)!;
+  assert.equal(v.keys.find((k) => k.cert.device === "ab".repeat(32))!.cert.box, fresh);
+  assert.equal(vaults().vaults[0].keyed, true);
+  await r.ask("vault.lock", {});
+  assert.equal((await r.ask("vault.open", { item: put.id })).plain.fields.value, "ghp_x");
+  // The vault deleted and another made: sealed to the new box key, it opens (not refused at once again).
+  await r.ask("vault.delete", { vault: id });
+  const made = await r.ask("vault.create", { name: "mine" });
+  const again = await r.ask("vault.putItem", { vault: made.id, plain: { kind: "token", name: "x", fields: { value: "y" } } });
+  assert.equal(r.st.vaults.get(made.id)!.keys.find((k) => k.cert.device === "ab".repeat(32))!.cert.box, fresh);
+  await r.ask("vault.lock", {});
+  assert.equal((await r.ask("vault.open", { item: again.id })).plain.fields.value, "y");
+  r.core.close();
+});
+
+test("FB-51: a vault made after the box key ended, before it was read, is sealed to the key kept now: the box key read once more makes it anew, and the vault made then opens", async () => {
+  const r = await rig();
+  r.putLock();
+  const { made: id } = await r.ask("vault.setup", {});
+  await r.ask("vault.lock", {});
+  screenLockTakenOff(r.host);
+  const put = await r.ask("vault.putItem", { vault: id, plain: { kind: "token", name: "a", fields: { value: "b" } } }).catch((e) => e);
+  assert.equal(put.code, "key_invalidated");
+  await r.host.time.pass(500);
+  const made = await r.ask("vault.create", { name: "again" });
+  const item = await r.ask("vault.putItem", { vault: made.id, plain: { kind: "token", name: "x", fields: { value: "y" } } });
+  await r.ask("vault.lock", {});
+  assert.equal((await r.ask("vault.open", { item: item.id })).plain.fields.value, "y");
+  r.core.close();
+});
+
+test("FB-51: the box key ended on the second device: another device of the person's that has the vault's key gives it to the new box key, and it opens the item", async () => {
+  const d1 = await rig();
+  d1.putLock();
+  const setup = await d1.ask("vault.setup", {});
+  const put = await d1.ask("vault.putItem", { vault: setup.made, plain: { kind: "token", name: "GitHub", fields: { value: "ghp_x" } }, listing: { name: "gh", kind: "token", modes: ["proxy"], hosts: ["api.github.com"] } });
+  const d2 = await secondDevice(d1);
+  d1.push("vault-box", d2.st.boxes.get(d1.phone.hex)!);
+  await d1.host.time.pass(500);
+  d2.push("vault", d1.st.vaults.get(setup.made)!);
+  await d2.host.time.pass(500);
+  const vaults = await d2.watch(1, { topic: "vaults", workspace: "ws" });
+  assert.equal(vaults().vaults[0].keyed, true);
+  await d1.ask("vault.lock", {});
+  screenLockTakenOff(d2.host);
+  await fails(d2.ask("vault.open", { item: put.id }), "key_invalidated");
+  await d2.host.time.pass(500);
+  assert.equal(vaults().vaults[0].keyed, false, "no key here, not a key it cannot open");
+  // 申请授权: its certificate (the new box key's) published again; the first device, asked there, gives it the key.
+  assert.deepEqual(await d2.ask("vault.ask", {}), { asked: 1 });
+  const cert = d2.st.boxes.get(d1.phone.hex)!;
+  assert.equal(cert.box, boxPub(d2));
+  d1.push("vault-box", cert);
+  await d1.host.time.pass(500);
+  assert.deepEqual(await d1.ask("vault.addDevice", { vault: setup.made, device: d1.phone.hex }), { added: 1 });
+  d2.push("vault", d1.st.vaults.get(setup.made)!);
+  await d2.host.time.pass(500);
+  assert.equal(vaults().vaults[0].keyed, true);
+  assert.equal((await d2.ask("vault.open", { item: put.id })).plain.fields.value, "ghp_x");
+  d1.core.close();
+  d2.core.close();
+});
+
+test("FB-51: the box key ended with no screen lock set again yet: no box key kept, so no vault shown keyed here; the screen lock set, the recovery words key it back in", async () => {
+  const r = await rig();
+  r.putLock();
+  const { words, made: id } = await r.ask("vault.setup", {});
+  const put = await r.ask("vault.putItem", { vault: id, plain: { kind: "token", name: "a", fields: { value: "b" } } });
+  await r.ask("vault.lock", {});
+  const vaults = await r.watch(1, { topic: "vaults", workspace: "ws" });
+  const screen = screenLockTakenOff(r.host);
+  screen.on = false;
+  await fails(r.ask("vault.open", { item: put.id }), "no_device_lock");
+  await r.host.time.pass(500);
+  assert.equal(boxPub(r), null, "the dead key's public half not kept");
+  assert.deepEqual(vaults().vaults.map((v: any) => v.keyed), [false]);
+  await fails(r.ask("vault.recover", { words }), "no_device_lock");
+  screen.on = true;
+  assert.deepEqual(await r.ask("vault.recover", { words }), { recovered: 1, others: 0 });
+  assert.equal(r.st.boxes.get("ab".repeat(32))!.box, boxPub(r));
+  assert.equal(vaults().vaults[0].keyed, true);
+  await r.ask("vault.lock", {});
+  assert.equal((await r.ask("vault.open", { item: put.id })).plain.fields.value, "b");
+  r.core.close();
+});

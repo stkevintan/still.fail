@@ -1,0 +1,1828 @@
+{
+  "schema_version": 1,
+  "monoid_source_commit": "f0fb92750e75a8625aa4da34e206fee16f6c96db",
+  "invar_target_commit": "339c271e0bd4ea9e2680f13adcec8075d6da9cf3",
+  "summary": {
+    "strict_invar_blockers": 59,
+    "pure_logic_escape_hatch_candidates": 34,
+    "m13_frozen_tester_missing_methods": 45,
+    "m2_plus_deferred_examples": 2
+  },
+  "strict_invar_blockers": [
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@glass.PillDirection",
+      "expected_invar": "lg::PillDirection",
+      "source_sig": "pub(all) enum PillDirection { Horizontal Vertical }",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/popover_shell_node.mbt:22"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@glass.bind_pill_press_by",
+      "expected_invar": "lg::bind_pill_press_by",
+      "source_sig": "pub fn bind_pill_press_by(@view.View, () -> Bool) -> Unit",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/bar_pill_group_node.mbt:27"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@glass.in_liquid_pill",
+      "expected_invar": "lg::in_liquid_pill",
+      "source_sig": "pub fn in_liquid_pill(@view.View) -> Bool",
+      "call_count": 8,
+      "locations": [
+        "libs/ui/src/controls/about_mark_node.mbt:17",
+        "libs/ui/src/controls/bar_pill_group_node.mbt:79",
+        "libs/ui/src/controls/button_node.mbt:89",
+        "libs/ui/src/controls/icon_button_node.mbt:74",
+        "libs/ui/src/controls/icon_button_node.mbt:132",
+        "libs/ui/src/controls/own_head_node.mbt:312",
+        "libs/ui/src/controls/page_node.mbt:52",
+        "libs/ui/src/controls/page_node.mbt:2548"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@glass.liquid_knob_glass",
+      "expected_invar": "lg::liquid_knob_glass",
+      "source_sig": "pub fn liquid_knob_glass(solid? : Int64) -> @paint.Glass",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/glass.mbt:110"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@glass.liquid_loupe_node",
+      "expected_invar": "lg::liquid_loupe_node",
+      "source_sig": "pub fn liquid_loupe_node(@view.View, () -> Bool, () -> (Double, Double)?, bg? : () -> Int64, solid? : () -> Int64, shadow_color? : () -> Int64, width? : Double, height? : Double, zoom? : Double, lift? : Double, side_inset? : Double, grow? : Double, shadow_blur? : Double, shadow_y? : Double, loc~ : SourceLoc) -> Unit",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/loupe_node.mbt:15"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@glass.liquid_pill_hover_ink",
+      "expected_invar": "lg::liquid_pill_hover_ink",
+      "source_sig": "pub fn liquid_pill_hover_ink(solid? : Bool) -> Int64",
+      "call_count": 5,
+      "locations": [
+        "libs/ui/src/controls/about_mark_node.mbt:44",
+        "libs/ui/src/controls/bar_pill_group_node.mbt:40",
+        "libs/ui/src/controls/button_node.mbt:202",
+        "libs/ui/src/controls/page_node.mbt:977",
+        "libs/ui/src/controls/page_node.mbt:2550"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@glass.liquid_pill_trigger_lent",
+      "expected_invar": "lg::liquid_pill_trigger_lent",
+      "source_sig": "pub let liquid_pill_trigger_lent : @view.Lent[PillTriggerScope]",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/popover_shell_node.mbt:204"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@glass.liquid_scroll_edge_fill_decorate",
+      "expected_invar": "lg::liquid_scroll_edge_fill_decorate",
+      "source_sig": "pub fn liquid_scroll_edge_fill_decorate(@view.View, () -> Int64, active? : () -> Bool) -> @view.View",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/glass.mbt:304"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@glass.liquid_tab_bar_surface_decorate",
+      "expected_invar": "lg::liquid_tab_bar_surface_decorate",
+      "source_sig": "pub fn liquid_tab_bar_surface_decorate(@view.View, () -> ((Double, Double)?, Double), share_when_unmerged? : Bool) -> @view.View",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/glass.mbt:84"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@glass.liquid_tab_lens_surface_decorate",
+      "expected_invar": "lg::liquid_tab_lens_surface_decorate",
+      "source_sig": "pub fn liquid_tab_lens_surface_decorate(@view.View, () -> Double, solid? : () -> Int64, shadow? : (Double, Double, Int64)) -> @view.View",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/glass.mbt:122"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@glass.liquid_toast_surface_decorate",
+      "expected_invar": "lg::liquid_toast_surface_decorate",
+      "source_sig": "pub fn liquid_toast_surface_decorate(@view.View, radius? : Double, active? : () -> Bool, solid? : () -> Int64, shadow? : () -> (Double, Double, Int64), solid_edge? : () -> (Double, Int64)) -> @view.View",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/toast_node.mbt:210"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@player.media_grab_wait_ms",
+      "expected_invar": "player::media_grab_wait_ms",
+      "source_sig": "pub let media_grab_wait_ms : Double",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/player_node.mbt:247"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@player.media_sleep_ms",
+      "expected_invar": "player::media_sleep_ms",
+      "source_sig": "pub let media_sleep_ms : Double",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/motion.mbt:94"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@player.media_wake_ms",
+      "expected_invar": "player::media_wake_ms",
+      "source_sig": "pub let media_wake_ms : Double",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/motion.mbt:91"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.Ctx",
+      "expected_invar": "ui::Ctx",
+      "source_sig": "pub struct Ctx { nodes : Array[Node] mut count : Int32 mut cur : Int32 mut id_seed : Int32 id_stack : Array[Int32] mut width : Double mut height : Double mut window_w : Double mut window_h : Double mut scale : Double mut whole_px : Bool mut clock : Double mut dt : Double mut last_now : Double mut frame_no : Int32 mut words_k : Double mut build_no : Int32 mut sideways_depth : Int32 mut bones : Int64 mut wants_frame : Bool mut wake_at : Double mut wake_waited : Double mut frame_rest : Bool mut frame_unasked : Bool mut frame_by : SourceLoc? mut wake_by : SourceLoc? mut page_in_hand : Bool mut hit_ids : Array[Int32] mut hit_rects : Array[Double] mut next_hit_ids : Array[Int32] mut next_hit_rects : Array[Double] mut hit_clips : Array[Double] mut next_hit_clips : Array[Double] mut hit_ends : Array[Int32] mut next_hit_ends : Array[Int32] mut hit_marks : Array[Int32] mut next_hit_marks : Array[Int32] built_ids : Map[Int32, Int32] marks_ahead : Map[Int32, Int32] focus_ahead : Map[Int32, Focusable] mut points : Map[Int32, Bool] mut passes : Map[Int32, Bool] mut next_passes : Map[Int32, Bool] mut passing : Int32 mut next_points : Map[Int32, Bool] next_point_hits : Array[Int32] mut scroll_ids : Array[Int32] mut scroll_rects : Array[Double] mut next_scroll_ids : Array[Int32] mut next_scroll_rects : Array[Double] mut bars : Array[BarAt] mut next_bars : Array[BarAt] across_seen : Array[(Int32, Double, Double)] floating : Array[Int32] mut bar_near : Int32 mut bar_drag : Int32 mut px : Double mut py : Double mut down : Bool mut hover : Int32 hover_in : Array[Int32] press_on : Array[Int32] mut active : Int32 mut focus : Int32 clicked : Array[Int32] double_clicked : Array[Int32] mut last_click : (Int32, Double, Double, Double) mut clicks : Int32 mut press_run : (Int32, Double, Double, Double) mut drag_scroll : Int32 mut press_chain : Array[Int32] mut claimed : Bool mut dragging : Bool mut following : Bool mut press_x : Double mut press_at : Double mut press_strayed : Bool mut press_late : Bool mut pointer_t : Double mut held_told : Double mut held_on : Int32 mut held_build : Int32 mut press_seen : Press mut press_seen_frame : Int32 mut press_was_down : Bool mut press_seen_at : Double mut press_mods : Int32 mut tapped : (Double, Double)? mut taken_at : Double mut press_y : Double mut last_y : Double mut last_x : Double mut vel_x : Double mut last_t : Double mut vel : Double mut editor_drag : Bool mut handle_drag : Int32 mut editor_tap : Int32 mut handle_which : Int32 mut word_drag : Int32 mut last_tap : (Int32, Double, Double, Double) mut menu_sig : String mut edit_can_told : Int32 mut handle_dy : Double lists : Map[Int32, ListState] editors : Map[Int32, EditorState] dev : DeviceState springs : Map[Int32, SpringPath] movers : Array[MoverEntry] mut cycling : Bool cycles : Array[(Double, SourceLoc)] periodic : Array[(Double, SourceLoc)] mut motion_left : Bool mut motion_read : Bool mut fiber_frame : Bool mut motion_unstarted : Bool mut took_input : Bool mut read_back_moved : Bool mut read_back_key : String mut read_back_whole : Bool laid_reads : Map[Int32, ((Double, Double, Double, Double)?, SourceLoc)] size_reads : Map[Int32, ((Double, Double)?, SourceLoc)] place_reads : Map[Int32, (String, (Int32, Double, Double)?)] info_reads : Array[(String, () -> Bool)] row_reads : Map[(Int32, Int32), (String, Double?)] words_reads : Map[String, Bool] words_shape_reads : Map[String, Bool] left_ids : Map[Int32, Bool] left_reads : Map[Int32, (Bool, SourceLoc)] cut_ids : Map[Int32, Bool] laid_watch : Map[Int32, Int32] tallest_h : Map[Int32, Double] mut tallest_new : Bool laid_rects : Map[Int32, (Double, Double, Double, Double)] shown_watch : Map[Int32, (Int32, String)] shown_spans : Map[Int32, (Double, Double)] mut nav_rest : Double mut clear : (Double, Double, Double) host_rec : HostRec covers : Map[Int32, CoverState] cover_asks : Array[CoverAsk] mut owner : Int32 mut stint : Int32 owned : Map[Int32, Array[Int32]] owned_releases : Map[Int32, OwnedReleases] mut back : ((Int32, Double, Double, Double, Double) -> Unit)? mut back_node : Int32 mut back_edge : Double mut back_next : ((Int32, Double, Double, Double, Double) -> Unit)? mut back_layer_next : Int32 mut back_within : Int32 mut back_node_next : Int32 mut back_edge_next : Double mut back_island : @view.NodeId? mut back_island_next : @view.NodeId? mut back_chain : BackList mut back_chain_next : BackList layer_gen : Map[Int32, Int32] mut layer_hook : ((Dismiss) -> Unit)? layer_on_dismiss : Map[Int32, (Int32, (Dismiss) -> Unit)] layer_retired : Map[Int32, Int32] layers_gone : @set.Set[Int32] mut back_held : BackHeld? mut back_off : Bool mut back_told : Bool mut edge : Int32 mut theme : Theme mut theme_wide : Theme mut theme_narrow : Theme? mut narrow_below : Double mut narrow : Bool inners : Array[Int32] inners_or : Array[Int32] move_runs : Array[MoveRun] mut shown_now : Map[String, MoveShown] mut shown_last : Map[String, MoveShown] move_seen : Map[String, Int32] arounds : Array[Int32] inner_faults : Array[String] mut corner_ladder : Array[Double] mut corner_fit : @paint.CornerFit? lit_asked : @set.Set[Int32] hand_chooses : @set.Set[Int32] mut hand_was : (Double, Double) mut hand_moved : Bool mut lit_apart : Double mut lit_reach : Double mut lit_all : Bool mut lit_every : Bool mut window_corner : Double window_corners : FixedArray[Double] mut direction : Direction sems : Array[Sem] mut sem_hide : Int32 asked_actions : Array[(Int32, @view.Action)] actions : Array[(Int32, @view.Action)] a11y : A11yTold mut focus_visible : Bool mut focus_roved : Bool mut focus_before : Int32 mut focusables : Array[Focusable] mut last_focusables : Array[Focusable] groups : Map[Int32, Group] mut group_cur : Int32 mut layers : Array[Layer] mut last_layers : Array[Layer] mut built_count : Int32 last_stacks : Map[Int32, Int32] layers_opened : Array[Int32] tells : Array[(Int32, () -> Unit)] told : Array[(Int32, () -> Unit)] shots : Map[Int32, Shot] mut shot_scale : Double mut layer_cur : Int32 mut stack_cur : Int32 mut keys_layer : Int32 dismissals : Map[Int32, Dismiss] layer_return : Map[Int32, Int32] editor_layer : Map[Int32, Int32] focus_island : Map[Int32, @view.NodeId] mut focus_returned : Bool mut press_down : (Double, Double)? mut press_down_tree : Bool mut press_tree_stack : Int32 mut inst : FixedArray[Double] mut ninst : Int32 segs : Array[Double] mut ime_sig : String mut ime_action_told : Int32 mut t_build : Double mut t_layout : Double mut t_paint : Double mut t_present : Double mut bench_list : Int32 // private fields }",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/presenters.mbt:1264",
+        "libs/ui/src/controls/tokens.mbt:1176"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.FieldMenuNow",
+      "expected_invar": "ui::FieldMenuNow",
+      "source_sig": "pub struct FieldMenuNow { field : Int32 node : @view.NodeId? x : Double y : Double w : Double h : Double can : Int32 selected : Bool }",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/field_bar_node.mbt:26",
+        "libs/ui/src/controls/field_bar_node.mbt:27"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.WordsShape::Cell",
+      "expected_invar": "ui::WordsShape::Cell",
+      "source_sig": null,
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/table_node.mbt:537"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.WordsShape::Code",
+      "expected_invar": "ui::WordsShape::Code",
+      "source_sig": null,
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/markdown_node.mbt:1451"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.WordsShape::Heading",
+      "expected_invar": "ui::WordsShape::Heading",
+      "source_sig": null,
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/markdown_node.mbt:695"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.WordsShape::Item",
+      "expected_invar": "ui::WordsShape::Item",
+      "source_sig": null,
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/markdown_node.mbt:1202"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.WordsShape::Quote",
+      "expected_invar": "ui::WordsShape::Quote",
+      "source_sig": null,
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/markdown_node.mbt:722"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.clipboard_secret",
+      "expected_invar": "ui::clipboard_secret",
+      "source_sig": "pub fn clipboard_secret(String, clear_ms~ : Double) -> Unit",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/secret_field_node.mbt:142"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.current",
+      "expected_invar": "ui::current",
+      "source_sig": "pub fn current() -> Ctx",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/presented_node.mbt:372"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.field_backdrop",
+      "expected_invar": "ui::field_backdrop",
+      "source_sig": null,
+      "call_count": 3,
+      "locations": [
+        "libs/ui/src/controls/field_node.mbt:263",
+        "libs/ui/src/controls/page_find_node.mbt:76",
+        "libs/ui/src/controls/search_input_node.mbt:69"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.field_edit_now",
+      "expected_invar": "ui::field_edit_now",
+      "source_sig": "pub fn field_edit_now(Int32, Int32) -> Unit",
+      "call_count": 4,
+      "locations": [
+        "libs/ui/src/controls/field_bar_node.mbt:105",
+        "libs/ui/src/controls/field_bar_node.mbt:114",
+        "libs/ui/src/controls/field_bar_node.mbt:124",
+        "libs/ui/src/controls/field_bar_node.mbt:132"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.field_menu_now",
+      "expected_invar": "ui::field_menu_now",
+      "source_sig": "pub fn field_menu_now() -> FieldMenuNow?",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/field_bar_node.mbt:29"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.field_menu_on",
+      "expected_invar": "ui::field_menu_on",
+      "source_sig": "pub fn field_menu_on(@view.View, Field, enabled? : () -> Bool) -> Unit",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/address_bar_node.mbt:74"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.finger_reads",
+      "expected_invar": "ui::finger_reads",
+      "source_sig": "pub fn finger_reads() -> (Double, Double)?",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/loupe_node.mbt:18"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.focused_editor_in_node",
+      "expected_invar": "ui::focused_editor_in_node",
+      "source_sig": "pub fn focused_editor_in_node(@view.View) -> Bool",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/sheet_node.mbt:231"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.full_screen",
+      "expected_invar": "ui::full_screen",
+      "source_sig": "pub fn full_screen() -> Bool",
+      "call_count": 3,
+      "locations": [
+        "libs/ui/src/controls/player_node.mbt:1531",
+        "libs/ui/src/controls/player_node.mbt:1542",
+        "libs/ui/src/controls/player_node.mbt:1556"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.has_image",
+      "expected_invar": "ui::has_image",
+      "source_sig": "pub fn has_image(String) -> Bool",
+      "call_count": 4,
+      "locations": [
+        "libs/ui/src/controls/accent_pick.mbt:271",
+        "libs/ui/src/controls/made_images.mbt:26",
+        "libs/ui/src/controls/mask_words.mbt:74",
+        "libs/ui/src/controls/open_gate.mbt:33"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.holds_ime_leaving",
+      "expected_invar": "ui::holds_ime_leaving",
+      "source_sig": "pub fn holds_ime_leaving(@view.View, active? : () -> Bool) -> Unit",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/sheet_node.mbt:226"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.image_any_ready",
+      "expected_invar": "ui::image_any_ready",
+      "source_sig": "pub fn image_any_ready(String) -> Bool",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/open_gate.mbt:33",
+        "libs/ui/src/controls/open_gate.mbt:34"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.image_natural",
+      "expected_invar": "ui::image_natural",
+      "source_sig": "pub fn image_natural(String) -> (Double, Double)?",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/image_reveal_node.mbt:65",
+        "libs/ui/src/controls/player_node.mbt:496"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.keeps_field_menu",
+      "expected_invar": "ui::keeps_field_menu",
+      "source_sig": "pub fn keeps_field_menu(@view.View) -> @view.View",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/field_bar_node.mbt:53"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.keyboard",
+      "expected_invar": "ui::keyboard",
+      "source_sig": "pub fn keyboard() -> Bool",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/shortcuts.mbt:20"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.log",
+      "expected_invar": "ui::log",
+      "source_sig": "pub fn log(String) -> Unit",
+      "call_count": 3,
+      "locations": [
+        "libs/ui/src/controls/player_list_node.mbt:149",
+        "libs/ui/src/controls/player_list_node.mbt:152",
+        "libs/ui/src/controls/player_node.mbt:218"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.more_contrast",
+      "expected_invar": "ui::more_contrast",
+      "source_sig": "pub fn more_contrast() -> Bool",
+      "call_count": 3,
+      "locations": [
+        "libs/ui/src/controls/tokens.mbt:1178",
+        "libs/ui/src/controls/tokens.mbt:1507",
+        "libs/ui/src/controls/tokens.mbt:1736"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.native_pointing",
+      "expected_invar": "ui::native_pointing",
+      "source_sig": "pub fn native_pointing() -> Pointing",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/tokens.mbt:1109"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.over_scrim_floor",
+      "expected_invar": "ui::over_scrim_floor",
+      "source_sig": "pub let over_scrim_floor : @ref.Ref[(Ctx) -> (Double, Double)?]",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/lift.mbt:15"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.stands_alone",
+      "expected_invar": "ui::stands_alone",
+      "source_sig": "pub fn stands_alone(Int64, glass? : Bool, edge? : Double) -> Bool",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/tool_node.mbt:183"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.system_tabletop",
+      "expected_invar": "ui::system_tabletop",
+      "source_sig": "pub fn system_tabletop() -> (Double, Double)?",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/tokens.mbt:1159"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.text_advance",
+      "expected_invar": "ui::text_advance",
+      "source_sig": "pub fn text_advance(String, size? : Double, weight? : Int32, style? : Int32) -> Double",
+      "call_count": 6,
+      "locations": [
+        "libs/ui/src/controls/agent_stats_node.mbt:153",
+        "libs/ui/src/controls/mark_node.mbt:187",
+        "libs/ui/src/controls/markdown_node.mbt:1161",
+        "libs/ui/src/controls/parts.mbt:940",
+        "libs/ui/src/controls/parts.mbt:941",
+        "libs/ui/src/controls/seg.mbt:47"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.web_lines_on",
+      "expected_invar": "ui::web_lines_on",
+      "source_sig": "pub fn web_lines_on() -> Bool",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/mark_node.mbt:195"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.window_corner_at",
+      "expected_invar": "ui::window_corner_at",
+      "source_sig": "pub fn window_corner_at(Int32) -> Double",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/viewer_frame.mbt:86",
+        "libs/ui/src/controls/viewer_frame.mbt:87"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.window_kept_set",
+      "expected_invar": "ui::window_kept_set",
+      "source_sig": "pub fn[K : Hash + Eq] window_kept_set(@set.Set[K]) -> Unit",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/presented_windows.mbt:17"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.window_keys_left_now",
+      "expected_invar": "ui::window_keys_left_now",
+      "source_sig": "pub fn window_keys_left_now() -> Bool",
+      "call_count": 4,
+      "locations": [
+        "libs/ui/src/controls/viewer_bar_node.mbt:85",
+        "libs/ui/src/controls/viewer_bar_node.mbt:97",
+        "libs/ui/src/controls/viewer_bar_node.mbt:224",
+        "libs/ui/src/controls/viewer_bar_node.mbt:236"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.window_keys_own",
+      "expected_invar": "ui::window_keys_own",
+      "source_sig": "pub fn window_keys_own() -> Bool",
+      "call_count": 6,
+      "locations": [
+        "libs/ui/src/controls/tokens.mbt:2292",
+        "libs/ui/src/controls/tokens.mbt:2330",
+        "libs/ui/src/controls/tokens.mbt:2389",
+        "libs/ui/src/controls/window_keys.mbt:24",
+        "libs/ui/src/controls/window_keys.mbt:106",
+        "libs/ui/src/controls/window_keys.mbt:119"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.window_keys_own_now",
+      "expected_invar": "ui::window_keys_own_now",
+      "source_sig": "pub fn window_keys_own_now() -> Bool",
+      "call_count": 5,
+      "locations": [
+        "libs/ui/src/controls/viewer_bar_node.mbt:208",
+        "libs/ui/src/controls/viewer_bar_node.mbt:249",
+        "libs/ui/src/controls/window_keys.mbt:34",
+        "libs/ui/src/controls/window_keys_node.mbt:43",
+        "libs/ui/src/controls/window_keys_node.mbt:67"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.window_snap_state",
+      "expected_invar": "ui::host_said",
+      "source_sig": "pub fn window_snap_state() -> Int32",
+      "call_count": 3,
+      "locations": [
+        "libs/ui/src/controls/window_keys_node.mbt:116",
+        "libs/ui/src/controls/window_keys_node.mbt:117",
+        "libs/ui/src/controls/window_keys_node.mbt:119"
+      ],
+      "note": "Must map to reactive signal/ui::host_said (non-reactive ui::window_snap_state_now / hostapi::window_snap_state does not subscribe)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.window_zoomed",
+      "expected_invar": "ui::host_said",
+      "source_sig": "pub fn window_zoomed() -> Bool",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/window_keys_node.mbt:109",
+        "libs/ui/src/controls/window_keys_node.mbt:114"
+      ],
+      "note": "Must map to reactive signal/ui::host_said (non-reactive ui::window_zoomed_now / hostapi::window_zoomed does not subscribe)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.words_hit_box",
+      "expected_invar": "ui::words_hit_box",
+      "source_sig": null,
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/table_node.mbt:536"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@ui.words_shaped",
+      "expected_invar": "ui::words_shaped",
+      "source_sig": null,
+      "call_count": 5,
+      "locations": [
+        "libs/ui/src/controls/markdown_node.mbt:695",
+        "libs/ui/src/controls/markdown_node.mbt:722",
+        "libs/ui/src/controls/markdown_node.mbt:1193",
+        "libs/ui/src/controls/markdown_node.mbt:1451",
+        "libs/ui/src/controls/table_node.mbt:537"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_missing_strict",
+      "source": "@view.ByNode",
+      "expected_invar": "view::ByNode",
+      "source_sig": null,
+      "call_count": 7,
+      "locations": [
+        "libs/ui/src/controls/chooser_node.mbt:193",
+        "libs/ui/src/controls/hover_card_node.mbt:399",
+        "libs/ui/src/controls/hover_card_node.mbt:680",
+        "libs/ui/src/controls/player_node.mbt:1215",
+        "libs/ui/src/controls/player_node.mbt:2136",
+        "libs/ui/src/controls/presented_node.mbt:88",
+        "libs/ui/src/controls/submenu_row_node.mbt:313"
+      ],
+      "note": "Requires invar internal state, draw hook, or host/event wiring (no local workaround allowed)"
+    },
+    {
+      "category": "controls_prod_signature_incompatible",
+      "source": "@player.MediaStatus",
+      "expected_invar": "player::MediaStatus",
+      "source_sig": "pub(all) struct MediaStatus { state : Int32 duration : Double position : Double buffered : Double playing : Bool buffering : Bool ended : Bool width : Double height : Double }",
+      "invar_sig": "struct MediaStatus { phase: MediaPhase; position_ms: Double; duration_ms: Double; buffered_ms: Double; muted: Bool; volume: Double; speed: Double; error: String }",
+      "call_count": 6,
+      "locations": [
+        "libs/ui/src/controls/player_node.mbt:124",
+        "libs/ui/src/controls/player_node.mbt:132",
+        "libs/ui/src/controls/player_node.mbt:151",
+        "libs/ui/src/controls/player_parts.mbt:403",
+        "libs/ui/src/controls/player_parts.mbt:433",
+        "libs/ui/src/controls/player_parts.mbt:487"
+      ],
+      "note": "Struct/enum field mismatch with invar player (tested by player_wbtest.mbt:185); align directly with Invar framework owner"
+    },
+    {
+      "category": "controls_prod_signature_incompatible",
+      "source": "@player.MediaTrack",
+      "expected_invar": "player::MediaTrack",
+      "source_sig": "pub(all) struct MediaTrack { name : String mime : String audio : Bool read : (Double, Int32, (Bytes, Double, Bool) -> Unit) -> () -> Unit direct : String }",
+      "invar_sig": "struct MediaTrack { url: String; title: String; duration_ms: Double; has_video: Bool; has_audio: Bool }",
+      "call_count": 0,
+      "locations": [],
+      "note": "Struct/enum field mismatch with invar player (tested by player_wbtest.mbt:185); align directly with Invar framework owner"
+    },
+    {
+      "category": "controls_prod_signature_incompatible",
+      "source": "@player.MediaNote",
+      "expected_invar": "player::MediaNote",
+      "source_sig": "pub(all) enum MediaNote { Back(Double) Ahead(Double) Paused Played }",
+      "invar_sig": "enum MediaNote { Volume(Double); Speed(Double); Seek(Double); PlayPause(Bool); Subtitle(Bool); Fit(Bool) }",
+      "call_count": 3,
+      "locations": [
+        "libs/ui/src/controls/player_node.mbt:27",
+        "libs/ui/src/controls/player_node.mbt:297",
+        "libs/ui/src/controls/player_parts.mbt:575"
+      ],
+      "note": "Struct/enum field mismatch with invar player (tested by player_wbtest.mbt:185); align directly with Invar framework owner"
+    },
+    {
+      "category": "controls_prod_signature_incompatible",
+      "source": "@player.MediaPhase",
+      "expected_invar": "player::MediaPhase",
+      "source_sig": "pub(all) enum MediaPhase { Opening Buffering Playing Paused Ended Failed }",
+      "invar_sig": "enum MediaPhase { Idle; Loading; Buffering; Playing; Paused; Ended; Failed(String) }",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/player_node.mbt:132"
+      ],
+      "note": "Struct/enum field mismatch with invar player (tested by player_wbtest.mbt:185); align directly with Invar framework owner"
+    },
+    {
+      "category": "controls_prod_signature_incompatible",
+      "source": "@ui.Align::AFirstLine",
+      "expected_invar": "ui::Align::FirstLine",
+      "source_sig": "pub(all) enum Align { AStart ACenter AEnd AStretch AFirstLine ABaseline }",
+      "invar_sig": "#derive(Eq) enum Align { Start; Center; End; Stretch; Baseline }",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/ui/style_css.mbt:415",
+        "libs/ui/src/controls/style_node.mbt:411",
+        "apps/mbui/src/sfpages/model_triple.mbt:3267"
+      ],
+      "note": "Invar ui::Align lacks FirstLine (AFirstLine: FirstLineCenter + lines_up_first_line); sf::css_read fails loudly instead of silently downgrading to Align::Start"
+    }
+  ],
+  "pure_logic_escape_hatch_candidates": [
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@headless.submenu_in_aim_corridor",
+      "expected_invar": "headless::submenu_in_aim_corridor",
+      "source_sig": "pub fn submenu_in_aim_corridor(Double, Double, Double, Double, Double, Double, Double, Double) -> Bool",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/submenu_row_node.mbt:131"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.ComeKept",
+      "expected_invar": "ui::ComeKept",
+      "source_sig": null,
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/sheet_node.mbt:1459"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.CornerFit",
+      "expected_invar": "ui::CornerFit",
+      "source_sig": null,
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/tokens.mbt:260"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.CornerOf",
+      "expected_invar": "ui::CornerOf",
+      "source_sig": null,
+      "call_count": 24,
+      "locations": [
+        "libs/ui/src/controls/icon_button_node.mbt:26",
+        "libs/ui/src/controls/icon_button_node.mbt:64",
+        "libs/ui/src/controls/secret_field_node.mbt:14",
+        "libs/ui/src/controls/tokens.mbt:295",
+        "libs/ui/src/controls/tokens.mbt:302",
+        "libs/ui/src/controls/tokens.mbt:309",
+        "libs/ui/src/controls/tokens.mbt:313",
+        "libs/ui/src/controls/tokens.mbt:324"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.CornerOf::Window",
+      "expected_invar": "ui::CornerOf::Window",
+      "source_sig": null,
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/window_keys.mbt:85"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.CornerRoots",
+      "expected_invar": "ui::CornerRoots",
+      "source_sig": null,
+      "call_count": 12,
+      "locations": [
+        "libs/ui/src/controls/tokens.mbt:2286",
+        "libs/ui/src/controls/tokens.mbt:2303",
+        "libs/ui/src/controls/tokens.mbt:2328",
+        "libs/ui/src/controls/tokens.mbt:2342",
+        "libs/ui/src/controls/tokens.mbt:2348",
+        "libs/ui/src/controls/tokens.mbt:2361",
+        "libs/ui/src/controls/viewer_bar.mbt:121",
+        "libs/ui/src/controls/window_keys.mbt:84"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.RunsLinks",
+      "expected_invar": "ui::RunsLinks",
+      "source_sig": "pub struct RunsLinks { pointed : @signals.Signal[Int32] }",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/link_cards_node.mbt:41"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.Velocity::new",
+      "expected_invar": "ui::Velocity::new",
+      "source_sig": "pub fn Velocity::new() -> Self",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/player_node.mbt:103"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.corner_following",
+      "expected_invar": "ui::corner_following",
+      "source_sig": "pub fn corner_following(Double, Double, Double, Double, @paint.CornerFit?) -> Double?",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/seg_node.mbt:559"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.corner_lies_in",
+      "expected_invar": "ui::corner_lies_in",
+      "source_sig": "pub fn corner_lies_in(Int32, Double, Double, Double, Double, Double) -> Double?",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/seg_node.mbt:557"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.corner_middle",
+      "expected_invar": "ui::corner_middle",
+      "source_sig": "pub fn corner_middle(Double, Double) -> Double",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/align.mbt:43"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.corners_kept",
+      "expected_invar": "ui::corners_kept",
+      "source_sig": "pub fn corners_kept(FixedArray[Double], Int32) -> Bool",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/seg_node.mbt:569"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.css",
+      "expected_invar": "ui::css",
+      "source_sig": "pub fn css(String) -> Style",
+      "call_count": 420,
+      "locations": [
+        "libs/ui/src/controls/accordion_node.mbt:105",
+        "libs/ui/src/controls/accordion_node.mbt:118",
+        "libs/ui/src/controls/accordion_node.mbt:128",
+        "libs/ui/src/controls/address_bar_node.mbt:241",
+        "libs/ui/src/controls/agent_stats_node.mbt:13",
+        "libs/ui/src/controls/agent_stats_node.mbt:26",
+        "libs/ui/src/controls/agent_stats_node.mbt:31",
+        "libs/ui/src/controls/agent_stats_node.mbt:36"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.cycle_step_ms",
+      "expected_invar": "ui::cycle_step_ms",
+      "source_sig": "pub let cycle_step_ms : Double",
+      "call_count": 3,
+      "locations": [
+        "libs/ui/src/controls/glyph.mbt:235",
+        "libs/ui/src/controls/glyph.mbt:235",
+        "libs/ui/src/controls/icons.mbt:458"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.long_press_ms",
+      "expected_invar": "ui::long_press_ms",
+      "source_sig": "pub let long_press_ms : Double",
+      "call_count": 16,
+      "locations": [
+        "libs/ui/src/controls/button_node.mbt:97",
+        "libs/ui/src/controls/edge_node.mbt:105",
+        "libs/ui/src/controls/hold_button_node.mbt:60",
+        "libs/ui/src/controls/hover_card_node.mbt:444",
+        "libs/ui/src/controls/hover_card_node.mbt:473",
+        "libs/ui/src/controls/hover_card_node.mbt:700",
+        "libs/ui/src/controls/icon_button_node.mbt:118",
+        "libs/ui/src/controls/menu_presses_node.mbt:11"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.picked_of",
+      "expected_invar": "ui::picked_of",
+      "source_sig": "pub fn picked_of(@view.View, String, whole? : Bool) -> @view.View",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/reader_node.mbt:577"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.row_gone_at",
+      "expected_invar": "ui::row_gone_at",
+      "source_sig": "pub let row_gone_at : Double",
+      "call_count": 3,
+      "locations": [
+        "libs/ui/src/controls/motion.mbt:106",
+        "libs/ui/src/controls/motion.mbt:111",
+        "libs/ui/src/controls/motion.mbt:111"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.row_size_ms",
+      "expected_invar": "ui::row_size_ms",
+      "source_sig": "pub let row_size_ms : Double",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/parts_node.mbt:36",
+        "libs/ui/src/controls/parts_node.mbt:40"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.runs_link_piece",
+      "expected_invar": "ui::runs_link_piece",
+      "source_sig": "pub fn runs_link_piece(@view.View, Int32, String) -> (Double, Double) -> (Double, Double, Double, Double)?",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/link_cards_node.mbt:67"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.runs_links",
+      "expected_invar": "ui::runs_links",
+      "source_sig": "pub fn runs_links(@view.View, () -> Array[@text.Run], (String) -> Unit, hold? : (String, (Double, Double, Double, Double)) -> Unit, shown? : (Array[(String, String, Int32)]) -> Unit) -> RunsLinks",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/markdown_node.mbt:1097"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.runs_piece",
+      "expected_invar": "ui::runs_piece",
+      "source_sig": "pub fn runs_piece(@view.View, Int32, Int32) -> (Double, Double) -> (Double, Double, Double, Double)?",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/markdown_node.mbt:1046",
+        "libs/ui/src/controls/reader_node.mbt:649"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.shape_of",
+      "expected_invar": "ui::shape_of",
+      "source_sig": "pub fn shape_of(Array[(Array[Double], Bool)], fill? : Int64, even_odd? : Bool, stroke? : Int64, width? : Double) -> @paint.Shape",
+      "call_count": 6,
+      "locations": [
+        "libs/ui/src/controls/files.mbt:56",
+        "libs/ui/src/controls/icons.mbt:445",
+        "libs/ui/src/controls/icons.mbt:449",
+        "libs/ui/src/controls/icons.mbt:484",
+        "libs/ui/src/controls/icons.mbt:488",
+        "libs/ui/src/controls/qr.mbt:80"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.shapes_ink_in",
+      "expected_invar": "ui::shapes_ink_in",
+      "source_sig": "pub fn shapes_ink_in(Array[@paint.Shape], Double) -> (Double, Double)",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/button_node.mbt:281",
+        "libs/ui/src/controls/chooser_button_node.mbt:69"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.smooth_middle",
+      "expected_invar": "ui::smooth_middle",
+      "source_sig": "pub fn smooth_middle(Double) -> Double",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/align.mbt:44"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.smooth_scale",
+      "expected_invar": "ui::smooth_scale",
+      "source_sig": "pub let smooth_scale : Double",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/tokens.mbt:2732"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.sp_at",
+      "expected_invar": "ui::sp_at",
+      "source_sig": "pub fn sp_at(Double, Double) -> Double",
+      "call_count": 10,
+      "locations": [
+        "libs/ui/src/controls/chat_list.mbt:579",
+        "libs/ui/src/controls/chat_list.mbt:581",
+        "libs/ui/src/controls/list_row_node.mbt:177",
+        "libs/ui/src/controls/list_row_node.mbt:179",
+        "libs/ui/src/controls/node_sp.mbt:9",
+        "libs/ui/src/controls/row_height_node.mbt:42",
+        "libs/ui/src/controls/row_height_node.mbt:42",
+        "libs/ui/src/controls/row_height_node.mbt:44"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.sp_from",
+      "expected_invar": "ui::sp_from",
+      "source_sig": "pub fn sp_from(Double, Double) -> Double",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/node_sp.mbt:15"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.span",
+      "expected_invar": "ui::span",
+      "source_sig": "pub fn span(String, weight? : Int32, bold? : Bool, italic? : Bool, emph? : Bool, code? : Bool, mono? : Bool, serif? : Bool, face? : Int32?, scale? : Double, color? : Int64, bg? : Int64, ground? : @text.Ground?, strike? : Bool, underline? : Bool, link? : String, drawing? : @text.InlineDrawing?) -> @text.Run",
+      "call_count": 44,
+      "locations": [
+        "libs/ui/src/controls/ask_card_node.mbt:43",
+        "libs/ui/src/controls/change_node.mbt:154",
+        "libs/ui/src/controls/chat_notice_pill_node.mbt:228",
+        "libs/ui/src/controls/code_display_node.mbt:54",
+        "libs/ui/src/controls/form_swatch_node.mbt:18",
+        "libs/ui/src/controls/form_swatch_node.mbt:322",
+        "libs/ui/src/controls/form_swatch_node.mbt:322",
+        "libs/ui/src/controls/form_swatch_node.mbt:323"
+      ],
+      "note": "NEVER map to non-existent text::span; @ui.span is a RichText span builder"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.style_cut",
+      "expected_invar": "ui::style_cut",
+      "source_sig": "pub fn style_cut(TextStyle) -> Bool",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/page_node.mbt:321"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.style_fills",
+      "expected_invar": "ui::style_fills",
+      "source_sig": "pub fn style_fills(TextStyle) -> Bool",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/page_node.mbt:322"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.style_ink",
+      "expected_invar": "ui::style_ink",
+      "source_sig": "pub fn style_ink(TextStyle) -> Int64",
+      "call_count": 23,
+      "locations": [
+        "libs/ui/src/controls/ask_card_node.mbt:45",
+        "libs/ui/src/controls/ask_line_node.mbt:132",
+        "libs/ui/src/controls/ask_outcome_node.mbt:53",
+        "libs/ui/src/controls/ask_outcome_node.mbt:99",
+        "libs/ui/src/controls/change_node.mbt:128",
+        "libs/ui/src/controls/chat_notice_pill_node.mbt:230",
+        "libs/ui/src/controls/form_swatch_node.mbt:21",
+        "libs/ui/src/controls/form_swatch_node.mbt:327"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.style_tabular",
+      "expected_invar": "ui::style_tabular",
+      "source_sig": "pub fn style_tabular(TextStyle) -> Bool?",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/page_node.mbt:322"
+      ],
+      "note": "NEVER map to hostapi::style_tabular (const Int bitflag); @ui.style_tabular is a Style builder fn"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.style_words",
+      "expected_invar": "ui::style_words",
+      "source_sig": "pub fn style_words(TextStyle) -> @view.WordsLook",
+      "call_count": 39,
+      "locations": [
+        "libs/ui/src/controls/ask_card_node.mbt:44",
+        "libs/ui/src/controls/ask_line_node.mbt:89",
+        "libs/ui/src/controls/ask_line_node.mbt:131",
+        "libs/ui/src/controls/ask_outcome_node.mbt:52",
+        "libs/ui/src/controls/ask_outcome_node.mbt:98",
+        "libs/ui/src/controls/change_node.mbt:127",
+        "libs/ui/src/controls/chat_list.mbt:577",
+        "libs/ui/src/controls/chat_notice_pill_node.mbt:229"
+      ],
+      "note": "NEVER map to hostapi::style_words (const Int bitflag); @ui.style_words is a Style builder fn"
+    },
+    {
+      "category": "controls_prod_missing_pure_logic",
+      "source": "@ui.tap_indication_ms",
+      "expected_invar": "ui::tap_indication_ms",
+      "source_sig": "pub let tap_indication_ms : Double",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/press_late.mbt:10",
+        "libs/ui/src/controls/press_look_node.mbt:226"
+      ],
+      "note": "Pure-logic builder/helper; upstream to invar preferred, temporary 100%-real-logic overlay allowed if upstream PR is in flight"
+    }
+  ],
+  "m13_frozen_tester_missing_methods": [
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::act",
+      "expected_invar": "ui::Tester::act",
+      "source_sig": "pub fn Tester::act(Self, @view.Role, @view.Action, label? : String, has? : String, within? : SemNode) -> Unit raise",
+      "call_count": 4,
+      "locations": [
+        "libs/ui/src/controls/button_node_focus_wbtest.mbt:33",
+        "libs/ui/src/controls/button_node_focus_wbtest.mbt:49",
+        "libs/ui/src/controls/button_node_focus_wbtest.mbt:60",
+        "libs/ui/src/controls/modal_focus_wbtest.mbt:51"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::advance",
+      "expected_invar": "ui::Tester::advance",
+      "source_sig": "pub fn Tester::advance(Self, Double) -> Unit",
+      "call_count": 4,
+      "locations": [
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:161",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:242",
+        "libs/ui/src/controls/player_wbtest.mbt:309",
+        "libs/ui/src/controls/player_parity_wbtest.mbt:189"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::all",
+      "expected_invar": "ui::Tester::all",
+      "source_sig": "pub fn Tester::all(Self, @view.Role, label? : String, has? : String, checked? : @view.Check, selected? : Bool, expanded? : Bool, disabled? : Bool, within? : SemNode) -> Array[SemNode]",
+      "call_count": 5,
+      "locations": [
+        "libs/ui/src/controls/choice_row_node_wbtest.mbt:89",
+        "libs/ui/src/controls/choice_row_node_wbtest.mbt:185",
+        "libs/ui/src/controls/choice_row_node_wbtest.mbt:202",
+        "libs/ui/src/controls/switch_node_wbtest.mbt:23",
+        "libs/ui/src/controls/player_wbtest.mbt:160"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::audit",
+      "expected_invar": "ui::Tester::audit",
+      "source_sig": "pub fn Tester::audit(Self) -> Array[String]",
+      "call_count": 13,
+      "locations": [
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:58",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:96",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:192",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:229",
+        "libs/ui/src/controls/choices_node_wbtest.mbt:30",
+        "libs/ui/src/controls/seg_glass_lens_wbtest.mbt:29",
+        "libs/ui/src/controls/seg_glass_lens_wbtest.mbt:58",
+        "libs/ui/src/controls/seg_glass_lens_wbtest.mbt:66"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::boxes_held",
+      "expected_invar": "ui::Tester::boxes_held",
+      "source_sig": "pub fn Tester::boxes_held(Self) -> Array[Laid]",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/switch_node_wbtest.mbt:33",
+        "libs/ui/src/controls/switch_node_wbtest.mbt:34"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::check_looks",
+      "expected_invar": "ui::Tester::check_looks",
+      "source_sig": "pub fn Tester::check_looks(Self, Bool) -> Unit",
+      "call_count": 21,
+      "locations": [
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:28",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:69",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:110",
+        "libs/ui/src/controls/card_foot_wbtest.mbt:7",
+        "libs/ui/src/controls/choice_row_node_wbtest.mbt:63",
+        "libs/ui/src/controls/choice_row_node_wbtest.mbt:177",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:9",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:76"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::draw",
+      "expected_invar": "ui::Tester::draw",
+      "source_sig": "pub fn Tester::draw(Self) -> Unit",
+      "call_count": 141,
+      "locations": [
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:46",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:87",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:133",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:142",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:147",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:152",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:187",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:223"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::drawlist",
+      "expected_invar": "ui::Tester::drawlist",
+      "source_sig": "pub fn Tester::drawlist(Self, bytes? : Bool) -> String",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/math_wbtest.mbt:37"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::drawn_rect_corners",
+      "expected_invar": "ui::Tester::drawn_rect_corners",
+      "source_sig": "pub fn Tester::drawn_rect_corners(Self) -> Array[(Double, Double, Double, Double, Int64, (Double, Double, Double, Double))]",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:18"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::drawn_rects",
+      "expected_invar": "ui::Tester::drawn_rects",
+      "source_sig": "pub fn Tester::drawn_rects(Self) -> Array[(Double, Double, Double, Double, Int64)]",
+      "call_count": 14,
+      "locations": [
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:49",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:134",
+        "libs/ui/src/controls/style_node_wbtest.mbt:27",
+        "libs/ui/src/controls/segment_rule_node_wbtest.mbt:7",
+        "libs/ui/src/controls/segment_rule_node_wbtest.mbt:39",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:215",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:264",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:231"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::find_last",
+      "expected_invar": "ui::Tester::find_last",
+      "source_sig": "pub fn Tester::find_last(Self, String) -> (Double, Double)?",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/player_wbtest.mbt:290"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::fixed_outgrown",
+      "expected_invar": "ui::Tester::fixed_outgrown",
+      "source_sig": "pub fn Tester::fixed_outgrown(Self) -> Array[String]",
+      "call_count": 7,
+      "locations": [
+        "libs/ui/src/controls/seg_node_wbtest.mbt:306",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:311",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:318",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:338",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:344",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:352",
+        "libs/ui/src/controls/player_wbtest.mbt:539"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::focused",
+      "expected_invar": "ui::Tester::focused",
+      "source_sig": "pub fn Tester::focused(Self) -> SemNode?",
+      "call_count": 17,
+      "locations": [
+        "libs/ui/src/controls/seg_node_wbtest.mbt:47",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:50",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:53",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:62",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:163",
+        "libs/ui/src/controls/switch_node_wbtest.mbt:32",
+        "libs/ui/src/controls/switch_node_wbtest.mbt:54",
+        "libs/ui/src/controls/scroll_keeps_typing_wbtest.mbt:10"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::frame_at",
+      "expected_invar": "ui::Tester::frame_at",
+      "source_sig": "pub fn Tester::frame_at(Self, Double) -> Unit",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:176"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::frame_period",
+      "expected_invar": "ui::Tester::frame_period",
+      "source_sig": "pub fn Tester::frame_period(Self) -> Double",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:242"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::holes",
+      "expected_invar": "ui::Tester::holes",
+      "source_sig": "pub fn Tester::holes(Self) -> Array[(Double, Double, Double, Double)]",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/player_wbtest.mbt:122",
+        "libs/ui/src/controls/player_parity_wbtest.mbt:84"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::host_says_finger",
+      "expected_invar": "ui::Tester::host_says_finger",
+      "source_sig": "pub fn Tester::host_says_finger(Self, Bool?) -> Unit",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/player_wbtest.mbt:347",
+        "libs/ui/src/controls/player_told_wbtest.mbt:72"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::ime",
+      "expected_invar": "ui::Tester::ime",
+      "source_sig": "pub fn Tester::ime(Self) -> (Bool, String, Int32, Int32)",
+      "call_count": 16,
+      "locations": [
+        "libs/ui/src/controls/scroll_keeps_typing_wbtest.mbt:104",
+        "libs/ui/src/controls/scroll_keeps_typing_wbtest.mbt:109",
+        "libs/ui/src/controls/scroll_keeps_typing_wbtest.mbt:120",
+        "libs/ui/src/controls/scroll_keeps_typing_wbtest.mbt:125",
+        "libs/ui/src/controls/scroll_keeps_typing_wbtest.mbt:163",
+        "libs/ui/src/controls/scroll_keeps_typing_wbtest.mbt:168",
+        "libs/ui/src/controls/scroll_keeps_typing_wbtest.mbt:173",
+        "libs/ui/src/controls/scroll_keeps_typing_wbtest.mbt:209"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::key_named",
+      "expected_invar": "ui::Tester::key_named",
+      "source_sig": "pub fn Tester::key_named(Self, String) -> Bool",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/modal_focus_wbtest.mbt:160"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::key_told",
+      "expected_invar": "ui::Tester::key_told",
+      "source_sig": "pub fn Tester::key_told(Self, Int32, Int32, Double) -> Unit",
+      "call_count": 3,
+      "locations": [
+        "libs/ui/src/controls/player_told_wbtest.mbt:43",
+        "libs/ui/src/controls/player_told_wbtest.mbt:48",
+        "libs/ui/src/controls/player_told_wbtest.mbt:86"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::leave",
+      "expected_invar": "ui::Tester::leave",
+      "source_sig": "pub fn Tester::leave(Self) -> Unit",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/choice_row_node_wbtest.mbt:181"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::locate",
+      "expected_invar": "ui::Tester::locate",
+      "source_sig": "pub fn Tester::locate(Self, String) -> Array[(Double, Double)]",
+      "call_count": 4,
+      "locations": [
+        "libs/ui/src/controls/player_wbtest.mbt:137",
+        "libs/ui/src/controls/player_wbtest.mbt:509",
+        "libs/ui/src/controls/player_wbtest.mbt:519",
+        "libs/ui/src/controls/player_parity_wbtest.mbt:117"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::query",
+      "expected_invar": "ui::Tester::query",
+      "source_sig": "pub fn Tester::query(Self, @view.Role, label? : String, has? : String, checked? : @view.Check, selected? : Bool, expanded? : Bool, disabled? : Bool, within? : SemNode) -> SemNode?",
+      "call_count": 4,
+      "locations": [
+        "libs/ui/src/controls/player_wbtest.mbt:381",
+        "libs/ui/src/controls/player_wbtest.mbt:383",
+        "libs/ui/src/controls/player_wbtest.mbt:393",
+        "libs/ui/src/controls/player_told_wbtest.mbt:75"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::rect_of",
+      "expected_invar": "ui::Tester::rect_of",
+      "source_sig": "pub fn Tester::rect_of(Self, String) -> (Double, Double, Double, Double)?",
+      "call_count": 9,
+      "locations": [
+        "libs/ui/src/controls/card_foot_wbtest.mbt:43",
+        "libs/ui/src/controls/card_foot_wbtest.mbt:44",
+        "libs/ui/src/controls/card_foot_wbtest.mbt:45",
+        "libs/ui/src/controls/card_foot_wbtest.mbt:46",
+        "libs/ui/src/controls/card_foot_wbtest.mbt:69",
+        "libs/ui/src/controls/card_foot_wbtest.mbt:70",
+        "libs/ui/src/controls/card_foot_wbtest.mbt:71",
+        "libs/ui/src/controls/segment_rule_node_wbtest.mbt:43"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::resize_next",
+      "expected_invar": "ui::Tester::resize_next",
+      "source_sig": "pub fn Tester::resize_next(Self, Double, Double) -> Unit",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:319",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:337"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::rich_of",
+      "expected_invar": "ui::Tester::rich_of",
+      "source_sig": "pub fn Tester::rich_of(Self, String) -> (RichLayout, Double, Double)?",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/math_wbtest.mbt:23"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::run_rects",
+      "expected_invar": "ui::Tester::run_rects",
+      "source_sig": "pub fn Tester::run_rects(Self, String) -> Array[(Double, Double, Double, Double)]",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/math_wbtest.mbt:24"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::semantics",
+      "expected_invar": "ui::Tester::semantics",
+      "source_sig": "pub fn Tester::semantics(Self) -> Array[SemNode]",
+      "call_count": 7,
+      "locations": [
+        "libs/ui/src/controls/seg_node_wbtest.mbt:25",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:103",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:138",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:142",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:36",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:67",
+        "libs/ui/src/controls/scroll_keeps_typing_wbtest.mbt:164"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::set_font_scale",
+      "expected_invar": "ui::Tester::set_font_scale",
+      "source_sig": "pub fn Tester::set_font_scale(Self, Double) -> Unit",
+      "call_count": 10,
+      "locations": [
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:85",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:173",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:187",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:308",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:312",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:340",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:346",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:8"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::set_player",
+      "expected_invar": "ui::Tester::set_player",
+      "source_sig": "pub fn Tester::set_player(Self, Int32, duration? : Double, position? : Double, playing? : Bool, natural? : (Double, Double), shown? : Bool, buffering? : Bool, buffered? : Double, ended? : Bool) -> Unit",
+      "call_count": 3,
+      "locations": [
+        "libs/ui/src/controls/player_wbtest.mbt:150",
+        "libs/ui/src/controls/player_wbtest.mbt:257",
+        "libs/ui/src/controls/player_wbtest.mbt:260"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::set_reduce_motion",
+      "expected_invar": "ui::Tester::set_reduce_motion",
+      "source_sig": "pub fn Tester::set_reduce_motion(Self, Bool) -> Unit",
+      "call_count": 5,
+      "locations": [
+        "libs/ui/src/controls/seg_glass_lens_wbtest.mbt:81",
+        "libs/ui/src/controls/seg_glass_lens_wbtest.mbt:114",
+        "libs/ui/src/controls/seg_glass_lens_wbtest.mbt:194",
+        "libs/ui/src/controls/seg_glass_lens_wbtest.mbt:234",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:118"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::set_reduce_transparency",
+      "expected_invar": "ui::Tester::set_reduce_transparency",
+      "source_sig": "pub fn Tester::set_reduce_transparency(Self, Bool) -> Unit",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:265"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::squeeze_faults",
+      "expected_invar": "ui::Tester::squeeze_faults",
+      "source_sig": "pub fn Tester::squeeze_faults(Self) -> Array[String]",
+      "call_count": 6,
+      "locations": [
+        "libs/ui/src/controls/styled_words_wbtest.mbt:36",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:307",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:319",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:339",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:345",
+        "libs/ui/src/controls/seg_node_wbtest.mbt:353"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::tab",
+      "expected_invar": "ui::Tester::tab",
+      "source_sig": "pub fn Tester::tab(Self, back? : Bool) -> Unit",
+      "call_count": 3,
+      "locations": [
+        "libs/ui/src/controls/button_node_focus_wbtest.mbt:34",
+        "libs/ui/src/controls/button_node_focus_wbtest.mbt:50",
+        "libs/ui/src/controls/button_node_focus_wbtest.mbt:61"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::tabular_wider",
+      "expected_invar": "ui::Tester::tabular_wider",
+      "source_sig": "pub fn Tester::tabular_wider(Self, Double) -> Unit",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/seg_node_wbtest.mbt:224"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::tap_text",
+      "expected_invar": "ui::Tester::tap_text",
+      "source_sig": "pub fn Tester::tap_text(Self, String) -> Unit",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/player_wbtest.mbt:337",
+        "libs/ui/src/controls/player_wbtest.mbt:339"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::text_missing",
+      "expected_invar": "ui::Tester::text_missing",
+      "source_sig": "pub fn Tester::text_missing(Self) -> Array[String]",
+      "call_count": 1,
+      "locations": [
+        "libs/ui/src/controls/math_wbtest.mbt:22"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::text_runs",
+      "expected_invar": "ui::Tester::text_runs",
+      "source_sig": "pub fn Tester::text_runs(Self) -> Array[TextRun]",
+      "call_count": 3,
+      "locations": [
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:47",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:88",
+        "libs/ui/src/controls/style_defaults_wbtest.mbt:135"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::touch",
+      "expected_invar": "ui::Tester::touch",
+      "source_sig": "pub fn Tester::touch(Self, Int32, Double, Double) -> Unit",
+      "call_count": 16,
+      "locations": [
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:168",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:170",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:171",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:244",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:245",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:259",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:268",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:286"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::touch_at",
+      "expected_invar": "ui::Tester::touch_at",
+      "source_sig": "pub fn Tester::touch_at(Self, Int32, Double, Double, Double) -> Unit",
+      "call_count": 4,
+      "locations": [
+        "libs/ui/src/controls/player_told_wbtest.mbt:55",
+        "libs/ui/src/controls/player_told_wbtest.mbt:57",
+        "libs/ui/src/controls/player_told_wbtest.mbt:80",
+        "libs/ui/src/controls/player_told_wbtest.mbt:81"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::tree_frames",
+      "expected_invar": "ui::Tester::tree_frames",
+      "source_sig": "pub fn Tester::tree_frames(Self) -> Array[TreeFrame]",
+      "call_count": 6,
+      "locations": [
+        "libs/ui/src/controls/seg_node_wbtest.mbt:285",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:372",
+        "libs/ui/src/controls/seg_glass_lens_wbtest.mbt:350",
+        "libs/ui/src/controls/switch_node_wbtest.mbt:117",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:151",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:225"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::tree_frames_from_now",
+      "expected_invar": "ui::Tester::tree_frames_from_now",
+      "source_sig": "pub fn Tester::tree_frames_from_now(Self) -> Unit",
+      "call_count": 6,
+      "locations": [
+        "libs/ui/src/controls/seg_node_wbtest.mbt:283",
+        "libs/ui/src/controls/seg_fill_node_wbtest.mbt:370",
+        "libs/ui/src/controls/seg_glass_lens_wbtest.mbt:341",
+        "libs/ui/src/controls/switch_node_wbtest.mbt:115",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:148",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:222"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::view_said",
+      "expected_invar": "ui::Tester::view_said",
+      "source_sig": "pub fn Tester::view_said(Self, String) -> Bool",
+      "call_count": 2,
+      "locations": [
+        "libs/ui/src/controls/player_wbtest.mbt:151",
+        "libs/ui/src/controls/player_wbtest.mbt:415"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::views",
+      "expected_invar": "ui::Tester::views",
+      "source_sig": "pub fn Tester::views(Self) -> Array[String]",
+      "call_count": 5,
+      "locations": [
+        "libs/ui/src/controls/player_wbtest.mbt:112",
+        "libs/ui/src/controls/player_wbtest.mbt:299",
+        "libs/ui/src/controls/player_parity_wbtest.mbt:166",
+        "libs/ui/src/controls/player_parity_wbtest.mbt:169",
+        "libs/ui/src/controls/player_parity_wbtest.mbt:179"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    },
+    {
+      "category": "m13_frozen_tester_missing",
+      "source": "@ui.Tester::words",
+      "expected_invar": "ui::Tester::words",
+      "source_sig": "pub fn Tester::words(Self) -> Array[(String, Double, Double, Double, Double, Double)]",
+      "call_count": 8,
+      "locations": [
+        "libs/ui/src/controls/seg_node_wbtest.mbt:205",
+        "libs/ui/src/controls/switch_node_wbtest.mbt:83",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:51",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:57",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:60",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:71",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:101",
+        "libs/ui/src/controls/slider_node_wbtest.mbt:105"
+      ],
+      "note": "Required by pre-frozen M1.3 interactive test matrix"
+    }
+  ],
+  "m2_plus_deferred": [
+    {
+      "source": "@sf.pin_field_node / OTP code_field_node",
+      "used_in": "apps/mbui/src/sfpages/lock_wait_node.mbt:128",
+      "wave": "M2/M3",
+      "note": "Not reachable from libs/ui/src/controls production code; never map to invar code_field editor"
+    },
+    {
+      "source": "apps/mbui/src/{sfbase,sfpages,sfdesk,sfapp} host/app_calls",
+      "used_in": "apps/mbui/src/",
+      "wave": "M2/M3",
+      "note": "App-layer controls deferred to Wave M2/M3"
+    }
+  ]
+}

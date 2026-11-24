@@ -406,6 +406,9 @@ export function mbSpawned(binary: string, args: string[], options: { background?
 /// failed), not let grow the station's memory with every ask given it meanwhile. The program's own queue of stdin is
 /// bounded too (mb/src/host/host.c STDIN_MOST): past it the rest waits in the pipe, then here.
 export const STDIN_MOST = 64 * 1024 * 1024;
+/// Unread past this, it is said once (and not ended): from then to STDIN_MOST, what it read of what it was given tells
+/// whether it stopped reading (next to nothing) or is given more than it reads.
+export const STDIN_BEHIND = 8 * 1024 * 1024;
 
 /// A program's process that runs, as the station's watch over its own memory counts them (ops/self-memory.ts).
 export type LiveProgram = { pid: number; args: readonly string[]; background: boolean; startedAt: number };
@@ -422,6 +425,9 @@ export class MbProcess extends EventEmitter {
   readonly #stdinMost: number;
   #exited = false;
   #stalled = false;
+  /// All written to its stdin, and where it stood when it was last found behind (STDIN_BEHIND, `postLine`).
+  #written = 0;
+  #behind: { at: number; written: number; unread: number } | null = null;
 
   /// `options.background`: whether it runs as the system's background work (mbSpawned), else as its args say;
   /// `stdinMost`: STDIN_MOST but in tests.
@@ -438,6 +444,9 @@ export class MbProcess extends EventEmitter {
     createInterface({ input: this.#child.stderr! }).on("line", (line) => log.warn("readers", "a MoonBit reader said", { line }));
     // (a failed write is the process gone, told by its exit)
     this.#child.stdin!.on("error", () => {});
+    // All it was given read, with nothing written meanwhile: no longer behind (else the next time it is would be told
+    // from where it stood before).
+    this.#child.stdin!.on("drain", () => void (this.#behind = null));
     this.#child.on("error", (error) => {
       if (this.#child.pid === undefined) MbProcess.#live.delete(this);
       this.emit("error", error);
@@ -463,9 +472,18 @@ export class MbProcess extends EventEmitter {
     if (this.#stalled || this.#exited) return;
     const stdin = this.#child.stdin!;
     stdin.write(`${line}\n`);
-    if (stdin.writableLength <= this.#stdinMost) return;
+    this.#written += line.length + 1;
+    const unread = stdin.writableLength;
+    if (unread > STDIN_BEHIND && this.#behind === null) {
+      this.#behind = { at: wall.now(), written: this.#written, unread };
+      log.warn("readers", "a MoonBit program is behind what it is asked", { args: this.#args.slice(0, 6), pid: this.#child.pid ?? null, unreadBytes: unread });
+    } else if (unread <= STDIN_BEHIND / 2) this.#behind = null;
+    if (unread <= this.#stdinMost) return;
     this.#stalled = true;
-    log.error("readers", "a MoonBit program stopped reading what it is asked; ending it", { args: this.#args.slice(0, 6), pid: this.#child.pid ?? null, unreadBytes: stdin.writableLength });
+    // Since it was found behind: how long, and what it read of what it was given (next to nothing, it stopped reading).
+    const behind = this.#behind;
+    const since = behind === null ? {} : { behindMs: wall.now() - behind.at, readBytes: this.#written - behind.written - (unread - behind.unread) };
+    log.error("readers", "a MoonBit program stopped reading what it is asked; ending it", { args: this.#args.slice(0, 6), pid: this.#child.pid ?? null, unreadBytes: unread, ...since });
     this.#child.kill("SIGKILL");
   }
 

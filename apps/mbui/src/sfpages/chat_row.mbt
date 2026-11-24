@@ -427,6 +427,12 @@ fn chat_menu_items(
       )
     None => ()
   }
+  // to another station of its workspace (its owners and admins: the core's mayMove), its stations picked among
+  if item.may_move {
+    items.push(
+      Some(@sf.menu_item_of(@sf.t("web-pages.stations.move.menu"), icon="move", further=true, fn() { open_chat_move(src, item, from=share_from()) })),
+    )
+  }
   // what shares it or takes it elsewhere: one 分享 where there are two or more
   let shared : Array[@sf.MenuItem?] = []
   let link = @sfbase.chat_link(item.station, item.session)

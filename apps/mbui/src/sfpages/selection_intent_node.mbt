@@ -19,6 +19,8 @@ fn open_selection_intent(
     fn(v, close) { selection_intent_body(v, src, close) },
     from~,
     heads_itself=true,
+    // (read beside the chat: the chat under it still scrolls by the wheel while it stays where it opened)
+    scrolls_under=true,
     gone=fn() { @sfbase.selection_intent_reset() },
   )
 }
@@ -38,7 +40,11 @@ fn selection_intent_body(v : @view.View, src : Source, close : () -> Unit) -> Un
   let column = intent_column.then(@ui.style(px=@sf.room_of(@sf.text_in)))
   // (its head: 戳一下, and at its end what can be done with the answer as quiet keys, as a pinned answer's head has)
   v.box(fn(head) {
-    @sf.style_node(head, fn() { intent_head.then(@ui.style(pl=@sf.room_of(@sf.text_in))) })
+    // (its last key in the popover's top right corner, concentric with it: as far in from its top and its right as the
+    // popover's corner is round past the key's, less the panel's padding it already stands in)
+    @sf.style_node(head, fn() {
+      intent_head.then(@ui.style(pl=@sf.room_of(@sf.text_in), pt=@sf.room_of(intent_key_in), pr=@sf.room_of(intent_key_in)))
+    })
     head.box(fn(t) {
       @sf.style_node(t, fn() { intent_pin_title_wrap }, in_row=true)
       @sf.words_node(t, fn() { @sf.t("web-main.chat.inferIntent.title") }, fn() { intent_title_words }) |> ignore
@@ -247,11 +253,16 @@ let intent_column : @ui.Style = @ui.css("w=Full pt=S1 pb=S3 gap=S2")
 
 ///|
 // kept across runs: a value (no field of it changes)
-let intent_head : @ui.Style = @ui.css("row w=Full gap=S1 pt=S1 align=ACenter")
+let intent_head : @ui.Style = @ui.css("row w=Full gap=S1 align=ACenter")
+
+///|
+/// How far the popover's head stands in from the panel's padding at its top and its right, so that its last key is
+/// concentric with the popover's corner (@sf.r_menu).
+let intent_key_in : Double = @sf.r_menu - intent_pin_btn / 2.0 - @sf.panel_pad
 
 ///|
 // kept across runs: a value (no field of it changes)
-let intent_title_words : @ui.TextStyle = @ui.text_style(size=Body, weight=Semibold, color=Fg, wrap=false, w=Full)
+let intent_title_words : @ui.TextStyle = @ui.text_style(size=Meta, weight=Semibold, color=Fg, wrap=false, w=Full)
 
 ///|
 // kept across runs: a value (no field of it changes)
@@ -263,7 +274,7 @@ let intent_failed_column : @ui.Style = @ui.css("w=Full gap=S1 py=S1")
 
 ///|
 // kept across runs: a value (no field of it changes)
-let intent_reply_words : @ui.TextStyle = @ui.text_style(size=Body, color=Fg, leading=L5, w=Full)
+let intent_reply_words : @ui.TextStyle = @ui.text_style(size=Meta, color=Fg, leading=L4_75, w=Full)
 
 ///|
 // kept across runs: a value (no field of it changes)
@@ -271,7 +282,7 @@ let intent_meta_words : @ui.TextStyle = @ui.text_style(size=Caption, color=Muted
 
 ///|
 // kept across runs: a value (no field of it changes)
-let intent_failed_title : @ui.TextStyle = @ui.text_style(size=Body, color=Fg, weight=Medium, w=Full)
+let intent_failed_title : @ui.TextStyle = @ui.text_style(size=Meta, color=Fg, weight=Medium, w=Full)
 
 ///|
 // kept across runs: a value (no field of it changes)

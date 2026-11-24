@@ -259,6 +259,7 @@ export function world(ids: string[] = [A, B], o: { answerMs?: boolean; packMost?
       order: () => st.moves.modules.map((m) => m.id), home: () => WS, here: () => id, rig: () => false,
       station: (_ws, v) => (roster.some((r) => r.id === v || r.name === v) ? { id: roster.find((r) => r.id === v || r.name === v)!.id, tasks: false } : null),
       refusal: (ws, s, lang) => st.moves.refusal(ws, s, lang),
+      chatOf: (k) => st.moves.handover.chatOf(k),
     });
     st.ask = async (method, path, body, role = "owner", query = []) => {
       const route = routes.find((r) => r.method === method && r.pattern.test(path))!;

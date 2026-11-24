@@ -1,0 +1,123 @@
+// Web host-provider asset adapter for `sf` (zero 2 MB embedded binary bloat on wasm32).
+// Supports:
+//   1. Initial absent state (returns empty Bytes; `sf::math_glyph_table()` returns None for text fallback)
+//   2. Late-arrival registration (`provide_code_face` / `provide_math_glyphs`) triggering redraw callbacks
+//   3. Post-decompress cache release (`drop_math_glyphs` clears compressed gzip buffer once unzipped)
+//   4. Graceful fallback on missing or corrupt payload without crashing
+
+import "sf"
+import "signals"
+
+fn empty_bytes() -> Bytes {
+  "".to_bytes()
+}
+
+pub struct WebAssetStore {
+  mut code_face_buf : Bytes
+  mut math_glyphs_buf : Bytes
+  mut math_drops : Int
+  mut redraw_count : Int
+  redraw_hooks : Array[() -> Unit]
+}
+
+pub fn WebAssetStore::new() -> WebAssetStore {
+  WebAssetStore::{
+    code_face_buf: empty_bytes(),
+    math_glyphs_buf: empty_bytes(),
+    math_drops: 0,
+    redraw_count: 0,
+    redraw_hooks: [],
+  }
+}
+
+pub fn WebAssetStore::on_redraw(self : WebAssetStore, cb : () -> Unit) -> Unit {
+  self.redraw_hooks.push(cb)
+}
+
+pub fn WebAssetStore::redraw_count(self : WebAssetStore) -> Int {
+  self.redraw_count
+}
+
+pub fn WebAssetStore::math_drops(self : WebAssetStore) -> Int {
+  self.math_drops
+}
+
+pub fn WebAssetStore::has_compressed_math_cache(self : WebAssetStore) -> Bool {
+  self.math_glyphs_buf.length() > 0
+}
+
+pub fn WebAssetStore::has_code_face(self : WebAssetStore) -> Bool {
+  self.code_face_buf.length() > 0
+}
+
+fn WebAssetStore::fire_redraw(self : WebAssetStore) -> Unit {
+  self.redraw_count = self.redraw_count + 1
+  for i in 0..<self.redraw_hooks.length() {
+    let cb = self.redraw_hooks[i]
+    cb()
+  }
+}
+
+/// Bind this Web host store into `sf`'s asset registries.
+pub fn WebAssetStore::install(self : WebAssetStore) -> Unit {
+  sf::register_faces(fn() -> Bytes { self.code_face_buf })
+  sf::register_math_glyphs(
+    fn() -> Bytes { self.math_glyphs_buf },
+    fn() -> Unit {
+      self.math_glyphs_buf = empty_bytes()
+      self.math_drops = self.math_drops + 1
+    },
+  )
+}
+
+/// Deliver lazily fetched code font bytes from the Web host and trigger redraw.
+pub fn WebAssetStore::provide_code_face(
+  self : WebAssetStore,
+  ttf : Bytes,
+) -> Unit {
+  self.code_face_buf = ttf
+  sf::register_faces(fn() -> Bytes { self.code_face_buf })
+  self.fire_redraw()
+}
+
+/// Deliver lazily fetched gzipped math glyph bytes from the Web host and trigger redraw.
+pub fn WebAssetStore::provide_math_glyphs(
+  self : WebAssetStore,
+  gz : Bytes,
+) -> Unit {
+  self.math_glyphs_buf = gz
+  sf::register_math_glyphs(
+    fn() -> Bytes { self.math_glyphs_buf },
+    fn() -> Unit {
+      self.math_glyphs_buf = empty_bytes()
+      self.math_drops = self.math_drops + 1
+    },
+  )
+  self.fire_redraw()
+}
+
+/// Simulate network disconnect / asset eviction (returns to graceful fallback state).
+pub fn WebAssetStore::clear_on_disconnect(self : WebAssetStore) -> Unit {
+  self.code_face_buf = empty_bytes()
+  self.math_glyphs_buf = empty_bytes()
+  sf::register_faces(fn() -> Bytes { self.code_face_buf })
+  sf::register_math_glyphs(
+    fn() -> Bytes { self.math_glyphs_buf },
+    fn() -> Unit {
+      self.math_glyphs_buf = empty_bytes()
+      self.math_drops = self.math_drops + 1
+    },
+  )
+  self.fire_redraw()
+}
+
+/// Minimal wasm32 smoke entrypoint proving `sf_assets_web` builds cleanly with zero embedded 2 MB blobs.
+pub fn web_assets_smoke_ready() -> Int {
+  let store = WebAssetStore::new()
+  let _ = signals::ref_new(0)
+  if store.has_code_face() { 1 } else { 0 }
+}
+
+pub fn main() -> Int {
+  web_assets_smoke_ready()
+}

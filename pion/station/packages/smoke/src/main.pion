@@ -9,8 +9,11 @@
 
 import "base_codec"
 import "builders_core"
+import "builders_index"
+import "builders_stateful"
 import "footprint"
 import "host_shim"
+import "js_json"
 import "memory"
 import "packed"
 import "sql_db"
@@ -62,12 +65,43 @@ fn is_hex_digit(c : Int) -> Bool {
   (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
 }
 
+fn advertised_modes() -> Array[String] {
+  [
+    "footprint",
+    "packed",
+    "memory",
+    "archive-marks",
+    "session-bindings",
+    "session-counts",
+    "signin-save",
+    "post-blocks",
+    "usage-retire",
+    "widget-sources",
+    "card-posts",
+    "closed-cards",
+    "people-since",
+    "session-up-jobs",
+    "workspace-up-jobs",
+    "outflow-chats",
+    "search-scope",
+    "session-list",
+    "archive-last",
+    "page-letters",
+  ]
+}
+
 fn run_version(world : World) -> Unit {
-  io_println(
-    world,
-    host_shim::build_info() +
-    " modes:footprint,packed,memory,archive-marks,session-bindings,session-counts,signin-save,post-blocks,usage-retire,widget-sources,card-posts,closed-cards,people-since",
-  )
+  let modes = advertised_modes()
+  let sb = StringBuilder::new()
+  sb.write_string(host_shim::build_info())
+  sb.write_string(" modes:")
+  for i in 0..<modes.length() {
+    if i > 0 {
+      sb.write_string(",")
+    }
+    sb.write_string(modes[i])
+  }
+  io_println(world, sb.to_string())
 }
 
 // Return codes for stdio line handling: 0 = continue, 1 = clean quit, -1 = stdout write failed.
@@ -890,16 +924,24 @@ fn run_smoke_sql_db(world : World, db_path : String) -> Unit {
     Ok(_) => ()
     Err(msg) => panic("sql_db selftest failed: " + msg)
   }
+  match js_json::run_selftest() {
+    Ok(_) => ()
+    Err(msg) => panic("js_json selftest failed: " + msg)
+  }
   match builders_core::run_builders_selftest() {
     Ok(_) => ()
     Err(msg) => panic("builders_core selftest failed: " + msg)
   }
-  io_println(world, "{\"ok\":true,\"suite\":\"sql_db+builders_core\"}")
+  match builders_stateful::run_gc_selftest() {
+    Ok(_) => ()
+    Err(msg) => panic("builders_stateful gc selftest failed: " + msg)
+  }
+  io_println(world, "{\"ok\":true,\"suite\":\"sql_db+js_json+builders_core+builders_stateful\"}")
 }
 
 fn usage_exit() -> Unit {
   let _ = host_shim::write_stderr_line(
-    "usage: stillfail-pion [--version | --smoke-stdio | --smoke-sqlite <db> | --smoke-sql-db <db> | --smoke-shell [dir] | --smoke-rc-soak [iters] | --builder footprint [--sep <sep>] | --builder memory [--shell-dir <dir>] [--sep <sep>] | --builder packed [--shell-dir <dir>] | --builder archive-marks|session-bindings|session-counts|signin-save|post-blocks|usage-retire|widget-sources|card-posts|closed-cards|people-since --db <file>]",
+    "usage: stillfail-pion [--version | --smoke-stdio | --smoke-sqlite <db> | --smoke-sql-db <db> | --smoke-shell [dir] | --smoke-rc-soak [iters] | --builder footprint [--sep <sep>] | --builder memory [--shell-dir <dir>] [--sep <sep>] | --builder packed [--shell-dir <dir>] | --builder archive-marks|session-bindings|session-counts|signin-save|post-blocks|usage-retire|widget-sources|card-posts|closed-cards|people-since|session-up-jobs|workspace-up-jobs|outflow-chats|search-scope|session-list|archive-last|page-letters --db <file>]",
   )
   host_shim::exit_process(2)
 }
@@ -1015,6 +1057,48 @@ fn main(world : World) -> Unit {
       Some("people-since") => {
         match flag_value(argv, "--db") {
           Some(db_path) => host_shim::exit_process(builders_core::run_people_since(db_path))
+          None => usage_exit()
+        }
+      }
+      Some("session-up-jobs") => {
+        match flag_value(argv, "--db") {
+          Some(db_path) => host_shim::exit_process(builders_index::run_session_up_jobs(db_path))
+          None => usage_exit()
+        }
+      }
+      Some("workspace-up-jobs") => {
+        match flag_value(argv, "--db") {
+          Some(db_path) => host_shim::exit_process(builders_index::run_workspace_up_jobs(db_path))
+          None => usage_exit()
+        }
+      }
+      Some("outflow-chats") => {
+        match flag_value(argv, "--db") {
+          Some(db_path) => host_shim::exit_process(builders_index::run_outflow_chats(db_path))
+          None => usage_exit()
+        }
+      }
+      Some("search-scope") => {
+        match flag_value(argv, "--db") {
+          Some(db_path) => host_shim::exit_process(builders_index::run_search_scope(db_path))
+          None => usage_exit()
+        }
+      }
+      Some("session-list") => {
+        match flag_value(argv, "--db") {
+          Some(db_path) => host_shim::exit_process(builders_index::run_session_list(db_path))
+          None => usage_exit()
+        }
+      }
+      Some("archive-last") => {
+        match flag_value(argv, "--db") {
+          Some(db_path) => host_shim::exit_process(builders_stateful::run_archive_last(db_path))
+          None => usage_exit()
+        }
+      }
+      Some("page-letters") => {
+        match flag_value(argv, "--db") {
+          Some(db_path) => host_shim::exit_process(builders_stateful::run_page_letters(db_path))
           None => usage_exit()
         }
       }

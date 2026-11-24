@@ -1,5 +1,6 @@
 import type { EventEmitter } from "node:events";
-import { MbBackfill, readerBinary } from "../read/mb-reader.ts";
+import { MbBackfill, resolveReaderSelection } from "../read/mb-reader.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import { Fibers } from "../ops/fibers.ts";
 import { log } from "../ops/log.ts";
 import { releaseStoppedBackfill } from "./backfill.ts";
@@ -29,7 +30,8 @@ type StartLookupWorker = (...args: ConstructorParameters<typeof MbBackfill>) => 
 /// MoonBit builder (station/mb, src/legacy; `MbBackfill`; `binary`: the program, a test's own where it gives one).
 /// A test can give `startWorker` to decide when each batch answers without starting a process.
 function buildLookups(store: Store, previous: Promise<void>, kinds: readonly Kind[], binary?: string,
-  startWorker: StartLookupWorker = (...args) => new MbBackfill(...args)): {
+  startWorker: StartLookupWorker = (...args) => new MbBackfill(...args),
+  readers?: () => ReaderSelectConfig): {
   ready: Promise<boolean>; waitForDecisionSessions: () => Promise<boolean>;
   wake: () => void; close: () => Promise<void>;
 } {
@@ -129,7 +131,10 @@ function buildLookups(store: Store, previous: Promise<void>, kinds: readonly Kin
       return;
     }
     let current: LookupWorker;
-    try { current = startWorker(binary ?? readerBinary(), ["--builder", "session-backfill", "--db", path], store.backfillPriority, 20); }
+    try {
+      const bin = resolveReaderSelection("session-backfill", { binary, config: readers, logAt: "readers" }).primaryBinary;
+      current = startWorker(bin, ["--builder", "session-backfill", "--db", path], store.backfillPriority, 20);
+    }
     catch (error) {
       log.warn("store", "the old message lookup worker could not start", { error: (error as Error).message });
       retry();
@@ -265,12 +270,12 @@ function buildLookups(store: Store, previous: Promise<void>, kinds: readonly Kin
 }
 
 /// Prepare only the old ordinary-message lookup (also used by its standalone recovery tests).
-export function buildLegacySaid(store: Store, previous: Promise<void>, binary?: string): ReturnType<typeof buildLookups> {
-  return buildLookups(store,previous,["legacy-said"],binary);
+export function buildLegacySaid(store: Store, previous: Promise<void>, binary?: string, readers?: () => ReaderSelectConfig): ReturnType<typeof buildLookups> {
+  return buildLookups(store,previous,["legacy-said"],binary,undefined,readers);
 }
 
 /// Prepare the old lookups a store needs after the old station has handed over.
 export function buildLegacyEntryLookups(store: Store, previous: Promise<void>, binary?: string,
-  startWorker?: StartLookupWorker): ReturnType<typeof buildLookups> {
-  return buildLookups(store,previous,["legacy-said","legacy-agent","legacy-login","legacy-edits","legacy-policy","legacy-decision-time","legacy-decision-session","page-letter-gc"],binary,startWorker);
+  startWorker?: StartLookupWorker, readers?: () => ReaderSelectConfig): ReturnType<typeof buildLookups> {
+  return buildLookups(store,previous,["legacy-said","legacy-agent","legacy-login","legacy-edits","legacy-policy","legacy-decision-time","legacy-decision-session","page-letter-gc"],binary,startWorker,readers);
 }

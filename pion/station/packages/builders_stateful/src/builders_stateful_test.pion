@@ -1,0 +1,33 @@
+fn expect(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+test "str_contains handles empty, prefix, middle, suffix, and miss" {
+  expect(str_contains("archive_last_v1", ""), "empty needle")
+  expect(str_contains("CREATE TRIGGER t BEGIN\n-- archive_last_v1\nEND;", "archive_last_v1"), "middle match")
+  expect(str_contains("page_letter_v1", "page_letter_v1"), "exact match")
+  expect(!str_contains("page_letter_v0", "page_letter_v1"), "miss")
+  expect(!str_contains("short", "longer_needle"), "needle longer than haystack")
+}
+
+test "archive_last and page_letters trigger definitions are complete and marked" {
+  let a_names = archive_last_names()
+  let a_trigs = archive_last_triggers()
+  expect(a_names.length() == 4 && a_trigs.length() == 4, "4 archive_last triggers")
+  for i in 0..<a_trigs.length() {
+    expect(str_contains(a_trigs[i], a_names[i]), "archive_last trigger name")
+    expect(str_contains(a_trigs[i], "-- archive_last_v1\n"), "archive_last mark")
+    expect(str_contains(a_trigs[i], " END;"), "archive_last END;")
+  }
+
+  let l_names = page_letter_names()
+  let l_trigs = page_letter_triggers()
+  expect(l_names.length() == 4 && l_trigs.length() == 4, "4 page_letter triggers")
+  for i in 0..<l_trigs.length() {
+    expect(str_contains(l_trigs[i], l_names[i]), "page_letter trigger name")
+    expect(str_contains(l_trigs[i], "-- page_letter_v1\n"), "page_letter mark")
+    expect(str_contains(l_trigs[i], " END;"), "page_letter END;")
+  }
+}

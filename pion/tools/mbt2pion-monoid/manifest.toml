@@ -1,0 +1,3325 @@
+# Machine-generated Wave M1 manifest for AFK-surf/monoid (`libs/ui/src/controls` -> `pion/ui/packages/sf`)
+# Regenerate via: node pion/tools/mbt2pion-monoid/audit_signatures.mjs
+
+[metadata]
+schema_version = 1
+monoid_source_commit = "f0fb92750e75a8625aa4da34e206fee16f6c96db"
+invar_lock_sha = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3"
+mbt2pion_commit = "6d22ff1f90bd19012a5997f7fdfdc56ee3012408"
+toolchain_lock = "2f2886f685c5f21a8fd33f766a13673d385fbf05b24334da79bcb352fcb11d50"
+api_map_sha256 = "1582a389d7a01f19508df4b56e22a77b7da9e8e6655e8f8a6bc3b614436051a9"
+recipes_sha256 = "326388adc01e16d447a92e25e0f422e0a005c77bd54df3c55ab94c7d2eb38051"
+blockers_sha256 = "11792b9508b287f81e75368a1bad2221a288616b385473b1fbdd1c81e70f5743"
+
+[toolchain.versions]
+pionc = "0.1.0"
+moon = "0.1.20261117"
+
+[toolchain.binaries.darwin-arm64]
+pionc_sha256 = "caa5806359f60283512aa51e1210e319ba08f5593805f451f963323b609f8d61"
+moon_sha256 = "9c6caa0cccf93865869c33310d3da104547a11327a89811dbc8296eb2ea83727"
+
+[toolchain.binaries.linux-x86_64]
+pionc_sha256 = "verify-on-linux-ci"
+moon_sha256 = "verify-on-linux-ci"
+
+[toolchain.binaries.linux-arm64]
+pionc_sha256 = "verify-on-linux-ci"
+moon_sha256 = "verify-on-linux-ci"
+
+[assets]
+code_face_ttf_bytes = 300144
+code_face_ttf_sha256 = "3cfafa86e28b87184d592fef82846e8c10cb48653c62efcda34f082da225ec34"
+math_glyphs_gz_bytes = 293607
+math_glyphs_gz_sha256 = "7fdd1b483df973987efc5d9731fc09d348e71346905604ed2f48ffdc295814f4"
+math_json_bytes = 15052
+math_json_sha256 = "7398fa93cdd39be955d010c31728cb64979db94a89ad3f8fc8fe6ab97b11d13f"
+math_mac_textrec_bytes = 5363
+math_mac_textrec_sha256 = "eb3197183f1252d7382e30e4e1b20022f7111664f023421a3e844ae88faa2cc1"
+
+[counts]
+production_files = 255
+production_loc = 67628
+app_unreachable_production_files = 4
+wbtest_files = 201
+blackbox_test_files = 7
+total_test_files = 208
+
+[m1_3_frozen_test_matrix]
+tokens = ["contrast_theme_wbtest.mbt", "style_defaults_wbtest.mbt", "style_node_wbtest.mbt", "styled_words_wbtest.mbt"]
+layout = ["card_foot_wbtest.mbt", "segment_rule_node_wbtest.mbt"]
+avatar = ["avatar_wbtest.mbt", "avatar_stack_node_wbtest.mbt"]
+options_card = ["choices_node_wbtest.mbt", "choice_row_node_wbtest.mbt"]
+segmented = ["seg_wbtest.mbt", "seg_node_wbtest.mbt", "seg_fill_node_wbtest.mbt", "seg_glass_lens_wbtest.mbt"]
+switch = ["switch_node_wbtest.mbt"]
+slider = ["slider_node_wbtest.mbt"]
+scroll = ["scroll_keeps_typing_wbtest.mbt"]
+focus = ["button_node_focus_wbtest.mbt", "modal_focus_wbtest.mbt", "panel_centred_focus_wbtest.mbt"]
+a11y = ["names_wbtest.mbt"]
+player = ["player_wbtest.mbt", "player_node_wbtest.mbt", "player_parity_wbtest.mbt", "player_told_wbtest.mbt"]
+assets = ["faces_wbtest.mbt", "math_wbtest.mbt", "math_fixture_wbtest.mbt", "math_text_wbtest.mbt"]
+
+[m1_1_vertical_pilot_samples]
+files = [
+  "numbers.mbt",
+  "marked.mbt",
+  "tokens_data.mbt",
+  "clock_read_known.mbt",
+  "table_copy.mbt",
+  "reader_marks.mbt",
+]
+
+[m1_2_complex_target_samples]
+files = [
+  "tokens.mbt",
+  "presented_windows.mbt",
+  "style_node.mbt",
+  "player_parts.mbt",
+  "markdown.mbt",
+  "icons.mbt",
+  "viewer_file.mbt",
+  "gradient.mbt",
+  "math.mbt",
+]
+
+[[production_files]]
+file = "about_mark_node.mbt"
+loc = 77
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "fc862aca0df090c803bb4fbbb87ac037713b6130d88a764cd5f73dc85a2fb521"
+
+[[production_files]]
+file = "accent_pick.mbt"
+loc = 298
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "0b29b5c9764809c064e2ef062431d921bdffbb9a83af6fd0a7d3597aa720827e"
+
+[[production_files]]
+file = "accordion_node.mbt"
+loc = 128
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "9c5485b1be2640248f28adf6cd21ba54878b084e5da2bc12ac6176aa71ae957b"
+
+[[production_files]]
+file = "action_sheet_node.mbt"
+loc = 276
+app_reachable = false
+disposition = "transpile_sf"
+sha256 = "a1e305a4dfc3fb9a9f63c023c81ae6a0c3c32d5685cb8d5e13f587a82d9ef76c"
+
+[[production_files]]
+file = "address_bar_node.mbt"
+loc = 241
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "e9e17bc0b7880f81138156ab03e0c40455b58b8b30e0f9107875fe81a5b6c5de"
+
+[[production_files]]
+file = "agent_stats_node.mbt"
+loc = 259
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "25e4dc584c7d10cda7928732a5c50b59d8e7f3c81c9c6b67de662fd8df84223c"
+
+[[production_files]]
+file = "align.mbt"
+loc = 185
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "5b2bade6a8480259488e9ca28c068e6d6a61fe3ba8997609ef26776dd5b314c1"
+
+[[production_files]]
+file = "ask.mbt"
+loc = 43
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "d25c72d2a49de837fcb5e85ace6a8f313eebaa2f595d49f56e8d5d26fae215a3"
+
+[[production_files]]
+file = "ask_card_node.mbt"
+loc = 111
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "87f6c4d55a6d2c4cfff898fad7575ad162780aed9abe81783263434d2ca50947"
+
+[[production_files]]
+file = "ask_line_node.mbt"
+loc = 147
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "861b8a6afc836ca916f3e87d38345f00474a5bc7eee21ff7aa89d018c614397e"
+
+[[production_files]]
+file = "ask_node.mbt"
+loc = 135
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "cbb134de365dabbb5fce95b9be07835c0d3faed919790549e64a079ea209625b"
+
+[[production_files]]
+file = "ask_outcome_node.mbt"
+loc = 192
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "589eb929ebd7648f9e54d8efa6a1e3925e136a0ed4e65d91aab675c5fa0cc14e"
+
+[[production_files]]
+file = "avatar.mbt"
+loc = 68
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "c5e5f7fed412d15762fc52e7f4c8e3e1dc86264c2cebe773fb5ebdb4cdd57d46"
+
+[[production_files]]
+file = "avatar_stack_node.mbt"
+loc = 124
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "460c738765b56e74562c58ef28ddda362f846aeccb965c07950ea5f5a9fa1d71"
+
+[[production_files]]
+file = "bar_meter_button_node.mbt"
+loc = 33
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "cc4426fd4817ce21739ecb8971ff7204e20a280856a2498afeafc042272c9bfb"
+
+[[production_files]]
+file = "bar_pill_group_node.mbt"
+loc = 145
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "17e2f3afadc185768240d849cb3ec25bec110cf42557735b8b89894641758a64"
+
+[[production_files]]
+file = "bar_place_node.mbt"
+loc = 69
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "4d0cc2f85981771d2f623be286f459c03048015ba58dc4cc2a79f9a474c06c54"
+
+[[production_files]]
+file = "beside_panel_node.mbt"
+loc = 98
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "8e1c1c6b2420c6cc64495ef509aec83c52e59ecfd906e04fc7ea6bd4279ebf4d"
+
+[[production_files]]
+file = "breathe_node.mbt"
+loc = 51
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "545568865f6f046741e123d9169028c8ce924c72693d30e90dda57ebb665925f"
+
+[[production_files]]
+file = "button_node.mbt"
+loc = 376
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "d4567b5dbeda8646f2614f9108bf141467b08971bbc321f1aec356307758bba5"
+
+[[production_files]]
+file = "button_while_node.mbt"
+loc = 67
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "46b7497b41432fe36ce18079571a7a5c8b7065f066209058c43a7c3d3cfeed9c"
+
+[[production_files]]
+file = "capsule_words_button_node.mbt"
+loc = 44
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "3a80d1c98600d3ea29f48342ca391f2f18ab8b0b671df7eb7e0997d8241daec6"
+
+[[production_files]]
+file = "card_piece_node.mbt"
+loc = 231
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "cecc8a44a3d370f754e863823d03c831cf810ddd3f061bccafca4d6b147affb8"
+
+[[production_files]]
+file = "change_node.mbt"
+loc = 308
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "f24c80299039b3e34855df5647ae82f184870271c767a3dad0960f472a6d6421"
+
+[[production_files]]
+file = "chat_list.mbt"
+loc = 605
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "5377786796954a26165d431ad974133de74006560ea554a6a8df705567256613"
+
+[[production_files]]
+file = "chat_notice_pill_node.mbt"
+loc = 521
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "2b58895aa02b1fcdef9b1167d1d336605acd3c3b64bd7d6b2c40a1d05c309d37"
+
+[[production_files]]
+file = "check_node.mbt"
+loc = 121
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "4f9abde514e02efc22109a9fc18787387971e64fd1402617630f0f758c373c1f"
+
+[[production_files]]
+file = "check_row_node.mbt"
+loc = 191
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "ab00f80f733c10e239b75959374978068c6f95028083fecf7c0267b4cb693ab8"
+
+[[production_files]]
+file = "chip_node.mbt"
+loc = 230
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "09cd43a1a9cccec67033beacac364597bda33964b2b5a25c086b6c3f855b89e4"
+
+[[production_files]]
+file = "choice_cards_node.mbt"
+loc = 110
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "f9b08514b254347d1536532412d4047efa0b178a1e07a7b6e9ae5f41985a1002"
+
+[[production_files]]
+file = "choice_row_node.mbt"
+loc = 259
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "b45405cd5e2eb2c9c71ddcb9a5179bee7ac666f746f075ef13665b8eb790115a"
+
+[[production_files]]
+file = "choices_node.mbt"
+loc = 180
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "95e9a01d11e88e13dd97756f5440d6a09e74d0c2a824ee06a1b22859afcbd5bf"
+
+[[production_files]]
+file = "chooser_button_node.mbt"
+loc = 83
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "d18e6161d6a60fbc2f921fe6e0ae0162a205a9d7a954abd10415cb6ae70ad4b1"
+
+[[production_files]]
+file = "chooser_node.mbt"
+loc = 240
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "efd2cdaa2c054795d74900f44a54d3e22883a0b6e2b4162664c6be8c99511d8b"
+
+[[production_files]]
+file = "clock_read_known.mbt"
+loc = 10
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "18a2c46a6c2434f6500c2ee2827358203dc96d50677a96ec68d3b054f2542e39"
+
+[[production_files]]
+file = "code_display_node.mbt"
+loc = 81
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "cba8b03ac8973b533cbf689da7883bae9c18d28dfff5afa2385ca9bab8302fa3"
+
+[[production_files]]
+file = "confirm_node.mbt"
+loc = 334
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "632ba6065e0f1d6268e8f9f3732dbca3962b4b8859a8bd9f725b1fa21624cecf"
+
+[[production_files]]
+file = "container_corner_node.mbt"
+loc = 59
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "308d6160ab67da5799f193bf06a03340bd04a5657aaee324965dfe132df119dc"
+
+[[production_files]]
+file = "control_edge.mbt"
+loc = 15
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1ef5fce5c6bba2d6d245c48e218046682a0884dafefdc96f3ab30a77126edc5c"
+
+[[production_files]]
+file = "control_look_node.mbt"
+loc = 210
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "c87eda0e23290794b9a500d4619d850ba80a1052dbc8ac89e757fc751d58071f"
+
+[[production_files]]
+file = "corner_remove_node.mbt"
+loc = 74
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "8d79ae7c4d78f8e52d0c60f4e3805defac193b6a15cc63081d872059c17b3959"
+
+[[production_files]]
+file = "count_badge_node.mbt"
+loc = 147
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "443704e73cc5b0b66692f8d478e780aa50a8e99cba09c2b57f6614c277d5d63f"
+
+[[production_files]]
+file = "countdown_node.mbt"
+loc = 31
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "360cd4bc70526cee867a2a2c67b08b43781000784df9dc737fd9130c82e210ca"
+
+[[production_files]]
+file = "default_words.mbt"
+loc = 356
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "80f49d454d4bf3c2923e71dd87a809fecee512c1fb76e269e43bfeded22005ba"
+
+[[production_files]]
+file = "dialog_foot_rows_node.mbt"
+loc = 37
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1ad8ffdf28d77727e9a0850aa2179fac636231bca5a477ade2ae2ac37d24f161"
+
+[[production_files]]
+file = "dialog_rows_node.mbt"
+loc = 20
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "741055fd1baac105be523429aff542b5225c1c52c3292e8844f43040a4fc2181"
+
+[[production_files]]
+file = "disclosure_key_node.mbt"
+loc = 37
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a4bd20cb36f0f9e6ae20d6105a3698d62c4d32968b2f6c3e93b628bb7d2595ed"
+
+[[production_files]]
+file = "drawer_node.mbt"
+loc = 172
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "4dc74bcd31bccbe0faa99a7be6eb0308d887bce3d7dd3c8c2465213d19fe7385"
+
+[[production_files]]
+file = "edge_look_node.mbt"
+loc = 162
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "e8501547ca5558ef8570db0e34f96db5399546688ab24525f310ea91c4fb032d"
+
+[[production_files]]
+file = "edge_node.mbt"
+loc = 202
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "b06bfa4db5b33e85a721b8e14b95e115ded16a35d5181553e32eb7ead5a13ff0"
+
+[[production_files]]
+file = "empty_state_node.mbt"
+loc = 97
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1063ce6968e06b60640a036f367b6eea0795fe32d34ae5074886d60a9c4474ab"
+
+[[production_files]]
+file = "faces.mbt"
+loc = 20
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "7e5c1994c0ac6345bbd329f19b8b814cd09e400fec2679f9fef31bff46bc4a84"
+
+[[production_files]]
+file = "facts_list_node.mbt"
+loc = 113
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "725beef4da8aec498facb0ef149d23c65ca6f09623fdff9ab92453b81f75d444"
+
+[[production_files]]
+file = "field_bar_node.mbt"
+loc = 165
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "620ec60e14a51acf6b809981cfaa9a9af00d1c92846802fe68ef467eac2a54a2"
+
+[[production_files]]
+file = "field_node.mbt"
+loc = 355
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "3c706f4dd999fe643184fef24777d7f28a8fd0652ea0b569b9e13510ee28ec95"
+
+[[production_files]]
+file = "file_card_node.mbt"
+loc = 211
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "eda8dab22ffde8e7bfb5711c3a58880c12d68c2ce393e14db920077fcb3a1be6"
+
+[[production_files]]
+file = "file_size.mbt"
+loc = 44
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a42fd9f30557442b15879e288155c166cb588954a052500cc6fa52341c283e1a"
+
+[[production_files]]
+file = "files.mbt"
+loc = 444
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a88f7d3375dab412a565d4ec3b232691c21aafa62d95f66411a4507342f50612"
+
+[[production_files]]
+file = "fill_chip.mbt"
+loc = 107
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "3d8b58c24fa2fd1bbf2b8dbb84979174c9ae71b69196b123c538137d72478940"
+
+[[production_files]]
+file = "filter_pill_node.mbt"
+loc = 373
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "90a1c03957756b755b253b69b05022f3c11ecccf583a8f6b77a6d1c618cc35ca"
+
+[[production_files]]
+file = "float_button_node.mbt"
+loc = 230
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "8cb270f59c23ae89d43b284b5f113f08cb5c861fada28d7ae5675d0748cc77d3"
+
+[[production_files]]
+file = "float_pill_node.mbt"
+loc = 86
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "bbbdde81771614aa117f422108c4f20330dec5497585f4c442b322b9d813d396"
+
+[[production_files]]
+file = "font_assets.mbt"
+loc = 6
+app_reachable = true
+disposition = "asset_generator_bypass"
+sha256 = "aeeea30b16ca6bcbeb6f80762a0f3c36c28cc05431d4b037f13a4c2eac5379b4"
+
+[[production_files]]
+file = "font_assets_js.mbt"
+loc = 15
+app_reachable = true
+disposition = "asset_generator_bypass"
+sha256 = "360eadcbbcaa73c95ba5251ef33ab912e80fbf03f9e3637c13920d37e6e5dc9f"
+
+[[production_files]]
+file = "font_assets_native.mbt"
+loc = 5
+app_reachable = true
+disposition = "asset_generator_bypass"
+sha256 = "92487785b6eb6a2b9057a0c7b6db4389cd96556d2c27200291953fa3002be0ca"
+
+[[production_files]]
+file = "foot_place_node.mbt"
+loc = 43
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a01bd5ad638d2c5d87159690d94e9c6ce0aafdfcca3c7a377093af40aa5c1e20"
+
+[[production_files]]
+file = "form_swatch_node.mbt"
+loc = 592
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "70d34c452a31c3b7f618e0f8cb5321933766f5e4cc04f26075bb19969ca4668f"
+
+[[production_files]]
+file = "found.mbt"
+loc = 210
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "63ee4218e0b317d5aadbc3a39d58a89c43122cf898a2a36b25581c5a182fd6d2"
+
+[[production_files]]
+file = "glass.mbt"
+loc = 305
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "0a1d8c575d68f327c12021ee9e3273e6d965e910a3974ad54c8e7769d90af992"
+
+[[production_files]]
+file = "glass_button_node.mbt"
+loc = 187
+app_reachable = false
+disposition = "transpile_sf"
+sha256 = "5d4937a9b78afa1430bb546214c83793187cf3b9f0b27d73d72f4195676edf23"
+
+[[production_files]]
+file = "glass_capsule_node.mbt"
+loc = 42
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "60077c6294aa3e4aac989528d8b74f2e9523088d416cccc95f7d7aaa45f6b689"
+
+[[production_files]]
+file = "glass_lift_node.mbt"
+loc = 32
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "44d78e22088d5a9d7f40f19c5df9be6cfc3cfcb8324618567a2e50e9b231e8d6"
+
+[[production_files]]
+file = "glyph.mbt"
+loc = 361
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "6b71b2783dc45438a6ffa3fb7772edd9ae717d2190b3604659a9b952da06796b"
+
+[[production_files]]
+file = "gradient.mbt"
+loc = 66
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "2455422e3be0c744d8ed2fd703097898fa2dcc5550d1ba5b3a41c174d7816670"
+
+[[production_files]]
+file = "grid_table_node.mbt"
+loc = 52
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "57554a54da97571b19f15e643b8a4a7864affe1e81d537260cca79d57d1c6e8c"
+
+[[production_files]]
+file = "hand.mbt"
+loc = 87
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "f1cff8e0607c061312595b9b345b715a1909279154479520f8318b31473e9e82"
+
+[[production_files]]
+file = "hold_button_node.mbt"
+loc = 152
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "8f16f4b5762b6b7228d39f662b549bc1e86daa008cd626d0d157cf7061590ff8"
+
+[[production_files]]
+file = "hover_card_node.mbt"
+loc = 703
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1e08571294f6612adbd88648d427d7a66c2c61d3bb8db8ae36c02ffcd1554ec1"
+
+[[production_files]]
+file = "i18n.mbt"
+loc = 53
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "73007bd20f005dfb92a5f5199c36e2926fec50df8421d8842a8f6ceb19b8ea1e"
+
+[[production_files]]
+file = "icon_button_node.mbt"
+loc = 247
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "3f891f68ff2f1a4fbbf2eb4a034d4ce894037bd4bcdf89c70c7ce6c0a841d8a3"
+
+[[production_files]]
+file = "icon_data.mbt"
+loc = 169
+app_reachable = true
+disposition = "asset_generator_bypass"
+sha256 = "2a39d56672f1033457df4121d7a7e84c4c844003a55e98dc4a06acac2a97518d"
+
+[[production_files]]
+file = "icons.mbt"
+loc = 492
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "698a6666a9f221f1f0f7a80e7400def178707d9454751bab48970f261b6ac07c"
+
+[[production_files]]
+file = "image_reveal_node.mbt"
+loc = 344
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a162250d028a5e98a663ae0dcf8ddc03a02e95ac1889487ccc2602d1be02dae5"
+
+[[production_files]]
+file = "ink.mbt"
+loc = 164
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "feeee1c00f69e92a9ec054eea274256d1f286cb7375cfed432ab91f348948bdc"
+
+[[production_files]]
+file = "ink_node.mbt"
+loc = 98
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "60b1828661b3c7bf918bb334f8dc49580ed06418c300eb72aeee3718066f47ba"
+
+[[production_files]]
+file = "inline_rename_node.mbt"
+loc = 89
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "bf79736b02deefd08aaaeffe102b9a1f42a33f1c22cc9aae256f56aeeae10a18"
+
+[[production_files]]
+file = "item_row_node.mbt"
+loc = 84
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "b0417ad3011a1ea11c20489ac1e7f70abe12396a1736932a10295ad5b31927c5"
+
+[[production_files]]
+file = "key_cap_node.mbt"
+loc = 308
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "70e10665953dc038f4eefad01e65b8ec4ba019de5c1f02bf9a144921dd8919fd"
+
+[[production_files]]
+file = "key_pad_bar_node.mbt"
+loc = 237
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "0a3cfd012792b4334dd4fbaf472944913f836069773350b2781eb64d0e00386a"
+
+[[production_files]]
+file = "keys_node.mbt"
+loc = 182
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "3a66b1f5aa5984f8c9dfa515fcfb4a5b973486b17fcaeda34673138d780b1e12"
+
+[[production_files]]
+file = "lang.mbt"
+loc = 168
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "8c9d7b10bb3e4cfb2eeca5db48e4a180ee0ccd843ee9cfc7820798f6f62b03ed"
+
+[[production_files]]
+file = "lift.mbt"
+loc = 29
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "c20d24d4a72ffb3b4b7c4e9a9446f4c064f88f164f754605734ceec0d5e580ad"
+
+[[production_files]]
+file = "lift_node.mbt"
+loc = 46
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "0cad3b5e62168de7648c7c9e6368c11c7e617fb76bc6bf75b18e77c02f69e3ed"
+
+[[production_files]]
+file = "link_cards_node.mbt"
+loc = 79
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "e12401b2561ef5565f528ecfa0ee8f57a958b4420ac479e60118f28ae0c7b45c"
+
+[[production_files]]
+file = "link_node.mbt"
+loc = 91
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1984d90524bfb538faca3ee3a5d3c5af99ee7b85238a35a4ac6ce963eadd5311"
+
+[[production_files]]
+file = "list_row.mbt"
+loc = 57
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "dcfdd1d96b7caf181d8a576957e42b672d9aab3cde6d8578c4cbc2d1a7782459"
+
+[[production_files]]
+file = "list_row_node.mbt"
+loc = 226
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "0913626802c09d7b6340b4a0684b3e97c1e7fc6a952f0d67d021330acf3307e0"
+
+[[production_files]]
+file = "lit_within_node.mbt"
+loc = 24
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "b73991144fa0b5e6a314ff8dfb165e4f7e7e1d1823404efe94168252f367dd7e"
+
+[[production_files]]
+file = "live.mbt"
+loc = 369
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "ea157285c988f695c02dfc6689ca1590a071003e6228933a7a251fe0c2f33bd9"
+
+[[production_files]]
+file = "loupe_node.mbt"
+loc = 59
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "d33aa54a6aac2effd5a624ea9280c721f61ccfaf6c47fc1a84396ca03212bf20"
+
+[[production_files]]
+file = "made_images.mbt"
+loc = 49
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "30a44bbd4e4c62e5a1b0971397d07878758cc8f57040fe51af9633fb970bc161"
+
+[[production_files]]
+file = "mark_node.mbt"
+loc = 297
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "f4c088a8ff0939bfa76b6a60629700693fdcdc5d38dfb6f4b55c3cfdadd6d14e"
+
+[[production_files]]
+file = "mark_words_node.mbt"
+loc = 16
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a367979b764fe977b5c8d5ec67fd6095a7fbd2ef971c37d8e8ca874bb11bd2c2"
+
+[[production_files]]
+file = "markdown.mbt"
+loc = 699
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "011d5080d677c46b97280dbcfb8512143071d3dccd3ab3cbaf69b2a9e540c078"
+
+[[production_files]]
+file = "markdown_node.mbt"
+loc = 1796
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "f0e446662b82df71bd45fe2921e344eee0e1b41078c1e27fedb2389a6c004e3f"
+
+[[production_files]]
+file = "marked.mbt"
+loc = 21
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "de7e05e38c51c9c0163deda322485b2f4d4ed1871870682f5f2abff735d29e77"
+
+[[production_files]]
+file = "marked_node.mbt"
+loc = 142
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "745b6066849c3ddd013b91f08830e37163886ac3f3a97cfdee2f1809f4e69255"
+
+[[production_files]]
+file = "marks_actions_node.mbt"
+loc = 183
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "5d6effcd85929535ae058a6e18cf32d36589cde56b014ea794a382a85b553e78"
+
+[[production_files]]
+file = "marks_node.mbt"
+loc = 354
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "ca1c284a96c630fce269e155a620a754e0b9415817e46a01269a1322a3aeaf10"
+
+[[production_files]]
+file = "mask_words.mbt"
+loc = 174
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "81a9467eac453cd595bacb38312e50d2bbe7fbe72f33c4db8615726d554ba8bd"
+
+[[production_files]]
+file = "math.mbt"
+loc = 230
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "cb729dc2861bbe8ce1c1e1122d16814840161ce043e7a1a3dbdd1447ebee9352"
+
+[[production_files]]
+file = "math_glyphs.mbt"
+loc = 7
+app_reachable = true
+disposition = "asset_generator_bypass"
+sha256 = "b19517468f83b6bbf889ae04921004541d2652b4830e3a993466d3f97c0ce578"
+
+[[production_files]]
+file = "math_glyphs_js.mbt"
+loc = 11
+app_reachable = true
+disposition = "asset_generator_bypass"
+sha256 = "78458b5970ad4edd676846627de07b33a0de75e5292368d586c42820d70e8d5d"
+
+[[production_files]]
+file = "math_glyphs_native.mbt"
+loc = 10
+app_reachable = true
+disposition = "asset_generator_bypass"
+sha256 = "416c8c16dd1cfeaa4025a64d51e28fe182ad6070ef3b117ecb2d0bb33dbb9e85"
+
+[[production_files]]
+file = "md_core.mbt"
+loc = 352
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1f61eb8cfd1910dcccd734f7f9bac54b64d808dbf81c079805b2b446a26a69bb"
+
+[[production_files]]
+file = "media.mbt"
+loc = 132
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "fe3c4ad215017350e0fa4c3ba91edc91d978dba3f26462bd331a570e7a7bb1b5"
+
+[[production_files]]
+file = "menu_node.mbt"
+loc = 1058
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "9544fc7a5322f5e8c627eda285ab8f2b41b3bd91c915b16fd27c1e7c729369f8"
+
+[[production_files]]
+file = "menu_presses_node.mbt"
+loc = 17
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "fc35299e8bd8a3bc919ae59840486872849149e298c0c81e4bd811a3a845d727"
+
+[[production_files]]
+file = "meter_atoms_node.mbt"
+loc = 394
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "78a9f0bbd643f3481f3eabb96ec967981c72d9e14002831b9da56a0c1ed225bb"
+
+[[production_files]]
+file = "meter_chips_brief_node.mbt"
+loc = 177
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "9867fa5e68452ef6098cfacaf43d7b3841258cbac6655a1b4a687eec1141d8f2"
+
+[[production_files]]
+file = "meter_line_node.mbt"
+loc = 82
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "63dba47bdfeb751570d5c3f3e1a9f007804be2d8f4d9a2717c02aff1b9616a00"
+
+[[production_files]]
+file = "motion.mbt"
+loc = 252
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "75dd321adbdcd9f9b521bfa9b057e404d8758c3242cef1069d35aca7e6f0162d"
+
+[[production_files]]
+file = "name_line_node.mbt"
+loc = 42
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "771bd0c593df0cea5bd832f9d5e0a5ccd75001717a854b802f92d16f1ef7573b"
+
+[[production_files]]
+file = "names.mbt"
+loc = 166
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "9cc0e78717159e40988b2c8dc536a4fe1bb3258fb0c9b4fa360d281e63db6d27"
+
+[[production_files]]
+file = "native_bars.mbt"
+loc = 334
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "cae0bab98ed7e806c622e35d9d64d553c26b2e042a5cc0aea9af52ef6fb8bc26"
+
+[[production_files]]
+file = "nav_bar.mbt"
+loc = 130
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "707ca7b464850cf2a8bd6b6cfb70b065480b87783240ee67866cf53242f230fc"
+
+[[production_files]]
+file = "nav_item_node.mbt"
+loc = 211
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "5f83d36a134a852da4795c8ede16376faf49de9c3daa2837391303756d272448"
+
+[[production_files]]
+file = "node_sp.mbt"
+loc = 16
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "b498332dec5f9f91f68465b5b6eeab87541442ffd1430cf706c7646460051fc4"
+
+[[production_files]]
+file = "notify_node.mbt"
+loc = 987
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "f638d0bded1d299bf3d866300295bea3490c02d1128814d9bf1da471fa5714b6"
+
+[[production_files]]
+file = "numbers.mbt"
+loc = 34
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "71339efd4fede0cadfbc190aeb85d44f0202f27150f049a96b9d21685d9bd6e0"
+
+[[production_files]]
+file = "offers_node.mbt"
+loc = 445
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "eb61a6ed0390b5a345120839a843e5041a424df98987bf43dd7209e5f04045b2"
+
+[[production_files]]
+file = "one_of_node.mbt"
+loc = 77
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "333142cc625aaa6d896269d73fddc66859058deb7d259532fdfeea3f22d1d9a5"
+
+[[production_files]]
+file = "open_gate.mbt"
+loc = 56
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "9f98d859c1e9f14634231ca4330fce56208f54dcc4dea6412fc69df13668030e"
+
+[[production_files]]
+file = "opened_head_node.mbt"
+loc = 127
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "afc2fdc294f2d9d8e2a823a291df6b8e97ab424d741463848a40a74ef2c22f29"
+
+[[production_files]]
+file = "options_card_node.mbt"
+loc = 260
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "61183fddabdc0d4dc835f0307efeb6bdbf3fcb744694f28ed867bb4c729fe713"
+
+[[production_files]]
+file = "own_head_node.mbt"
+loc = 340
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "847f62ae1522ee4fc68d3a866b7235e8e84afba58598b057ad6cf254d11a590f"
+
+[[production_files]]
+file = "page.mbt"
+loc = 791
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "21e749e21d7ee124f99faff41261cf7a5a1a0f9f35d114e34ba64f29940df855"
+
+[[production_files]]
+file = "page_add_node.mbt"
+loc = 33
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "af54285a4a5d43237a621e2de241130f11fca5fca0089fd77d496142a3bee17d"
+
+[[production_files]]
+file = "page_bar.mbt"
+loc = 49
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "d9f738c87856e27f8c96d94c269b9b28049004e8b1bf303726fd34e30624b359"
+
+[[production_files]]
+file = "page_bar_node.mbt"
+loc = 189
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "73458da969ca3091eea446c29a59a40d49195791eae5fe8d198942d789b1ecf1"
+
+[[production_files]]
+file = "page_find_node.mbt"
+loc = 169
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1fa8742300bf4c8db01d9cd32997ce75afa60bcb73db60a96d501f2abd4dc8e5"
+
+[[production_files]]
+file = "page_node.mbt"
+loc = 3097
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "47ac1edf759dc0b7f31b9bb86c5fd7741fddbb347d01165c5bc54272a1ab46a5"
+
+[[production_files]]
+file = "page_skeleton_node.mbt"
+loc = 443
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "cc10249687a73d823e8ba2424e2a0bdf856454c1ad42c45738658006b88fafde"
+
+[[production_files]]
+file = "page_wide_node.mbt"
+loc = 1061
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "33ec8b16dbd583cd0f520413b4fa1cddade273b3a8344a9836c596ba71a7590c"
+
+[[production_files]]
+file = "palette_data.mbt"
+loc = 91
+app_reachable = true
+disposition = "asset_generator_bypass"
+sha256 = "4f4647f1e90ba0dff8b555da6b325e59a414ab01e45ef316cf6b7c4c23176099"
+
+[[production_files]]
+file = "panel_card_node.mbt"
+loc = 45
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "420a75f535162750bae69d45e234f55bf9f439b397b8612819c907f50083dfa7"
+
+[[production_files]]
+file = "panel_centred_node.mbt"
+loc = 360
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "abab30fe973cf5f7b50d43f77d6867b56b0b4f9b804ec40db4f50769d506817d"
+
+[[production_files]]
+file = "panel_list_node.mbt"
+loc = 113
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "564edff7199121fdda5ca3041e9f3b10a6319e0b26747abbc952d9722a5c0763"
+
+[[production_files]]
+file = "panel_node.mbt"
+loc = 419
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "f64b71f5e6b9d201cfcdf34a0433b03ba13132974369ce98f97238a14076487d"
+
+[[production_files]]
+file = "panel_parts_node.mbt"
+loc = 705
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "38f4db0f8b3396d9eddc36b7630d62466a9cbc25cbd5371d8589d7066912c063"
+
+[[production_files]]
+file = "panel_row_in_node.mbt"
+loc = 33
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "700b8f7ad3418f5b24407cc91da55f47c8aea3e449c1f792dab197f562947273"
+
+[[production_files]]
+file = "panel_rule_node.mbt"
+loc = 6
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "63ed7eeb7b274e5aafd44eeba564f9f2da3f42172acc74f09dc1c557c387cd33"
+
+[[production_files]]
+file = "panel_steps_node.mbt"
+loc = 434
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "64e6d4b4e726d60fa2b9f2ace825d2f153e8c0c42e8376e66dee03ac81260c0d"
+
+[[production_files]]
+file = "panel_tip_node.mbt"
+loc = 13
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "00ac47b033898b501afd4f23a71c0be7d8f0da4b01d10528f1efcbe745fe48aa"
+
+[[production_files]]
+file = "panel_tips_node.mbt"
+loc = 9
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "01a57c8263ff3e42147a47391265a72bbb8a5dcb5763bfb090eba6e4c62c8270"
+
+[[production_files]]
+file = "panel_words_out_node.mbt"
+loc = 11
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "d5903be8f24714f390ed98c0fbbd84f25f7985a850343876e9f4d2153326827f"
+
+[[production_files]]
+file = "parts.mbt"
+loc = 1269
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "16c42ce99c2e991befce4a3545bee2501cd01628b2b151226734c6e24074930b"
+
+[[production_files]]
+file = "parts_node.mbt"
+loc = 145
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "616e94f8fd625b0c82bc8e2f7b17cd4f2188560625112e49326d6fbd17a510bb"
+
+[[production_files]]
+file = "pick_bar_node.mbt"
+loc = 140
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "10339295dd261ce359df0d8d34571fbedfec5c7c14c7d5155d9ffdeabd81c4b6"
+
+[[production_files]]
+file = "pick_node.mbt"
+loc = 357
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "5e02495e553b2f3279fa857e061a8ed4c50ac88072b85c9cdad7231430219833"
+
+[[production_files]]
+file = "picture.mbt"
+loc = 300
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "3ac91aa07c2fc952af5a2aa447d0ab87507e85c55b466ad76812a207b6204999"
+
+[[production_files]]
+file = "picture_out.mbt"
+loc = 35
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "8f97ff51aab697a73711d6b325ce5aeb2db73aaea98431de136acdda6d890185"
+
+[[production_files]]
+file = "place_node.mbt"
+loc = 57
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "9a52ac7ad048558eb4967677ad163d1464e1853b220a4064a08762895862018c"
+
+[[production_files]]
+file = "player_list_node.mbt"
+loc = 484
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1c8b4d50f26efc1f867da722ab8b0cfe9e4eccfe6e5276239e266c1a4a5f7c16"
+
+[[production_files]]
+file = "player_node.mbt"
+loc = 2797
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "3878ed4f19428c9f6ccbcfeecc0e2b3c9407c01349bcb1867e282fb5325a56c5"
+
+[[production_files]]
+file = "player_parts.mbt"
+loc = 859
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "7af42fcc16afd122b2cdce5cf500dd52d07e6b342aa8cfa2db233a19bcdc44cf"
+
+[[production_files]]
+file = "pointer.mbt"
+loc = 447
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "8a9a511343528a5fa834a59c7cbc58f62d854c6cfa4113d9847740440fe97822"
+
+[[production_files]]
+file = "popover_shell_node.mbt"
+loc = 770
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "25450985ff235f88adcc71310239692029537f2c212ede94037c18dd4da42f9d"
+
+[[production_files]]
+file = "presented_from.mbt"
+loc = 38
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "79cada88097e7d18c6a9bedc0511ed772bc6ffe9796d8b550e8b8a1f40f61e63"
+
+[[production_files]]
+file = "presented_node.mbt"
+loc = 518
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "89780fb13c83deae51380f504da8d0f8bb711ee5141f7083fae03c94bf12de1d"
+
+[[production_files]]
+file = "presented_open_node.mbt"
+loc = 10
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "8e0ee68060d90861e1a237dad13ed56dbaf189daccd4358cce17f39e74b35f6f"
+
+[[production_files]]
+file = "presented_rest.mbt"
+loc = 56
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "5bce6b241fbb58b3f665a8d87a606c90f79962fac31b0aed4142db6cab6013db"
+
+[[production_files]]
+file = "presented_windows.mbt"
+loc = 29
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "61a0ea77d8b78158ed5a0c70206cb2a79acf0baa01004a6688ad889f74068f89"
+
+[[production_files]]
+file = "presenters.mbt"
+loc = 1797
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "45dfbf931e50754defa52e8b4fe50451bfb6619fb8af3f16a847954f668eaa86"
+
+[[production_files]]
+file = "press_late.mbt"
+loc = 18
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "3ae033669cf8902700e088c7092e6fa0c1c87ba813378f9d922831e54e7c17ac"
+
+[[production_files]]
+file = "press_look_node.mbt"
+loc = 378
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "41855870f9842e4ef33b0cfcd3627637c90338347b8cc6d687c7a73414b95583"
+
+[[production_files]]
+file = "progress_node.mbt"
+loc = 147
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "037794c050a54c8b1d9742ad50cb672145a0fb63678b2bbc24b281d854b2bf52"
+
+[[production_files]]
+file = "progress_ring_node.mbt"
+loc = 32
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "8162c8b91285f0fcbe15ba052dc3d0a3770bde0a2776297f06a5955e5bd5f0b4"
+
+[[production_files]]
+file = "progress_spinner_node.mbt"
+loc = 62
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "e1be23285ef244c6fc08738f14fb999a0fc518a62466696134978e449ec7cd79"
+
+[[production_files]]
+file = "qr.mbt"
+loc = 87
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "5efc539784b1da3c6fec28951bf79a34232414c29e2a6e27a4487bec1acc405a"
+
+[[production_files]]
+file = "quote_card_node.mbt"
+loc = 224
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "d439f018a9f326505e58ece3a5bf383bba8c261d821cfedfcd5588be982a2e84"
+
+[[production_files]]
+file = "reader.mbt"
+loc = 1326
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "b602c42478aa2d4731b3c48ddd6578e776f59a4b214404da6fe09da4e2c0a459"
+
+[[production_files]]
+file = "reader_layout_node.mbt"
+loc = 517
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "4ef0c3ae00cfe0291293e76432a90e200538127ceaaa5c67ca7eb0c5745616cb"
+
+[[production_files]]
+file = "reader_marks.mbt"
+loc = 51
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "6cf81ee0579a3dcd88c1c602438815afa01b4925e48abc0cb5e4f7af03242514"
+
+[[production_files]]
+file = "reader_node.mbt"
+loc = 1736
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "288b8b8808f904944d24fdeaaac9a506fd709e517e636f273747b2a2edae7828"
+
+[[production_files]]
+file = "reader_style.mbt"
+loc = 61
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "2a0c9dc30a7ec4c631ef427ee62e3cc591e5e27cad0685a36a20712297566954"
+
+[[production_files]]
+file = "reader_text.mbt"
+loc = 337
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "3ed23596dbe19d41a435bcc7a873ba980105f3ba350fd21fcb6b78390c20ec55"
+
+[[production_files]]
+file = "rolling_number_node.mbt"
+loc = 56
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "ad0f09badcdb8ecad38a9f2161a4c470eabbbead888d907a41480ff65581a4e7"
+
+[[production_files]]
+file = "roving_hover_node.mbt"
+loc = 110
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1300e25fa7ce72e3e6744dafec6956759469940a0fc27fc36f1789bc1201fa14"
+
+[[production_files]]
+file = "row_compound_node.mbt"
+loc = 230
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "f739aa8fdb12356b9162908c3352fa09a0d2f2b4098fd25739986d22f5b5d13a"
+
+[[production_files]]
+file = "row_height_node.mbt"
+loc = 80
+app_reachable = false
+disposition = "transpile_sf"
+sha256 = "e8a962b0d6b038465ecd0579321d80dc35405c2fc0e48aeabfd06bfa9179be43"
+
+[[production_files]]
+file = "row_lead_out_node.mbt"
+loc = 19
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1047982064b1ae476f1cd9a1fa7cdd4bad25f2566dbbaf607abae7fd8ac72af7"
+
+[[production_files]]
+file = "run_begins.mbt"
+loc = 34
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "4928f4079c805d71adb52abab2e6fc4c43d840ab1c9674a9f797b6160a9831b4"
+
+[[production_files]]
+file = "search_input_node.mbt"
+loc = 126
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "57ba8c32f59807aa546f46ae9e629067c3a6e6a79911e006e12a82d99863eb4d"
+
+[[production_files]]
+file = "secret_field_node.mbt"
+loc = 421
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "831af63bed467052e9f09708d781631ec4a98bc71371cf7dd9c99693d3b84037"
+
+[[production_files]]
+file = "seg.mbt"
+loc = 218
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a92cdca896c01dbf7d5d2d5ed22af7b7c16a21bdbb3d4e757c7e9ddbd3faea4d"
+
+[[production_files]]
+file = "seg_node.mbt"
+loc = 976
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "da971f7770b8f1ef8c857177e3493a5f7ad713c2e8c74dfcb0e923bd78952109"
+
+[[production_files]]
+file = "segment_rule_node.mbt"
+loc = 65
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "2a3a5790e3c61688bc6daed8e2086a8ff97c6dd1005fdab2b27709999fc7a1e4"
+
+[[production_files]]
+file = "segments_node.mbt"
+loc = 48
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "e1e72919a4d923288e0e5e9a2a5852803dcd984788df98afa5f48d6136dca23c"
+
+[[production_files]]
+file = "select_node.mbt"
+loc = 96
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "5bdfd8cb0d6e8b51caac089f115a3d40092d6dee7f4555f4a72878195681f05c"
+
+[[production_files]]
+file = "select_ring_node.mbt"
+loc = 51
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "332834e4a4fd81f0aa11dbf282c8438a9ae6d474ab0f13ba7756e5c47d829c4c"
+
+[[production_files]]
+file = "send_button_node.mbt"
+loc = 96
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1694a69ee2e87ec39fee52fb11badf96597d91ef6fb694dde25f0c91cdb2c40b"
+
+[[production_files]]
+file = "setting_node.mbt"
+loc = 145
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "e51ca5397f87be9e64c494e3f87382331f342e55fc6825fe95e0723733f8e3d3"
+
+[[production_files]]
+file = "settings_rows_node.mbt"
+loc = 233
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a4c9681bcfad62e0c8b3071d7753a815d389f40b51a58e19a9df8d06f32757bb"
+
+[[production_files]]
+file = "shadow.mbt"
+loc = 143
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "5ac7e25cbaff355a1fd59844b22046c80f47ca53d8eb2c7b720a32d1b2111a27"
+
+[[production_files]]
+file = "share_tabs_node.mbt"
+loc = 72
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "2e73aee04210fee6f65c4d07d8bdc8c8ec0dc94e02842d2b83b79b5309a59d87"
+
+[[production_files]]
+file = "sheet_column_node.mbt"
+loc = 26
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a63dd7776d4a254f9958c8c00dce3741ab022873c4203ba62866266ad909a3d6"
+
+[[production_files]]
+file = "sheet_node.mbt"
+loc = 1600
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "477c1df1c228e417b6f2633e1df3266fe1e0c1c191521003935de8140cb91bf3"
+
+[[production_files]]
+file = "sheet_shows_node.mbt"
+loc = 518
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "e8a7448da946547c840b061952f47d5d10f36b24b1e62672769aa0a31b5a6199"
+
+[[production_files]]
+file = "shortcuts.mbt"
+loc = 25
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "20cf1e75f4af58616362ffd8c87167a295817ee4c1e433185fe8f92887c21ee8"
+
+[[production_files]]
+file = "side_rows.mbt"
+loc = 57
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "834bf42db37b4338a9cd64c598cdfb243efc5438757b680dd9a248a26394d7d8"
+
+[[production_files]]
+file = "side_rows_node.mbt"
+loc = 376
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1771f1b60336a6e8d16eaf9b1ed882b7b96c206dc9d9eb2fe65ec3fee5b49446"
+
+[[production_files]]
+file = "sized_words_node.mbt"
+loc = 44
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "f76ede9fd829916164161a859e6bf374731a908f905d1b20ab2a2f01e59b02d9"
+
+[[production_files]]
+file = "skeleton_node.mbt"
+loc = 123
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "b646d4c16ea9692715e0e83a7258a61b2b384818bbf3dcf6a6f6d1ca954dccd8"
+
+[[production_files]]
+file = "slider_node.mbt"
+loc = 151
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "4867da1f459dff92906183ecbd479a0eeb052320656a372efefcd76b224d6149"
+
+[[production_files]]
+file = "small_panel_node.mbt"
+loc = 79
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "6a183c805c564d3c294a648ecda7214529652c07a7e7514f60a6152432bcbdb0"
+
+[[production_files]]
+file = "stage_node.mbt"
+loc = 117
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "8b85d5f667b35bf771489a515624b23fd9a3fd67b8f5a40d7cf1f31f6d5fed87"
+
+[[production_files]]
+file = "step_circle_node.mbt"
+loc = 106
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "b6e3e0d45abfc4c3c773b1a6d2a9b76ed513fc7add147bcb84b0465df597c00f"
+
+[[production_files]]
+file = "stops_node.mbt"
+loc = 103
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "f753e8bfa8a10a84cb2065f44733697dbfa4a9819a60366901840afea2003c66"
+
+[[production_files]]
+file = "stroke.mbt"
+loc = 67
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a8d2ca0574dee6f2865048eaed560078e589b69e8f626c70c3816b88a7790bc6"
+
+[[production_files]]
+file = "style_node.mbt"
+loc = 494
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "2a462fe5a06f96bb758b08dd8ac0140666a25f1b71b98514164f7f434cc90ed2"
+
+[[production_files]]
+file = "styles.mbt"
+loc = 118
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "2aff6e6fcde334900a36dc9ceb2bf4469397f0d48485c9d4f214877c969514e7"
+
+[[production_files]]
+file = "submenu_row_node.mbt"
+loc = 344
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "f693112d10884d0463096bcffd61a8aa257d57028d54721acfda1afdf927795c"
+
+[[production_files]]
+file = "tab_bar_node.mbt"
+loc = 465
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "ba86ddff137379b180ed0ad549f868ba819ed39b58d73fe85702e5073186112b"
+
+[[production_files]]
+file = "tab_strip_node.mbt"
+loc = 606
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "7d23f73150edc7adc2404322b2e90a69764982b4111f81c47878e29447a48910"
+
+[[production_files]]
+file = "table_copy.mbt"
+loc = 32
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "71b5cb63089f0bce4927a1b8927b38814c7c9bce930c885ab5e2d897dc30c974"
+
+[[production_files]]
+file = "table_node.mbt"
+loc = 818
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "00f0bb3df0bd13661a003be81b6d90484ea9d17af35a3e07c422702ffbdef0e2"
+
+[[production_files]]
+file = "tabs_node.mbt"
+loc = 415
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "27b72053de1c8873d9cb5632f681331b5e0d7e0c6633559bfcae81e62d16d748"
+
+[[production_files]]
+file = "tag_node.mbt"
+loc = 114
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "10ab5cf341b81935c05ae42fcc157d417495649bb5a9a92d54ec0ff2ba8e98e1"
+
+[[production_files]]
+file = "text_action_node.mbt"
+loc = 186
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "eedadf062b6519c1fa2f7afa8cb73bafd0289f9d347ebbd0d7884473e170dd01"
+
+[[production_files]]
+file = "tiles_node.mbt"
+loc = 172
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a3abf71b8aebbf09919c67cf5569f680aba02e4b182cc74003fcb4c787761f55"
+
+[[production_files]]
+file = "tip_node.mbt"
+loc = 727
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "ff516093f25060f68bc3f7bf5220f5e156af34b1af424baee737565cc0e4608d"
+
+[[production_files]]
+file = "title_accent.mbt"
+loc = 62
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "ad51fe5f3b15711e85b5237ae64c316e9c726d5ee6c96e1f430df87638d0edae"
+
+[[production_files]]
+file = "toast.mbt"
+loc = 30
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "2f5ee79b23fff963b13bcdff2790b6b9f7b091f35097fe544cbdf990bb608b26"
+
+[[production_files]]
+file = "toast_node.mbt"
+loc = 303
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a9655ea8f8d4f6639a2813a427011696cfbbf9cd641ae5fa726f7de71fa66266"
+
+[[production_files]]
+file = "toggle_group_node.mbt"
+loc = 184
+app_reachable = false
+disposition = "transpile_sf"
+sha256 = "4e0d1d3be4d9324769e9cb1f859b004cf4ef415440e06f630a45afc6602c25ff"
+
+[[production_files]]
+file = "tokens.mbt"
+loc = 3027
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "51296f22eebf88ce1339f7a2e1d5605b6acc05cd611d45098539d486719ef85b"
+
+[[production_files]]
+file = "tokens_data.mbt"
+loc = 94
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "83b414790f37daa44d192faf19374d2280c2769766a8358301b17df6177b119a"
+
+[[production_files]]
+file = "tool_node.mbt"
+loc = 276
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "7ec5712426ed2751146a978a45df242a08c021894bffbefb51270de92839d2f7"
+
+[[production_files]]
+file = "transient_overlay.mbt"
+loc = 256
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "80b22dca3b3e3ed9dcb1bc02af70179a301b9b05a81615b7ed1595fe3dacbb8b"
+
+[[production_files]]
+file = "viewer_bar.mbt"
+loc = 123
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "a777aa265e544a3a9f63ea0e41ad4b894628ffdc0d61fb0b039f2cdec3a95bc5"
+
+[[production_files]]
+file = "viewer_bar_node.mbt"
+loc = 420
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "942de2ddf4a87b7e577fb0d9686b558d3a5395d2113ecf866f6c7d991982840e"
+
+[[production_files]]
+file = "viewer_file.mbt"
+loc = 109
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1f84739e121cc54c6f98a3af4a38fe127b82319dbff309ed16432c3919ced8cb"
+
+[[production_files]]
+file = "viewer_frame.mbt"
+loc = 311
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "153fef5d1b105023c9ee5e53d93885926cabcbe8690d354661336d52b7fd3573"
+
+[[production_files]]
+file = "viewer_head_node.mbt"
+loc = 149
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "8e2cf33cc7baa4a1b096a85869e31c3fe0e6b12ec0260dc15863d1cea5bdfd58"
+
+[[production_files]]
+file = "viewer_host.mbt"
+loc = 95
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "40f3b25b1afd8660f4255f188d2323879efb8de8e6b9392000d127f886bc06fd"
+
+[[production_files]]
+file = "viewer_steps_node.mbt"
+loc = 123
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "efa31d29e027cac0c2437ddd354bed8fe49a23a0277cd190b416bed8a834ce6d"
+
+[[production_files]]
+file = "waiting.mbt"
+loc = 369
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "74cd76336aeafd8ccdfe0bb8df4940e3129c102f0afd2a9c0211df27d2529632"
+
+[[production_files]]
+file = "waiting_tile_node.mbt"
+loc = 93
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "77ed55a363fd3b5857c0e03b1f9e77450a452f8db61a350ff03fdcfef2123585"
+
+[[production_files]]
+file = "way.mbt"
+loc = 28
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "940464e47bc730f6a04f44cd37223e8f9c6a78cdbd569d58fa5908834598d2b4"
+
+[[production_files]]
+file = "way_in_node.mbt"
+loc = 280
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "40db674d154940c487daec1d8d5fea50b25f8b1d66433d8a18808080a3829ff7"
+
+[[production_files]]
+file = "way_node.mbt"
+loc = 141
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "0ba4824b396aca139e1ccf9e3f1ac7b0f0c88cbc5b0a0ede2b423655e2f98996"
+
+[[production_files]]
+file = "window_keys.mbt"
+loc = 124
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "1e605552e2ca86200dc40fa2f363f6a6a506d4843002a24ee51760ac3bbe530e"
+
+[[production_files]]
+file = "window_keys_node.mbt"
+loc = 139
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "f633ee6928b7fddf1261c41b4d89171f3ba8153274d39140ba4b4f8b0b266e45"
+
+[[production_files]]
+file = "words_box.mbt"
+loc = 46
+app_reachable = true
+disposition = "transpile_sf"
+sha256 = "3f7498ec82e1f23dfad0e7b5799c2dc1326c2988fad2feaef1c2bee9bb093930"
+
+[[test_files]]
+file = "accordion_node_wbtest.mbt"
+kind = "wbtest"
+loc = 191
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "action_sheet_node_wbtest.mbt"
+kind = "wbtest"
+loc = 132
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "address_bar_node_wbtest.mbt"
+kind = "wbtest"
+loc = 68
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "agent_stats_node_wbtest.mbt"
+kind = "wbtest"
+loc = 194
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "align_wbtest.mbt"
+kind = "wbtest"
+loc = 22
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "avatar_stack_node_wbtest.mbt"
+kind = "wbtest"
+loc = 40
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "avatar_wbtest.mbt"
+kind = "wbtest"
+loc = 27
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "bar_pill_group_node_wbtest.mbt"
+kind = "wbtest"
+loc = 520
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "blocks_read_wbtest.mbt"
+kind = "wbtest"
+loc = 92
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "brand_wbtest.mbt"
+kind = "wbtest"
+loc = 29
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "breathe_node_wbtest.mbt"
+kind = "wbtest"
+loc = 126
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "button_feel_wbtest.mbt"
+kind = "wbtest"
+loc = 97
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "button_node_focus_wbtest.mbt"
+kind = "wbtest"
+loc = 66
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "button_node_wbtest.mbt"
+kind = "wbtest"
+loc = 446
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "button_reshape_wbtest.mbt"
+kind = "wbtest"
+loc = 43
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "card_foot_wbtest.mbt"
+kind = "wbtest"
+loc = 74
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "chat_notice_pill_node_wbtest.mbt"
+kind = "wbtest"
+loc = 140
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "check_row_node_wbtest.mbt"
+kind = "wbtest"
+loc = 64
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "chip_node_wbtest.mbt"
+kind = "wbtest"
+loc = 34
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "choice_row_node_wbtest.mbt"
+kind = "wbtest"
+loc = 371
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "choices_node_wbtest.mbt"
+kind = "wbtest"
+loc = 33
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "chooser_button_node_wbtest.mbt"
+kind = "wbtest"
+loc = 39
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "chooser_node_wbtest.mbt"
+kind = "wbtest"
+loc = 49
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "code_block_node_wbtest.mbt"
+kind = "wbtest"
+loc = 97
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "code_display_node_wbtest.mbt"
+kind = "wbtest"
+loc = 87
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "come_group_judge_wbtest.mbt"
+kind = "wbtest"
+loc = 81
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "composer_quote_card_node_wbtest.mbt"
+kind = "wbtest"
+loc = 36
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "consolidated_parts_wbtest.mbt"
+kind = "wbtest"
+loc = 80
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "container_corner_node_wbtest.mbt"
+kind = "wbtest"
+loc = 135
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "contrast_theme_wbtest.mbt"
+kind = "wbtest"
+loc = 27
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "control_edge_wbtest.mbt"
+kind = "wbtest"
+loc = 191
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "control_look_node_wbtest.mbt"
+kind = "wbtest"
+loc = 248
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "count_badge_node_wbtest.mbt"
+kind = "wbtest"
+loc = 53
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "custom_tone_wbtest.mbt"
+kind = "wbtest"
+loc = 30
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "default_words_wbtest.mbt"
+kind = "wbtest"
+loc = 85
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "dials_node_wbtest.mbt"
+kind = "wbtest"
+loc = 81
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "drawer_node_wbtest.mbt"
+kind = "wbtest"
+loc = 253
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "edge_look_node_wbtest.mbt"
+kind = "wbtest"
+loc = 222
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "edge_node_wbtest.mbt"
+kind = "wbtest"
+loc = 295
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "empty_state_node_wbtest.mbt"
+kind = "wbtest"
+loc = 52
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "faces_wbtest.mbt"
+kind = "wbtest"
+loc = 7
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "facts_list_node_wbtest.mbt"
+kind = "wbtest"
+loc = 89
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "feel_parts_wbtest.mbt"
+kind = "wbtest"
+loc = 132
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "field_bar_node_wbtest.mbt"
+kind = "wbtest"
+loc = 119
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "field_node_look_wbtest.mbt"
+kind = "wbtest"
+loc = 179
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "field_node_wbtest.mbt"
+kind = "wbtest"
+loc = 177
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "file_card_upload_node_wbtest.mbt"
+kind = "wbtest"
+loc = 132
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "filter_pill_node_wbtest.mbt"
+kind = "wbtest"
+loc = 122
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "float_button_node_wbtest.mbt"
+kind = "wbtest"
+loc = 52
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "foot_keeps_wbtest.mbt"
+kind = "wbtest"
+loc = 152
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "foot_place_node_wbtest.mbt"
+kind = "wbtest"
+loc = 144
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "form_swatch_node_wbtest.mbt"
+kind = "wbtest"
+loc = 219
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "gaps_steady_known_wbtest.mbt"
+kind = "wbtest"
+loc = 10
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "glass_button_node_wbtest.mbt"
+kind = "wbtest"
+loc = 144
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "glass_capsule_node_wbtest.mbt"
+kind = "wbtest"
+loc = 144
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "glass_float_controls_wbtest.mbt"
+kind = "wbtest"
+loc = 236
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "glass_floating_menu_wbtest.mbt"
+kind = "wbtest"
+loc = 250
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "glass_lift_node_wbtest.mbt"
+kind = "wbtest"
+loc = 136
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "glass_wave3b_wbtest.mbt"
+kind = "wbtest"
+loc = 119
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "glyph_wbtest.mbt"
+kind = "wbtest"
+loc = 29
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "ground_node_wbtest.mbt"
+kind = "wbtest"
+loc = 90
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "grounds_wbtest.mbt"
+kind = "wbtest"
+loc = 25
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "group_panel_node_wbtest.mbt"
+kind = "wbtest"
+loc = 150
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "hold_button_node_wbtest.mbt"
+kind = "wbtest"
+loc = 146
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "hover_card_node_wbtest.mbt"
+kind = "wbtest"
+loc = 1831
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "hover_idle_wbtest.mbt"
+kind = "wbtest"
+loc = 50
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "icon_stroke_wbtest.mbt"
+kind = "wbtest"
+loc = 22
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "image_reveal_node_wbtest.mbt"
+kind = "wbtest"
+loc = 276
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "ink_node_wbtest.mbt"
+kind = "wbtest"
+loc = 134
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "inline_rename_node_wbtest.mbt"
+kind = "wbtest"
+loc = 103
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "kept_each_run_wbtest.mbt"
+kind = "wbtest"
+loc = 72
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "kept_wbtest.mbt"
+kind = "wbtest"
+loc = 112
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "key_cap_node_wbtest.mbt"
+kind = "wbtest"
+loc = 68
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "key_pad_bar_node_wbtest.mbt"
+kind = "wbtest"
+loc = 98
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "keys_node_wbtest.mbt"
+kind = "wbtest"
+loc = 41
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "lift_node_wbtest.mbt"
+kind = "wbtest"
+loc = 312
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "lift_wbtest.mbt"
+kind = "wbtest"
+loc = 62
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "link_cards_node_wbtest.mbt"
+kind = "wbtest"
+loc = 213
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "link_row_card_node_wbtest.mbt"
+kind = "wbtest"
+loc = 125
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "link_row_note_way_wbtest.mbt"
+kind = "wbtest"
+loc = 34
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "link_row_opens_node_wbtest.mbt"
+kind = "wbtest"
+loc = 104
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "link_row_panel_node_wbtest.mbt"
+kind = "wbtest"
+loc = 218
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "live_wbtest.mbt"
+kind = "wbtest"
+loc = 41
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "looks_painted_wbtest.mbt"
+kind = "wbtest"
+loc = 56
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "made_images_wbtest.mbt"
+kind = "wbtest"
+loc = 59
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "mark_node_wbtest.mbt"
+kind = "wbtest"
+loc = 185
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "markdown_node_line_wbtest.mbt"
+kind = "wbtest"
+loc = 152
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "markdown_node_wbtest.mbt"
+kind = "wbtest"
+loc = 568
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "marks_node_wbtest.mbt"
+kind = "wbtest"
+loc = 58
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "math_env_js_wbtest.mbt"
+kind = "wbtest"
+loc = 3
+m1_3_frozen = false
+disposition = "target_wasm32_web_only"
+
+[[test_files]]
+file = "math_env_native_wbtest.mbt"
+kind = "wbtest"
+loc = 4
+m1_3_frozen = false
+disposition = "target_native_only"
+
+[[test_files]]
+file = "math_fixture_wbtest.mbt"
+kind = "wbtest"
+loc = 788
+m1_3_frozen = true
+disposition = "prebuild_embedded_fixture"
+
+[[test_files]]
+file = "math_text_wbtest.mbt"
+kind = "wbtest"
+loc = 58
+m1_3_frozen = true
+disposition = "prebuild_embedded_fixture"
+
+[[test_files]]
+file = "math_wbtest.mbt"
+kind = "wbtest"
+loc = 57
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "md_core_wbtest.mbt"
+kind = "wbtest"
+loc = 246
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "menu_from_node_wbtest.mbt"
+kind = "wbtest"
+loc = 96
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "menu_node_beside_wbtest.mbt"
+kind = "wbtest"
+loc = 418
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "menu_title_wbtest.mbt"
+kind = "wbtest"
+loc = 33
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "meter_chips_brief_node_wbtest.mbt"
+kind = "wbtest"
+loc = 120
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "modal_focus_wbtest.mbt"
+kind = "wbtest"
+loc = 166
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "motion_counted_wbtest.mbt"
+kind = "wbtest"
+loc = 10
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "names_wbtest.mbt"
+kind = "wbtest"
+loc = 36
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "native_over_wbtest.mbt"
+kind = "wbtest"
+loc = 90
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "nav_bar_node_wbtest.mbt"
+kind = "wbtest"
+loc = 24
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "notify_node_wbtest.mbt"
+kind = "wbtest"
+loc = 51
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "offers_node_wbtest.mbt"
+kind = "wbtest"
+loc = 404
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "one_of_node_wbtest.mbt"
+kind = "wbtest"
+loc = 114
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "opener_said_wbtest.mbt"
+kind = "wbtest"
+loc = 52
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "page_find_node_wbtest.mbt"
+kind = "wbtest"
+loc = 56
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "page_node_wbtest.mbt"
+kind = "wbtest"
+loc = 1171
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "page_reused_wbtest.mbt"
+kind = "wbtest"
+loc = 100
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "page_skeleton_node_wbtest.mbt"
+kind = "wbtest"
+loc = 378
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "page_wide_node_wbtest.mbt"
+kind = "wbtest"
+loc = 137
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "panel_centred_focus_wbtest.mbt"
+kind = "wbtest"
+loc = 140
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "panel_centred_tall_node_wbtest.mbt"
+kind = "wbtest"
+loc = 150
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "panel_empty_node_wbtest.mbt"
+kind = "wbtest"
+loc = 238
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "panel_list_node_wbtest.mbt"
+kind = "wbtest"
+loc = 365
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "panel_steps_motion_wbtest.mbt"
+kind = "wbtest"
+loc = 113
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "panel_tip_node_wbtest.mbt"
+kind = "wbtest"
+loc = 72
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "parts_web_wbtest.mbt"
+kind = "wbtest"
+loc = 187
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "player_node_wbtest.mbt"
+kind = "wbtest"
+loc = 158
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "player_parity_wbtest.mbt"
+kind = "wbtest"
+loc = 295
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "player_told_wbtest.mbt"
+kind = "wbtest"
+loc = 112
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "player_wbtest.mbt"
+kind = "wbtest"
+loc = 563
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "popover_bridge_wbtest.mbt"
+kind = "wbtest"
+loc = 1051
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "presented_each_run_wbtest.mbt"
+kind = "wbtest"
+loc = 68
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "presented_order_wbtest.mbt"
+kind = "wbtest"
+loc = 49
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "presented_rest_wbtest.mbt"
+kind = "wbtest"
+loc = 69
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "presenters_back_to_wbtest.mbt"
+kind = "wbtest"
+loc = 202
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "presenters_over_wbtest.mbt"
+kind = "wbtest"
+loc = 117
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "presenters_wbtest.mbt"
+kind = "wbtest"
+loc = 1344
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "press_look_node_wbtest.mbt"
+kind = "wbtest"
+loc = 393
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "progress_node_wbtest.mbt"
+kind = "wbtest"
+loc = 187
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "progress_ring_node_wbtest.mbt"
+kind = "wbtest"
+loc = 38
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "quote_card_node_wbtest.mbt"
+kind = "wbtest"
+loc = 210
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "reader_chapters_wbtest.mbt"
+kind = "wbtest"
+loc = 144
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "reader_keep_wbtest.mbt"
+kind = "wbtest"
+loc = 51
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "reader_style_wbtest.mbt"
+kind = "wbtest"
+loc = 204
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "reader_text_wbtest.mbt"
+kind = "wbtest"
+loc = 188
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "reader_track_wbtest.mbt"
+kind = "wbtest"
+loc = 112
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "refused_shake_wbtest.mbt"
+kind = "wbtest"
+loc = 207
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "reveal_node_wbtest.mbt"
+kind = "wbtest"
+loc = 326
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "rolling_number_node_wbtest.mbt"
+kind = "wbtest"
+loc = 98
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "roving_hover_node_wbtest.mbt"
+kind = "wbtest"
+loc = 200
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "row_compound_node_wbtest.mbt"
+kind = "wbtest"
+loc = 170
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "scroll_keeps_typing_wbtest.mbt"
+kind = "wbtest"
+loc = 248
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "search_input_node_wbtest.mbt"
+kind = "wbtest"
+loc = 89
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "secret_field_node_wbtest.mbt"
+kind = "wbtest"
+loc = 235
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "seg_fill_node_wbtest.mbt"
+kind = "wbtest"
+loc = 380
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "seg_glass_lens_wbtest.mbt"
+kind = "wbtest"
+loc = 522
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "seg_node_wbtest.mbt"
+kind = "wbtest"
+loc = 354
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "seg_wbtest.mbt"
+kind = "wbtest"
+loc = 57
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "segment_rule_node_wbtest.mbt"
+kind = "wbtest"
+loc = 59
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "send_button_node_wbtest.mbt"
+kind = "wbtest"
+loc = 114
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "sheet_clear_wbtest.mbt"
+kind = "wbtest"
+loc = 39
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "sheet_drag_motion_wbtest.mbt"
+kind = "wbtest"
+loc = 434
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "sheet_over_wbtest.mbt"
+kind = "wbtest"
+loc = 33
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "sheet_page_foot_wbtest.mbt"
+kind = "wbtest"
+loc = 69
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "sheet_rise_wbtest.mbt"
+kind = "wbtest"
+loc = 23
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "sheet_sink_wbtest.mbt"
+kind = "wbtest"
+loc = 290
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "sized_words_node_wbtest.mbt"
+kind = "wbtest"
+loc = 91
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "sizes_across_known_wbtest.mbt"
+kind = "wbtest"
+loc = 12
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "sizes_steady_known_wbtest.mbt"
+kind = "wbtest"
+loc = 10
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "skeleton_node_wbtest.mbt"
+kind = "wbtest"
+loc = 64
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "slider_node_wbtest.mbt"
+kind = "wbtest"
+loc = 236
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "spinner_node_wbtest.mbt"
+kind = "wbtest"
+loc = 99
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "step_circle_node_wbtest.mbt"
+kind = "wbtest"
+loc = 36
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "stops_wbtest.mbt"
+kind = "wbtest"
+loc = 249
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "style_defaults_wbtest.mbt"
+kind = "wbtest"
+loc = 282
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "style_node_wbtest.mbt"
+kind = "wbtest"
+loc = 429
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "styled_words_wbtest.mbt"
+kind = "wbtest"
+loc = 39
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "switch_node_wbtest.mbt"
+kind = "wbtest"
+loc = 125
+m1_3_frozen = true
+disposition = "m1_3_frozen_mandatory"
+
+[[test_files]]
+file = "tab_bar_node_wbtest.mbt"
+kind = "wbtest"
+loc = 97
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "table_copy_wbtest.mbt"
+kind = "wbtest"
+loc = 226
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "table_node_wbtest.mbt"
+kind = "wbtest"
+loc = 559
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "table_node_widths_wbtest.mbt"
+kind = "wbtest"
+loc = 146
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "tabs_node_wbtest.mbt"
+kind = "wbtest"
+loc = 258
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "text_action_node_wbtest.mbt"
+kind = "wbtest"
+loc = 113
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "tip_caps_wbtest.mbt"
+kind = "wbtest"
+loc = 192
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "tip_handoff_clip_wbtest.mbt"
+kind = "wbtest"
+loc = 59
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "tip_idle_wbtest.mbt"
+kind = "wbtest"
+loc = 31
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "tip_no_control_wbtest.mbt"
+kind = "wbtest"
+loc = 30
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "tip_owner_leaving_wbtest.mbt"
+kind = "wbtest"
+loc = 58
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "tip_repeats_node_wbtest.mbt"
+kind = "wbtest"
+loc = 72
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "tip_roving_wbtest.mbt"
+kind = "wbtest"
+loc = 194
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "tip_still_pointer_wbtest.mbt"
+kind = "wbtest"
+loc = 48
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "title_accent_wbtest.mbt"
+kind = "wbtest"
+loc = 10
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "toast_node_wbtest.mbt"
+kind = "wbtest"
+loc = 30
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "toggle_group_node_wbtest.mbt"
+kind = "wbtest"
+loc = 163
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "tones_wbtest.mbt"
+kind = "wbtest"
+loc = 111
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "tool_node_wbtest.mbt"
+kind = "wbtest"
+loc = 775
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "viewer_bar_corner_wbtest.mbt"
+kind = "wbtest"
+loc = 62
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "viewer_bar_gone_wbtest.mbt"
+kind = "wbtest"
+loc = 53
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "viewer_head_node_wbtest.mbt"
+kind = "wbtest"
+loc = 408
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "wait_line_node_wbtest.mbt"
+kind = "wbtest"
+loc = 24
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "waiting_node_wbtest.mbt"
+kind = "wbtest"
+loc = 170
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "waiting_tile_node_wbtest.mbt"
+kind = "wbtest"
+loc = 143
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "way_in_node_wbtest.mbt"
+kind = "wbtest"
+loc = 77
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "way_node_wbtest.mbt"
+kind = "wbtest"
+loc = 280
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "words_box_wbtest.mbt"
+kind = "wbtest"
+loc = 60
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "words_links_node_wbtest.mbt"
+kind = "wbtest"
+loc = 177
+m1_3_frozen = false
+disposition = "m1_3_full_wbtest_migrate"
+
+[[test_files]]
+file = "file_size_test.mbt"
+kind = "blackbox_test"
+loc = 17
+m1_3_frozen = false
+disposition = "m1_3_blackbox_migrate"
+
+[[test_files]]
+file = "kept_test.mbt"
+kind = "blackbox_test"
+loc = 56
+m1_3_frozen = false
+disposition = "m1_3_blackbox_migrate"
+
+[[test_files]]
+file = "link_path_test.mbt"
+kind = "blackbox_test"
+loc = 13
+m1_3_frozen = false
+disposition = "m1_3_blackbox_migrate"
+
+[[test_files]]
+file = "markdown_test.mbt"
+kind = "blackbox_test"
+loc = 268
+m1_3_frozen = false
+disposition = "m1_3_blackbox_migrate"
+
+[[test_files]]
+file = "seen_at_test.mbt"
+kind = "blackbox_test"
+loc = 9
+m1_3_frozen = false
+disposition = "m1_3_blackbox_migrate"
+
+[[test_files]]
+file = "w4_m1_overlays_test.mbt"
+kind = "blackbox_test"
+loc = 468
+m1_3_frozen = false
+disposition = "m1_3_blackbox_migrate"
+
+[[test_files]]
+file = "w4_m2_widgets_test.mbt"
+kind = "blackbox_test"
+loc = 331
+m1_3_frozen = false
+disposition = "m1_3_blackbox_migrate"
+

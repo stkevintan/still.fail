@@ -1,0 +1,964 @@
+// Lossless UTF-16 JSON (JSON.parse / JSON.stringify semantics) and UTF-16 code-unit helpers,
+// 1:1 aligned with `station/mb/src/jsjson/jsjson.mbt`.
+// Strings and object keys are represented as `Array[Int]` of UTF-16 code units so lone surrogates
+// (`0xD800..0xDFFF`) and embedded NUL (`0x0000`) are preserved losslessly.
+
+import "sqlite_ffi"
+
+pub let MAX_PARSE_DEPTH : Int = 1024
+
+let SEEN_FROM : Int = 16
+
+pub enum JValue {
+  Null
+  Bool(Bool)
+  Num(Double)
+  Str(Array[Int])
+  Arr(Array[JValue])
+  Obj(Array[(Array[Int], JValue)])
+}
+
+// ── Numeric helpers ──
+
+fn is_nan_or_inf(n : Double) -> Bool {
+  if n != n {
+    return true
+  }
+  let diff = n - n
+  diff != 0.0
+}
+
+/// JavaScript `Number.isSafeInteger(d)`: finite, exact integer, and `|d| <= 2^53 - 1`.
+pub fn is_safe_integer(d : Double) -> Bool {
+  if is_nan_or_inf(d) {
+    return false
+  }
+  if d < -9007199254740991.0 || d > 9007199254740991.0 {
+    return false
+  }
+  d.to_int64().to_double() == d
+}
+
+// ── UTF-16 / UTF-8 helpers ──
+
+fn is_utf8_cont(b : Int) -> Bool {
+  (b & 0xC0) == 0x80
+}
+
+fn push_cp_as_utf16(out : Array[Int], cp : Int) -> Unit {
+  if cp <= 0xFFFF {
+    out.push(cp)
+  } else {
+    let v = cp - 0x10000
+    out.push(0xD800 + (v >> 10))
+    out.push(0xDC00 + (v & 0x3FF))
+  }
+}
+
+/// Decode a UTF-8 Pion `String` into UTF-16 code units (WHATWG lossy on ill-formed UTF-8).
+pub fn utf16_units(s : String) -> Array[Int] {
+  let raw = s.to_bytes()
+  let end = raw.length()
+  let out : Array[Int] = []
+  let mut i = 0
+  while i < end {
+    let b0 = raw[i].to_int() & 0xFF
+    if b0 < 0x80 {
+      out.push(b0)
+      i = i + 1
+    } else if b0 >= 0xC2 && b0 <= 0xDF {
+      if i + 1 < end {
+        let b1 = raw[i + 1].to_int() & 0xFF
+        if is_utf8_cont(b1) {
+          let cp = ((b0 & 0x1F) << 6) | (b1 & 0x3F)
+          out.push(cp)
+          i = i + 2
+          continue
+        }
+      }
+      out.push(0xFFFD)
+      i = i + 1
+    } else if b0 >= 0xE0 && b0 <= 0xEF {
+      let lo1 = if b0 == 0xE0 { 0xA0 } else { 0x80 }
+      let hi1 = if b0 == 0xED { 0x9F } else { 0xBF }
+      if i + 1 < end {
+        let b1 = raw[i + 1].to_int() & 0xFF
+        if b1 >= lo1 && b1 <= hi1 {
+          if i + 2 < end {
+            let b2 = raw[i + 2].to_int() & 0xFF
+            if is_utf8_cont(b2) {
+              let cp = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
+              out.push(cp)
+              i = i + 3
+              continue
+            }
+          }
+          out.push(0xFFFD)
+          i = i + 2
+          continue
+        }
+      }
+      out.push(0xFFFD)
+      i = i + 1
+    } else if b0 >= 0xF0 && b0 <= 0xF4 {
+      let lo1 = if b0 == 0xF0 { 0x90 } else { 0x80 }
+      let hi1 = if b0 == 0xF4 { 0x8F } else { 0xBF }
+      if i + 1 < end {
+        let b1 = raw[i + 1].to_int() & 0xFF
+        if b1 >= lo1 && b1 <= hi1 {
+          if i + 2 < end {
+            let b2 = raw[i + 2].to_int() & 0xFF
+            if is_utf8_cont(b2) {
+              if i + 3 < end {
+                let b3 = raw[i + 3].to_int() & 0xFF
+                if is_utf8_cont(b3) {
+                  let cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+                  push_cp_as_utf16(out, cp)
+                  i = i + 4
+                  continue
+                }
+              }
+              out.push(0xFFFD)
+              i = i + 3
+              continue
+            }
+          }
+          out.push(0xFFFD)
+          i = i + 2
+          continue
+        }
+      }
+      out.push(0xFFFD)
+      i = i + 1
+    } else {
+      out.push(0xFFFD)
+      i = i + 1
+    }
+  }
+  out
+}
+
+/// Number of UTF-16 code units in `s`.
+pub fn utf16_len(s : String) -> Int {
+  utf16_units(s).length()
+}
+
+fn write_utf8_cp(sb : StringBuilder, cp : Int) -> Unit {
+  if cp < 0x80 {
+    sb.write_byte(cp as Byte)
+  } else if cp < 0x800 {
+    sb.write_byte((0xC0 | (cp >> 6)) as Byte)
+    sb.write_byte((0x80 | (cp & 0x3F)) as Byte)
+  } else if cp < 0x10000 {
+    sb.write_byte((0xE0 | (cp >> 12)) as Byte)
+    sb.write_byte((0x80 | ((cp >> 6) & 0x3F)) as Byte)
+    sb.write_byte((0x80 | (cp & 0x3F)) as Byte)
+  } else {
+    sb.write_byte((0xF0 | (cp >> 18)) as Byte)
+    sb.write_byte((0x80 | ((cp >> 12) & 0x3F)) as Byte)
+    sb.write_byte((0x80 | ((cp >> 6) & 0x3F)) as Byte)
+    sb.write_byte((0x80 | (cp & 0x3F)) as Byte)
+  }
+}
+
+/// Well-formed UTF-8 string from UTF-16 code units: lone surrogates replaced with U+FFFD,
+/// valid surrogate pairs decoded, embedded NUL preserved.
+pub fn sanitize_str(units : Array[Int]) -> String {
+  let sb = StringBuilder::new()
+  let n = units.length()
+  let mut i = 0
+  while i < n {
+    let c = units[i]
+    i = i + 1
+    if c >= 0xD800 && c <= 0xDBFF && i < n {
+      let d = units[i]
+      if d >= 0xDC00 && d <= 0xDFFF {
+        write_utf8_cp(sb, 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00))
+        i = i + 1
+        continue
+      }
+    }
+    if c >= 0xD800 && c <= 0xDFFF {
+      write_utf8_cp(sb, 0xFFFD)
+    } else {
+      write_utf8_cp(sb, c)
+    }
+  }
+  sb.to_string()
+}
+
+/// Alias for `sanitize_str` matching `jsjson.mbt::text`.
+pub fn text(units : Array[Int]) -> String {
+  sanitize_str(units)
+}
+
+/// Slice `s` by UTF-16 code-unit range `[start, end)`.
+pub fn utf16_slice(s : String, start : Int, end : Int) -> String {
+  let u = utf16_units(s)
+  let n = u.length()
+  let s0 = if start < 0 { 0 } else if start > n { n } else { start }
+  let e0 = if end < 0 { 0 } else if end > n { n } else { end }
+  if s0 >= e0 {
+    return ""
+  }
+  let slice : Array[Int] = []
+  for i in s0..<e0 {
+    slice.push(u[i])
+  }
+  sanitize_str(slice)
+}
+
+/// Find the first occurrence of `needle` in `haystack` starting at UTF-16 code-unit index `from_units`
+/// (matching JS `String.prototype.indexOf`: empty needle clamps `from_units` to `[0, len]`).
+pub fn utf16_find_from(haystack : String, needle : String, from_units : Int) -> Option[Int] {
+  let h = utf16_units(haystack)
+  let nd = utf16_units(needle)
+  let start = if from_units < 0 { 0 } else { from_units }
+  if nd.length() == 0 {
+    return Some(if start > h.length() { h.length() } else { start })
+  }
+  if start + nd.length() > h.length() {
+    return None
+  }
+  let last = h.length() - nd.length()
+  for i in start..<(last + 1) {
+    let mut matched = true
+    for j in 0..<nd.length() {
+      if h[i + j] != nd[j] {
+        matched = false
+        break
+      }
+    }
+    if matched {
+      return Some(i)
+    }
+  }
+  None
+}
+
+/// Encode UTF-16 code units as UTF-16LE bytes (`Buffer.from(s, "utf16le")`).
+pub fn utf16le_bytes(units : Array[Int]) -> Bytes {
+  let out = Bytes::new(units.length() * 2)
+  for i in 0..<units.length() {
+    let c = units[i]
+    out[i * 2] = (c & 0xFF) as Byte
+    out[i * 2 + 1] = ((c >> 8) & 0xFF) as Byte
+  }
+  out
+}
+
+/// UTF-8 bytes of a Pion `String`.
+pub fn utf8_bytes(s : String) -> Bytes {
+  s.to_bytes()
+}
+
+pub fn units_eq(a : Array[Int], b : Array[Int]) -> Bool {
+  if a.length() != b.length() {
+    return false
+  }
+  for i in 0..<a.length() {
+    if a[i] != b[i] {
+      return false
+    }
+  }
+  true
+}
+
+pub fn jvalue_eq(a : JValue, b : JValue) -> Bool {
+  match a {
+    JValue::Null =>
+    match b {
+      JValue::Null => true
+      _ => false
+    }
+    JValue::Bool(x) =>
+    match b {
+      JValue::Bool(y) => x == y
+      _ => false
+    }
+    JValue::Num(x) =>
+    match b {
+      JValue::Num(y) => (x != x && y != y) || x == y
+      _ => false
+    }
+    JValue::Str(xs) =>
+    match b {
+      JValue::Str(ys) => units_eq(xs, ys)
+      _ => false
+    }
+    JValue::Arr(xs) =>
+    match b {
+      JValue::Arr(ys) => {
+        if xs.length() != ys.length() {
+          return false
+        }
+        for i in 0..<xs.length() {
+          if !jvalue_eq(xs[i], ys[i]) {
+            return false
+          }
+        }
+        true
+      }
+      _ => false
+    }
+    JValue::Obj(xs) =>
+    match b {
+      JValue::Obj(ys) => {
+        if xs.length() != ys.length() {
+          return false
+        }
+        for i in 0..<xs.length() {
+          let (kx, vx) = xs[i]
+          let (ky, vy) = ys[i]
+          if !units_eq(kx, ky) || !jvalue_eq(vx, vy) {
+            return false
+          }
+        }
+        true
+      }
+      _ => false
+    }
+  }
+}
+
+/// Property lookup by UTF-16 code units.
+pub fn JValue::get_units(self : JValue, name : Array[Int]) -> Option[JValue] {
+  match self {
+    JValue::Obj(entries) => {
+      for i in 0..<entries.length() {
+        let (k, v) = entries[i]
+        if units_eq(k, name) {
+          return Some(v)
+        }
+      }
+      None
+    }
+    _ => None
+  }
+}
+
+/// Property lookup by UTF-8 `String`.
+pub fn JValue::get(self : JValue, name : String) -> Option[JValue] {
+  self.get_units(utf16_units(name))
+}
+
+// ── Lossless UTF-16 JSON Parser ──
+
+fn hex_val(c : Int) -> Int {
+  if c >= 0x30 && c <= 0x39 {
+    c - 0x30
+  } else if c >= 0x61 && c <= 0x66 {
+    c - 0x61 + 10
+  } else if c >= 0x41 && c <= 0x46 {
+    c - 0x41 + 10
+  } else {
+    -1
+  }
+}
+
+fn hex_lower_byte(v : Int) -> Byte {
+  if v < 10 { (48 + v) as Byte } else { (87 + v) as Byte }
+}
+
+/// Injective ASCII-safe key encoding for `Array[Int]` so lone surrogates never collide in `Map[String, Int]`.
+fn units_map_key(units : Array[Int]) -> String {
+  let sb = StringBuilder::new()
+  for i in 0..<units.length() {
+    let c = units[i]
+    if c == 0x5C {
+      sb.write_string("\\\\")
+    } else if c > 0 && c < 0x80 {
+      sb.write_byte(c as Byte)
+    } else {
+      sb.write_string("\\u")
+      sb.write_byte(hex_lower_byte((c >> 12) & 0xF))
+      sb.write_byte(hex_lower_byte((c >> 8) & 0xF))
+      sb.write_byte(hex_lower_byte((c >> 4) & 0xF))
+      sb.write_byte(hex_lower_byte(c & 0xF))
+    }
+  }
+  sb.to_string()
+}
+
+struct Parser {
+  units : Array[Int]
+  mut at : Int
+}
+
+fn Parser::peek(self : Parser) -> Int {
+  if self.at < self.units.length() {
+    self.units[self.at]
+  } else {
+    -1
+  }
+}
+
+fn Parser::skip(self : Parser) -> Unit {
+  while self.at < self.units.length() {
+    let c = self.units[self.at]
+    if c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D {
+      self.at = self.at + 1
+    } else {
+      break
+    }
+  }
+}
+
+fn Parser::fail(self : Parser) -> String {
+  "unexpected input at " + self.at.to_string()
+}
+
+fn Parser::expect_ascii(self : Parser, word : String) -> Result[Unit, String] {
+  let raw = word.to_bytes()
+  for i in 0..<raw.length() {
+    if self.peek() != (raw[i].to_int() & 0xFF) {
+      return Err(self.fail())
+    }
+    self.at = self.at + 1
+  }
+  Ok(())
+}
+
+fn Parser::parse_string(self : Parser) -> Result[Array[Int], String] {
+  match self.expect_ascii("\"") {
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  let out : Array[Int] = []
+  while true {
+    let c = self.peek()
+    if c < 0 || c < 0x20 {
+      return Err(self.fail())
+    }
+    self.at = self.at + 1
+    if c == 0x22 {
+      break
+    }
+    if c != 0x5C {
+      out.push(c)
+      continue
+    }
+    let e = self.peek()
+    self.at = self.at + 1
+    if e == 0x22 || e == 0x5C || e == 0x2F {
+      out.push(e)
+    } else if e == 0x62 {
+      out.push(0x08)
+    } else if e == 0x66 {
+      out.push(0x0C)
+    } else if e == 0x6E {
+      out.push(0x0A)
+    } else if e == 0x72 {
+      out.push(0x0D)
+    } else if e == 0x74 {
+      out.push(0x09)
+    } else if e == 0x75 {
+      let mut v = 0
+      for _ in 0..<4 {
+        let h = hex_val(self.peek())
+        if h < 0 {
+          return Err(self.fail())
+        }
+        v = v * 16 + h
+        self.at = self.at + 1
+      }
+      out.push(v)
+    } else {
+      return Err(self.fail())
+    }
+  }
+  Ok(out)
+}
+
+fn Parser::read_digits(self : Parser) -> Bool {
+  let from = self.at
+  while self.peek() >= 0x30 && self.peek() <= 0x39 {
+    self.at = self.at + 1
+  }
+  self.at > from
+}
+
+fn Parser::parse_number(self : Parser) -> Result[Double, String] {
+  let start = self.at
+  if self.peek() == 0x2D {
+    self.at = self.at + 1
+  }
+  if self.peek() == 0x30 {
+    self.at = self.at + 1
+  } else if !self.read_digits() {
+    return Err(self.fail())
+  }
+  if self.peek() == 0x2E {
+    self.at = self.at + 1
+    if !self.read_digits() {
+      return Err(self.fail())
+    }
+  }
+  let mut has_exp = false
+  let mut exp_neg = false
+  let e = self.peek()
+  if e == 0x65 || e == 0x45 {
+    has_exp = true
+    self.at = self.at + 1
+    let sign = self.peek()
+    if sign == 0x2B || sign == 0x2D {
+      if sign == 0x2D {
+        exp_neg = true
+      }
+      self.at = self.at + 1
+    }
+    if !self.read_digits() {
+      return Err(self.fail())
+    }
+  }
+  let sb = StringBuilder::new()
+  for i in start..<self.at {
+    sb.write_byte(self.units[i] as Byte)
+  }
+  let lit = sb.to_string()
+  match lit.to_double() {
+    Some(d) => Ok(d)
+    None => {
+      if !has_exp {
+        return Err(self.fail())
+      }
+      let neg = self.units[start] == 0x2D
+      if exp_neg {
+        Ok(if neg { -0.0 } else { 0.0 })
+      } else if neg {
+        Ok(-1.0 / 0.0)
+      } else {
+        Ok(1.0 / 0.0)
+      }
+    }
+  }
+}
+
+fn Parser::parse_value(self : Parser, depth : Int) -> Result[JValue, String] {
+  if depth > MAX_PARSE_DEPTH {
+    return Err("maximum nesting depth exceeded at " + self.at.to_string())
+  }
+  self.skip()
+  let c = self.peek()
+  if c == 0x7B {
+    self.at = self.at + 1
+    let entries : Array[(Array[Int], JValue)] = []
+    let mut seen : Option[Map[String, Int]] = None
+    self.skip()
+    if self.peek() == 0x7D {
+      self.at = self.at + 1
+      return Ok(JValue::Obj(entries))
+    }
+    while true {
+      self.skip()
+      let key = match self.parse_string() {
+        Ok(k) => k
+        Err(e) => return Err(e)
+      }
+      self.skip()
+      match self.expect_ascii(":") {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      let v = match self.parse_value(depth + 1) {
+        Ok(jv) => jv
+        Err(e) => return Err(e)
+      }
+      match seen {
+        Some(m) => {
+          let mk = units_map_key(key)
+          match m.get(mk) {
+            Some(idx) => entries[idx] = (key, v)
+            None => {
+              m.set(mk, entries.length())
+              entries.push((key, v))
+            }
+          }
+        }
+        None => {
+          let mut found = -1
+          for i in 0..<entries.length() {
+            let (ek, _) = entries[i]
+            if units_eq(ek, key) {
+              found = i
+              break
+            }
+          }
+          if found >= 0 {
+            entries[found] = (key, v)
+          } else {
+            entries.push((key, v))
+            if entries.length() >= SEEN_FROM {
+              let m : Map[String, Int] = Map::new()
+              for i in 0..<entries.length() {
+                let (ek, _) = entries[i]
+                m.set(units_map_key(ek), i)
+              }
+              seen = Some(m)
+            }
+          }
+        }
+      }
+      self.skip()
+      if self.peek() == 0x2C {
+        self.at = self.at + 1
+        continue
+      }
+      match self.expect_ascii("}") {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      break
+    }
+    Ok(JValue::Obj(entries))
+  } else if c == 0x5B {
+    self.at = self.at + 1
+    let items : Array[JValue] = []
+    self.skip()
+    if self.peek() == 0x5D {
+      self.at = self.at + 1
+      return Ok(JValue::Arr(items))
+    }
+    while true {
+      match self.parse_value(depth + 1) {
+        Ok(jv) => items.push(jv)
+        Err(e) => return Err(e)
+      }
+      self.skip()
+      if self.peek() == 0x2C {
+        self.at = self.at + 1
+        continue
+      }
+      match self.expect_ascii("]") {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      break
+    }
+    Ok(JValue::Arr(items))
+  } else if c == 0x22 {
+    match self.parse_string() {
+      Ok(s) => Ok(JValue::Str(s))
+      Err(e) => Err(e)
+    }
+  } else if c == 0x74 {
+    match self.expect_ascii("true") {
+      Ok(_) => Ok(JValue::Bool(true))
+      Err(e) => Err(e)
+    }
+  } else if c == 0x66 {
+    match self.expect_ascii("false") {
+      Ok(_) => Ok(JValue::Bool(false))
+      Err(e) => Err(e)
+    }
+  } else if c == 0x6E {
+    match self.expect_ascii("null") {
+      Ok(_) => Ok(JValue::Null)
+      Err(e) => Err(e)
+    }
+  } else {
+    match self.parse_number() {
+      Ok(d) => Ok(JValue::Num(d))
+      Err(e) => Err(e)
+    }
+  }
+}
+
+/// Parse UTF-16 code units as JavaScript `JSON.parse`.
+pub fn parse_units(units : Array[Int]) -> Result[JValue, String] {
+  let p = Parser::{ units: units, at: 0 }
+  let v = match p.parse_value(0) {
+    Ok(jv) => jv
+    Err(e) => return Err(e)
+  }
+  p.skip()
+  if p.at != units.length() {
+    return Err(p.fail())
+  }
+  Ok(v)
+}
+
+/// Parse a UTF-8 `String` as JavaScript `JSON.parse` (error offsets counted in UTF-16 code units).
+pub fn parse(src : String) -> Result[JValue, String] {
+  parse_units(utf16_units(src))
+}
+
+// ── Stringifier (ECMAScript key ordering + lone-surrogate escaping) ──
+
+/// Canonical array index key (`0`, `12`, not `012`), `< 2^32 - 1`.
+pub fn index_key(key : Array[Int]) -> Option[Int64] {
+  let n = key.length()
+  if n == 0 || n > 10 {
+    return None
+  }
+  if n > 1 && key[0] == 0x30 {
+    return None
+  }
+  let mut v : Int64 = 0.to_int64()
+  let ten = 10.to_int64()
+  for i in 0..<n {
+    let c = key[i]
+    if c < 0x30 || c > 0x39 {
+      return None
+    }
+    v = v * ten + (c - 0x30).to_int64()
+  }
+  let limit : Int64 = (1.to_int64() << 32.to_int64()) - 1.to_int64()
+  if v < limit { Some(v) } else { None }
+}
+
+fn sort_indexed(items : Array[(Int64, Array[Int], JValue)]) -> Unit {
+  let n = items.length()
+  // Insertion sort is simple, stable, and fast for typical object sizes; for larger sizes merge sort.
+  if n <= 32 {
+    for i in 1..<n {
+      let cur = items[i]
+      let (cur_k, _, _) = cur
+      let mut j = i - 1
+      while j >= 0 {
+        let (jk, _, _) = items[j]
+        if jk > cur_k {
+          items[j + 1] = items[j]
+          j = j - 1
+        } else {
+          break
+        }
+      }
+      items[j + 1] = cur
+    }
+    return
+  }
+  // Iterative bottom-up merge sort for O(n log n) worst case.
+  let mut width = 1
+  let mut src = items
+  let mut dst : Array[(Int64, Array[Int], JValue)] = []
+  for i in 0..<n {
+    dst.push(items[i])
+  }
+  while width < n {
+    let mut left = 0
+    while left < n {
+      let mid = if left + width < n { left + width } else { n }
+      let right = if left + width * 2 < n { left + width * 2 } else { n }
+      let mut l = left
+      let mut r = mid
+      let mut out = left
+      while l < mid && r < right {
+        let (lk, _, _) = src[l]
+        let (rk, _, _) = src[r]
+        if lk <= rk {
+          dst[out] = src[l]
+          l = l + 1
+        } else {
+          dst[out] = src[r]
+          r = r + 1
+        }
+        out = out + 1
+      }
+      while l < mid {
+        dst[out] = src[l]
+        l = l + 1
+        out = out + 1
+      }
+      while r < right {
+        dst[out] = src[r]
+        r = r + 1
+        out = out + 1
+      }
+      left = left + width * 2
+    }
+    let tmp = src
+    src = dst
+    dst = tmp
+    width = width * 2
+  }
+  for i in 0..<n {
+    items[i] = src[i]
+  }
+}
+
+fn ordered_entries(entries : Array[(Array[Int], JValue)]) -> Array[(Array[Int], JValue)] {
+  let mut has_index = false
+  for i in 0..<entries.length() {
+    let (k, _) = entries[i]
+    match index_key(k) {
+      Some(_) => {
+        has_index = true
+        break
+      }
+      None => ()
+    }
+  }
+  if !has_index {
+    return entries
+  }
+  let indexed : Array[(Int64, Array[Int], JValue)] = []
+  let rest : Array[(Array[Int], JValue)] = []
+  for i in 0..<entries.length() {
+    let (k, v) = entries[i]
+    match index_key(k) {
+      Some(idx) => indexed.push((idx, k, v))
+      None => rest.push((k, v))
+    }
+  }
+  sort_indexed(indexed)
+  let out : Array[(Array[Int], JValue)] = []
+  for i in 0..<indexed.length() {
+    let (_, k, v) = indexed[i]
+    out.push((k, v))
+  }
+  for i in 0..<rest.length() {
+    out.push(rest[i])
+  }
+  out
+}
+
+fn write_escape4(sb : StringBuilder, c : Int) -> Unit {
+  sb.write_string("\\u")
+  sb.write_byte(hex_lower_byte((c >> 12) & 0xF))
+  sb.write_byte(hex_lower_byte((c >> 8) & 0xF))
+  sb.write_byte(hex_lower_byte((c >> 4) & 0xF))
+  sb.write_byte(hex_lower_byte(c & 0xF))
+}
+
+fn quote_units(sb : StringBuilder, units : Array[Int], escape_ls : Bool) -> Unit {
+  sb.write_byte(0x22 as Byte)
+  let n = units.length()
+  let mut i = 0
+  while i < n {
+    let c = units[i]
+    i = i + 1
+    if c == 0x22 {
+      sb.write_string("\\\"")
+    } else if c == 0x5C {
+      sb.write_string("\\\\")
+    } else if c == 0x08 {
+      sb.write_string("\\b")
+    } else if c == 0x0C {
+      sb.write_string("\\f")
+    } else if c == 0x0A {
+      sb.write_string("\\n")
+    } else if c == 0x0D {
+      sb.write_string("\\r")
+    } else if c == 0x09 {
+      sb.write_string("\\t")
+    } else if escape_ls && (c == 0x2028 || c == 0x2029) {
+      write_escape4(sb, c)
+    } else if c < 0x20 {
+      write_escape4(sb, c)
+    } else if c >= 0xD800 && c <= 0xDBFF && i < n && units[i] >= 0xDC00 && units[i] <= 0xDFFF {
+      let cp = 0x10000 + ((c - 0xD800) << 10) + (units[i] - 0xDC00)
+      write_utf8_cp(sb, cp)
+      i = i + 1
+    } else if c >= 0xD800 && c <= 0xDFFF {
+      write_escape4(sb, c)
+    } else {
+      write_utf8_cp(sb, c)
+    }
+  }
+  sb.write_byte(0x22 as Byte)
+}
+
+fn write_value(
+  sb : StringBuilder,
+  v : JValue,
+  escape_ls : Bool,
+  fmt_num : (Double) -> String,
+) -> Unit {
+  match v {
+    JValue::Null => sb.write_string("null")
+    JValue::Bool(b) => sb.write_string(if b { "true" } else { "false" })
+    JValue::Num(d) => sb.write_string(if is_nan_or_inf(d) { "null" } else { fmt_num(d) })
+    JValue::Str(u) => quote_units(sb, u, escape_ls)
+    JValue::Arr(items) => {
+      sb.write_byte(0x5B as Byte)
+      for i in 0..<items.length() {
+        if i > 0 {
+          sb.write_byte(0x2C as Byte)
+        }
+        write_value(sb, items[i], escape_ls, fmt_num)
+      }
+      sb.write_byte(0x5D as Byte)
+    }
+    JValue::Obj(entries) => {
+      sb.write_byte(0x7B as Byte)
+      let ord = ordered_entries(entries)
+      for i in 0..<ord.length() {
+        if i > 0 {
+          sb.write_byte(0x2C as Byte)
+        }
+        let (k, jv) = ord[i]
+        quote_units(sb, k, escape_ls)
+        sb.write_byte(0x3A as Byte)
+        write_value(sb, jv, escape_ls, fmt_num)
+      }
+      sb.write_byte(0x7D as Byte)
+    }
+  }
+}
+
+/// Stringify `v` with a caller-provided finite-number formatter (enables pure-Pion unit tests).
+pub fn stringify_with_num(v : JValue, fmt_num : (Double) -> String) -> String {
+  let sb = StringBuilder::new()
+  write_value(sb, v, false, fmt_num)
+  sb.to_string()
+}
+
+/// Stringify `v` as JavaScript `JSON.stringify` (finite doubles formatted via `sqlite_ffi::format_js_double`).
+pub fn stringify(v : JValue) -> String {
+  let sb = StringBuilder::new()
+  write_value(sb, v, false, sqlite_ffi::format_js_double)
+  sb.to_string()
+}
+
+/// Stringify `v` as a single JSON line with U+2028/U+2029 escaped (matching `jsjson.mbt::write_utf8`).
+pub fn stringify_line(v : JValue) -> String {
+  let sb = StringBuilder::new()
+  write_value(sb, v, true, sqlite_ffi::format_js_double)
+  sb.to_string()
+}
+
+/// Linked-binary self-test verifying `js_json::stringify` numeric formatting via `sqlite_ffi::format_js_double`.
+pub fn run_selftest() -> Result[Unit, String] {
+  let cases : Array[(String, String)] = [
+    ("1e21", "1e+21"),
+    ("-0", "0"),
+    ("5e-324", "5e-324"),
+    ("1e-7", "1e-7"),
+    ("9007199254740993", "9007199254740992"),
+    ("-9007199254740993", "-9007199254740992"),
+    ("1e400", "null"),
+    ("-1e400", "null"),
+    ("1e-400", "0"),
+    ("0.000001", "0.000001"),
+    ("1e20", "100000000000000000000"),
+    ("{\"b\":1,\"2\":2,\"10\":3,\"0\":4,\"a\":5,\"01\":6}", "{\"0\":4,\"2\":2,\"10\":3,\"b\":1,\"a\":5,\"01\":6}"),
+    ("{\"k\":1,\"m\":2,\"k\":3}", "{\"k\":3,\"m\":2}"),
+    ("\"\\uD800\\u0000\\uDC00\"", "\"\\ud800\\u0000\\udc00\""),
+  ]
+  for i in 0..<cases.length() {
+    let (input, want) = cases[i]
+    match parse(input) {
+      Ok(v) => {
+        let got = stringify(v)
+        if got != want {
+          return Err("js_json stringify(" + input + ") mismatch: got=" + got + " want=" + want)
+        }
+      }
+      Err(e) => return Err("js_json parse(" + input + ") failed: " + e)
+    }
+  }
+  let nan_str = stringify(JValue::Num(0.0 / 0.0))
+  if nan_str != "null" {
+    return Err("js_json stringify(NaN) mismatch: got=" + nan_str)
+  }
+  let inf_str = stringify(JValue::Num(1.0 / 0.0))
+  if inf_str != "null" {
+    return Err("js_json stringify(+Inf) mismatch: got=" + inf_str)
+  }
+  let ninf_str = stringify(JValue::Num(-1.0 / 0.0))
+  if ninf_str != "null" {
+    return Err("js_json stringify(-Inf) mismatch: got=" + ninf_str)
+  }
+  Ok(())
+}

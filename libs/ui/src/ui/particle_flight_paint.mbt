@@ -20,6 +20,7 @@ priv struct ParticleAt {
   base_x : Double
   base_y : Double
   base_s : Double
+  fast_fade : Array[(Int, Int)]
 }
 
 ///|
@@ -208,15 +209,37 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
   // View::shared(container=true, particle=true) crossfade over t in [0.32, 0.58] is already applied on `l.a` by
   // Tree::flight_at (so `orig_alpha` carries it without double-fading).
   let box_fade = 1.0
-  // Adaptive particle cell size: cap total glyph particles at <= 1400 per flight.
+  let is_fast_fade = fn(abs_k : Int) -> Bool {
+    for r in at.fast_fade {
+      if abs_k >= r.0 && abs_k < r.1 {
+        return true
+      }
+    }
+    false
+  }
+  // Adaptive particle cell size (cap total glyph particles at <= 1400 per flight) and active content span for
+  // shared_box flights so short quotes do not stall on wide composer cards and wide quotes map into destination bounds.
   let base_cell = 2.2
   let mut est = 0
+  let mut content_min_x = 1.0e9
+  let mut content_max_x = -1.0e9
+  let mut content_min_y = 1.0e9
+  let mut content_max_y = -1.0e9
+  let mut content_max_rx = 0.0
+  let mut content_max_ry = 0.0
+  let mut max_gw = 0.0
+  let mut max_gh = 0.0
   for i in 0..<count {
+    if is_fast_fade(from_k + i) {
+      continue
+    }
     let o = i * inst_size
     let kind = snap.unsafe_get(o + 5)
+    let gx = snap.unsafe_get(o)
+    let gy = snap.unsafe_get(o + 1)
+    let gw = snap.unsafe_get(o + 2)
+    let gh = snap.unsafe_get(o + 3)
     if kind == 1.0 || kind == 3.0 {
-      let gw = snap.unsafe_get(o + 2)
-      let gh = snap.unsafe_get(o + 3)
       let uw = snap.unsafe_get(o + 14)
       let vh = snap.unsafe_get(o + 15)
       let max_nx = if uw >= 1.5 { (uw / 1.5).floor().to_int() } else { 1 }
@@ -224,11 +247,46 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
       let nx = particle_iclamp((gw / base_cell).round().to_int(), 1, if max_nx > 1 { max_nx } else { 1 })
       let ny = particle_iclamp((gh / base_cell).round().to_int(), 1, if max_ny > 1 { max_ny } else { 1 })
       est = est + nx * ny
+      let rx0 = gx - pf.from_x
+      let ry0 = gy - pf.from_y
+      if rx0 < content_min_x { content_min_x = rx0 }
+      if rx0 + gw > content_max_x { content_max_x = rx0 + gw }
+      if ry0 < content_min_y { content_min_y = ry0 }
+      if ry0 + gh > content_max_y { content_max_y = ry0 + gh }
+      if rx0 > content_max_rx { content_max_rx = rx0 }
+      if ry0 > content_max_ry { content_max_ry = ry0 }
+      if gw > max_gw { max_gw = gw }
+      if gh > max_gh { max_gh = gh }
+    } else if kind == 10.0 || kind == 11.0 {
+      let rx0 = gx - pf.from_x
+      let ry0 = gy - pf.from_y
+      if rx0 < content_min_x { content_min_x = rx0 }
+      if rx0 + gw > content_max_x { content_max_x = rx0 + gw }
+      if ry0 < content_min_y { content_min_y = ry0 }
+      if ry0 + gh > content_max_y { content_max_y = ry0 + gh }
     }
+  }
+  let has_content = content_max_x > content_min_x && content_max_y > content_min_y
+  let wave_x0 = if pf.shared_box && has_content { content_min_x } else { 0.0 }
+  let wave_y0 = if pf.shared_box && has_content { content_min_y } else { 0.0 }
+  let wave_w = if pf.shared_box && has_content { dmax(content_max_x - content_min_x, 1.0) } else { bw }
+  let wave_h = if pf.shared_box && has_content { dmax(content_max_y - content_min_y, 1.0) } else { bh }
+  let icon_wave_w = if pf.shared_box { dmax(dmin(pf.from_w, pf.to_w), 1.0) } else { bw }
+  let icon_wave_h = if pf.shared_box { dmax(dmin(pf.from_h, pf.to_h), 1.0) } else { bh }
+  let old_dest_sx = if pf.shared_box && pf.old && content_max_x > pf.to_w - 8.0 && content_max_rx > 1.0 {
+    dclamp(dmax(pf.to_w - 8.0 - max_gw, 0.0) / content_max_rx, 0.0, 1.0)
+  } else {
+    1.0
+  }
+  let old_dest_sy = if pf.shared_box && pf.old && content_max_y > pf.to_h - 6.0 && content_max_ry > 1.0 {
+    dclamp(dmax(pf.to_h - 6.0 - max_gh, 0.0) / content_max_ry, 0.0, 1.0)
+  } else {
+    1.0
   }
   let cell = if est > 1400 { base_cell * (est.to_double() / 1400.0).sqrt() } else { base_cell }
   let mut glyph_idx = 0
   let mut img_idx = 0
+  let mut shape_idx = 0
   let mut card_dust_done = false
   for i in 0..<count {
     let o = i * inst_size
@@ -241,6 +299,20 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
       self.particle_emit_copy(snap, o, keep_owners, ow, cel, tre, mar) |> ignore
       continue
     }
+    // Fast-fade empty-field placeholder chrome (e.g. composer quote card's empty comment hint) in place on takeoff so
+    // it never dissolves into stray flying sand or vanishes mid-air at handoff.
+    if is_fast_fade(from_k + i) {
+      let fade = 1.0 - particle_smoothstep(0.0, 0.10, t)
+      if fade > 0.002 {
+        let b = self.particle_emit_copy(snap, o, keep_owners, ow, cel, tre, mar)
+        let a = self.inst
+        a.unsafe_set(b + 11, snap.unsafe_get(o + 11) * fade)
+        if kind == 0.0 {
+          a.unsafe_set(b + 15, snap.unsafe_get(o + 15) * fade)
+        }
+      }
+      continue
+    }
     // Every instance in `snap` was emitted in the immutable origin coordinate system `(pf.from_x, pf.from_y)` at 1:1.
     let gx = snap.unsafe_get(o)
     let gy = snap.unsafe_get(o + 1)
@@ -250,9 +322,10 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
     let ry = gy - pf.from_y
     let sx = gx
     let sy = gy
-    let ex = pf.to_x + rx
-    let ey = pf.to_y + ry
-    if kind == 1.0 || kind == 3.0 {
+    let is_text = kind == 1.0 || kind == 3.0
+    let ex = if is_text { pf.to_x + rx * old_dest_sx } else { pf.to_x + rx }
+    let ey = if is_text { pf.to_y + ry * old_dest_sy } else { pf.to_y + ry }
+    if is_text {
       let g_id = glyph_idx
       glyph_idx = glyph_idx + 1
       let u0_raw = snap.unsafe_get(o + 12)
@@ -277,8 +350,8 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
         for ix in 0..<nx {
           let cell_rx = rx + (ix.to_double() + 0.5) * cw
           let cell_ry = ry + (iy.to_double() + 0.5) * ch
-          let nx_pos = dclamp(cell_rx / bw, 0.0, 1.0)
-          let ny_pos = dclamp(cell_ry / bh, 0.0, 1.0)
+          let nx_pos = dclamp((cell_rx - wave_x0) / wave_w, 0.0, 1.0)
+          let ny_pos = dclamp((cell_ry - wave_y0) / wave_h, 0.0, 1.0)
           let wave = 1.0 - (0.72 * nx_pos + 0.28 * (1.0 - ny_pos))
           let cid = g_id * 1024 + iy * 32 + ix
           let h0 = particle_hash_u(cid, pf.seed + 11)
@@ -318,8 +391,8 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
         for ix in 0..<nx {
           let cell_rx = rx + (ix.to_double() + 0.5) * cw
           let cell_ry = ry + (iy.to_double() + 0.5) * ch
-          let nx_pos = dclamp(cell_rx / bw, 0.0, 1.0)
-          let ny_pos = dclamp(cell_ry / bh, 0.0, 1.0)
+          let nx_pos = dclamp((cell_rx - wave_x0) / wave_w, 0.0, 1.0)
+          let ny_pos = dclamp((cell_ry - wave_y0) / wave_h, 0.0, 1.0)
           let wave = 1.0 - (0.72 * nx_pos + 0.28 * (1.0 - ny_pos))
           let cid = g_id * 1024 + iy * 32 + ix
           let h0 = particle_hash_u(cid, pf.seed + 11)
@@ -574,17 +647,6 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
     } else if kind == 0.0 {
       let orig_alpha = snap.unsafe_get(o + 11)
       let orig_edge_alpha = snap.unsafe_get(o + 15)
-      // Fast-fade composer quote card's small circular close button (`✕`) background so it never lingers mid-air.
-      if pf.old && gw <= 24.0 && gh <= 24.0 {
-        let fade = 1.0 - particle_smoothstep(0.0, 0.10, t)
-        if fade > 0.002 {
-          let b = self.particle_emit_copy(snap, o, keep_owners, ow, cel, tre, mar)
-          let a = self.inst
-          a.unsafe_set(b + 11, orig_alpha * fade)
-          a.unsafe_set(b + 15, orig_edge_alpha * fade)
-        }
-        continue
-      }
       if pf.bare {
         let m = particle_smoothstep(0.42, 0.96, t)
         if m <= 0.001 {
@@ -654,8 +716,10 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
         // Visible uniform grid card surface dust (80-140 soft 2.0-2.8pt rounded particles filtered to card corners).
         if !card_dust_done && orig_alpha > 0.01 && gw >= 24.0 && gh >= 16.0 && t > 0.02 && t < 0.98 {
           card_dust_done = true
-          let raw_cols = particle_iclamp((dmax(gw, pf.from_w) / 9.0).round().to_int(), 10, 20)
-          let raw_rows = particle_iclamp((dmax(gh, pf.from_h) / 7.5).round().to_int(), 6, 10)
+          let dust_span_w = if pf.shared_box { bw } else { dmax(gw, pf.from_w) }
+          let dust_span_h = if pf.shared_box { bh } else { dmax(gh, pf.from_h) }
+          let raw_cols = particle_iclamp((dust_span_w / 9.0).round().to_int(), 10, 20)
+          let raw_rows = particle_iclamp((dust_span_h / 7.5).round().to_int(), 6, 10)
           let (cols, rows) = if raw_cols * raw_rows > 140 {
             let r_sc = (140.0 / (raw_cols * raw_rows).to_double()).sqrt()
             (
@@ -665,9 +729,12 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
           } else {
             (raw_cols, raw_rows)
           }
-          let card_r = dmin(orig_r, dmin(gw, gh) * 0.5)
+          let corner_w = if pf.shared_box { pf.to_w } else { gw }
+          let corner_h = if pf.shared_box { pf.to_h } else { gh }
+          let dust_r = if pf.shared_box && pf.to_r > 0.0 { pf.to_r } else { orig_r }
+          let card_r = dmin(dust_r, dmin(corner_w, corner_h) * 0.5)
           let base_dust_a = dclamp(dmax(orig_alpha * 3.4, 0.30), 0.24, 0.58)
-          let file_card_morph = !pf.old && !pf.has_old
+          let card_morph = pf.shared_box || (!pf.old && !pf.has_old)
           let dust_kx = if pf.shared_box { 1.0 } else { kx }
           let dust_ky = if pf.shared_box { 1.0 } else { ky }
           for iy in 0..<rows {
@@ -677,7 +744,7 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
               let jy = particle_hash_s(cid, pf.seed + 389) * 0.32
               let u_x = dclamp((ix.to_double() + 0.5 + jx) / cols.to_double(), 0.02, 0.98)
               let u_y = dclamp((iy.to_double() + 0.5 + jy) / rows.to_double(), 0.02, 0.98)
-              if particle_out_of_corner(u_x * gw, u_y * gh, gw, gh, card_r) {
+              if particle_out_of_corner(u_x * corner_w, u_y * corner_h, corner_w, corner_h, card_r) {
                 continue
               }
               let wave = 1.0 - (0.72 * u_x + 0.28 * (1.0 - u_y))
@@ -696,7 +763,7 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
               let arc = 0.18 * spread * s
               let lat = h1 * spread * s
               let lon = h2 * (spread * 0.40) * s
-              let (src_cx, src_cy, dst_cx, dst_cy) = if file_card_morph {
+              let (src_cx, src_cy, dst_cx, dst_cy) = if card_morph {
                 (
                   pf.from_x + u_x * pf.from_w,
                   pf.from_y + u_y * pf.from_h,
@@ -734,21 +801,14 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
         }
       }
     } else if kind == 10.0 || kind == 11.0 {
-      // Fast-fade composer quote card's top-right `✕` icon so it never lingers mid-air.
-      if pf.old && gw <= 16.0 && gh <= 16.0 && gx > pf.from_x + pf.from_w - 24.0 {
-        let fade = 1.0 - particle_smoothstep(0.0, 0.10, t)
-        if fade > 0.002 {
-          let b = self.particle_emit_copy(snap, o, keep_owners, ow, cel, tre, mar)
-          self.inst.unsafe_set(b + 11, snap.unsafe_get(o + 11) * fade)
-        }
-        continue
-      }
+      let s_id = shape_idx
+      shape_idx = shape_idx + 1
       let cell_rx = rx + gw * 0.5
       let cell_ry = ry + gh * 0.5
-      let nx_pos = dclamp(cell_rx / bw, 0.0, 1.0)
-      let ny_pos = dclamp(cell_ry / bh, 0.0, 1.0)
+      let nx_pos = dclamp(cell_rx / icon_wave_w, 0.0, 1.0)
+      let ny_pos = dclamp(cell_ry / icon_wave_h, 0.0, 1.0)
       let wave = 1.0 - (0.72 * nx_pos + 0.28 * (1.0 - ny_pos))
-      let cid = 500000 + i
+      let cid = 500000 + s_id
       let h0 = particle_hash_u(cid, pf.seed + 11)
       let delay = dclamp((0.78 * wave + 0.22 * h0) * stagger, 0.0, stagger)
       let lp = dclamp((t - delay) / (1.0 - stagger), 0.0, 1.0)
@@ -792,7 +852,7 @@ fn Ctx::particle_apply(self : Ctx, at : ParticleAt, from_k : Int, till_k : Int) 
         let icon_dust_a = orig_alpha * 0.70 * s * box_fade
         if icon_dust_a > 0.004 {
           for d in 0..<10 {
-            let dcid = 600000 + i * 16 + d
+            let dcid = 600000 + s_id * 16 + d
             let u_x = particle_hash_u(dcid, pf.seed + 311)
             let u_y = particle_hash_u(dcid, pf.seed + 389)
             let dh1 = particle_hash_s(dcid, pf.seed + 37)

@@ -1103,6 +1103,9 @@ fn ops_preset_profile_request(op : String, params : base_codec::Json) -> OpResul
       ("on", base_codec::json_bool(p_bool(params, "on"))),
       ("allow", allow_j),
     ]
+    if p_has(params, "allowAuto") {
+      fields.push(("allowAuto", base_codec::json_bool(p_bool(params, "allowAuto"))))
+    }
     match p_get(params, "among") {
       Some(v) => fields.push(("among", v))
       None => ()

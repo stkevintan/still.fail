@@ -272,6 +272,10 @@ impl Os for System {
         unsafe { libc::kill(node.pid, libc::SIGKILL) };
     }
 
+    fn diagnose_hung(&mut self, node: &Node) -> serde_json::Map<String, Value> {
+        crate::diagnose::collect(node.pid)
+    }
+
     fn parent_gone(&mut self) -> bool {
         // SAFETY: getppid has no preconditions.
         unsafe { libc::getppid() != self.parent }

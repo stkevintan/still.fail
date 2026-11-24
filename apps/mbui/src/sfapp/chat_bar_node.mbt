@@ -764,11 +764,18 @@ fn small_station_status_node(
   parent : @view.View,
   is_offline : () -> Bool,
   is_updating : () -> Bool,
+  moving? : () -> String = fn() { "" },
 ) -> Unit {
-  parent.show(fn() { is_updating() || is_offline() }, at_once=true, fn(st) {
+  parent.show(fn() { moving() != "" || is_updating() || is_offline() }, at_once=true, fn(st) {
     st.row(Is(true)).lines_up(Is(Some(Middle))).gap(Is(@ui.Space::S1.px())).shrink(Is(0.0)).drops(Is(5)) |> ignore
-    st.pick(at_once=true, is_updating, fn(x, updating) {
-      if updating {
+    // (its chat going to another station: that, turning, before what its station is (the chat is on it till then))
+    st.pick(at_once=true, fn() { if moving() != "" { 2 } else if is_updating() { 1 } else { 0 } }, fn(x, what) {
+      if what == 2 {
+        x.row(Is(true)).lines_up(Is(Some(Middle))).gap(Is(@ui.Space::S1.px())).shrink(Is(0.0)) |> ignore
+        @sf.updating_mark_node(x, 12.0, fn() { @sf.theme().p.muted })
+        @sf.words_node(x, fn() { @sf.t("web-main.chat.movingTo", args=[("station", moving())]) }, fn() { small_composer_pill_muted })
+        |> ignore
+      } else if what == 1 {
         x.row(Is(true)).lines_up(Is(Some(Middle))).gap(Is(@ui.Space::S1.px())).shrink(Is(0.0)) |> ignore
         @sf.updating_mark_node(x, 12.0, fn() { @sf.theme().p.muted })
         @sf.words_node(x, fn() { @sf.t("web-main.stationUpdate.updating") }, fn() { small_composer_pill_muted })
@@ -792,6 +799,7 @@ fn station_chip_node(
   is_updating : () -> Bool,
   offline_note : () -> String,
   stint : () -> Int,
+  moving? : () -> String = fn() { "" },
 ) -> Unit {
   v.box(fn(k) {
     @sf.presses_node(k, fn() {
@@ -819,7 +827,7 @@ fn station_chip_node(
       |> ignore
     })
     |> ignore
-    small_station_status_node(k, is_offline, is_updating)
+    small_station_status_node(k, is_offline, is_updating, moving~)
   })
   |> ignore
 }
@@ -1002,6 +1010,13 @@ fn chat_composer_bar_node(o : @view.View, src : Source, r : ChatRef, shows : () 
       None => false
     }
   }
+  // (going to another station: where, "" none)
+  let moving = fn() {
+    match view() {
+      Some({ moving: Some((to, _)), .. }) => to
+      _ => ""
+    }
+  }
   let offline_note = fn() {
     match view() {
       Some(v) => v.offline_note.unwrap_or("")
@@ -1093,7 +1108,7 @@ fn chat_composer_bar_node(o : @view.View, src : Source, r : ChatRef, shows : () 
       match group_opt {
         None =>
           match station {
-            Some(s) => station_chip_node(slot, r.station, s, via_now, is_offline, is_updating, offline_note, stint)
+            Some(s) => station_chip_node(slot, r.station, s, via_now, is_offline, is_updating, offline_note, stint, moving~)
             None => ()
           }
         Some(group) => {
@@ -1140,7 +1155,7 @@ fn chat_composer_bar_node(o : @view.View, src : Source, r : ChatRef, shows : () 
                   }
                 })
                 |> ignore
-                small_station_status_node(k, is_offline, is_updating)
+                small_station_status_node(k, is_offline, is_updating, moving~)
                 // (within the one button: gone while it is lit)
                 let one = @sf.Segments::new()
                 one.made(0, k)

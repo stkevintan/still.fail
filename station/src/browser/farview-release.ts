@@ -1,9 +1,9 @@
-// Farview's release (AFK-surf/farview's `tools/package.sh`: bin/host.exe, bin/agent.exe, lib/), got by a station
+// Farview's release (AFK-surf/farview-legacy's `tools/package.sh`: bin/host.exe, bin/agent.exe, lib/), got by a station
 // that has it nowhere else: where config.json names no directory of its own, a station on a system Farview is built
 // for takes the release this station's version names (FARVIEW_RELEASES: its commit, as apps/mbui/farview.pin pins the
 // client the app draws its tabs with, and the SHA-256 of its tarball), downloaded the first time a chat's Farview is
 // started, its digest checked before anything of it is unpacked, and kept in the machine's cache of native parts,
-// which every station process and worktree shares. Farview is private (AFK-surf/farview): its releases are that
+// which every station process and worktree shares. Farview is private (AFK-surf/farview-legacy): its releases are that
 // repository's own (the release `builds`), got with the machine's `gh` and its sign-in, never published where anyone
 // may download them until its owner says so (the lead, 2026-11-16); then still.fail's store of native parts and the
 // release `native-artifacts` of AFK-surf/monoid, as scripts/native.ts gets the native parts, are asked after it.
@@ -52,7 +52,7 @@ export function farviewSources(name: string, env: NodeJS.ProcessEnv = process.en
   const store = env.STILLFAIL_NATIVE_STORE ?? "https://app.still.fail/releases/natives";
   const repo = env.STILLFAIL_NATIVE_REPO ?? "AFK-surf/monoid";
   const release = env.STILLFAIL_NATIVE_RELEASE ?? "native-artifacts";
-  return [`gh:AFK-surf/farview@builds/${name}`, `${store}/${name}`, `https://github.com/${repo}/releases/download/${release}/${name}`];
+  return [`gh:AFK-surf/farview-legacy@builds/${name}`, `${store}/${name}`, `https://github.com/${repo}/releases/download/${release}/${name}`];
 }
 
 /// The bytes at an address, null where it has none (or it cannot be reached).

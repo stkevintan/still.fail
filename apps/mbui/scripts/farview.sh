@@ -1,5 +1,5 @@
 #!/bin/sh
-# Farview's client (AFK-surf/farview, private: its client/, the module fvclient, which draws a chat's Farview tab in the
+# Farview's client (AFK-surf/farview-legacy, private: its client/, the module fvclient, which draws a chat's Farview tab in the
 # app) at the commit farview.pin names, into deps/farview/client, which moon.work names (the user, 2026-11-14: kept out
 # of this repository, pulled at a pinned commit). Nothing is fetched while deps/farview holds that commit. In CI its
 # read-only deploy key is FARVIEW_DEPLOY_KEY (the workflows' secret); elsewhere git's own credentials for GitHub.
@@ -11,13 +11,13 @@ d=$A/deps/farview
 tmp=$A/deps/farview.tmp
 rm -rf "$tmp"
 mkdir -p "$tmp"
-urls=https://github.com/AFK-surf/farview.git
+urls=https://github.com/AFK-surf/farview-legacy.git
 if [ -n "${FARVIEW_DEPLOY_KEY:-}" ]; then
   umask 077
   printf '%s\n' "$FARVIEW_DEPLOY_KEY" > "$tmp/key"
   # (GitHub's SSH on port 22, and the same on 443 where 22 is cut: Studio's runners behind its proxy, whose node closed
   # every connection to 22 in 300 ms, mbui-media-runtime red on 43868680757 and 43869405355, 2026-11-16)
-  urls="git@github.com:AFK-surf/farview.git ssh://git@ssh.github.com:443/AFK-surf/farview.git"
+  urls="git@github.com:AFK-surf/farview-legacy.git ssh://git@ssh.github.com:443/AFK-surf/farview-legacy.git"
   export GIT_SSH_COMMAND="ssh -i '$tmp/key' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
 fi
 # (each way in turn, three rounds, no wait of a fixed time between (detlint's script-wait): a failed fetch's half

@@ -1,0 +1,6 @@
+[package]
+name = "js_json"
+version = "0.1.0"
+
+[dependencies]
+sqlite_ffi = { workspace = true }

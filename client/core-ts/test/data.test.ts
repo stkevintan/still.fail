@@ -9,7 +9,7 @@ import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { Data, dbName, type RowChange } from "../src/data.ts";
+import { Data, HEARD_FLUSH_MS, TRANSCRIPT_FLUSH_MS, dbName, type RowChange } from "../src/data.ts";
 import { CHUNK, importFormer } from "../src/db/import.ts";
 import { placesFor, sameTurns } from "../src/db/account.ts";
 import { VERSION, giveBackRoomStep } from "../src/db/schema.ts";
@@ -285,7 +285,7 @@ test("a_list_read_again_writes_only_the_rows_that_changed", async () => {
   // A new chat on top and one changed: those two rows, and nothing else, though every row moved down.
   data.set(rows("w/a"), [{ id: "new", title: "新", lastActiveAt: 2000 }, ...list.map((r, i) => (i === 7 ? { ...r, title: "改了" } : r))]);
   await run(data.written);
-  assert.equal(db().writes().slice(writes).filter((s) => s.startsWith("INSERT OR REPLACE INTO chat")).length, 2);
+  assert.equal(db().writes().slice(writes).filter((s) => /^INSERT (OR REPLACE )?INTO chat \(/.test(s)).length, 2);
   assert.deepEqual(
     (data.get(rows("w/a")) as J[]).slice(0, 3).map((r: J) => r.id),
     ["new", "c0", "c1"],
@@ -1676,5 +1676,182 @@ test("closing_last_view_of_shown_transcript_clears_kept_backoff_for_next_write",
     await run(data.written);
     await flush();
     assert.equal(data.evicted("transcript", "w/a", "big"), true, "closing last view clears backoff and allows immediate eviction");
+  } finally { runner.shutdown(); }
+});
+
+test("hot_overview_updates_do_not_rewrite_station_part_profiles_and_profile_updates_do_not_rewrite_station_part", async () => {
+  const { data, open, db, runner } = fresh();
+  await open();
+  try {
+    const base = {
+      counts: { running: 1 },
+      disk: { freeBytes: 94 * 1024 ** 3, totalBytes: 1858 * 1024 ** 3 },
+      profiles: [{ id: "p1", name: "Claude", models: ["claude-sonnet-5-5"], extra: "x".repeat(4000) }],
+      connects: [{ id: "c1", kind: "slack" }],
+      mesh: { name: "station-a" },
+    };
+    data.set({ topic: "overview", station: "w/a" }, base);
+    await run(data.written);
+
+    db().inner.exec(`
+      CREATE TEMP TABLE _t_sp (n INTEGER);
+      CREATE TEMP TRIGGER _t_sp_upd AFTER UPDATE ON station_part BEGIN INSERT INTO _t_sp VALUES (1); END;
+      CREATE TEMP TABLE _t_spp (n INTEGER);
+      CREATE TEMP TRIGGER _t_spp_upd AFTER UPDATE ON station_part_profiles BEGIN INSERT INTO _t_spp VALUES (1); END;
+    `);
+
+    // Hot field changes (counts.running, disk.freeBytes) touch station_part, never station_part_profiles.
+    data.set({ topic: "overview", station: "w/a" }, { ...base, counts: { running: 3 }, disk: { freeBytes: 93 * 1024 ** 3, totalBytes: 1858 * 1024 ** 3 } });
+    await run(data.written);
+    assert.equal(db().all("SELECT count(*) FROM _t_sp")[0]![0], 1, "hot update updates station_part");
+    assert.equal(db().all("SELECT count(*) FROM _t_spp")[0]![0], 0, "hot update leaves station_part_profiles untouched");
+
+    // Profile change updates station_part_profiles and leaves station_part untouched.
+    data.set({ topic: "overview", station: "w/a" }, {
+      ...base,
+      counts: { running: 3 },
+      disk: { freeBytes: 93 * 1024 ** 3, totalBytes: 1858 * 1024 ** 3 },
+      profiles: [{ id: "p1", name: "Claude Renamed", models: ["claude-sonnet-5-5"], extra: "x".repeat(4000) }],
+    });
+    await run(data.written);
+    assert.equal(db().all("SELECT count(*) FROM _t_sp")[0]![0], 1, "profile-only update leaves station_part untouched");
+    assert.equal(db().all("SELECT count(*) FROM _t_spp")[0]![0], 1, "profile-only update updates station_part_profiles");
+    assert.equal((data.overviewProfile("w/a", "p1") as J)?.name, "Claude Renamed");
+  } finally { runner.shutdown(); }
+});
+
+test("a station's whitelist turned on, or its shares able to follow it, alone reaches the profiles' part", async () => {
+  const { data, open, runner } = fresh();
+  await open();
+  try {
+    const base = { profiles: [{ id: "p1", name: "Claude" }], sharing: true, mesh: { name: "station-a" }, autoChats: { enabled: false, canEdit: true } };
+    data.set({ topic: "overview", station: "w/a" }, base);
+    await run(data.written);
+    assert.equal((data.overviewProfiled("w/a") as J)?.autoChats?.enabled, false);
+    // (only `autoChats` changed: nothing else the profiles read)
+    data.set({ topic: "overview", station: "w/a" }, { ...base, autoChats: { enabled: true, canEdit: true } });
+    await run(data.written);
+    assert.equal((data.overviewProfiled("w/a") as J)?.autoChats?.enabled, true, "the whitelist turned on reaches the part");
+    // (only `shareAllowAuto` changed)
+    data.set({ topic: "overview", station: "w/a" }, { ...base, autoChats: { enabled: true, canEdit: true }, shareAllowAuto: true });
+    await run(data.written);
+    assert.equal((data.overviewProfiled("w/a") as J)?.shareAllowAuto, true, "a share able to follow it reaches the part");
+  } finally { runner.shutdown(); }
+});
+
+test("chat_agent_trigger_skips_delete_rewrite_when_agents_unchanged", async () => {
+  const { data, open, db, runner } = fresh();
+  await open();
+  try {
+    const row = {
+      id: "c1",
+      session: "s1",
+      thread: 1,
+      title: "Chat 1",
+      agents: [{ key: "s1", name: "a1" }, { key: "s2", name: "a2" }],
+    };
+    data.set(rows("w/a"), [row]);
+    await run(data.written);
+
+    db().inner.exec(`
+      CREATE TEMP TABLE _t_ca_del (n INTEGER);
+      CREATE TEMP TRIGGER _t_ca_del_t AFTER DELETE ON chat_agent BEGIN INSERT INTO _t_ca_del VALUES (1); END;
+    `);
+    const rowidBefore = db().all("SELECT rowid FROM chat WHERE station = 'w/a' AND id = 'c1'")[0]![0];
+
+    // Updating title/preview with identical agents keeps rowid (ON CONFLICT DO UPDATE) and deletes 0 chat_agent rows.
+    data.putChat("w/a", { ...row, title: "Chat 1 updated" });
+    await run(data.written);
+    assert.equal(db().all("SELECT rowid FROM chat WHERE station = 'w/a' AND id = 'c1'")[0]![0], rowidBefore, "putChat preserves rowid");
+    assert.equal(db().all("SELECT count(*) FROM _t_ca_del")[0]![0], 0, "unchanged agents cause 0 chat_agent deletes");
+    assert.deepEqual(db().all("SELECT session FROM chat_agent WHERE station = 'w/a' AND id = 'c1' ORDER BY session").map((r) => r[0]), ["s1", "s2"]);
+
+    // Updating an agent's running flag without changing agent keys also deletes 0 chat_agent rows.
+    data.putChat("w/a", { ...row, agents: [{ key: "s1", name: "a1", running: true }, { key: "s2", name: "a2" }] });
+    await run(data.written);
+    assert.equal(db().all("SELECT rowid FROM chat WHERE station = 'w/a' AND id = 'c1'")[0]![0], rowidBefore, "putChat preserves rowid on agent state change");
+    assert.equal(db().all("SELECT count(*) FROM _t_ca_del")[0]![0], 0, "same agent keys cause 0 chat_agent deletes");
+
+    // Replacing s2 with s3 deletes only s2 and inserts s3.
+    data.putChat("w/a", { ...row, agents: [{ key: "s1", name: "a1" }, { key: "s3", name: "a3" }] });
+    await run(data.written);
+    assert.equal(db().all("SELECT count(*) FROM _t_ca_del")[0]![0], 1, "removed agent deleted once");
+    assert.deepEqual(db().all("SELECT session FROM chat_agent WHERE station = 'w/a' AND id = 'c1' ORDER BY session").map((r) => r[0]), ["s1", "s3"]);
+
+    // A legacy in-place UPDATE of json (leaving `made` untouched) still fires chat_made_set and marks `made = NULL`.
+    db().inner.exec(`UPDATE chat SET json = json_set(json, '$.title', 'legacy title') WHERE station = 'w/a' AND id = 'c1'`);
+    const afterLegacy = db().all("SELECT title, made FROM chat WHERE station = 'w/a' AND id = 'c1'")[0]!;
+    assert.deepEqual(afterLegacy, ["legacy title", null], "legacy json UPDATE still fires chat_made_set");
+  } finally { runner.shutdown(); }
+});
+
+test("transcriptOverBudget_flags_unshown_transcripts_while_non_evictable_exceeds_cap", async () => {
+  const host = new FakeHost();
+  const runner = new Runner(host.time.clock);
+  const sql = new NodeSql(new DatabaseSync(":memory:"), true);
+  host.openDbHook = () => sql;
+  const data = new Data(host, runner, { owner: () => "s1", kept: 128 * 1024 });
+  await run(data.open(["s1"]));
+  try {
+    assert.equal(data.transcriptOverBudget("w/a", "bg"), false, "under budget initially");
+    const big = "字".repeat(4000);
+    for (let t = 1; t <= 5; t++) {
+      data.putItems("entry", "w/a", String(t), Array.from({ length: 10 }, (_, i) => [i + 1, { n: i + 1, kind: "message", text: `${t} ${big}`, at: i }] as [number, J]));
+    }
+    await run(data.written);
+    await flush();
+    assert.equal(data.transcriptOverBudget("w/a", "bg"), true, "unshown transcript flagged over budget");
+    data.opened("transcript", "w/a", "bg", true);
+    assert.equal(data.transcriptOverBudget("w/a", "bg"), false, "shown transcript never flagged over budget");
+    data.opened("transcript", "w/a", "bg", false);
+  } finally { runner.shutdown(); }
+});
+
+test("heard_cursor_and_putItemsSoon_coalesce_bursts_until_window_or_open", async () => {
+  const { data, open, db, host, runner } = fresh();
+  await open();
+  try {
+    db().statements.length = 0;
+    // Burst of heard cursor updates: visible in memory immediately, 0 SQLite writes until HEARD_FLUSH_MS.
+    data.put("heard", "w/a", "run.1");
+    data.put("heard", "w/a", "run.2");
+    data.put("heard", "w/a", "run.3");
+    await flush();
+    assert.equal(data.record("heard", "w/a"), "run.3", "pending heard readable immediately");
+    assert.equal(db().writes().length, 0, "heard writes held back during coalescing window");
+
+    // Burst of unshown background transcript chunks: visible in logSpan/logNumbers/logRange/logCount, 0 SQLite writes until TRANSCRIPT_FLUSH_MS.
+    data.putItemsSoon("transcript", "w/a", "bg1", [[0, { text: "a" }]]);
+    data.putItemsSoon("transcript", "w/a", "bg1", [[1, { text: "b" }]]);
+    data.putItemsSoon("transcript", "w/a", "bg1", [[2, { text: "c" }]]);
+    await flush();
+    assert.deepEqual(data.logSpan("transcript", "w/a", "bg1"), { min: 0, max: 2, count: 3 });
+    assert.deepEqual(data.logNumbers("transcript", "w/a", "bg1"), [0, 1, 2]);
+    assert.equal(data.logCount("transcript", "w/a", "bg1", 1, 2), 2);
+    assert.deepEqual(data.logRange("transcript", "w/a", "bg1", 0, 2).get(1), { text: "b" });
+    assert.equal(db().writes().length, 0, "unshown transcript writes held back during coalescing window");
+
+    // Advancing TRANSCRIPT_FLUSH_MS flushes bg1 in one transaction (heard still pending).
+    await host.time.pass(TRANSCRIPT_FLUSH_MS);
+    await flush();
+    assert.equal(db().all("SELECT count(*) FROM transcript WHERE station = 'w/a' AND session = 'bg1'")[0]![0], 3);
+    assert.equal(db().all("SELECT json FROM workspace_pref WHERE workspace = 'w' AND key = 'heard:w/a'").length, 0, "heard still waits for HEARD_FLUSH_MS");
+
+    // Advancing remaining HEARD_FLUSH_MS flushes heard once with latest cursor.
+    await host.time.pass(HEARD_FLUSH_MS);
+    await flush();
+    assert.equal(JSON.parse(String(db().all("SELECT json FROM workspace_pref WHERE workspace = 'w' AND key = 'heard:w/a'")[0]![0])), "run.3");
+
+    // Opening a transcript immediately flushes any pending chunks and bypasses buffering while shown.
+    data.putItemsSoon("transcript", "w/a", "bg2", [[0, { text: "x" }]]);
+    await flush();
+    assert.equal(db().all("SELECT count(*) FROM transcript WHERE station = 'w/a' AND session = 'bg2'")[0]![0], 0);
+    data.opened("transcript", "w/a", "bg2", true);
+    await flush();
+    assert.equal(db().all("SELECT count(*) FROM transcript WHERE station = 'w/a' AND session = 'bg2'")[0]![0], 1, "opened flushes pending transcript");
+    data.putItemsSoon("transcript", "w/a", "bg2", [[1, { text: "y" }]]);
+    await flush();
+    assert.equal(db().all("SELECT count(*) FROM transcript WHERE station = 'w/a' AND session = 'bg2'")[0]![0], 2, "shown transcript writes immediately");
+    data.opened("transcript", "w/a", "bg2", false);
   } finally { runner.shutdown(); }
 });

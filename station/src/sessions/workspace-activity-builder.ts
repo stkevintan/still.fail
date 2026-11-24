@@ -1,4 +1,5 @@
-import { MbBackfill, readerBinary } from "../read/mb-reader.ts";
+import { MbBackfill, resolveReaderSelection } from "../read/mb-reader.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import { Fibers } from "../ops/fibers.ts";
 import { log } from "../ops/log.ts";
 import { releaseStoppedBackfill } from "../store/backfill.ts";
@@ -13,7 +14,7 @@ type Kind = "activity" | "recovery" | "awake" | "active-jobs";
 /// One builder prepares the lookups after handover, in bounded batches. Workspace activity is prepared first so its
 /// existing callers are not held up by restart and awake preparation. Every cursor can resume after interruption. By
 /// the MoonBit builder (station/mb, src/activity; `MbBackfill`; `binary`: the program, a test's own where it gives one).
-export function buildWorkspaceActivity(store: Store, previous: Promise<void>, binary?: string): {
+export function buildWorkspaceActivity(store: Store, previous: Promise<void>, binary?: string, readers?: () => ReaderSelectConfig): {
   ready: Promise<boolean>; activeJobsReady: Promise<boolean>; close: () => Promise<void>;
 } {
   const activity = Promise.withResolvers<boolean>();
@@ -55,7 +56,10 @@ export function buildWorkspaceActivity(store: Store, previous: Promise<void>, bi
       return;
     }
     let current: MbBackfill;
-    try { current = new MbBackfill(binary ?? readerBinary(), ["--builder", "session-backfill", "--db", path], store.backfillPriority, 20); }
+    try {
+      const bin = resolveReaderSelection("session-backfill", { binary, config: readers, logAt: "readers" }).primaryBinary;
+      current = new MbBackfill(bin, ["--builder", "session-backfill", "--db", path], store.backfillPriority, 20);
+    }
     catch (error) {
       log.warn("hub", "the session recovery worker could not start", { error: (error as Error).message });
       retry();

@@ -1,6 +1,7 @@
 // A Colab sandbox's task (station/src/agents/sandbox.ts, kind "colab"): what a job runs in place of its command. It
 // takes a Google Colab VM of the sandbox's GPU from the station's pool, runs the task there through sandbox-bridge.mjs
-// (its ssh carried by the Colab CLI's ProxyCommand) and hands the VM back, kept warm a while for the chat's next task.
+// (its ssh carried by the Colab CLI's ProxyCommand, one connection per task shared by all its ssh: `ensureControlMaster`)
+// and hands the VM back, kept warm a while for the chat's next task.
 // The pool is a bounded-ephemeral directory of the station's (`pool`, <data>/colab) — authoritative OAuth credentials
 // live exclusively in Profiles (`homes/<id>/colab-auth.json`) and are synced into `cli-homes/<id>/` via
 // PlaintextKeyring before each CLI invocation:
@@ -19,8 +20,9 @@
 //   node colab-sandbox.mjs run '<json>'   {pool, gpu, chat, command, cwd, ports, lostFile, back, bridge, accounts}
 //   node colab-sandbox.mjs reap '<json>'  {pool, accounts}
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -115,11 +117,13 @@ export function locked(pool, io, f) {
 const vmFile = (pool, vm) => join(pool, "vms", `${vm}.json`);
 const holderLive = (v, io) => v.holder != null && io.alive(v.holder);
 
-/// The pool's io: the CLI, the clock, sleeping, whether a process lives. Tests give their own.
+/// The pool's io: the CLI, other commands (`run`, spawnSync's), the clock, sleeping, whether a process lives. Tests
+/// give their own.
 export function realIo(pool) {
   return {
     now: () => Date.now(),
     sleep: sleepSync,
+    run: (cmd, args, opts) => spawnSync(cmd, args, opts),
     alive: (pid) => {
       try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
     },
@@ -172,7 +176,7 @@ export function acquire(pool, gpu, chat, accounts, io, waitMs = WAIT_MS) {
           const [vm, v] = free[0];
           Object.assign(v, { holder: process.pid, chat, used: now });
           leave();
-          return { vm, account: v.account, reused: true };
+          return { vm, account: v.account, reused: true, nodeReady: v.nodeReady === true };
         }
         const held = (id) => Object.values(st.vms).filter((v) => v.gpu === gpu && v.account === id).length;
         const open = list.filter((a) => held(a.id) < PER_ACCOUNT && !st.refused[`${a.id}:${gpu}`]);
@@ -225,7 +229,13 @@ export function release(pool, vm, io) {
   });
 }
 
+/// Notes that `vm` has Node (`ensureNode`), so the next task there need not ask.
+export function markNodeReady(pool, vm, io) {
+  locked(pool, io, (st) => { if (st.vms[vm]) st.vms[vm].nodeReady = true; });
+}
+
 /// Stops the VMs no live task holds whose last use is KEEP_WARM_MS past (none while a task waits for their GPU), and
+/// those whose task died while starting them (Colab made the VM once `vms/<vm>.json` is written, and bills it), and
 /// forgets those Colab no longer has. Returns the names stopped.
 export function reap(pool, accounts, io) {
   const list = normalizeAccounts(accounts);
@@ -235,7 +245,16 @@ export function reap(pool, accounts, io) {
     st.queue = st.queue.filter((q) => io.alive(q.pid));
     const out = [];
     for (const [vm, v] of Object.entries(st.vms)) {
-      if (v.state === "starting" && !holderLive(v, io)) { delete st.vms[vm]; continue; }
+      if (v.state === "starting" && !holderLive(v, io)) {
+        if (existsSync(vmFile(pool, vm))) {
+          v.state = "stopping";
+          out.push([vm, v.account]);
+        } else {
+          delete st.vms[vm];
+          closeControlMaster(pool, vm, io);
+        }
+        continue;
+      }
       if (v.state !== "ready" || holderLive(v, io)) continue;
       if (now - v.used < KEEP_WARM_MS || st.queue.some((q) => q.gpu === v.gpu)) continue;
       v.state = "stopping";
@@ -247,6 +266,7 @@ export function reap(pool, accounts, io) {
     const acct = byId.get(accountId);
     if (acct !== undefined) io.colab(acct, vm, ["stop", "-s", vm]);
     rmSync(vmFile(pool, vm), { force: true });
+    closeControlMaster(pool, vm, io);
     locked(pool, io, (st) => void delete st.vms[vm]);
     say(`stopped VM ${vm} (idle)`);
   }
@@ -265,6 +285,7 @@ export function reap(pool, accounts, io) {
         if (endpoint !== null && !listed.has(endpoint)) {
           delete st.vms[vm];
           rmSync(vmFile(pool, vm), { force: true });
+          closeControlMaster(pool, vm, io);
         }
       }
     });
@@ -296,14 +317,106 @@ function ensureKey(pool) {
   return key;
 }
 
-/// ssh's command line to `vm`, up to the remote command: its connection carried by `colab ssh --proxy-mode`.
-export function sshTo(pool, vm, accountId) {
+const HOST = "root@colab-runtime";
+const quoted = (w) => `'${w.replace(/'/g, `'\\''`)}'`;
+
+/// ssh's options to `vm`: its connection carried by `colab ssh --proxy-mode` (`proxyTail` added to that command).
+function sshOptions(pool, vm, accountId, proxyTail = "") {
   const key = join(pool, "id_ed25519");
   const env = Object.entries({ ...CLI_ENV, HOME: cliHomeOf(pool, accountId) }).map(([k, v]) => `${k}=${v}`);
   const proxy = ["env", ...env, join(pool, "venv", "bin", "colab"), "--config", vmFile(pool, vm), "ssh", "--proxy-mode", "-s", vm, "--identity", key]
-    .map((w) => `'${w.replace(/'/g, `'\\''`)}'`).join(" ");
-  return ["ssh", "-T", "-o", "BatchMode=yes", "-o", `ProxyCommand=${proxy}`, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
-    "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4", "-i", key, "-o", "IdentitiesOnly=yes", "root@colab-runtime"];
+    .map(quoted).join(" ") + proxyTail;
+  return ["-T", "-o", "BatchMode=yes", "-o", `ProxyCommand=${proxy}`, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
+    "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4", "-i", key, "-o", "IdentitiesOnly=yes"];
+}
+
+/// ssh's command line to `vm`, up to the remote command: through the task's shared connection at `sock`
+/// (`ensureControlMaster`) when given, else (or should that connection be gone) its own `colab ssh --proxy-mode`.
+export function sshTo(pool, vm, accountId, sock = null) {
+  const mux = sock ? ["-o", "ControlMaster=no", "-o", `ControlPath=${sock}`] : [];
+  return ["ssh", ...mux, ...sshOptions(pool, vm, accountId), HOST];
+}
+
+// ── one connection to a VM, shared ──
+//
+// Each `colab ssh --proxy-mode` asks Colab's API for the VM's tunnel, and a few within seconds are refused (429): a
+// task's ssh (Node's check, the task, the results brought back) all go through one master connection instead, kept
+// MUX_PERSIST_S after its last use for the chat's next task on the warm VM and closed when reap stops the VM. Not on
+// Windows (its OpenSSH has no ControlMaster). The master is started with nothing of this process's open (stdio
+// ignored, ssh's log and the proxy's stderr to a file): this process's stdout and stderr are the job's pipes, which
+// would never close while a master outliving the task held them.
+
+/// How long a master connection stays after its last ssh (more than KEEP_WARM_MS: reap closes it with the VM).
+export const MUX_PERSIST_S = 240;
+/// Waits before starting a master again after Colab refused (429) or the connection broke (a VM just started).
+export const MUX_RETRY_MS = [2000, 5000];
+const TRANSIENT = /\b429\b|too many requests|rate.?limit|kex_exchange_identification|connection (?:closed|reset|refused|timed out)|timed out|UNKNOWN port/i;
+const IGNORED = ["ignore", "ignore", "ignore"];
+
+/// The master connection's socket for `vm`: short, as a Unix socket's path is at most 104 bytes on macOS (ssh adds
+/// 17 while making it), in a directory of this user's; the pool's hash keeps stations of one user apart.
+export function controlPathOf(pool, vm) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : "";
+  const name = `${createHash("sha256").update(pool).digest("hex").slice(0, 8)}-${vm}.sock`;
+  const path = join(tmpdir(), `sfc${uid}`, name);
+  return Buffer.byteLength(path) <= 84 ? path : join("/tmp", `sfc${uid}`, name);
+}
+
+/// The socket's directory, made only this user's: false when it is someone else's (their socket would get the task).
+function ownDir(dir) {
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const s = lstatSync(dir);
+    if (!s.isDirectory() || (typeof process.getuid === "function" && s.uid !== process.getuid())) return false;
+    if ((s.mode & 0o077) !== 0) chmodSync(dir, 0o700);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const muxAlive = (sock, io) => (io.run("ssh", ["-O", "check", "-S", sock, "-o", "BatchMode=yes", HOST], { stdio: IGNORED, timeout: 15_000 }).status ?? 1) === 0;
+
+/// The master connection to `vm`, started when there is none alive: its socket, for `sshTo`, or null where there is
+/// none to share (Windows, a socket directory not this user's). Throws when Colab keeps refusing or the VM is
+/// unreachable.
+export function ensureControlMaster(pool, vm, accountId, io, { platform = process.platform } = {}) {
+  if (platform === "win32") return null;
+  const sock = controlPathOf(pool, vm);
+  if (!ownDir(dirname(sock))) {
+    say(`${dirname(sock)} is not this user's: each ssh to the VM connects on its own`);
+    return null;
+  }
+  if (existsSync(sock) && muxAlive(sock, io)) return sock;
+  const errFile = `${sock}.err`;
+  for (let attempt = 0; ; attempt++) {
+    rmSync(sock, { force: true });
+    rmSync(errFile, { force: true });
+    const r = io.run("ssh", ["-M", "-N", "-f", "-E", errFile, "-o", "ControlMaster=yes", "-o", `ControlPath=${sock}`, "-o", `ControlPersist=${MUX_PERSIST_S}`,
+      ...sshOptions(pool, vm, accountId, ` 2>>${quoted(errFile)}`), HOST], { stdio: IGNORED, timeout: 120_000 });
+    if ((r.status ?? 1) === 0 && muxAlive(sock, io)) {
+      rmSync(errFile, { force: true });
+      return sock;
+    }
+    let err = "";
+    try { err = readFileSync(errFile, "utf8").trim(); } catch {}
+    rmSync(errFile, { force: true });
+    const why = err.slice(-400) || (r.error ? r.error.message : `ssh exited ${r.status ?? r.signal}`);
+    if (attempt >= MUX_RETRY_MS.length || !(TRANSIENT.test(err) || r.error?.code === "ETIMEDOUT")) {
+      throw new Error(`could not connect to the Colab VM ${vm} (tried ${attempt + 1} times): ${why}; start the task again in a few minutes`);
+    }
+    say(`connecting to VM ${vm} failed (${why.split("\n").pop()}); again in ${MUX_RETRY_MS[attempt] / 1000} s`);
+    io.sleep(MUX_RETRY_MS[attempt]);
+  }
+}
+
+/// Ends `vm`'s master connection, when it has one.
+export function closeControlMaster(pool, vm, io, { platform = process.platform } = {}) {
+  if (platform === "win32") return;
+  const sock = controlPathOf(pool, vm);
+  if (!existsSync(sock)) return;
+  io.run("ssh", ["-O", "exit", "-S", sock, "-o", "BatchMode=yes", HOST], { stdio: IGNORED, timeout: 15_000 });
+  rmSync(sock, { force: true });
 }
 
 /// Node on the VM (the bridge's far side runs on it; Colab's image has none): this Node's version, from nodejs.org.
@@ -332,11 +445,15 @@ async function runTask(o) {
   ensureCli(o.pool);
   ensureKey(o.pool);
   const io = realIo(o.pool);
-  const { vm, account, authFile } = acquire(o.pool, o.gpu, o.chat, o.accounts, io);
+  const { vm, account, authFile, nodeReady } = acquire(o.pool, o.gpu, o.chat, o.accounts, io);
   try {
     syncKeyring(o.pool, { id: account, authFile });
-    const ssh = sshTo(o.pool, vm, account);
-    ensureNode(ssh);
+    const sock = ensureControlMaster(o.pool, vm, account, io);
+    const ssh = sshTo(o.pool, vm, account, sock);
+    if (!nodeReady) {
+      ensureNode(ssh);
+      markNodeReady(o.pool, vm, io);
+    }
     const rootPath = o.data ?? dirname(o.pool);
     const base = { root: { path: rootPath }, dirs: [o.cwd] };
     const runSpec = {
@@ -355,11 +472,17 @@ async function runTask(o) {
       sync: backPaths.map((b) => ({ path: join(o.cwd, b), mode: "whole", push: false, dir: false })),
     };
     const code = await bridged(o.bridge, { ...runSpec, ssh });
-    // What it brings back; once more when its connection failed (seen once on a VM just started: the first
-    // connection after the task's own never answered).
-    if (backSpec && (await bridged(o.bridge, { ...backSpec, ssh })) !== 0) {
+    // What it brings back, on the master connection started again should it be gone; once more when that failed
+    // (seen once on a VM just started: the first connection after the task's own never answered).
+    const back = () => {
+      if (sock !== null) {
+        try { ensureControlMaster(o.pool, vm, account, io); } catch (e) { say(e.message); }
+      }
+      return bridged(o.bridge, { ...backSpec, ssh });
+    };
+    if (backSpec && (await back()) !== 0) {
       say("bringing the results back failed; once more");
-      await bridged(o.bridge, { ...backSpec, ssh });
+      await back();
     }
     return code;
   } finally {

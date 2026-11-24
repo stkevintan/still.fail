@@ -1,0 +1,29 @@
+// Isolated cross-workspace smoke test verifying `pion/app` (`app_state`) and
+// `pion/ui` (`sf`) share identical `signals`/`view`/`ui` types with zero
+// package conflict, while keeping `packages/app_state` strictly headless.
+
+import "app_state"
+import "sf"
+import "signals"
+import "ui"
+import "view"
+
+test "cross_workspace_sf_probe_zero_invar_conflict" {
+  let demos = app_state::default_demo_chats()
+  debug_assert(demos.length() >= 1, "app_state demo chats available")
+  debug_assert(sf::sf_version_tag() == "sf-m1.1-prep", "sf cross-workspace tag")
+  let title_sig = signals::signal(demos[0].title)
+  let t = ui::Tester::tree(
+    fn(root : view::View) {
+      let _ = sf::sf_probe_badge(root, title_sig)
+    },
+    width=400.0,
+    height=200.0,
+  )
+  t.run_shown(80.0)
+  debug_assert(t.find("Invar Vertical Slice").is_some(), "sf_probe_badge rendered app_state title signal")
+  title_sig.set("Updated Cross-Workspace Signal")
+  t.run_shown(80.0)
+  debug_assert(t.find("Updated Cross-Workspace Signal").is_some(), "reactive update propagated across workspaces")
+  t.dispose()
+}

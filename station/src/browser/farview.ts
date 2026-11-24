@@ -1,4 +1,4 @@
-// Farview (AFK-surf/farview, a browser whose pages run on a host and draw on the person's device) as a chat's browser,
+// Farview (AFK-surf/farview-legacy, a browser whose pages run on a host and draw on the person's device) as a chat's browser,
 // in place of its Chrome context: config.json `browser: { farview?: "<the unpacked release: bin/host.exe,
 // bin/agent.exe, lib/>" | false, engine?: "chrome" | "farview", sessions?: [<session>...] }`. With no `farview`, a
 // station on a system Farview is released for has it all the same: the release its version names, downloaded and

@@ -32,6 +32,8 @@ priv struct Known {
   mut places : Map[String, Place]?
   books : Map[String, @jsjson.JValue]
   mut config : (Array[(String, String)], Bool)?
+  mut has_runtime_sessions_ordered : Bool?
+  original_runtimes : Map[String, Json]
 }
 
 ///|
@@ -75,6 +77,8 @@ fn Known::of(host : @host.Host, data : String, sep : String, ask : Json) -> Know
     places: None,
     books: Map([]),
     config: None,
+    has_runtime_sessions_ordered: None,
+    original_runtimes: Map([]),
   }
 }
 
@@ -326,6 +330,7 @@ priv struct Names {
   db : @sql.Db
   surface : Json
   members : Array[Map[String, Json]]
+  sessions : Map[String, Map[String, Json]]?
   names : Map[String, Json]
   pictures : Map[String, String]
 }
@@ -341,8 +346,32 @@ fn Known::author_names(self : Known, db : @sql.Db, thread : Json) -> Names raise
     db,
     surface,
     members: db.all("SELECT * FROM thread_sessions WHERE thread = ? ORDER BY joined_at, rowid", [thread]),
+    sessions: None,
     names: Map([]),
     pictures: Map([]),
+  }
+}
+
+///|
+fn Known::author_names_preloaded(
+  self : Known,
+  db : @sql.Db,
+  surface : Json,
+  members : Array[Map[String, Json]],
+  sessions : Map[String, Map[String, Json]],
+) -> Names {
+  { known: self, db, surface, members, sessions: Some(sessions), names: Map([]), pictures: Map([]) }
+}
+
+///|
+fn Names::session_of(self : Names, author : String) -> Map[String, Json]? raise {
+  match self.sessions {
+    Some(cache) =>
+      match cache.get(author) {
+        Some(s) => Some(s)
+        None => one(self.db, "SELECT * FROM sessions WHERE key = ?", [Json::string(author)])
+      }
+    None => one(self.db, "SELECT * FROM sessions WHERE key = ?", [Json::string(author)])
   }
 }
 
@@ -356,7 +385,7 @@ fn Names::name(self : Names, kind : String, author : String) -> Json raise {
     Json::string("still.fail")
   } else if kind == "agent" {
     // An agent goes by the name of the connect it posts through (on the page, of the connect that started it).
-    let session = one(self.db, "SELECT * FROM sessions WHERE key = ?", [Json::string(author)])
+    let session = self.session_of(author)
     let via = self.members.search_by(m => field(m, "session") == Json::string(author)).map(i => field(self.members[i], "connect"))
     let connect = match via {
       Some(String(c)) if c != "chat" => Json::string(c)
@@ -407,9 +436,20 @@ fn Names::picture(self : Names, kind : String, author : String) -> String? raise
 }
 
 ///|
+fn Known::runtime_sessions_ordered(self : Known, db : @sql.Db) -> Bool raise {
+  match self.has_runtime_sessions_ordered {
+    Some(v) => v
+    None => {
+      let v = exists_in(db, "index", "runtime_sessions_ordered")
+      self.has_runtime_sessions_ordered = Some(v)
+      v
+    }
+  }
+}
+
+///|
 /// store.ts `originalRuntime`: the runtime a session began in (a message from before each said its own was of it).
-fn original_runtime(db : @sql.Db, key : Json) -> Json raise {
-  let ordered = exists_in(db, "index", "runtime_sessions_ordered")
+fn original_runtime_with_ordered(db : @sql.Db, key : Json, ordered : Bool) -> Json raise {
   let runtime = (sql : String) => match one(db, sql, [key]) {
     Some(r) => field(r, "runtime")
     None => Json::null()
@@ -446,6 +486,72 @@ fn original_runtime(db : @sql.Db, key : Json) -> Json raise {
 }
 
 ///|
+fn original_runtime(db : @sql.Db, key : Json) -> Json raise {
+  original_runtime_with_ordered(db, key, exists_in(db, "index", "runtime_sessions_ordered"))
+}
+
+///|
+fn Known::prefetch_original_runtimes(self : Known, db : @sql.Db, keys : Array[String]) -> Unit raise {
+  if keys.length() == 0 {
+    return
+  }
+  let ordered = self.runtime_sessions_ordered(db)
+  let param = [ids_json(keys.map(Json::string))]
+  let rows = try {
+    db.all(
+      if ordered {
+        "SELECT s.key, COALESCE(s.original_runtime,\n  (SELECT r.runtime FROM runtime_sessions r INDEXED BY runtime_sessions_ordered WHERE r.session_key = s.key ORDER BY r.at, r.rowid LIMIT 1),\n  s.runtime) AS runtime FROM sessions s WHERE s.key IN (SELECT value FROM json_each(?1))"
+      } else {
+        "SELECT key, COALESCE(original_runtime, runtime) AS runtime FROM sessions WHERE key IN (SELECT value FROM json_each(?1))"
+      },
+      param,
+    )
+  } catch {
+    _ =>
+      if ordered {
+        let found = try {
+          Some(
+            db.all(
+              "SELECT s.key, COALESCE(\n  (SELECT r.runtime FROM runtime_sessions r INDEXED BY runtime_sessions_ordered WHERE r.session_key = s.key ORDER BY r.at, r.rowid LIMIT 1),\n  s.runtime) AS runtime FROM sessions s WHERE s.key IN (SELECT value FROM json_each(?1))",
+              param,
+            ),
+          )
+        } catch {
+          _ => None
+        }
+        match found {
+          Some(rs) => rs
+          None => db.all("SELECT key, runtime FROM sessions WHERE key IN (SELECT value FROM json_each(?1))", param)
+        }
+      } else {
+        db.all("SELECT key, runtime FROM sessions WHERE key IN (SELECT value FROM json_each(?1))", param)
+      }
+  }
+  for r in rows {
+    self.original_runtimes[js_text(field(r, "key"))] = field(r, "runtime")
+  }
+  for k in keys {
+    if !self.original_runtimes.contains(k) {
+      self.original_runtimes[k] = Json::null()
+    }
+  }
+}
+
+///|
+fn Known::original_runtime_of(self : Known, db : @sql.Db, author_json : Json, author : String, session : Map[String, Json]?) -> Json raise {
+  if self.original_runtimes.get(author) is Some(r) {
+    return r
+  }
+  if session is Some(s) && s.get("original_runtime") is Some(r) && !(r is Null) {
+    self.original_runtimes[author] = r
+    return r
+  }
+  let r = original_runtime_with_ordered(db, author_json, self.runtime_sessions_ordered(db))
+  self.original_runtimes[author] = r
+  r
+}
+
+///|
 /// views.ts `messageView`: a merged message as lists show it, with its author's name.
 fn message_view(db : @sql.Db, m : Json, names : Names) -> Json raise {
   let get = (k : String) => m.value(k).unwrap_or(Json::null())
@@ -477,12 +583,16 @@ fn message_view(db : @sql.Db, m : Json, names : Names) -> Json raise {
     }
     let session = match said_runtime {
       Some(String(_)) => None
-      _ => one(db, "SELECT * FROM sessions WHERE key = ?", [get("author")])
+      _ =>
+        match get("author") {
+          String(a) => names.session_of(a)
+          other => one(db, "SELECT * FROM sessions WHERE key = ?", [other])
+        }
     }
     // (`agentIdentity?.runtime ?? originalRuntime(author) ?? session?.runtime`)
     let runtime = match said_runtime {
       Some(Null) | None =>
-        match original_runtime(db, get("author")) {
+        match names.known.original_runtime_of(db, get("author"), author, session) {
           Null =>
             match session {
               Some(s) => s.get("runtime")

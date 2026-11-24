@@ -204,6 +204,13 @@ fn frame_afters_run() -> Unit {
 
 ///|
 fn on_frame(w : Double, h : Double, scale : Double, t : Double) -> Unit {
+  // A frame arriving mid-batch closes the batch and marks pointer+words owed so view_pointed_again
+  // flushes both hover and I-Beam cursor after this frame's zoom rescaling and layout (view_brought) at frame moment `t`.
+  let was_batched = moves_batched.val
+  if was_batched {
+    moves_batched.val = false
+    view_point_owed.val = true
+  }
   // (how many sets there had been as the frame began: what the frame itself sets is no cause told before it)
   frame_start_sets.val = @signals.sets_said()
   // (what the host gives the frame, as it gives it: kept on a core trace as it changes, envrec.mbt)
@@ -273,6 +280,7 @@ fn on_frame(w : Double, h : Double, scale : Double, t : Double) -> Unit {
   // nothing due, the window and its glyphs as they were: sizes_steady.mbt's first frame)
   frame_quiet.val = frame_end_sets.val >= 0 &&
     @signals.sets_said() == frame_end_sets.val &&
+    !was_batched &&
     !fed &&
     !taken &&
     was_window == (w, h, scale) &&
@@ -1186,7 +1194,7 @@ fn pointer_in(
   moves_batched.val = more
   view_event_said(fn() { pointing_said_by_host(by) }, fn() {
     pointer_in_now(kind, x, y, button, mods, by~, more~, batched~)
-  }, what="pointer", input=!batched)
+  }, what="pointer", input=!batched, more~)
 }
 
 ///|

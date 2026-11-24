@@ -669,3 +669,57 @@ test "bar: switching system theme light <-> dark or accent while mounted updates
   let diff = drawlist_first_diff(switched_accent, fresh_accent)
   assert_eq(diff, "", msg="home accent orange->blue:\n\{diff}")
 }
+
+///|
+test "bar: pressed bottom tab lens (slot 7 == -64.0) emits no outer shadow in light or dark while regular bottom bar keeps its shadow" {
+  for dark in [false, true] {
+    new_run()
+    let src = fixture(if dark { "home-dark" } else { "home" })
+    let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=390.0, h=844.0, platform=2, dark~)
+    t.draw()
+    t.run_for(@ui.move_most_ms)
+    let expected_bar_shadow = @sf.tab_bar_shadow()
+    let rest_shadows = t.drawn_shadows()
+    assert_true(
+      rest_shadows.iter().any(fn(s) {
+        (s.5 - expected_bar_shadow.sigma).abs() < 0.01 &&
+        s.6 == expected_bar_shadow.color
+      }),
+      msg="dark=\{dark}: regular bottom bar at rest must keep its outer shadow",
+    )
+    let (xs, y) = bar_places_at()
+    t.press_at(xs[0], y)
+    t.run_for(@ui.move_most_ms)
+    let mut saw_lens = false
+    let mut lens_rect = (0.0, 0.0, 0.0, 0.0)
+    for inst in t.drawn_instances() {
+      if inst[5] == 6.0 && (inst[7] - -64.0).abs() < 0.01 {
+        saw_lens = true
+        lens_rect = (inst[0], inst[1], inst[2], inst[3])
+      }
+    }
+    assert_true(saw_lens, msg="dark=\{dark}: pressed bottom tab must emit clear lens with slot 7 == -64.0")
+    let pressed_shadows = t.drawn_shadows()
+    assert_true(
+      pressed_shadows.iter().any(fn(s) {
+        (s.5 - expected_bar_shadow.sigma).abs() < 0.01 &&
+        s.6 == expected_bar_shadow.color
+      }),
+      msg="dark=\{dark}: regular bottom bar must keep its outer shadow while tab is pressed",
+    )
+    assert_eq(
+      pressed_shadows.length(),
+      rest_shadows.length(),
+      msg="dark=\{dark}: pressing bottom tab lens must not add any outer shadow (rest=\{rest_shadows.length()}, pressed=\{pressed_shadows.length()})",
+    )
+    let lens_has_shadow = pressed_shadows.iter().any(fn(s) {
+      (s.0 - lens_rect.0).abs() < 1.0 &&
+      (s.1 - lens_rect.1).abs() < 1.0 &&
+      (s.2 - lens_rect.2).abs() < 1.0 &&
+      (s.3 - lens_rect.3).abs() < 1.0
+    })
+    assert_true(!lens_has_shadow, msg="dark=\{dark}: pressed bottom tab lens must have no outer shadow")
+    t.release(xs[0], y)
+    t.run_for(@ui.move_most_ms)
+  }
+}

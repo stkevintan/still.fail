@@ -23,6 +23,7 @@ import type { CardOutcomeSaver } from "../store/card-outbox.ts";
 import { type Json, STILLFAIL_SURFACE, type SessionThread } from "../store/store.ts";
 import { CARD_OCCUPIED, cardPlace, recordPostedCard } from "../sessions/card-place.ts";
 import type { Hub } from "../sessions/hub.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import { hold } from "../updates/holds.ts";
 import { stateOf } from "../browser/signins.ts";
 import { ABOUT_MOST, type BoxCert, type BrowseAnswer, type CrossListing, type Deny, type Grant, type Item, type Kind, type Listing, type Mode, type Request, type Save, type Scope, type Sealed, type Vault, SCOPES, TAG, allows, certOk, listingOk, saveContext, seal, signedOk, signerOf } from "./crypto.ts";
@@ -192,7 +193,7 @@ export type SecretsDeps = {
   /// request whose box is not here yet is not let go.
   coming?(): boolean;
   /// Background use-index work waits for the previous process and gives foreground database writes priority.
-  backfill?: { previousGone?: Promise<void>; priority?: SharedArrayBuffer };
+  backfill?: { previousGone?: Promise<void>; priority?: SharedArrayBuffer; readers?: () => ReaderSelectConfig };
   /// The chats' browsers (browser/browsers.ts), for sign-ins (kind browser); none: no sign-in is kept or given.
   browsers?: SignIns;
 };

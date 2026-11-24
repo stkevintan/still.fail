@@ -1,0 +1,26 @@
+[workspace]
+members = [
+  "packages/sf",
+  "packages/sf_assets_native",
+  "packages/sf_assets_web",
+]
+
+[workspace.dependencies]
+# Official AFK-surf/pion-packages release tags
+base64 = { git = "https://github.com/AFK-surf/pion-packages.git", tag = "base64-v0.1.0", subdir = "packages/base64" }
+
+# Official AFK-surf/pion mbt_compat pinned main rev
+mbt_compat = { git = "https://github.com/AFK-surf/pion.git", rev = "6d22ff1f90bd19012a5997f7fdfdc56ee3012408", subdir = "tools/mbt_compat" }
+
+# Official AFK-surf/invar single repo-wide pinned main rev (enforced by pion/tools/mbt2pion-monoid/check_single_invar_pin.sh)
+signals = { git = "https://github.com/AFK-surf/invar.git", rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3", subdir = "packages/signals" }
+view = { git = "https://github.com/AFK-surf/invar.git", rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3", subdir = "packages/view" }
+ui = { git = "https://github.com/AFK-surf/invar.git", rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3", subdir = "packages/ui" }
+zip = { git = "https://github.com/AFK-surf/invar.git", rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3", subdir = "packages/zip" }
+pixels = { git = "https://github.com/AFK-surf/invar.git", rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3", subdir = "packages/pixels" }
+paint = { git = "https://github.com/AFK-surf/invar.git", rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3", subdir = "packages/paint" }
+
+# Local workspace packages
+sf = { path = "packages/sf" }
+sf_assets_native = { path = "packages/sf_assets_native" }
+sf_assets_web = { path = "packages/sf_assets_web" }

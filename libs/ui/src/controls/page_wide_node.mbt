@@ -1059,3 +1059,21 @@ pub fn page_section_note_node(parent : @view.View, words : () -> String, loc~ : 
   })
   |> ignore
 }
+
+///|
+/// What a page puts up at its foot under its list, outside what scrolls (a list's bar while picking several), in from
+/// its sides as its blocks are where the page is laid out by its `width` as page_node lays it out (none: narrow):
+/// wide, its lane (lane_node's); narrow, its blocks' room (page_block's), so its edges are the cards'.
+#callsite(autofill(loc))
+pub fn page_lane_node(parent : @view.View, width : (() -> Double)?, make : (@view.View) -> Unit, loc~ : SourceLoc) -> Unit {
+  let look = match width {
+    Some(w) => fn() { look_for(w()) }
+    None => fn() { Narrow }
+  }
+  parent.pick(look, fn(x, l) {
+    match l {
+      Wide => lane_node(loc~, x, make)
+      Narrow => page_block(loc~, x, make)
+    }
+  })
+}

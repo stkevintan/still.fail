@@ -26,12 +26,13 @@ const MAX_TEXT = 200_000;
 
 const chars = (s: string) => Array.from(s).length;
 
-/// A chat by its title, linked when it has a link, as written on `surface` (Markdown in still.fail chats, Slack's
-/// mrkdwn elsewhere).
+/// A chat by its title, linked when it has a link, as written on `surface`: Slack's mrkdwn in a Slack thread, Markdown
+/// everywhere else (still.fail chats, and Feishu, Comma and group threads, which read it as still.fail does), where
+/// Slack's `<link|title>` shows as the text it is (FB-47).
 export function chatNamed(surface: string, title: string, link: string | null): string {
-  if (link !== null && surface === STILLFAIL_SURFACE) return `[${title.replace(/[[\]]/g, "")}](${link})`;
-  if (link !== null) return `<${link}|${title.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("|", "/")}>`;
-  return title;
+  if (link === null) return title;
+  if (surface.startsWith("slack:")) return `<${link}|${title.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("|", "/")}>`;
+  return `[${title.replace(/[[\]]/g, "")}](${link})`;
 }
 
 /// Who a message comes from, as its header shows it: the sender's chat by its title, linked when it has a link. The

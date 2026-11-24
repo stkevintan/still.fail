@@ -28,7 +28,7 @@ const LIST: Topic = { topic: "profiles", scope: "ws" };
 
 /// The rows of every station of the workspace as the list makes them in each language, and their digest (conform.ts
 /// textKey): another whenever rows are made otherwise, when KEPT.profileRow.making is to be raised with it.
-const MADE: Record<number, string> = { 3: "59701.12oepx.1df1wis" };
+const MADE: Record<number, string> = { 3: "59701.12oepx.1df1wis", 4: "59759.1le97o7.1k8c4ka" };
 
 /// The real-size workspace written to a database as a core holds it, the core then stopped; its host, and when.
 async function written(): Promise<{ host: FakeHost; base: number }> {

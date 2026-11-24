@@ -251,6 +251,7 @@
   "web-pages.appearance.accent.blue": "蓝色",
   "web-pages.appearance.accent.teal": "青色",
   "web-pages.appearance.accent.purple": "紫色",
+  "web-pages.appearance.accent.rainbow": "五彩色",
   "web-pages.appearance.accent.custom": "自定义",
   "web-pages.appearance.accent.hue": "色相",
   "web-pages.appearance.accent.pink": "粉色",
@@ -1181,6 +1182,43 @@
   "web-pages.profiles.share.hostAway": "{station} 无响应，当前无法使用",
   "web-pages.profiles.share.changeThere": "在该 station 上修改",
   "web-pages.profiles.share.users": "使用中：{stations}",
+  "web-pages.profiles.share.followAuto": "跟随工作区白名单",
+  "web-pages.profiles.share.followAutoNote": {
+    "one": "白名单内现有 1 台 station，随白名单同步",
+    "other": "白名单内现有 {n} 台 station，随白名单同步"
+  },
+  "web-pages.profiles.share.followAutoEmpty": "白名单为空，可在工作区设置中添加",
+  "web-pages.profiles.share.followAutoOld": "该 station 版本较旧，更新后可用",
+  "web-pages.profiles.batch.select": "多选",
+  "web-pages.profiles.batch.selected": "已选 {n} 项",
+  "web-pages.profiles.batch.all": "全选",
+  "web-pages.profiles.batch.none": "取消全选",
+  "web-pages.profiles.batch.share": "开启分享",
+  "web-pages.profiles.batch.stations": "可用 station",
+  "web-pages.profiles.batch.mixed": "分享与 station",
+  "web-pages.profiles.batch.stop": "停止分享",
+  "web-pages.profiles.batch.stopTitle": {
+    "one": "停止分享 1 个账号？",
+    "other": "停止分享 {n} 个账号？"
+  },
+  "web-pages.profiles.batch.stopBody": "其他 station 将不能再使用这些账号，它们那里的副本会被移除",
+  "web-pages.profiles.batch.applies": {
+    "one": "将应用于 1 个 Profile",
+    "other": "将应用于 {n} 个 Profile"
+  },
+  "web-pages.profiles.batch.sharesToo": "将为未分享的账号开启分享，并统一设置可用 station",
+  "web-pages.profiles.batch.ownKept": "每个账号所在的 station 始终保留使用权限",
+  "web-pages.profiles.batch.autoOld": "有账号所在的 station 版本较旧，更新后才能跟随工作区白名单",
+  "web-pages.profiles.batch.done": {
+    "one": "已更新 1 个 Profile",
+    "other": "已更新 {n} 个 Profile"
+  },
+  "web-pages.profiles.batch.partial": "已更新 {ok} 个，{failed} 个失败：{why}",
+  "web-pages.profiles.batch.why.borrowed": "由其他 station 分享",
+  "web-pages.profiles.batch.why.several": "多台 station 独立登录，请点进分别设置",
+  "web-pages.profiles.batch.why.unsupported": "所在 station 不支持分享",
+  "web-pages.profiles.batch.why.offline": "所在 station 离线",
+  "web-pages.profiles.batch.why.unshareable": "不支持分享",
   "web-pages.profiles.account.each": "可使用的 station",
   "web-pages.profiles.fusionModels": "Fusion 组合",
   "web-pages.profiles.fusionHint": "勾选的组合会直接列在模型列表中；未勾选时也可在模型选择器「副模型」中随时切换",

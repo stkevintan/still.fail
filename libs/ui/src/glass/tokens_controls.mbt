@@ -378,13 +378,17 @@ fn ctrl_segmented_track_glass() -> @paint.Glass {
 ///|
 /// Calibrated clear loupe recipe for standalone 40-44pt segmented capsules overlaid above labels (`glass_track=true`).
 /// Keeps maximum inward refraction inside the clear vertical margin so top/bottom bevel rims never ghost text strokes.
-fn ctrl_segmented_lens_glass(p : Double) -> @paint.Glass {
+fn ctrl_segmented_lens_glass(p : Double, solid? : Int64) -> @paint.Glass {
   let p = clamp(p, 0.0, 1.0)
   let c = colors()
+  let sol = match solid {
+    Some(s) if s != clear => s
+    _ => alpha(c.container, 1.0 / 0.4)
+  }
   @paint.Glass::liquid(
     blur=0.0,
     tint=0xFFFFFF00L,
-    solid=alpha(c.container, 1.0 / 0.4),
+    solid=sol,
     saturation=1.0,
     rim=1.0 * p,
     bezel=9.0 * p,

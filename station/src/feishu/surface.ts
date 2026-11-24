@@ -279,8 +279,8 @@ export class FeishuSurface extends ConnectedSurface {
   }
 
   /// Which thread a message is in (「会话怎么分」): a topic group's topic is its own; in thread mode a
-  /// group's thread is, by its first message (one that @s the bot outside a thread begins one), and so a direct chat's
-  /// with its threads on (each message there calls the bot); anything else said in
+  /// group's thread is, by its first message (one that @s the bot outside a thread begins one, a reply quoting another
+  /// too), and so a direct chat's with its threads on (each message there calls the bot); anything else said in
   /// the chat is the chat's conversation now, begun by the first message that @s the bot (or a new one asked for).
   private async heard(m: FeishuMessage, handler: Handler) {
     this.heardIn.set(m.user, m.chat);
@@ -292,7 +292,9 @@ export class FeishuSurface extends ConnectedSurface {
       threadTs = m.topic!;
       this.threads.heardTopic(this.connect, m.topic!, m.root ?? m.id);
     } else if (m.p2p ? this.directThreads : this.threadMode) {
-      threadTs = m.root ?? m.id;
+      // Only a reply inside a thread carries its `thread_id`; one that quotes a message from the chat itself carries
+      // that message as its root all the same, and begins a thread of its own (the quoted message comes as `quoted`).
+      threadTs = m.topic !== null ? (m.root ?? m.id) : m.id;
       if (m.topic !== null || m.addressed) this.threads.heardTopic(this.connect, threadTs, threadTs);
     } else {
       const current = this.threads.current(this.connect, m.chat);

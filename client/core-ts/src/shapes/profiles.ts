@@ -241,6 +241,7 @@ export const PROFILE_SHAPES: Record<string, Shape> = {
     ["role", "String", { doc: "host: this station has it and lends it; user: a copy of another station's." }],
     ["host", "String", { doc: "The station that has it." }],
     ["allow", opt(vec("String")), { doc: "The stations that may use it; absent: every station of the workspace." }],
+    ["allowAuto", opt("bool"), { doc: "Who may use it follows the workspace's whitelist (stations taking automatically assigned chats, and its host):\n`allow` is then the stations that makes now. Absent: `allow` is a list chosen by hand (or every station)." }],
     ["reachable", opt("bool"), { doc: "For a copy: whether its host answered lately (absent on the host)." }],
     ["pausable", opt("bool"), { doc: "For a copy: its station pauses it (`profile.put` `enabled`), since 2026-11-11; absent on a station from before, which refuses that." }],
     ["users", vec("String"), { default: true, doc: "On its host: the stations that have it (a copy, or borrowing it)." }],
@@ -328,6 +329,7 @@ export const PROFILE_SHAPES: Record<string, Shape> = {
     ["attention", "i64", { client: "I54", doc: "How many of them need a look (`look`): what the settings' row says." }],
     ["wait", "ListNote", { doc: "What it still waits on, as every list's first read is drawn (looks.ts waitNote): the stations not read yet, those that could not be." }],
     ["machineLogins", vec("StationMachineLogins"), { default: true, doc: "The machines' own logins offered for a profile, each up station's whose overview is read, in the\nstations' order; a station with none left out. What the Profile place lists with its profiles, in the topic it opens on." }],
+    ["manages", "bool", { default: true, doc: "The viewer is one of the workspace's owners or admins: the list's 多选 (sharing several at once) is theirs." }],
   ], { doc: "The workspace's profiles in one list (the `profiles` view): one shared between stations once, the others each with\nthe station they are on; by kind of account (`group`, in its order), those that need a look first in each.", keepNone: true }),
   ProfilesOverviewView: struct([
     ["pools", vec("OverviewPool"), { doc: "Each model's pool the workspace's subscriptions make (Claude, Fable, Codex, Gemini, each other vendor's), in that order." }],
@@ -364,6 +366,11 @@ export const PROFILE_SHAPES: Record<string, Shape> = {
     ["where", "String", { said: true, doc: "As WorkspaceProfile's." }],
     ["several", "bool", { doc: "Signed in on more than one of its members (those not a copy of another station's): its row opens the account's page (profile_new.mbt), else its profile's on `station`." }],
     ["usedCount", "u32", { doc: "How many connects use its profile (its `usedBy`), as the desk's row says it." }],
+    ["shared", "bool", { default: true, doc: "Shared with the workspace's other stations: what the list's 多选 stops sharing." }],
+    ["shareAuto", "bool", { default: true, doc: "Shared, who may use it following the workspace's whitelist." }],
+    ["canBatchShare", "bool", { default: true, doc: "The list's 多选 can share it or set its stations (`profile.share` on `station`'s profile): its station has it\n(not a copy of another's), signed in there alone, is up, shares, and its login can be lent." }],
+    ["batchShareAllowAuto", "bool", { default: true, doc: "Its station lets its stations follow the workspace's whitelist (Overview `shareAllowAuto`)." }],
+    ["batchShareWhy", opt("String"), { doc: "Why 多选 cannot take it, where it cannot: borrowed (another station's copy), several (signed in on several\nstations, each set on its own page), unsupported (its station shares nothing), offline (its station is down), unshareable\n(its kind of login cannot be lent yet)." }],
   ], { doc: "An account as the workspace's list draws its row (settings profiles.mbt profile_list_blocks, sfdesk places.mbt\nprofiles_side, place_route_first): its kind, its title, how it is and where, its profile's name, words and allowance's\nchips. What else an account is (its members, places and stations, its check's detail, its allowance's resets and\ntimes) is that account's own topic's (`profile`, WorkspaceProfile), which its pages ask." }),
   RowProfile: struct([
     ["id", "String"],
@@ -428,6 +435,8 @@ export const PROFILE_SHAPES: Record<string, Shape> = {
     ["id", "String"],
     ["name", "String", { said: true }],
     ["online", "bool"],
+    ["acceptAutoChats", "bool", { default: true, doc: "It takes automatically assigned chats: on the workspace's whitelist (a share following it reaches it)." }],
+    ["tasksOnly", "bool", { default: true, doc: "It only runs tasks: never on the whitelist." }],
   ], { doc: "A station a shared account's page may let use it (accounts.mbt pick_stations). Its address and whether it may now\n(`station`, `allowed`) are the core's: the page ticks those its profile's `share.allow` names." }),
   Picked: struct([
     ["model", opt("String")],

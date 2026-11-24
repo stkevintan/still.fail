@@ -1,0 +1,10 @@
+[package]
+name = "sf_smoke"
+version = "0.1.0"
+
+[dependencies]
+app_state = { path = "../app_state" }
+sf = { workspace = true }
+signals = { workspace = true }
+view = { workspace = true }
+ui = { workspace = true }

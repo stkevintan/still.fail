@@ -22,6 +22,7 @@ import { hubConfig } from "../src/sessions/config.ts";
 import { FakeFeishu } from "./feishu-fake.ts";
 import { Rig, message, settle } from "./hub-fakes.ts";
 import { sessionKey } from "../src/sessions/hub.ts";
+import { stationLang, tr } from "../src/ops/i18n.ts";
 
 type Json = any;
 
@@ -302,6 +303,53 @@ test("surface: a direct chat's threads: each message outside a thread begins one
     r.fake.message({ id: "om_g", text: "群里", at: true });
     await r.fake.until("group", () => r.events.length === 4);
     assert.equal(r.threads.current("fs", "oc_g"), "om_g");
+  } finally {
+    await r.close();
+  }
+});
+
+test("surface: thread mode: an @ quoting a message from the chat begins a thread of its own, answered under the reply, not the quoted message", async () => {
+  const r = await surfaceRig({ threadMode: true });
+  try {
+    r.fake.message({ id: "om_old", text: "旧讨论" });
+    // Quoting from the chat itself: Feishu gives the quoted message as parent and root, and no thread.
+    r.fake.message({ id: "om_q", text: "这是什么意思", at: true, parent: "om_old" });
+    // Quoting a message that is a thread's first message, from the chat (not inside that thread): still the chat's.
+    r.fake.message({ id: "om_q2", text: "这个呢", at: true, parent: "om_t", root: "om_t" });
+    // A reply inside a thread (it quotes, and has the thread): that thread's.
+    r.fake.message({ id: "om_in", text: "接着说", at: true, parent: "om_q", thread: "omt_q", root: "om_q" });
+    await r.fake.until("heard", () => r.events.length === 4);
+    assert.deepEqual(r.events.map((e) => (e.type === "message" ? [e.message.threadTs, e.message.quoted ?? null] : null)), [
+      ["om_old", null],
+      ["om_q", "om_old"],
+      ["om_q2", "om_t"],
+      ["om_q", "om_q"],
+    ]);
+    await r.surface.post({ channel: "oc_g", threadTs: "om_q" }, "答案", []);
+    assert.equal(r.fake.calls("POST", "/open-apis/im/v1/messages/om_q/reply").length, 1);
+    assert.equal(r.fake.calls("POST", "/open-apis/im/v1/messages/om_q/reply")[0]!.body.reply_in_thread, true);
+    assert.equal(r.fake.calls("POST", "/open-apis/im/v1/messages/om_old/reply").length, 0);
+    assert.equal(r.fake.calls("POST", "/open-apis/im/v1/messages").length, 0);
+  } finally {
+    await r.close();
+  }
+});
+
+test("surface: a direct chat's threads: a message quoting one from the chat begins a thread of its own; a reply in a thread goes on there", async () => {
+  const r = await surfaceRig({ directThreads: true });
+  try {
+    r.fake.message({ id: "om_a", chat: "oc_dm", text: "看看", p2p: true });
+    r.fake.message({ id: "om_q", chat: "oc_dm", text: "这条呢", p2p: true, parent: "om_a" });
+    r.fake.message({ id: "om_c", chat: "oc_dm", text: "接着说", p2p: true, parent: "om_a", thread: "omt_1", root: "om_a" });
+    await r.fake.until("heard", () => r.events.length === 3);
+    assert.deepEqual(r.events.map((e) => (e.type === "message" ? [e.message.threadTs, e.message.quoted ?? null] : null)), [
+      ["om_a", null],
+      ["om_q", "om_a"],
+      ["om_a", "om_a"],
+    ]);
+    await r.surface.post({ channel: "oc_dm", threadTs: "om_q" }, "答案", []);
+    assert.equal(r.fake.calls("POST", "/open-apis/im/v1/messages/om_q/reply").length, 1);
+    assert.equal(r.fake.calls("POST", "/open-apis/im/v1/messages/om_a/reply").length, 0);
   } finally {
     await r.close();
   }
@@ -600,6 +648,36 @@ async function feishuHub(r: Awaited<ReturnType<typeof surfaceRig>>) {
   rig.claude.last().reads();
   return { rig, key: "fs:oc_g:om_a" };
 }
+
+test("hub: a chat opened from a Feishu thread is said there as a Markdown link Feishu shows, not Slack's <link|title> (FB-47)", async () => {
+  const r = await surfaceRig();
+  const rig = new Rig();
+  try {
+    rig.edit((raw) => raw.connects.push({ id: "fs", kind: "feishu", feishu: { appId: "cli_test", appSecret: "s" }, bind: { runtime: "claude" } }));
+    await rig.hub.shutdown();
+    rig.hub = rig.newHub({ chats: (id) => (id === "fs" ? r.surface : undefined), link: true });
+    await rig.accept({ channel: "oc_g", threadTs: "om_a", ts: "om_a", user: "ou_ada", text: "@Bot 开个对话", addressed: true }, "fs");
+    await settle();
+    const key = "fs:oc_g:om_a";
+    rig.claude.last().reads();
+    await rig.call(key, "chat_create", { for: "me", key: "android", text: "build the android app", title: "安卓构建" });
+    const child = rig.store.openedBy(key)[0]!.child;
+    const link = `https://ember.test/o/ws/st/${child.replaceAll(":", "%3A")}`;
+    const said = tr(stationLang(), "station.session.opened", { chat: `[安卓构建](${link})` });
+    // Kept in the opener's thread as said there, and sent to Feishu as a rich-text post's Markdown.
+    const thread = rig.store.threadAt("feishu:fs", "oc_g", "om_a")!;
+    const notice = rig.said(thread.id).at(-1)!;
+    assert.deepEqual([notice.authorKind, notice.text], ["station", said]);
+    const posts = r.fake.calls("POST", "/open-apis/im/v1/messages").filter((c) => c.body.msg_type === "post");
+    const md = JSON.parse(posts.at(-1)!.body.content).zh_cn.content[0][0];
+    assert.equal(md.tag, "md");
+    assert.ok(md.text.startsWith(said), md.text);
+    assert.ok(!md.text.includes(`<${link}|`), md.text);
+  } finally {
+    await r.close();
+    await rig.close();
+  }
+});
 
 /// What the surface heard last, given to the hub as the connect gives it.
 async function heardLast(rig: Rig, r: Awaited<ReturnType<typeof surfaceRig>>, count: number) {

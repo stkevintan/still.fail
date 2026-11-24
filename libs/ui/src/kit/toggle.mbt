@@ -279,10 +279,10 @@ fn group_pressed(was : Array[String], v : String, multiple : Bool) -> Array[Stri
 
 ///|
 /// A sliding group's lens's shadow, held all the way: its blur and how far down (a loupe's too).
-pub let lens_shadow : Double = 6.0
+pub let lens_shadow : Double = 0.0
 
 ///|
-pub let lens_shadow_y : Double = 2.0
+pub let lens_shadow_y : Double = 0.0
 
 ///|
 /// A sliding group's default thumb (still.fail's segmented choice): `w` by `h`, lifted out of the track (the theme's

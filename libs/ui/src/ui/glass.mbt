@@ -205,7 +205,7 @@ fn effective_glass(gl : Glass, frost : Double, contrast : Bool) -> Glass {
   if frost <= 0.0001 && !contrast {
     return gl
   }
-  if gl.liquid && (gl.tint & 0xFFL) == 0L && (gl.zoom > 1.0001 || (gl.blur <= 0.0 && gl.droplet_role > 0 && !contrast)) {
+  if gl.liquid && (gl.tint & 0xFFL) == 0L && gl.zoom > 1.0001 {
     return gl
   }
   if !gl.liquid && gl.progressive {
@@ -223,9 +223,17 @@ fn effective_glass(gl : Glass, frost : Double, contrast : Bool) -> Glass {
   let r = dclamp((tr + (sr - tr) * mix).round(), 0.0, 255.0).to_int().to_int64()
   let g = dclamp((tg + (sg - tg) * mix).round(), 0.0, 255.0).to_int().to_int64()
   let b = dclamp((tb + (sb - tb) * mix).round(), 0.0, 255.0).to_int().to_int64()
-  let a = dclamp(((ta + (0.94 - ta) * f) * 255.0).round(), 0.0, 255.0).to_int().to_int64()
+  let a_frac = ta + (0.94 - ta) * f
+  let a = dclamp((a_frac * 255.0).round(), 0.0, 255.0).to_int().to_int64()
   let tint = (r << 24) | (g << 16) | (b << 8) | a
-  let blur = if gl.blur < 14.0 {
+  let is_clear_droplet = gl.liquid && (gl.tint & 0xFFL) == 0L && gl.blur <= 0.0 && gl.droplet_role > 0 && !contrast
+  let blur = if is_clear_droplet {
+    if a_frac <= 0.12 {
+      0.0
+    } else {
+      14.0 * ((a_frac - 0.12) / 0.88) * 0.5
+    }
+  } else if gl.blur < 14.0 {
     gl.blur + (14.0 - gl.blur) * (f * 0.5)
   } else {
     gl.blur

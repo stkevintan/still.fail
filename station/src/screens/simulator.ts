@@ -235,6 +235,13 @@ export class Simulators {
   }
 }
 
+/// How long a view's opening (the helper's first message) is waited for: a helper stuck on CoreSimulator (a `simctl io`
+/// that never ends) would otherwise hold the one who asked, and the socket, for ever.
+export const OPEN_TIMEOUT_MS = 30_000;
+
+/// `f` once, `ms` from now; the returned function calls it off (`wall.after`; a test's own).
+export type After = (ms: number, f: () => void) => () => void;
+
 /// One booted simulator: a view is a connection to the helper's `simulator.view`.
 export class Simulator implements ScreenSource {
   readonly id: string;
@@ -253,8 +260,9 @@ export class Simulator implements ScreenSource {
   readonly #listedAt = wall.now();
   #size: { width: number; height: number };
   readonly #views = new Set<HelperView>();
+  readonly #opening: { ms: number; after: After };
 
-  constructor(device: Booted, helper: HelperApp, size: { width: number; height: number }, simctl: Run = run, panels: Panel[] = [], chrome: ChromeSource[] = []) {
+  constructor(device: Booted, helper: HelperApp, size: { width: number; height: number }, simctl: Run = run, panels: Panel[] = [], chrome: ChromeSource[] = [], opening: { ms: number; after: After } = { ms: OPEN_TIMEOUT_MS, after: wall.after }) {
     this.id = `simulator:${device.udid}`;
     this.debug = new SimDebug(SIMCTL, device.udid, simctl, () => this.#picture());
     this.poses = device.type.endsWith(".iPhone-Duo");
@@ -264,6 +272,7 @@ export class Simulator implements ScreenSource {
     this.#helper = helper;
     this.#simctl = simctl;
     this.#size = size;
+    this.#opening = opening;
   }
 
   title(): string {
@@ -292,13 +301,18 @@ export class Simulator implements ScreenSource {
     const socket = await this.#helper.connect({ op: "simulator.view", udid: this.#device.udid, codec, maxWidth: options.maxWidth, maxHeight: options.maxHeight, ...(options.bitrate ? { bitrate: Math.round(options.bitrate) } : {}), ...(options.fps ? { fps: options.fps } : {}) });
     const view = new HelperView(codec, socket, () => this.#views.delete(view), new SimInput(), "CoreSimulator");
     this.#views.add(view);
+    let stop = () => {};
     try {
-      await view.ready;
+      // (the helper's own wait on the device, given up on: the view closed below, its socket with it)
+      const late = new Promise<never>((_, reject) => (stop = this.#opening.after(this.#opening.ms, () => reject(new Error(`the simulator's view did not open in ${this.#opening.ms} ms`)))));
+      await Promise.race([view.ready, late]);
       return view;
     } catch (error) {
       view.close();
       log.warn("screens", "a simulator's view did not open", { udid: this.#device.udid, error: (error as Error).message });
       throw new ScreenRefused(503, "station.screen.failed", { said: (error as Error).message });
+    } finally {
+      stop();
     }
   }
 

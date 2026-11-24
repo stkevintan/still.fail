@@ -1,0 +1,12 @@
+[package]
+name = "sf"
+version = "0.1.0"
+
+[dependencies]
+mbt_compat = { workspace = true }
+signals = { workspace = true }
+view = { workspace = true }
+ui = { workspace = true }
+zip = { workspace = true }
+pixels = { workspace = true }
+paint = { workspace = true }

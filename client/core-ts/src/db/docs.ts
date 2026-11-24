@@ -4,14 +4,16 @@ import type { Topic } from "../protocol.ts";
 import { isObject } from "../util.ts";
 import { work } from "../work.ts";
 import { type DbEnv, type Doc, type J, K, frozen, parse } from "./collection.ts";
-import { ensureOverviewParts, overviewProfilesOf, PART_COLUMNS, partRev } from "./schema.ts";
+import { ensureOverviewParts, HOT_PART_COLUMNS, overviewProfilesOf, PART_COLUMNS, partRev, PROFILE_PART_COLUMNS, PROFILE_PART_SET } from "./schema.ts";
 
 export class DocsStore {
   readonly #env: DbEnv;
   /// Whether each overview's part the chat list reads is kept (`station_part`; it could not be made without room).
   #parts = false;
-  /// The columns of each overview's part this database keeps (schema.ts PART_COLUMNS: `station_part`'s).
-  #columns = new Set<string>();
+  /// Whether cold profile columns live in `station_part_profiles` (vs legacy `station_part` on an older read-only DB).
+  #profileParts = false;
+  /// Which table holds each overview part column this database keeps (`station_part` or `station_part_profiles`).
+  readonly #tableOf = new Map<string, "station_part" | "station_part_profiles">();
   /// The profiles read of each station's overview, one by one (overviewProfile): let go of as its profiles change.
   readonly #profilesRead = new Map<string, Set<string>>();
 
@@ -25,14 +27,18 @@ export class DocsStore {
       try {
         ensureOverviewParts(sql);
         this.#parts = true;
-        for (const [column] of PART_COLUMNS) this.#columns.add(column);
+        this.#profileParts = true;
+        for (const [column] of HOT_PART_COLUMNS) this.#tableOf.set(column, "station_part");
+        for (const [column] of PROFILE_PART_COLUMNS) this.#tableOf.set(column, "station_part_profiles");
       } catch {
         // No room to make it: each part is read of its overview, by SQLite, this time.
       }
       return;
     }
     this.#parts = sql.all("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'station_part'").length > 0;
-    for (const r of this.#parts ? sql.all("PRAGMA table_info(station_part)") : []) this.#columns.add(String(r[1]));
+    for (const r of this.#parts ? sql.all("PRAGMA table_info(station_part)") : []) this.#tableOf.set(String(r[1]), "station_part");
+    this.#profileParts = sql.all("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'station_part_profiles'").length > 0;
+    for (const r of this.#profileParts ? sql.all("PRAGMA table_info(station_part_profiles)") : []) this.#tableOf.set(String(r[1]), "station_part_profiles");
   }
 
   /// The account's own documents (`me`, `login_sessions`, `admin/<list>`).
@@ -141,7 +147,8 @@ export class DocsStore {
     if (read === undefined) this.#profilesRead.set(station, (read = new Set()));
     read.add(id);
     const path = `$.${JSON.stringify(id)}`;
-    const kept = this.#columns.has("profiles") ? this.#env.sql.all("SELECT profiles IS NOT NULL, profiles -> ? FROM station_part WHERE address = ?", [path, station])[0] : undefined;
+    const table = this.#tableOf.get("profiles");
+    const kept = table !== undefined ? this.#env.sql.all(`SELECT profiles IS NOT NULL, profiles -> ? FROM ${table} WHERE address = ?`, [path, station])[0] : undefined;
     const r = kept !== undefined && kept[0] === 1
       ? kept[1]
       : this.#env.sql.all(`SELECT (${overviewProfilesOf("st.json")}) -> ? FROM station AS st WHERE st.address = ? AND st.kind = 'overview' AND json_valid(st.json)`, [path, station])[0]?.[0];
@@ -173,7 +180,8 @@ export class DocsStore {
   /// a database a newer core wrote, or a core from before the column keeps the parts now by its own triggers: a web
   /// page still open from before), made of the overview by SQLite as it is read.
   #columnText(station: string, column: string): string | undefined {
-    const kept = this.#columns.has(column) ? this.#env.sql.all(`SELECT ${column} FROM station_part WHERE address = ?`, [station])[0] : undefined;
+    const table = this.#tableOf.get(column);
+    const kept = table !== undefined ? this.#env.sql.all(`SELECT ${column} FROM ${table} WHERE address = ?`, [station])[0] : undefined;
     if (typeof kept?.[0] === "string") return kept[0];
     const of = PART_COLUMNS.find(([c]) => c === column)![1];
     const r = this.#env.sql.all(`SELECT ${of("st.json")} FROM station AS st WHERE st.address = ? AND st.kind = 'overview' AND json_valid(st.json)`, [station])[0];
@@ -192,7 +200,15 @@ export class DocsStore {
   /// that knows nothing of them put in, or a database that keeps no parts). A few numbers: no text read.
   #partRevs(station: string): (number | null)[] {
     if (!this.#parts) return PART_COLUMNS.map(() => null);
-    const r = this.#env.sql.all(`SELECT ${PART_COLUMNS.map(([c]) => `CASE WHEN ${partRev(c)} IS NOT NULL AND ${c} IS NULL THEN -1 ELSE ${partRev(c)} END`).join(", ")} FROM station_part WHERE address = ?`, [station])[0];
+    const r = this.#profileParts
+      ? this.#env.sql.all(
+          `SELECT ${PART_COLUMNS.map(([c]) => {
+            const a = PROFILE_PART_SET.has(c) ? "pp" : "p";
+            return `CASE WHEN ${a}.${partRev(c)} IS NOT NULL AND ${a}.${c} IS NULL THEN -1 ELSE ${a}.${partRev(c)} END`;
+          }).join(", ")} FROM station_part p LEFT JOIN station_part_profiles pp ON pp.address = p.address WHERE p.address = ?`,
+          [station],
+        )[0]
+      : this.#env.sql.all(`SELECT ${PART_COLUMNS.map(([c]) => `CASE WHEN ${partRev(c)} IS NOT NULL AND ${c} IS NULL THEN -1 ELSE ${partRev(c)} END`).join(", ")} FROM station_part WHERE address = ?`, [station])[0];
     return PART_COLUMNS.map((_, i) => (r === undefined ? -1 : typeof r[i] === "number" ? r[i] : null));
   }
 
@@ -209,7 +225,7 @@ export class DocsStore {
       const key = K("st", station, "overview");
       const was = this.#env.cache.get(key);
       const overview = this.#env.kept.writing("station", [station]);
-      const profiled = this.#env.kept.writing("station_part", [station]);
+      const profiled = this.#env.kept.writing("station_part_profiles", [station]);
       write();
       const after = this.#partRevs(station);
       for (const [i, [column]] of PART_COLUMNS.entries()) {

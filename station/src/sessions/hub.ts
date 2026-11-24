@@ -34,6 +34,7 @@ import { log } from "../ops/log.ts";
 import { type UpkeepState, readUpkeepState as defaultReadUpkeepState } from "../ops/upkeep-state.ts";
 import { tr, stationLang } from "../ops/i18n.ts";
 import { iso, sessionPlaces } from "../read/transcript.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import { transcriptSourcesSoon } from "../read/transcript-soon.ts";
 import { type ArchivedWorkspace, type Attachment, MANUAL, type SessionRow, type Store, STILLFAIL_SURFACE, feishuSurface, commaSurface, groupSurface, slackSurface, type MessageRow, type ThreadRow, type ThreadSummary } from "../store/store.ts";
 import type { DeliveryCardState, InWorkspace, PendingMessage } from "../store/rows.ts";
@@ -130,6 +131,7 @@ export type BilledFallback = { session: string; workspace: string | null; runtim
 export type HubOptions = {
   /// Read on every use, so edits apply to the next decision.
   config: () => HubConfig;
+  readers?: () => ReaderSelectConfig;
   store: Store;
   /// The connected connects by id; configured connects without one are offline.
   chats: (connect: string) => ChatSurface | undefined;
@@ -1447,7 +1449,7 @@ export class Hub {
   /// The session-name lookup of runners, whose ids use the session-key part (it served sessions' sandboxes before
   /// sandboxes as station_task's targets took their place: no longer prepared).
   private sandboxNameLookup(): SandboxNameBuilder {
-    return this.sandboxNames ??= new SandboxNameBuilder(this.store, this.options?.previous ?? Promise.resolve(), () => false);
+    return this.sandboxNames ??= new SandboxNameBuilder(this.store, this.options?.previous ?? Promise.resolve(), () => false, undefined, this.options?.readers);
   }
 
   runnerNameSessions(runners: readonly { id: string; part: string }[]): Map<string, string> | "fallback" {
@@ -1455,15 +1457,15 @@ export class Hub {
   }
 
   sessionInDirectory(dir: string) {
-    return (this.sessionDirectories ??= new SessionDirectoryBuilder(this.store, this.options?.previous ?? Promise.resolve())).find(dir);
+    return (this.sessionDirectories ??= new SessionDirectoryBuilder(this.store, this.options?.previous ?? Promise.resolve(), undefined, this.options?.readers)).find(dir);
   }
 
   sessionsInArguments(lines: readonly string[], home: string) {
-    return (this.sessionDirectories ??= new SessionDirectoryBuilder(this.store, this.options?.previous ?? Promise.resolve())).findArguments(lines, home);
+    return (this.sessionDirectories ??= new SessionDirectoryBuilder(this.store, this.options?.previous ?? Promise.resolve(), undefined, this.options?.readers)).findArguments(lines, home);
   }
 
   processJobLookup(): ProcessJobsBuilder {
-    return this.processJobs ??= new ProcessJobsBuilder(this.store, this.options?.previous ?? Promise.resolve());
+    return this.processJobs ??= new ProcessJobsBuilder(this.store, this.options?.previous ?? Promise.resolve(), undefined, this.options?.readers);
   }
 
   /// The lookup of sessions by their sandbox's name a station kept while sessions ran in sandboxes, taken down (its

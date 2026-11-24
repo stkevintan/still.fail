@@ -132,6 +132,8 @@ fn setting_made(p : @view.View, src : Source, route : @settings.Route, width : (
     NewProfile(a) => new_profile_node(p, core, src, here, a, on_back=core.pop, frame~, width~)
     Station(a) => station_node(p, core, src, here, a, on_back=core.pop, frame~, width~)
     Stations => stations_list_node(p, core, here, on_back=core.pop, frame~, width~)
+    // (the workspace's as the app makes it, its list or 概览 one page: narrow_shell's, page_pane's)
+    Profiles("") => profiles_page_node(p, src, core, here, @settings.profiles_narrow_overview, on_back=core.pop, frame~, width~)
     Profiles(only) => profiles_list_node(p, core, here, only, on_back=core.pop, frame~, width~)
     ProfileAccount(k) => profile_account_node(p, core, here, k, on_back=core.pop, frame~, width~)
     Home => settings_home_node(p, core, here, fn(r) { (core.push)(r) }, on_back=core.pop, frame~, stint=fn() { 0 }, bars=fn() { false })

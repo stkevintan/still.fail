@@ -803,6 +803,9 @@ struct Node {
   /// on its way whole (a page's list's key said `comes_whole`, View::scrolls_window): not cut to its room as it makes
   /// its way, nor what it holds; cut as what holds it cuts it
   mut come_uncut : Bool
+  /// on its way down its column, cut at its animated foot alone and open across and above its top (View::resizes'
+  /// `open_top`: a quote room whose ✕ hangs above its top edge)
+  mut come_open_top : Bool
   // (on a way its list's page said of its key, View::scrolls_window `comes_way`: a flight in to it goes with it,
   // shared.mbt's Tree::rides_said_way; let go with the way)
   mut list_key_way : Bool
@@ -1389,6 +1392,8 @@ pub struct Tree {
   mut moves_causes : Int
   /// latest change moment deferred by lazy moves_for settlement (-1.0: none pending)
   mut unsettled_at : Double
+  /// latest change moment whose `settle_now` was skipped by a mid-batch (`more=true`) event (-1.0: none pending)
+  mut batch_owed_at : Double
   /// whether no new non-standing/non-laying mutations have dirtied the tree since mark_unsettled
   mut unsettled_clean : Bool
   /// true while Tree::brought is laying out deferred lazy moves_for changes so derived bindings stay answered
@@ -1860,6 +1865,7 @@ pub fn Tree::new(
     before_causes: 0,
     moves_causes: 0,
     unsettled_at: -1.0,
+    batch_owed_at: -1.0,
     unsettled_clean: false,
     settling_unsettled: false,
     answer_unsettled: false,
@@ -2215,6 +2221,7 @@ fn Tree::made(self : Tree, parent : Int, words_as_said? : Bool = false, loc? : S
       n.clips_said = false
       n.clips_down = false
       n.come_uncut = false
+      n.come_open_top = false
       n.list_key_way = false
       n.inert = false
       n.takes_unseen = false
@@ -2410,6 +2417,7 @@ fn Tree::made(self : Tree, parent : Int, words_as_said? : Bool = false, loc? : S
         clips_said: false,
         clips_down: false,
         come_uncut: false,
+        come_open_top: false,
         list_key_way: false,
         inert: false,
         takes_unseen: false,
@@ -2904,6 +2912,7 @@ pub fn Tree::dispose(self : Tree) -> Unit {
   }
   self.drain_parked_garbage()
   self.unsettled_at = -1.0
+  self.batch_owed_at = -1.0
   self.unsettled_clean = false
   self.answer_unsettled = false
   if node_rests.length() > 0 {
@@ -8296,7 +8305,8 @@ pub fn View::on_wheel_moves(self : View, f : (Wheel) -> Bool) -> View {
 ///|
 /// A wheel that nothing in it moves goes on to what is drawn under it, not to what holds it: a card floating over a page
 /// (in a layer of the window, so the page is none of what holds it) leaves the page to scroll under the pointer. What is
-/// kept from input (a modal layer over the page) is not asked, as ever.
+/// kept from input by a modal layer over the page is not asked, unless that layer (the topmost) is this one: then the
+/// page under it scrolls by the wheel while presses and keys stay the layer's (Tree::wheelless_at).
 pub fn View::wheel_passes(self : View) -> View {
   guard self.live() is Some(n) else { return self }
   n.wheel_passes = true
@@ -8356,7 +8366,7 @@ pub fn Tree::wheel_at(
     let hits : Array[NodeId] = []
     let now = self.logic_said()
     self.each_drawn_scaled(fn(c, cx, cy, _, s) {
-      if self.finger_on(c, cx, cy, s, x, y, now, tracked=false) {
+      if self.finger_on(c, cx, cy, s, x, y, now, tracked=false, wheel=true) {
         let n = self.nodes[c.id.at]
         if n.on_wheel is Some(_) ||
           n.on_drag is Some(_) ||
@@ -8406,7 +8416,7 @@ pub fn Tree::wheel_at(
         let (id, hosted, said) = e
         guard self.nodes[0].live else { break }
         let n = self.nodes[id.at]
-        guard n.live && n.gen == id.gen && !self.pressless_at(id.at) else { continue }
+        guard n.live && n.gen == id.gen && !self.wheelless_at(id.at) else { continue }
         if hosted && n.hosted {
           theirs.val = true
           if @signals.untracked(fn() { old(id) }) {
@@ -11327,6 +11337,7 @@ fn View::comes(
   foot? : Bool = false,
   anew? : Bool = false,
   uncut? : Bool = false,
+  open_top? : Bool = false,
 ) -> Bool {
   let tree = self.tree
   // (in a block of a page's list said `flips`: there at once, the list setting it out with the rest of its column)
@@ -11360,7 +11371,7 @@ fn View::comes(
     // (in what is laid out nowhere (a page under the one on top): there at once, as it is shown again (Tree::nowhere_at))
     !tree.nowhere_at(self.at) &&
     tree.makes_way(v.at) &&
-    !tree.holds_shared(v.at, stays_ok=uncut) &&
+    !tree.holds_shared(v.at, stays_ok=uncut || open_top) &&
     // (made or let go as an answer told it, a block given another key or woken: at once, answering.mbt; but one on a
     // way a cause set it on, turned back by an answer (a show's shown again as it closes), turns back on that way as
     // it would for a cause: that way is the cause's still, and stopped dead or done at once it jumps)
@@ -11444,6 +11455,7 @@ fn View::comes(
   if uncut {
     n.come_uncut = true
   }
+  n.come_open_top = open_top
   n.look.clips = n.clips_said || !n.come_uncut
   (n.come_off)()
   n.come_off = fn() {  }
@@ -11519,7 +11531,7 @@ fn View::comes(
     @signals.after_flush(fn() {
       guard v.live() is Some(m) && m.coming && st.come_at == at && st.come_to >= 1.0 else { return }
       tree.measured_now()
-      if m.come_uncut {
+      if m.come_uncut || m.come_open_top {
         match m.come_said {
           Some(s) => s.set(s.untracked() + 1)
           None => ()
@@ -11838,7 +11850,7 @@ fn Tree::come_group_settle(
       // (leaving as long as the group's way: let go as it ends)
       m.span = dmax(st.come_ends - m.left_at, 0.0)
     }
-    if m.come_uncut {
+    if m.come_uncut || m.come_open_top {
       match m.come_said {
         Some(s) => s.set(s.untracked() + 1)
         None => ()
@@ -11864,8 +11876,9 @@ fn come_done(tree : Tree, v : View, m : Node) -> Unit {
   if m.structure_box {
     tree.structure_row_sync_one(v.at)
   }
-  let was_uncut = m.come_uncut
+  let was_uncut = m.come_uncut || m.come_open_top
   m.come_uncut = false
+  m.come_open_top = false
   m.list_key_way = false
   st.come_grid = 0.0
   st.come_foot = false
@@ -12197,6 +12210,27 @@ fn Tree::pressless_at(self : Tree, at : Int) -> Bool {
 }
 
 ///|
+/// Whether a wheel turned over node `at` is kept from it: as a press is (Tree::pressless_at), but under the topmost
+/// modal layer where that layer lets the wheel through (View::wheel_passes): a popover that leaves the page under it to
+/// scroll while it stays open, its presses outside it and its keys still its own. An old frame's modal layer over it
+/// keeps it as ever.
+fn Tree::wheelless_at(self : Tree, at : Int) -> Bool {
+  if self.pressless_own_at(at) {
+    return true
+  }
+  if self.allows_at(at) {
+    return false
+  }
+  match self.modal_top() {
+    Some(m) if self.nodes[m.at].wheel_passes => {
+      let under = self.held_under_now()
+      under > -2 && self.stack_at(at) <= under
+    }
+    _ => true
+  }
+}
+
+///|
 /// Whether node `at` or what holds it is leaving, said to take no press or left out of its row (View::drops: laid out
 /// nowhere), whatever a modal layer says of it.
 fn Tree::pressless_own_at(self : Tree, at : Int) -> Bool {
@@ -12406,6 +12440,11 @@ pub fn Tree::input(self : Tree, at : Double, f : () -> Unit) -> Unit {
 }
 
 ///|
+/// The tree whose outer `Tree::event_said` is currently executing (None outside `event_said`).
+// kept across runs: saved and restored around Tree::event_said
+let active_event_tree : Ref[Tree?] = Ref(None)
+
+///|
 /// One event at `at` whose own facts (`said`: what it came by, as a host says it) are so as of its moment: what was due
 /// by then done first (seeing what was so before it), then `said` committed and told (what follows it brought to it,
 /// the event's moment their cause), then `f` taken as Tree::event takes it, finding things as they are with it. Inside
@@ -12416,7 +12455,12 @@ pub fn Tree::input(self : Tree, at : Double, f : () -> Unit) -> Unit {
 /// (a list's slots set, read by bindings through what is worked out of them) is told and laid out in it, not marked in
 /// `f`'s batch and left there while `f` finds what it reaches (a row 120 lower than drawn, an input 88 ms after the
 /// last frame, 2026-11-12). A key and words typed bring nothing of their own (press_stays_ways_test's Page Down).
-pub fn Tree::event_said(self : Tree, at : Double, said : () -> Unit, f : () -> Unit, brings? : Bool = false) -> Unit {
+///
+/// `more`: true for intermediate samples of a coalesced touch/pointer move batch. Commits modal eligibility and records
+/// `sight_owe(at)` (and `batch_owed_at` if motion causes are active), while deferring `withins_settled`, `settle_now`,
+/// `hand_now`, `sights_now`, and trailing `withins_owed_now` until the final sample (`more=false`), a mid-batch
+/// `@view.transition`, or the next frame.
+pub fn Tree::event_said(self : Tree, at : Double, said : () -> Unit, f : () -> Unit, brings? : Bool = false, more? : Bool = false) -> Unit {
   // (in an event already: its moment, settled as it began)
   if self.cause_at >= 0.0 {
     @signals.start_batch()
@@ -12425,6 +12469,8 @@ pub fn Tree::event_said(self : Tree, at : Double, said : () -> Unit, f : () -> U
     @signals.end_batch()
     return
   }
+  let prev_active = active_event_tree.val
+  active_event_tree.val = Some(self)
   let passes_was = self.work.passes
   self.in_events += 1
   // (what the changes before it at its moment owe, settled before it finds anything)
@@ -12444,7 +12490,7 @@ pub fn Tree::event_said(self : Tree, at : Double, said : () -> Unit, f : () -> U
   @signals.untracked(f)
   @signals.end_batch()
   self.committing -= 1
-  self.modals_settled()
+  self.modals_settled(withins=!more)
   // (what waits for it committed whole, each a change of its own of this moment, in order)
   while self.afters.length() > 0 {
     let next = self.afters.remove(0)
@@ -12453,7 +12499,7 @@ pub fn Tree::event_said(self : Tree, at : Double, said : () -> Unit, f : () -> U
     @signals.untracked(next)
     @signals.end_batch()
     self.committing -= 1
-    self.modals_settled()
+    self.modals_settled(withins=!more)
   }
   self.afters.release_unused(placeholder=run_gone)
   // (what was let go of and made in it with one id paired, as it is committed whole: shared.mbt)
@@ -12464,18 +12510,27 @@ pub fn Tree::event_said(self : Tree, at : Double, said : () -> Unit, f : () -> U
   self.change_ended()
   // (where things stand once it is told whole, for the next change: Tree::settle_after_change)
   if was < 0.0 {
-    self.settle_now(at)
-    self.hand_now()
+    if !more {
+      self.settle_now(at)
+      self.hand_now()
+    } else if self.moves_causes > 0 || self.before_causes > 0 {
+      self.batch_owed_at = at
+    }
     // (what the page's lists have in sight owed as of this change, an input's or data's: not a binding's the clock or a
     // frame's laying out told (Tree::at_cause's), nor the one that tells it)
     if !self.sights_telling {
       self.sight_owe(at)
     }
-    self.sights_now()
+    if !more {
+      self.sights_now()
+    }
   }
   // (and what a change told in it as it was laid out left owed, as it ends: what follows finds it settled)
-  self.withins_owed_now()
+  if !more {
+    self.withins_owed_now()
+  }
   self.in_events -= 1
+  active_event_tree.val = prev_active
   if was < 0.0 {
     self.event_passes_counted(self.work.passes - passes_was)
   }
@@ -12517,6 +12572,7 @@ fn Tree::clear_unsettled(self : Tree) -> Unit {
   self.unsettled_clean = false
   self.answer_unsettled = false
   self.unsettled_at = -1.0
+  self.batch_owed_at = -1.0
 }
 
 ///|
@@ -12686,6 +12742,7 @@ fn Tree::settle_after_change(self : Tree, at : Double) -> Unit {
 /// Where things stand as of `at` laid out and placed now, where something asks (View::laid_before_causes): what was told
 /// worked out, laid out and placed as a frame would, nothing drawn.
 fn Tree::settle_now(self : Tree, at : Double) -> Unit {
+  self.batch_owed_at = -1.0
   if self.standing || self.last_w <= 0.0 {
     return
   }
@@ -12703,6 +12760,7 @@ fn Tree::settle_now(self : Tree, at : Double) -> Unit {
 /// property bindings (`bindings_due` / `pulls_marked` / `after_bindings`) without touching `clock`/`beat` or running
 /// `@flex.compute` / text measurement / `Tree::place`, then marks the tree unsettled if layout or placing remains due.
 fn Tree::settle_bindings_at(self : Tree, at : Double) -> Unit {
+  self.batch_owed_at = -1.0
   if self.standing || self.last_w <= 0.0 {
     return
   }
@@ -12753,6 +12811,7 @@ fn Tree::settle_bindings_at(self : Tree, at : Double) -> Unit {
 
 ///|
 fn Tree::settle_layout_at(self : Tree, at : Double) -> Unit {
+  self.batch_owed_at = -1.0
   if self.standing || self.last_w <= 0.0 {
     return
   }
@@ -13010,6 +13069,13 @@ fn Tree::advance_loop(self : Tree, upto : Double) -> Unit {
         self.sights_now()
       }
       return
+    }
+    if self.batch_owed_at >= 0.0 {
+      let batch_at = self.batch_owed_at
+      self.batch_owed_at = -1.0
+      self.settle_now(batch_at)
+      // (what settling ran may have scheduled or called off timeline work: re-select from the updated timeline)
+      continue
     }
     let d = self.timeline[next]
     match d {
@@ -13275,11 +13341,13 @@ pub fn Tree::frame(self : Tree, w : Double, h : Double, now? : Double) -> Bool {
 /// the tree has a size (its first frame).
 pub fn Tree::bring_to(self : Tree, at : Double) -> Unit {
   if self.nodes.length() == 0 || !self.nodes[0].live {
+    self.batch_owed_at = -1.0
     return
   }
   // (its logic first, to the moment, then what it draws drawn as of it (a frame to be shown later drawn ahead of it:
   // drawn again as of now, for where a press finds things), then what it marked)
   self.advance(at)
+  self.batch_owed_at = -1.0
   self.clock_to(at)
   // (what the change under way set so far, and the clock, pulled into its properties: an input in a change's batch
   // finds things where they are then, nothing else told before the change ends)
@@ -14488,6 +14556,8 @@ fn Tree::made_again(self : Tree, at : Int) -> Unit {
       }
     } else if self.along_row_at(at) {
       2
+    } else if n.come_open_top {
+      3
     } else {
       1
     },
@@ -16057,8 +16127,11 @@ fn Tree::finger_on(
   y : Double,
   at : Double,
   tracked~ : Bool,
+  wheel? : Bool = false,
 ) -> Bool {
-  if x < cx || y < cy || x >= cx + c.w * s || y >= cy + c.h * s || self.pressless_at(c.id.at) {
+  // (a wheel's: as a press's, but on under a modal layer that lets the wheel through, Tree::wheelless_at)
+  let kept = if wheel { self.wheelless_at(c.id.at) } else { self.pressless_at(c.id.at) }
+  if x < cx || y < cy || x >= cx + c.w * s || y >= cy + c.h * s || kept {
     return false
   }
   // (within what holds it bounds it to: View::bounds_input)

@@ -7,7 +7,7 @@ Narrower rules:
 - `station/src/cloud/AGENTS.md`: lock pinning, fork choice, moved workspaces, lock tests, cloud TCP entries
 - `station/src/mesh/AGENTS.md`: mesh base, ways and relays, station name and icon
 - `station/src/rig/AGENTS.md`: task-only stations, ownership, signed grants, mode switch, devices
-- `station/src/share/AGENTS.md`: shared agent memory, team skills, presets, starred models
+- `station/src/share/AGENTS.md`: shared agent memory, team skills, presets, starred models, profiles following the whitelist
 - `station/src/ops/AGENTS.md`: storage manifest, logs, background yielding, bounded walks, self-memory, stdin backpressure
 - `station/src/move/AGENTS.md`, `station/src/replica/AGENTS.md`: migration, chat handovers, backups, retirement (off)
 - `station/mb/src/station_main/AGENTS.md`, `station/docker/AGENTS.md`: MoonBit station, Docker

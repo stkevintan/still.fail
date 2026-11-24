@@ -4,6 +4,7 @@
 // fake helper (its grants, its view protocol); the clipboard both ways and files dropped (only for a view that drives,
 // within bounds, of the types a source carries). Nothing here captures a screen: side/screen-desktop.test.ts does.
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -25,7 +26,7 @@ import { described, letGo } from "../src/tools/screen.ts";
 import { CLICK_MS, FLAGS, KEYCODES, MacInput } from "../src/screens/mac-input.ts";
 import { USAGES, SimInput } from "../src/screens/sim-input.ts";
 import type { SimDebug } from "../src/screens/sim-debug.ts";
-import { SIMCTL, Simulators, bootedOf, runtimeName, screenOf } from "../src/screens/simulator.ts";
+import { OPEN_TIMEOUT_MS, SIMCTL, Simulator, Simulators, bootedOf, runtimeName, screenOf } from "../src/screens/simulator.ts";
 import { WindowsDesktop, screenBinary } from "../src/screens/win-desktop.ts";
 import { KEYS, WinInput } from "../src/screens/win-input.ts";
 import { type AudioFrame, CLIP_PNG_MAX, CLIP_TEXT_MAX, CURSOR_PNG_MAX, CURSOR_SHAPE, type Clip, type ClipType, type Frame, type ScreenAccess, type ScreenInput, type ScreenSource, type ScreenView, type ViewOptions, codecFor, cursorImageShape } from "../src/screens/source.ts";
@@ -2796,6 +2797,54 @@ test("no simulators where there is no helper, nor where simctl cannot be run", a
   await failing.start();
   assert.equal(hub.list().length, 0);
   failing.close();
+});
+
+test("a simulator's view the helper never answers is given up on: refused as failed, its socket closed, nothing left waiting", async () => {
+  // A helper stuck on CoreSimulator (a `simctl io … enumerate` that never ends): connected, it says nothing.
+  class Silent extends EventEmitter {
+    destroyed = false;
+    write() { return true; }
+    destroy() {
+      if (this.destroyed) return;
+      this.destroyed = true;
+      this.emit("close");
+    }
+  }
+  const sockets: Silent[] = [];
+  const helper = { connect: async () => { const s = new Silent(); sockets.push(s); return s; } } as unknown as HelperApp;
+  // The deadline as the test's own: armed once, fired here, called off once the view is settled.
+  const armed: { ms: number; fire: () => void; off: boolean }[] = [];
+  const after = (ms: number, fire: () => void) => {
+    const a = { ms, fire, off: false };
+    armed.push(a);
+    return () => void (a.off = true);
+  };
+  const device = { udid: "5A25EA86-3568-43D6-9068-8B2CB5FADB26", name: "iPhone 17", runtime: "iOS 26.2", type: "t17" };
+  const simulator = new Simulator(device, helper, { width: 1206, height: 2622 }, async () => "", [], [], { ms: OPEN_TIMEOUT_MS, after });
+  const opening = simulator.open({ maxWidth: 1280, maxHeight: 720, codecs: ["h264"] });
+  let settled = false;
+  void opening.then(() => (settled = true), () => (settled = true));
+  await settle();
+  assert.equal(settled, false);
+  assert.deepEqual(armed.map((a) => [a.ms, a.off]), [[OPEN_TIMEOUT_MS, false]]);
+  armed[0]!.fire();
+  await assert.rejects(opening, (e: ScreenRefused) => e.status === 503 && e.key === "station.screen.failed");
+  assert.equal(sockets[0]!.destroyed, true);
+  assert.equal(armed[0]!.off, true);
+
+  // One that opens in time: its deadline called off.
+  const answering = new Simulator(device, helper, { width: 1206, height: 2622 }, async () => "", [], [], { ms: OPEN_TIMEOUT_MS, after });
+  const opened = answering.open({ maxWidth: 1280, maxHeight: 720, codecs: ["h264"] });
+  await settle();
+  const info = Buffer.from(JSON.stringify({ width: 640, height: 480, codec: "h264" }));
+  const head = Buffer.alloc(5);
+  head[0] = 1;
+  head.writeUInt32BE(info.length, 1);
+  sockets[1]!.emit("data", Buffer.concat([head, info]));
+  const view = await opened;
+  assert.deepEqual([armed[1]!.ms, armed[1]!.off, sockets[1]!.destroyed], [OPEN_TIMEOUT_MS, true, false]);
+  view.close();
+  assert.equal(sockets[1]!.destroyed, true);
 });
 
 test("system audio is pull driven, old helpers decline it, and close releases a pending packet", async () => {

@@ -262,9 +262,20 @@ fn skeleton_page_head(
         let left_extra : @signals.Signal[Double] = @signals.signal(0.0)
         let balance_owner : Ref[Int] = Ref(0)
         b.box(fn(left) {
-          left.row(Is(true)).lies_along(Is(Start)).lines_up(Is(Some(Middle))) |> ignore
+          // (the room mirroring the trailing pill gives way first where the bar is short of room, so the title goes off
+          // its centre before the trailing actions are cut: pg_balance_yields)
+          left
+          .row(Is(true))
+          .lies_along(Is(Start))
+          .lines_up(Is(Some(Middle)))
+          .shrink(Is(pg_balance_yields))
+          .min_width(Is(Some(pg_back_pill_h)))
+          |> ignore
           nav_back_circle_node(left, fn() { frame().back.unwrap_or("") }, on_back)
-          left.box(fn(bal) { bal.width(By(fn() { Some(left_extra.get()) })) |> ignore }) |> ignore
+          left.box(fn(bal) {
+            bal.width(By(fn() { Some(left_extra.get()) })).shrink(Is(1.0)).min_width(Is(Some(0.0))) |> ignore
+          })
+          |> ignore
         })
         |> ignore
         b.box(fn(mid) {

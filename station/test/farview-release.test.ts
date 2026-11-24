@@ -101,14 +101,14 @@ test("a tarball whose SHA-256 is not the release's is refused, nothing of it unp
 
 test("a release is asked of Farview's own private release first, then of still.fail's store and the public one, or where the environment says; kept in the cache native.ts keeps", () => {
   assert.deepEqual(farviewSources("farview-darwin-arm64-0123456789ab.tar.gz", {}), [
-    "gh:AFK-surf/farview@builds/farview-darwin-arm64-0123456789ab.tar.gz",
+    "gh:AFK-surf/farview-legacy@builds/farview-darwin-arm64-0123456789ab.tar.gz",
     "https://app.still.fail/releases/natives/farview-darwin-arm64-0123456789ab.tar.gz",
     "https://github.com/AFK-surf/monoid/releases/download/native-artifacts/farview-darwin-arm64-0123456789ab.tar.gz",
   ]);
   assert.deepEqual(farviewSources("x.tar.gz", { STILLFAIL_FARVIEW_SOURCES: "http://127.0.0.1:9/a, gh:o/r@t" }), ["http://127.0.0.1:9/a/x.tar.gz", "gh:o/r@t/x.tar.gz"]);
-  assert.deepEqual(ghSource("gh:AFK-surf/farview@builds/farview-darwin-arm64-0123456789ab.tar.gz"), { repo: "AFK-surf/farview", tag: "builds", name: "farview-darwin-arm64-0123456789ab.tar.gz" });
-  assert.equal(ghSource("https://github.com/AFK-surf/farview/x"), null);
-  assert.equal(ghSource("gh:AFK-surf/farview/x"), null);
+  assert.deepEqual(ghSource("gh:AFK-surf/farview-legacy@builds/farview-darwin-arm64-0123456789ab.tar.gz"), { repo: "AFK-surf/farview-legacy", tag: "builds", name: "farview-darwin-arm64-0123456789ab.tar.gz" });
+  assert.equal(ghSource("https://github.com/AFK-surf/farview-legacy/x"), null);
+  assert.equal(ghSource("gh:AFK-surf/farview-legacy/x"), null);
   assert.equal(nativeCache({ STILLFAIL_NATIVE_CACHE: "/c" }), "/c");
   assert.match(nativeCache({}), /stillfail-native$/);
   // (each system's place, as scripts/native.ts has it)

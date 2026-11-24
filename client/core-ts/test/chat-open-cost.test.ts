@@ -63,7 +63,7 @@ function ownReads(sql: Sql): number {
     const r = sql.all("SELECT coalesce(json_extract(detail, '$.session.profile'), json_extract(summary, '$.profile')) FROM session WHERE station = ? AND key = ?", [CHAT.station, key])[0];
     return typeof r?.[0] === "string" ? [r[0]] : [];
   }));
-  const profiles = [...ids].reduce((n, id) => n + String(sql.all("SELECT profiles -> ? FROM station_part WHERE address = ?", [`$.${JSON.stringify(id)}`, CHAT.station])[0]?.[0] ?? "").length, 0);
+  const profiles = [...ids].reduce((n, id) => n + String(sql.all("SELECT profiles -> ? FROM station_part_profiles WHERE address = ?", [`$.${JSON.stringify(id)}`, CHAT.station])[0]?.[0] ?? "").length, 0);
   return chat + profiles;
 }
 
@@ -74,7 +74,7 @@ test("a_chats_agents_read_of_their_stations_profiles_those_they_run_on_alone", a
   const sql = host.sqls.get(dbName("s1"))!;
   const chat = String(sql.all("SELECT chat FROM station_part WHERE address = ?", [CHAT.station])[0]![0]);
   assert.ok(!chat.includes('"profiles"'), "the chat's part holds no profile");
-  const whole = String(sql.all("SELECT profiles FROM station_part WHERE address = ?", [CHAT.station])[0]![0]).length;
+  const whole = String(sql.all("SELECT profiles FROM station_part_profiles WHERE address = ?", [CHAT.station])[0]![0]).length;
   const own = ownReads(sql);
   const { value, made } = await chatAnew(host, base);
   assert.ok(value.agents.length > 0 && value.agents.every((a: { profile?: { name?: string } }) => typeof a.profile?.name === "string"));
@@ -150,7 +150,8 @@ test("a_chat_opens_the_same_on_a_database_from_before_its_part_and_while_a_core_
   // Brought to it as it opens: the column added, the triggers and every part made again, by SQLite.
   const anew = await chatAnew(host, base);
   assert.deepEqual(sql.all("SELECT count(*), count(chat) FROM station_part")[0], [5, 5]);
-  assert.ok(String(sql.all("SELECT sql FROM sqlite_master WHERE name = 'station_part_set'")[0]?.[0]).includes("(address, part, row, chat, formerly, profiles, profiled, software, connects, settings)"));
+  assert.ok(String(sql.all("SELECT sql FROM sqlite_master WHERE name = 'station_part_set'")[0]?.[0]).includes("(address, part, row, chat, formerly, software, connects, settings)"));
+  assert.ok(String(sql.all("SELECT sql FROM sqlite_master WHERE name = 'station_part_profiles_set'")[0]?.[0]).includes("(address, profiles, profiled)"));
   assert.deepEqual([anew.made.overviewsRead, anew.made.overviews], [0, 0]);
   assert.deepEqual(anew.value, kept.value);
   // A core from before it opening the database meanwhile (a web page still open from before) keeps the parts by its

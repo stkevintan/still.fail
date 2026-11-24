@@ -669,6 +669,7 @@ fn view_forget() -> Unit {
   view_handed.val = None
   view_point.val = None
   view_over_words.val = false
+  view_point_owed.val = false
   cmd_hover_clear()
   view_fingers[0] = -1
   view_fingers[1] = -1
@@ -1765,6 +1766,21 @@ fn Ctx::view_paint(self : Ctx, root : Int) -> Unit {
   // (lifted nodes currently dissolving/reassembling as particles: @view.Tree::lift_particle_of, ParticleAt)
   let has_particles = dr.mode != mode_hits && tree.has_particle_flights()
   let particling : Array[ParticleAt] = []
+  let fast_fade_scopes : Array[(Int, @view.NodeId, Int)] = []
+  let close_fast_fade = fn(next : @view.NodeId?) {
+    while fast_fade_scopes.length() > 0 {
+      let (p_idx, nid, fk0) = fast_fade_scopes[fast_fade_scopes.length() - 1]
+      match next {
+        Some(nx) if tree.holds_in_order(nid, nx) => break
+        _ => {
+          fast_fade_scopes.pop() |> ignore
+          if p_idx < particling.length() && self.ninst > fk0 {
+            particling[p_idx].fast_fade.push((fk0, self.ninst))
+          }
+        }
+      }
+    }
+  }
   // (adaptive liquid glass ink scopes active during the tree walk, innermost last: saved prior (ink_x, ink_y, ink_r))
   let ink_stack : Array[(@view.NodeId, Double, Double, Double)] = []
   // (covered beside pages clipped horizontally during parallax push/pop: (pv_id, cut_left, cut_right, runs0))
@@ -1977,6 +1993,7 @@ fn Ctx::view_paint(self : Ctx, root : Int) -> Unit {
       _ => ()
     }
     close_to(Some(c.id))
+    close_fast_fade(Some(c.id))
     while particling.length() > 0 && !tree.holds_in_order(particling[particling.length() - 1].id, c.id) {
       let at = particling.pop().unwrap()
       self.particle_apply(at, at.k0, self.ninst)
@@ -2139,6 +2156,7 @@ fn Ctx::view_paint(self : Ctx, root : Int) -> Unit {
       ride_spoil()
       nav_scope_stack.clear()
       close_to(None)
+      close_fast_fade(None)
       while particling.length() > 0 {
         let at = particling.pop().unwrap()
         self.particle_apply(at, at.k0, self.ninst)
@@ -2181,7 +2199,7 @@ fn Ctx::view_paint(self : Ctx, root : Int) -> Unit {
           }
           let ck = clip_top()
           let outer_clip = FixedArray::makei(24, fn(j) { clip_stack[ck + j] })
-          particling.push({ id: c.id, pf, k0: self.ninst, outer_clip, base_x: x, base_y: y, base_s: s })
+          particling.push({ id: c.id, pf, k0: self.ninst, outer_clip, base_x: x, base_y: y, base_s: s, fast_fade: [] })
         }
         None => ()
       }
@@ -2253,6 +2271,14 @@ fn Ctx::view_paint(self : Ctx, root : Int) -> Unit {
       nav_scope_stack.push((c.id, nav_scope_gen))
     }
     let k0 = self.ninst
+    if particling.length() > 0 {
+      let p_idx = particling.length() - 1
+      let top = particling[p_idx]
+      let in_fade = fast_fade_scopes.length() > 0 && fast_fade_scopes[fast_fade_scopes.length() - 1].0 == p_idx
+      if !in_fade && top.pf.old && tree.flies_fade_at(c.id) {
+        fast_fade_scopes.push((p_idx, c.id, k0))
+      }
+    }
     let k = clip_top()
     // (what it draws itself, and where its edge was composed among the frame's instances (-1: none), drawn after what it
     // holds, composed as the rest of it was (moved, turned, faded, cut, its own): taken out where it was drawn, held till
@@ -2341,6 +2367,18 @@ fn Ctx::view_paint(self : Ctx, root : Int) -> Unit {
       -1
     } else {
       let r_at = self.view_drawn(tree, c, x, y, a, s, ux, uy, turn, ground_drawn)
+      if particling.length() > 0 {
+        let p_idx = particling.length() - 1
+        let top = particling[p_idx]
+        let in_fade = fast_fade_scopes.length() > 0 && fast_fade_scopes[fast_fade_scopes.length() - 1].0 == p_idx
+        if !in_fade && top.pf.old && !tree_fields.is_empty() {
+          match tree_fields.get(c.id) {
+            Some(tf) if tf.st.text == "" && tf.st.marked == "" && self.ninst > k0 =>
+              top.fast_fade.push((k0, self.ninst))
+            _ => ()
+          }
+        }
+      }
       if !glass_paint.solid {
         match view_blocks.get(c.id) {
           Some(b) if b.glass_layer > 0 && b.glass_at >= 0 => {
@@ -2614,6 +2652,7 @@ fn Ctx::view_paint(self : Ctx, root : Int) -> Unit {
     glass_paint.ink_r = or_
   }
   close_to(None)
+  close_fast_fade(None)
   while particling.length() > 0 {
     let at = particling.pop().unwrap()
     self.particle_apply(at, at.k0, self.ninst)
@@ -5630,7 +5669,7 @@ let event_depth : Ref[Int] = Ref(0)
 ///|
 /// One event (view_event's) whose own facts (`said`: what the host says it came by) are so as of its moment, told
 /// before it is taken (Tree::event_said).
-fn view_event_said(said : () -> Unit, f : () -> Unit, what? : String = "event", input? : Bool = false) -> Unit {
+fn view_event_said(said : () -> Unit, f : () -> Unit, what? : String = "event", input? : Bool = false, more? : Bool = false) -> Unit {
   let recording = event_depth.val == 0 && @hostapi.perf_recording()
   // (the outermost event between frames, into the window thread's journal: journal.mbt; one in a frame is the frame's)
   let journaled = event_depth.val == 0 && !frame_running.val
@@ -5643,7 +5682,7 @@ fn view_event_said(said : () -> Unit, f : () -> Unit, what? : String = "event", 
   let in_frame = frame_running.val
   event_depth.val += 1
   match view_app.val {
-    Some(t) => t.event_said(h_event_time(), said, f, brings=input)
+    Some(t) => t.event_said(h_event_time(), said, f, brings=input, more~)
     None => {
       said()
       f()
@@ -5656,7 +5695,9 @@ fn view_event_said(said : () -> Unit, f : () -> Unit, what? : String = "event", 
   // the event has run. An event inside a frame leaves its handovers for the frame's end instead.
   if event_depth.val == 0 && !frame_running.val {
     frame_afters_run()
-    glyphs_ahead()
+    if !more {
+      glyphs_ahead()
+    }
   }
   if journaled {
     journal_event(what, start, c0~)
@@ -6882,6 +6923,17 @@ fn view_point_said(kind : Int, x : Double, y : Double) -> Unit {
 }
 
 ///|
+fn view_pointed_laid(tree : @view.Tree, laid~ : Bool) -> Unit {
+  // (over words of the tree's picked with the pointer, a press held nowhere: the pointer's shape over them,
+  // view_cursor_tell)
+  view_over_words.val = match (view_point.val, view_held.val) {
+    (Some((x, y)), None) => tree_words_under(x, y, laid~)
+    _ => false
+  }
+  view_point_tell(tree)
+}
+
+///|
 /// What a pointer's event left the pointer over, told as the event is taken: the tree brought to its moment (the moment
 /// of the event being taken: no other).
 fn view_pointed(bring? : Bool = true) -> Unit {
@@ -6890,13 +6942,7 @@ fn view_pointed(bring? : Bool = true) -> Unit {
       if bring {
         tree.bring_to(view_moment())
       }
-      // (over words of the tree's picked with the pointer, a press held nowhere: the pointer's shape over them,
-      // view_cursor_tell)
-      view_over_words.val = match (view_point.val, view_held.val) {
-        (Some((x, y)), None) => tree_words_under(x, y, laid=bring)
-        _ => false
-      }
-      view_point_tell(tree)
+      view_pointed_laid(tree, laid=bring)
     }
     None => ()
   }
@@ -7016,6 +7062,12 @@ fn view_old_pointed(at : (Double, Double)?) -> Unit {
 let view_point_seen : Ref[(Int, Bool, Int)] = Ref((-1, false, -1))
 
 ///|
+/// Whether a frame closed an unfinished `more=true` move batch and owes a full pointer+words refresh
+/// (`view_pointed_laid`) once `view_brought` has laid out the frame.
+// kept across runs: put back as a run begins (view_forget)
+let view_point_owed : Ref[Bool] = Ref(false)
+
+///|
 /// As a frame begins, the tree laid out as it has it (view_frame): what a still pointer is over where the old frame's
 /// layer over it changed or what it yields (by what it last drew, as the old views' own pointing is), before anything of
 /// the frame is built or drawn. What of the tree's a point hits is not looked at again here: the hand is worked out at
@@ -7023,6 +7075,8 @@ let view_point_seen : Ref[(Int, Bool, Int)] = Ref((-1, false, -1))
 /// (view_hand_at), never on a frame as something goes; what decides where a node takes it (View::takes) is followed by
 /// the tree itself (Tree::point_at).
 fn view_pointed_again() -> Unit {
+  let owed = view_point_owed.val
+  view_point_owed.val = false
   let tree = match view_app.val {
     Some(t) => t
     None => return
@@ -7032,12 +7086,14 @@ fn view_pointed_again() -> Unit {
   }
   match view_point.val {
     None =>
-      if tree.pointed_now() is Some(_) {
-        view_point_tell(tree)
+      if owed || tree.pointed_now() is Some(_) || view_over_words.val {
+        view_pointed_laid(tree, laid=true)
       }
     Some((x, y)) => {
       let (_, over, yields) = view_point_seen.val
-      if (over, yields) != (old_layer_over(x, y), yields_said.val) {
+      if owed || yields < 0 {
+        view_pointed_laid(tree, laid=true)
+      } else if (over, yields) != (old_layer_over(x, y), yields_said.val) {
         view_point_tell(tree)
       }
     }

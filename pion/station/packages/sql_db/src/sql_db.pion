@@ -672,6 +672,81 @@ pub fn Db::tx[T](self : Db, f : (Db) -> Result[T, SqlError]) -> Result[T, SqlErr
   self.tx_err(f, fn(e : SqlError) -> SqlError { e })
 }
 
+/// Emergency rollback guard: if a transaction is open (`!self.autocommit()`), execute `ROLLBACK`
+/// and verify autocommit is restored. No-op `Ok(())` when already in autocommit mode.
+/// If `ROLLBACK` returns an error (e.g. SQLite already auto-rolled back), re-check `autocommit()`
+/// and return `Ok(())` if autocommit is already restored.
+pub fn Db::rollback_if_in_tx(self : Db) -> Result[Unit, SqlError] {
+  if self.autocommit() {
+    return Ok(())
+  }
+  match self.exec("ROLLBACK") {
+    Ok(_) => {
+      if self.autocommit() {
+        Ok(())
+      } else {
+        Err(sql_error(1, "transaction remained open after ROLLBACK"))
+      }
+    }
+    Err(e) => if self.autocommit() { Ok(()) } else { Err(e) }
+  }
+}
+
+/// Nestable savepoint with rollback on error and error-propagating `RELEASE`:
+/// - On `body` `Err(e)`: best-effort `ROLLBACK TO <name>` + `RELEASE <name>` (preserving outer tx), returns `Err(e)`.
+/// - On `body` `Ok(v)`: `RELEASE <name>`; if `RELEASE` fails, best-effort `ROLLBACK TO <name>` + `RELEASE <name>`
+///   and returns `Err(map_err(re))`.
+/// Note: `name` must be a constant SQLite identifier, and any writes inside `body` must be nested
+/// inside an outer `Db::tx` / `Db::tx_err` (which opens `BEGIN IMMEDIATE`).
+pub fn Db::savepoint_err[T, E](
+  self : Db,
+  name : String,
+  body : (Db) -> Result[T, E],
+  map_err : (SqlError) -> E,
+) -> Result[T, E] {
+  match self.exec("SAVEPOINT " + name) {
+    Ok(_) => ()
+    Err(e) => return Err(map_err(e))
+  }
+  match body(self) {
+    Err(e) => {
+      let _ = self.exec("ROLLBACK TO " + name)
+      let _ = self.exec("RELEASE " + name)
+      Err(e)
+    }
+    Ok(v) => {
+      match self.exec("RELEASE " + name) {
+        Ok(_) => Ok(v)
+        Err(re) => {
+          let _ = self.exec("ROLLBACK TO " + name)
+          let _ = self.exec("RELEASE " + name)
+          Err(map_err(re))
+        }
+      }
+    }
+  }
+}
+
+/// Nestable read-snapshot savepoint matching `said/said.mbt` and `vaultuses/steps.mbt`:
+/// executes `SAVEPOINT <name>`, runs `body`, and always executes best-effort `RELEASE <name>`
+/// (swallowing release errors on both `Ok` and `Err` paths).
+/// Note: `name` must be a constant SQLite identifier, and any writes inside `body` must be nested
+/// inside an outer `Db::tx` / `Db::tx_err` (which opens `BEGIN IMMEDIATE`).
+pub fn Db::savepoint_swallow_err[T, E](
+  self : Db,
+  name : String,
+  body : (Db) -> Result[T, E],
+  map_err : (SqlError) -> E,
+) -> Result[T, E] {
+  match self.exec("SAVEPOINT " + name) {
+    Ok(_) => ()
+    Err(e) => return Err(map_err(e))
+  }
+  let res = body(self)
+  let _ = self.exec("RELEASE " + name)
+  res
+}
+
 pub fn Db::schema_version(self : Db) -> Result[base_codec::Json, SqlError] {
   match self.first("PRAGMA schema_version", []) {
     Ok(Some(r)) => Ok(row_val(r, "schema_version"))
@@ -1155,6 +1230,244 @@ pub fn run_selftest(temp_db_path : String) -> Result[Unit, String] {
       }
     }
   }
+  // 9. SAVEPOINT & rollback_if_in_tx verification (dual-WAL concurrency + nested savepoints)
+  let _ = match f1.run("INSERT OR REPLACE INTO lock_t (id) VALUES (?)", [base_codec::json_int(100)]) {
+    Ok(n) => n
+    Err(e) => { f2.close(); f1.close(); return Err("seed lock_t failed: " + e.message) }
+  }
+
+  // 9a. Dual WAL concurrency + true snapshot isolation:
+  //     f1 holds BEGIN IMMEDIATE write lock with uncommitted row 101;
+  //     f2 reads inside savepoint_swallow_err (asserting !r.autocommit()), then f1 commits row 101,
+  //     and f2's second read inside the same savepoint STILL sees only row 100 (proves snapshot isolation).
+  let _ = match f1.exec("BEGIN IMMEDIATE") {
+    Ok(_) => ()
+    Err(e) => { f2.close(); f1.close(); return Err("f1 begin immediate failed: " + e.message) }
+  }
+  let _ = match f1.run("INSERT INTO lock_t (id) VALUES (?)", [base_codec::json_int(101)]) {
+    Ok(n) => n
+    Err(e) => { let _ = f1.rollback_if_in_tx(); f2.close(); f1.close(); return Err(e.message) }
+  }
+  let snap_res = f2.savepoint_swallow_err(
+    "wal_read_snap",
+    fn(r : Db) -> Result[Int, String] {
+      if r.autocommit() {
+        return Err("expected !r.autocommit() inside savepoint_swallow_err")
+      }
+      let rows1 = match r.all("SELECT id FROM lock_t ORDER BY id", []) {
+        Ok(rs) => rs
+        Err(e) => return Err("f2 snapshot query 1 failed: " + e.message)
+      }
+      if rows1.length() != 1 || row_int(rows1[0], "id") != 100 {
+        return Err("f2 snapshot 1 saw unexpected rows: len=" + rows1.length().to_string())
+      }
+      // Commit f1's row 101 while f2 is still inside its read savepoint.
+      match f1.exec("COMMIT") {
+        Ok(_) => ()
+        Err(e) => return Err("f1 commit during f2 snapshot failed: " + e.message)
+      }
+      let rows2 = match r.all("SELECT id FROM lock_t ORDER BY id", []) {
+        Ok(rs) => rs
+        Err(e) => return Err("f2 snapshot query 2 failed: " + e.message)
+      }
+      if rows2.length() != 1 || row_int(rows2[0], "id") != 100 {
+        return Err("f2 snapshot 2 failed isolation (saw committed row 101): len=" + rows2.length().to_string())
+      }
+      Ok(rows2.length())
+    },
+    fn(e : SqlError) -> String { "savepoint_swallow_err sql: " + e.message },
+  )
+  match snap_res {
+    Ok(1) => ()
+    Ok(other) => { let _ = f1.rollback_if_in_tx(); f2.close(); f1.close(); return Err("unexpected snap count: " + other.to_string()) }
+    Err(msg) => { let _ = f1.rollback_if_in_tx(); f2.close(); f1.close(); return Err(msg) }
+  }
+  if !f2.autocommit() {
+    let _ = f1.rollback_if_in_tx()
+    f2.close()
+    f1.close()
+    return Err("f2 autocommit should be true after savepoint_swallow_err")
+  }
+  // Clean up committed row 101 and test rollback_if_in_tx on an open tx and on autocommit.
+  let _ = match f1.run("DELETE FROM lock_t WHERE id = 101", []) {
+    Ok(n) => n
+    Err(e) => { f2.close(); f1.close(); return Err(e.message) }
+  }
+  let _ = match f1.exec("BEGIN IMMEDIATE") {
+    Ok(_) => ()
+    Err(e) => { f2.close(); f1.close(); return Err(e.message) }
+  }
+  match f1.rollback_if_in_tx() {
+    Ok(_) => ()
+    Err(e) => { f2.close(); f1.close(); return Err("f1 rollback_if_in_tx failed: " + e.message) }
+  }
+  if !f1.autocommit() {
+    f2.close()
+    f1.close()
+    return Err("f1 autocommit should be true after rollback_if_in_tx")
+  }
+  match f1.rollback_if_in_tx() {
+    Ok(_) => ()
+    Err(e) => { f2.close(); f1.close(); return Err("f1 noop rollback_if_in_tx failed: " + e.message) }
+  }
+
+  // 9b. Nested savepoint_swallow_err inside outer tx_err: outer continues writing and rolls back cleanly.
+  let nested_swallow = f1.tx_err(
+    fn(t : Db) -> Result[Unit, String] {
+      let _ = match t.run("INSERT INTO lock_t (id) VALUES (?)", [base_codec::json_int(200)]) {
+        Ok(n) => n
+        Err(e) => return Err(e.message)
+      }
+      let inner = t.savepoint_swallow_err(
+        "nested_swallow",
+        fn(s : Db) -> Result[Int, String] {
+          match s.first("SELECT COUNT(*) AS n FROM lock_t WHERE id = 200", []) {
+            Ok(Some(r)) => Ok(row_int(r, "n"))
+            Ok(None) => Err("missing count row")
+            Err(e) => Err(e.message)
+          }
+        },
+        fn(e : SqlError) -> String { e.message },
+      )
+      match inner {
+        Ok(1) => ()
+        Ok(_) => return Err("nested_swallow did not see outer row 200")
+        Err(m) => return Err("nested_swallow failed: " + m)
+      }
+      let _ = match t.run("INSERT INTO lock_t (id) VALUES (?)", [base_codec::json_int(201)]) {
+        Ok(n) => n
+        Err(e) => return Err(e.message)
+      }
+      Err("outer_intentional_rollback")
+    },
+    fn(e : SqlError) -> String { e.message },
+  )
+  match nested_swallow {
+    Err(msg) => {
+      if msg != "outer_intentional_rollback" {
+        f2.close()
+        f1.close()
+        return Err("nested_swallow unexpected err: " + msg)
+      }
+    }
+    Ok(_) => { f2.close(); f1.close(); return Err("nested_swallow outer tx should have rolled back") }
+  }
+  if !f1.autocommit() {
+    f2.close()
+    f1.close()
+    return Err("f1 autocommit should be true after nested_swallow rollback")
+  }
+  match f1.first("SELECT COUNT(*) AS n FROM lock_t WHERE id IN (200, 201)", []) {
+    Ok(Some(r)) => {
+      if row_int(r, "n") != 0 {
+        f2.close()
+        f1.close()
+        return Err("nested_swallow outer rollback left rows behind")
+      }
+    }
+    _ => { f2.close(); f1.close(); return Err("nested_swallow check query failed") }
+  }
+
+  // 9c. Nested savepoint_err returning Err inside outer tx_err: inner write 0 residue, outer commits cleanly.
+  let nested_err = f1.tx_err(
+    fn(t : Db) -> Result[Unit, String] {
+      let _ = match t.run("INSERT INTO lock_t (id) VALUES (?)", [base_codec::json_int(300)]) {
+        Ok(n) => n
+        Err(e) => return Err(e.message)
+      }
+      let inner = t.savepoint_err(
+        "nested_err",
+        fn(s : Db) -> Result[Unit, String] {
+          let _ = match s.run("INSERT INTO lock_t (id) VALUES (?)", [base_codec::json_int(301)]) {
+            Ok(n) => n
+            Err(e) => return Err(e.message)
+          }
+          Err("inner_rollback")
+        },
+        fn(e : SqlError) -> String { e.message },
+      )
+      match inner {
+        Err(m) => if m != "inner_rollback" { return Err("inner err mismatch: " + m) }
+        Ok(_) => return Err("nested_err should have returned Err")
+      }
+      let _ = match t.run("INSERT INTO lock_t (id) VALUES (?)", [base_codec::json_int(302)]) {
+        Ok(n) => n
+        Err(e) => return Err(e.message)
+      }
+      Ok(())
+    },
+    fn(e : SqlError) -> String { e.message },
+  )
+  match nested_err {
+    Ok(_) => ()
+    Err(m) => { f2.close(); f1.close(); return Err("nested_err outer tx failed: " + m) }
+  }
+  if !f1.autocommit() {
+    f2.close()
+    f1.close()
+    return Err("f1 autocommit should be true after nested_err commit")
+  }
+  match f1.all("SELECT id FROM lock_t WHERE id >= 300 ORDER BY id", []) {
+    Ok(rows) => {
+      if rows.length() != 2 || row_int(rows[0], "id") != 300 || row_int(rows[1], "id") != 302 {
+        f2.close()
+        f1.close()
+        return Err("nested_err expected [300, 302], got len=" + rows.length().to_string())
+      }
+    }
+    Err(e) => { f2.close(); f1.close(); return Err("nested_err verify query failed: " + e.message) }
+  }
+
+  // 9d. savepoint_err RELEASE failure path: deferred FK constraint fails at RELEASE after body returns Ok.
+  let fk_db = match Db::create(":memory:", wait_ms=250) {
+    Ok(d) => d
+    Err(e) => { f2.close(); f1.close(); return Err("fk_db create failed: " + e.message) }
+  }
+  match fk_db.exec("PRAGMA foreign_keys = ON; CREATE TABLE fp (id INTEGER PRIMARY KEY); CREATE TABLE fc (id INTEGER PRIMARY KEY, pid INTEGER REFERENCES fp(id) DEFERRABLE INITIALLY DEFERRED);") {
+    Ok(_) => ()
+    Err(e) => { fk_db.close(); f2.close(); f1.close(); return Err("fk_db schema failed: " + e.message) }
+  }
+  let rel_fail = fk_db.savepoint_err(
+    "sp_rel_fk",
+    fn(s : Db) -> Result[Unit, String] {
+      let _ = match s.run("INSERT INTO fc (id, pid) VALUES (?, ?)", [base_codec::json_int(1), base_codec::json_int(999)]) {
+        Ok(n) => n
+        Err(e) => return Err("unexpected insert err: " + e.message)
+      }
+      Ok(())
+    },
+    fn(e : SqlError) -> String { "release_sql:" + e.message },
+  )
+  match rel_fail {
+    Err(msg) => {
+      if !str_contains(msg, "release_sql:") || !str_contains(msg, "FOREIGN KEY") {
+        fk_db.close()
+        f2.close()
+        f1.close()
+        return Err("expected release_sql FOREIGN KEY error, got: " + msg)
+      }
+    }
+    Ok(_) => { fk_db.close(); f2.close(); f1.close(); return Err("savepoint_err RELEASE should fail on deferred FK") }
+  }
+  if !fk_db.autocommit() {
+    fk_db.close()
+    f2.close()
+    f1.close()
+    return Err("fk_db autocommit should be true after savepoint_err RELEASE failure")
+  }
+  match fk_db.first("SELECT COUNT(*) AS n FROM fc", []) {
+    Ok(Some(r)) => {
+      if row_int(r, "n") != 0 {
+        fk_db.close()
+        f2.close()
+        f1.close()
+        return Err("savepoint_err RELEASE failure left rows behind")
+      }
+    }
+    _ => { fk_db.close(); f2.close(); f1.close(); return Err("fk_db count failed") }
+  }
+  fk_db.close()
+
   f2.close()
   f1.close()
   check_cond(true, "ok")

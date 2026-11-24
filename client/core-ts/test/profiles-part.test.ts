@@ -65,7 +65,9 @@ for (const lang of ["zh", "en"] as const) {
       };
       const listed = t.store.value(topic);
       assert.ok(listed !== undefined && "ok" in listed);
-      assert.equal(out(listed.ok), out(before));
+      // (the list says too whether the viewer manages the workspace, as the workspace says it: its 多选)
+      const role = (t.views.ok({ topic: "workspace", workspace: String(topic.scope) }) as J)?.role;
+      assert.equal(out(listed.ok), out({ ...before, ...(role === "owner" || role === "admin" ? { manages: true } : {}) }));
     } finally {
       setCurrent("zh");
     }
@@ -82,6 +84,8 @@ test("a core opened anew on a written database makes the workspace's profiles of
   await fresh.host.time.pass(100);
   const v = fresh.store.value(profiles);
   assert.ok(v !== undefined && "ok" in v && ((v.ok as J).items as J[]).length > 0, "its profiles made");
+  // (its owner's, as the workspace already read for its stations says it: the list's 多选 offered, nothing more read)
+  assert.equal((v.ok as J).manages, true);
   const spent = workSince(before);
   assert.equal(spent.overviewsRead, 0, "no station's whole overview read");
   assert.equal(spent.overviews, 0, "no station's whole overview decorated");

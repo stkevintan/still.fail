@@ -182,6 +182,7 @@ pub(all) struct LiftParticle {
   to_y : Double
   to_w : Double
   to_h : Double
+  to_r : Double
   t_lin : Double
   p : Double
   bare : Bool
@@ -842,6 +843,12 @@ pub fn Tree::lift_particle_of(self : Tree, id : NodeId) -> LiftParticle? {
   let (x0, y0, tw, th) = self.placed_window(l.follow)
   let (hx, hy) = self.held_off(l.follow)
   let (tx, ty) = (x0 + hx, y0 + hy)
+  let dst = self.nodes[l.follow]
+  let to_r = match dst.look.corners {
+    Some((tl, tr, br, bl)) => dmax(dmax(tl, tr), dmax(br, bl))
+    None => dst.look.radius
+  }
+  let follow_gen = dst.gen
   let seed_mul = 0x9E3779B1U.reinterpret_as_int()
   Some({
     from_x: fx,
@@ -852,13 +859,14 @@ pub fn Tree::lift_particle_of(self : Tree, id : NodeId) -> LiftParticle? {
     to_y: ty,
     to_w: tw,
     to_h: th,
+    to_r,
     t_lin: l.t_lin,
     p: 1.0 - l.k,
     bare: l.bare_ground,
     old: l.old,
     shared_box: l.box,
     has_old: l.has_old,
-    seed: id.at * seed_mul + id.gen * 40503,
+    seed: l.follow * seed_mul + follow_gen * 40503,
   })
 }
 
@@ -1684,6 +1692,8 @@ fn Tree::resting_in_clip(
         }
       } else if self.along_row_at(idx) {
         2
+      } else if m.come_open_top {
+        3
       } else {
         1
       }
@@ -1698,6 +1708,7 @@ fn Tree::resting_in_clip(
       let (ox0, oy0, ox1, oy1) = match way {
         1 => (-1.0e9, y, 1.0e9, y + h)
         2 => (x, -1.0e9, x + w, 1.0e9)
+        3 => (-1.0e9, -1.0e9, 1.0e9, y + h)
         _ => (x, y, x + w, y + h)
       }
       let nx0 = dmax(b.0, ox0)
@@ -3093,6 +3104,7 @@ priv struct TreeMotionAux {
   shared_how : Map[Int, SharedHow]
   kept_departures : Array[(Departure, Double)]
   apart : Map[Int, Int]
+  fade_out : Map[Int, Int]
 }
 
 ///|
@@ -3126,6 +3138,7 @@ fn Tree::motion_aux(self : Tree) -> TreeMotionAux {
     shared_how: {},
     kept_departures: [],
     apart: {},
+    fade_out: {},
   }
   tree_motion_auxs.push(aux)
   tree_motion_last.val = Some(aux)
@@ -3599,6 +3612,36 @@ pub fn View::flies_apart(self : View, loc~ : SourceLoc) -> View {
   })
   |> ignore
   self
+}
+
+///|
+/// Marks this node (and its subtree) as departing chrome inside a particle flight (e.g. a corner ✕ remove button):
+/// when its container flies out as the departing copy (`old=true`), it fast-fades cleanly in place on takeoff rather
+/// than dissolving into flying particles or affecting the active content bounding box.
+#callsite(autofill(loc))
+pub fn View::flies_fade(self : View, loc~ : SourceLoc) -> View {
+  ignore(loc)
+  guard self.live() is Some(n) else { return self }
+  let tree = self.tree
+  let at = self.at
+  let gen = n.gen
+  tree.motion_aux().fade_out[at] = gen
+  self.owns(fn() {
+    let fade_out = tree.motion_aux().fade_out
+    if fade_out.get(at) == Some(gen) {
+      fade_out.remove(at)
+    }
+  })
+  |> ignore
+  self
+}
+
+///|
+/// Whether node `id` is marked to fast-fade in place on takeoff when inside a departing particle flight (`View::flies_fade`).
+pub fn Tree::flies_fade_at(self : Tree, id : NodeId) -> Bool {
+  guard !tree_motion_auxs.is_empty() && self.alive_id(id) else { return false }
+  let fade_out = self.motion_aux().fade_out
+  !fade_out.is_empty() && fade_out.get(id.at) == Some(id.gen)
 }
 
 ///|

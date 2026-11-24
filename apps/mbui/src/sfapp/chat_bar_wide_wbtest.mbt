@@ -780,6 +780,31 @@ test "大屏, 中屏: the agent and station halves of the composer-top capsule l
 }
 
 ///|
+test "大屏, 中屏: a click on the station's half holds the card its hover brought, one card and no panel over it, kept as the pointer leaves" {
+  for win in wide_bar_windows {
+    let calls : Array[Made] = []
+    let t = wide_bar_at(calls, w=win.1)
+    let station = match t.all(Group).filter(fn(g) { g.label == "Willow" && g.rect.1 > 400.0 }) {
+      [g, ..] => g.rect
+      _ => fail("\{win.0}: no station's half")
+    }
+    let (x, y) = (station.0 + station.2 / 2.0, station.1 + station.3 / 2.0)
+    t.move_to(x, y)
+    t.run_for(@sf.hover_card_open_ms + @ui.move_most_ms)
+    let rested = t.words().filter(fn(w) { w.5 > 0.0 }).map(fn(w) { w.0 })
+    assert_true(wide_bar_card_under(t, station), msg="\{win.0}: rested on, its card")
+    t.press_at(x, y)
+    t.release(x, y)
+    t.run_for(@ui.move_most_ms)
+    // (the same words as the card the hover brought: no panel of its own over it)
+    assert_eq(t.words().filter(fn(w) { w.5 > 0.0 }).map(fn(w) { w.0 }), rested, msg="\{win.0}: clicked, the card as it was")
+    t.move_to(x, 40.0)
+    t.run_for(@sf.hover_card_close_ms + @ui.move_most_ms)
+    assert_true(wide_bar_card_under(t, station), msg="\{win.0}: clicked, the card held as the pointer left")
+  }
+}
+
+///|
 test "大屏, 中屏: the window's own buttons in its top row (Windows) pressed from 2 off them as on them, the bar's own part beside them none of theirs" {
   for win in wide_bar_windows {
     let calls : Array[Made] = []
@@ -1517,10 +1542,11 @@ test "大屏, 中屏: 多模型按 station 分组合并成一颗胶囊，Station
     wide_bar_tap(t2, a1)
     let opened_tabs = calls2.filter(fn(c) { c.name == "chat.tabs.open" }).map(fn(c) { text(Some(c.params), "tab") })
     assert_true(opened_tabs.contains("s-c1") && opened_tabs.contains("s-x1"), msg="\{win.0}: opened both agents: \{Repr(opened_tabs)}")
-    // Click Station -> opens station peek
+    // Click Station -> holds its card, no panel of its own over it
     @sf.presenters_reset()
     wide_bar_tap(t2, st)
-    assert_true(@sf.presenting(), msg="\{win.0}: station tap opens peek")
+    assert_false(@sf.presenting(), msg="\{win.0}: station click opens no panel")
+    assert_true(wide_bar_card_under(t2, st), msg="\{win.0}: station click holds its card")
     t2.key(@ui.key_escape)
     t2.run_for(@ui.move_most_ms)
 

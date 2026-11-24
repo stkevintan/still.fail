@@ -11,6 +11,8 @@
 //! run_windows.rs `renew`).
 
 mod data;
+#[cfg_attr(windows, allow(dead_code))]
+mod diagnose;
 #[cfg(unix)]
 mod front;
 mod lifecycle;

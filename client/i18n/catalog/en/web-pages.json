@@ -260,6 +260,7 @@
   "web-pages.appearance.accent.blue": "Blue",
   "web-pages.appearance.accent.teal": "Teal",
   "web-pages.appearance.accent.purple": "Purple",
+  "web-pages.appearance.accent.rainbow": "Multicolor",
   "web-pages.appearance.accent.custom": "Custom",
   "web-pages.appearance.accent.hue": "Hue",
   "web-pages.appearance.accent.pink": "Pink",
@@ -1232,6 +1233,43 @@
   "web-pages.profiles.share.hostAway": "{station} isn't responding and can't be used",
   "web-pages.profiles.share.changeThere": "Change it there",
   "web-pages.profiles.share.users": "In use on {stations}",
+  "web-pages.profiles.share.followAuto": "Follow whitelist",
+  "web-pages.profiles.share.followAutoNote": {
+    "one": "1 station on the whitelist; follows it",
+    "other": "{n} stations on the whitelist; follows it"
+  },
+  "web-pages.profiles.share.followAutoEmpty": "Whitelist empty; add stations in workspace settings",
+  "web-pages.profiles.share.followAutoOld": "Update this station to use it",
+  "web-pages.profiles.batch.select": "Select",
+  "web-pages.profiles.batch.selected": "{n} selected",
+  "web-pages.profiles.batch.all": "Select all",
+  "web-pages.profiles.batch.none": "Deselect all",
+  "web-pages.profiles.batch.share": "Share",
+  "web-pages.profiles.batch.stations": "Stations",
+  "web-pages.profiles.batch.mixed": "Sharing & stations",
+  "web-pages.profiles.batch.stop": "Stop sharing",
+  "web-pages.profiles.batch.stopTitle": {
+    "one": "Stop sharing 1 account?",
+    "other": "Stop sharing {n} accounts?"
+  },
+  "web-pages.profiles.batch.stopBody": "Other stations can no longer use them, and their copies there are removed",
+  "web-pages.profiles.batch.applies": {
+    "one": "Applies to 1 profile",
+    "other": "Applies to {n} profiles"
+  },
+  "web-pages.profiles.batch.sharesToo": "Accounts not shared yet are shared, all set to these stations",
+  "web-pages.profiles.batch.ownKept": "Each account's own station always keeps using it",
+  "web-pages.profiles.batch.autoOld": "Some accounts are on older stations; update them to follow the workspace whitelist",
+  "web-pages.profiles.batch.done": {
+    "one": "Updated 1 profile",
+    "other": "Updated {n} profiles"
+  },
+  "web-pages.profiles.batch.partial": "Updated {ok}, {failed} failed: {why}",
+  "web-pages.profiles.batch.why.borrowed": "Shared from another station",
+  "web-pages.profiles.batch.why.several": "Signed in on several stations; open it to set each",
+  "web-pages.profiles.batch.why.unsupported": "Its station can't share",
+  "web-pages.profiles.batch.why.offline": "Its station is offline",
+  "web-pages.profiles.batch.why.unshareable": "Can't be shared",
   "web-pages.profiles.account.each": "Available on",
   "web-pages.profiles.fusionModels": "Fusion pairings",
   "web-pages.profiles.fusionHint": "Ticked pairings appear as rows in the model list; you can also pick a sidekick directly in the model picker",

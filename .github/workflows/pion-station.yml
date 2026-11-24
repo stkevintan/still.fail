@@ -5,41 +5,75 @@ on:
     paths:
       - "pion/station/**"
       - "pion/base/**"
+      - "station/mb/src/activity/**"
+      - "station/mb/src/archivelast/**"
       - "station/mb/src/bindings/**"
       - "station/mb/src/cards/**"
+      - "station/mb/src/cc/**"
       - "station/mb/src/counts/**"
       - "station/mb/src/footprint/**"
       - "station/mb/src/host/**"
+      - "station/mb/src/jobs/**"
+      - "station/mb/src/jsjson/**"
+      - "station/mb/src/legacy/**"
+      - "station/mb/src/letters/**"
       - "station/mb/src/lookups/**"
       - "station/mb/src/marks/**"
       - "station/mb/src/memory/**"
+      - "station/mb/src/outflow/**"
       - "station/mb/src/packed/**"
       - "station/mb/src/posts/**"
       - "station/mb/src/reader/main.mbt"
+      - "station/mb/src/readops/chatparts.mbt"
+      - "station/mb/src/readops/pages.mbt"
+      - "station/mb/src/readops/shared_sql.mbt"
+      - "station/mb/src/recent/**"
+      - "station/mb/src/said/**"
+      - "station/mb/src/searchscope/**"
+      - "station/mb/src/sessions/**"
       - "station/mb/src/signin/**"
       - "station/mb/src/sql/**"
+      - "station/mb/src/turns/**"
+      - "station/mb/src/upjobs/**"
+      - "station/mb/src/usage/**"
       - "station/mb/src/usagefill/**"
+      - "station/mb/src/vaultuses/**"
       - "station/mb/src/widgets/**"
       - "station/mb/src/wire/**"
-      - "station/src/sessions/footprint.ts"
-      - "station/src/sessions/packed-mb.ts"
-      - "station/src/sessions/post-block-builder.ts"
-      - "station/src/sessions/session-count-builder.ts"
-      - "station/src/share/memory-mb.ts"
-      - "station/src/share/memory.ts"
+      - "station/src/jobs/process-jobs-builder.ts"
       - "station/src/ops/paths.ts"
       - "station/src/read/archive-mark-builder.ts"
       - "station/src/read/card-posts-builder.ts"
+      - "station/src/read/chat-index-builder.ts"
       - "station/src/read/mb-reader.ts"
       - "station/src/read/pool.ts"
       - "station/src/read/reader-select.ts"
       - "station/src/read/requested-builder.ts"
+      - "station/src/read/said-builder.ts"
       - "station/src/read/session-bindings-builder.ts"
+      - "station/src/read/session-list-builder.ts"
+      - "station/src/read/session-up-jobs-builder.ts"
+      - "station/src/read/turn-builder.ts"
       - "station/src/read/widget-sources-builder.ts"
+      - "station/src/read/workspace-up-jobs-builder.ts"
       - "station/src/rig/main.ts"
+      - "station/src/search/scope-builder.ts"
       - "station/src/services.ts"
+      - "station/src/sessions/agents.ts"
+      - "station/src/sessions/footprint.ts"
+      - "station/src/sessions/hub.ts"
+      - "station/src/sessions/packed-mb.ts"
+      - "station/src/sessions/post-block-builder.ts"
+      - "station/src/sessions/sandbox-name-builder.ts"
+      - "station/src/sessions/session-count-builder.ts"
+      - "station/src/sessions/session-directory-builder.ts"
+      - "station/src/sessions/workspace-activity-builder.ts"
+      - "station/src/share/memory-mb.ts"
+      - "station/src/share/memory.ts"
       - "station/src/store/archive-mark-index.ts"
+      - "station/src/store/backfill.ts"
       - "station/src/store/card-post-index.ts"
+      - "station/src/store/legacy-said-builder.ts"
       - "station/src/store/post-blocks.ts"
       - "station/src/store/session-bindings-index.ts"
       - "station/src/store/session-counts.ts"
@@ -48,47 +82,72 @@ on:
       - "station/src/store/usage-retire.ts"
       - "station/src/store/widget-sources.ts"
       - "station/src/usage/module.ts"
+      - "station/src/vault/module.ts"
+      - "station/src/vault/secrets.ts"
       - "station/src/vault/signin-save-builder.ts"
       - "station/src/vault/signin-save-index.ts"
+      - "station/src/vault/use-index.ts"
+      - "station/src/vault/use-reader-mb.ts"
+      - "station/src/xshare/index-builder.ts"
+      - "station/test/autoarchive-last-bounded.test.ts"
       - "station/test/builders-core-pion-switch.test.ts"
+      - "station/test/builders-index-pion-switch.test.ts"
+      - "station/test/builders-stateful-pion-switch.test.ts"
+      - "station/test/footprint-mounts.ts"
+      - "station/test/footprint-pion-switch.test.ts"
       - "station/test/footprint-reference.ts"
+      - "station/test/mb-archive-last.test.ts"
       - "station/test/mb-archive-marks.test.ts"
       - "station/test/mb-card-posts.test.ts"
       - "station/test/mb-footprint.test.ts"
       - "station/test/mb-lookups.test.ts"
+      - "station/test/mb-memory-merge.test.ts"
+      - "station/test/mb-outflow-chats.test.ts"
       - "station/test/mb-packed.test.ts"
+      - "station/test/mb-page-letters.test.ts"
       - "station/test/mb-post-blocks.test.ts"
+      - "station/test/mb-said.test.ts"
+      - "station/test/mb-search-scope.test.ts"
       - "station/test/mb-session-bindings.test.ts"
       - "station/test/mb-session-counts.test.ts"
+      - "station/test/mb-session-list.test.ts"
+      - "station/test/mb-session-up-jobs.test.ts"
+      - "station/test/mb-share-skills.test.ts"
       - "station/test/mb-signin-save.test.ts"
+      - "station/test/mb-turn-counts.test.ts"
       - "station/test/mb-usage-retire.test.ts"
       - "station/test/mb-widget-sources.test.ts"
-      - "station/test/reader-contract-builders.test.ts"
-      - "station/test/reader-contract-footprint.test.ts"
-      - "station/test/reader-contract-packed.test.ts"
-      - "station/test/footprint-mounts.ts"
-      - "station/test/reader-contract-select.test.ts"
-      - "station/test/reader-config-select.test.ts"
-      - "station/test/footprint-pion-switch.test.ts"
-      - "station/test/reader-contract-memory.test.ts"
-      - "station/test/mb-memory-merge.test.ts"
-      - "station/test/mb-share-skills.test.ts"
       - "station/test/memory-pion-switch.test.ts"
       - "station/test/memory-program.ts"
       - "station/test/packed-pion-switch.test.ts"
+      - "station/test/reader-config-select.test.ts"
+      - "station/test/reader-contract-builders.test.ts"
+      - "station/test/reader-contract-footprint.test.ts"
+      - "station/test/reader-contract-memory.test.ts"
+      - "station/test/reader-contract-packed.test.ts"
+      - "station/test/reader-contract-select.test.ts"
+      - "station/test/w5-foundation.test.ts"
+      - "station/test/reference/backfill/archive-last.ts"
       - "station/test/reference/backfill/archive-mark-index.ts"
       - "station/test/reference/backfill/card-post-index.ts"
+      - "station/test/reference/backfill/job-name-first.ts"
       - "station/test/reference/backfill/legacy-closed-cards.ts"
       - "station/test/reference/backfill/legacy-people-since.ts"
+      - "station/test/reference/backfill/outflow-index.ts"
+      - "station/test/reference/backfill/page-letter-index.ts"
       - "station/test/reference/backfill/post-blocks.ts"
       - "station/test/reference/backfill/session-bindings-index.ts"
       - "station/test/reference/backfill/session-counts.ts"
+      - "station/test/reference/backfill/session-list-index.ts"
+      - "station/test/reference/backfill/session-up-jobs.ts"
       - "station/test/reference/backfill/signin-save-index.ts"
       - "station/test/reference/backfill/usage-retire.ts"
       - "station/test/reference/backfill/widget-sources.ts"
+      - "station/test/reference/backfill/workspace-up-jobs.ts"
       - "station/test/reference/memory-merge.ts"
-      - "station/test/reference/share-skills.ts"
       - "station/test/reference/packed.ts"
+      - "station/test/reference/search-scope-prepare.ts"
+      - "station/test/reference/share-skills.ts"
       - "station/test/reference/workspace-archive.ts"
       - ".github/workflows/pion-station.yml"
   workflow_dispatch:
@@ -99,6 +158,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   c-shims:
@@ -198,7 +258,58 @@ jobs:
           "$zbin" cc -target x86_64-windows-gnu -std=c11 -O2 -Wall -Wextra -Werror -c \
             pion/station/packages/footprint/native/footprint_fs.c -o "$RUNNER_TEMP/footprint_fs_win.o"
 
-  verify-linux:
+  pion-unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify access to AFK-surf/pion and AFK-surf/pion-packages
+        env:
+          PION_TOKEN: ${{ secrets.PION_TOKEN }}
+        run: |
+          if [ -n "${PION_TOKEN:-}" ]; then
+            exit 0
+          fi
+          if GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code https://github.com/AFK-surf/pion.git HEAD >/dev/null 2>&1 && \
+             GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code https://github.com/AFK-surf/pion-packages.git HEAD >/dev/null 2>&1; then
+            exit 0
+          fi
+          echo "::error::AFK-surf/pion or AFK-surf/pion-packages is private and PION_TOKEN is not configured."
+          exit 1
+
+      - name: Cache pinned Pion toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pion-station-toolchain
+          key: pion-station-toolchain-linux-x64-v1-${{ hashFiles('pion/station/TOOLCHAIN') }}
+
+      - name: Configure git credentials for private AFK-surf/pion-packages
+        env:
+          PION_TOKEN: ${{ secrets.PION_TOKEN }}
+        run: |
+          if [ -n "${PION_TOKEN:-}" ]; then
+            auth_b64="$(printf 'x-access-token:%s' "$PION_TOKEN" | base64 | tr -d '\n\r')"
+            git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth_b64"
+          fi
+
+      - name: Ensure pinned pionc toolchain
+        env:
+          PION_TOKEN: ${{ secrets.PION_TOKEN }}
+        run: |
+          ENV_OUT="$(sh pion/station/scripts/ensure-pionc.sh --print-env)" || exit $?
+          eval "$ENV_OUT"
+          echo "$(dirname "$PIONC")" >> "$GITHUB_PATH"
+          echo "PIONC=$PIONC" >> "$GITHUB_ENV"
+          "$PIONC" --version
+
+      - name: Pion fmt, check, and unit tests
+        run: |
+          "$PIONC" fmt --check pion/station
+          "$PIONC" check --json pion/station
+          "$PIONC" test --json pion/station
+
+  build-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -219,7 +330,7 @@ jobs:
              GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code https://github.com/AFK-surf/pion-packages.git HEAD >/dev/null 2>&1; then
             exit 0
           fi
-          echo "::error::AFK-surf/pion or AFK-surf/pion-packages is private and PION_TOKEN is not configured in AFK-surf/monoid repository secrets. Configure a read-only PION_TOKEN covering both repos so pion-station CI runs real pionc checks instead of skipping."
+          echo "::error::AFK-surf/pion or AFK-surf/pion-packages is private and PION_TOKEN is not configured in AFK-surf/monoid repository secrets."
           exit 1
 
       - name: Cache pinned Pion toolchain
@@ -265,17 +376,6 @@ jobs:
           echo "PION_RT_DIR=$PION_RT_DIR" >> "$GITHUB_ENV"
           "$PIONC" --version
 
-      - name: Pion fmt, check, and unit tests
-        run: |
-          "$PIONC" fmt --check pion/station
-          "$PIONC" check --json pion/station
-          "$PIONC" test --json pion/station
-
-      # (the footprint tests mount a tmpfs in a user namespace, which Ubuntu 24.04's AppArmor keeps from a user's)
-      - run: sudo -n sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
-
-      # (the footprint switch test runs this commit's MoonBit reader too: on a branch that changes station/mb it is not
-      # in the release, only its pipeline's run artifact, so it is built here as natives builds a branch's)
       - name: Whether this commit's MoonBit reader is prebuilt
         id: reader
         env:
@@ -283,9 +383,11 @@ jobs:
         run: |
           missing="$(node scripts/native.ts missing reader:linux-x64)"
           echo "missing=$([ -n "$missing" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
       - if: steps.reader.outputs.missing == 'true'
         uses: ./.github/actions/mbui-moonbit
         with: { tools: 'mbc', farview: 'false' }
+
       - name: Zig 0.16.0 for the reader (UBSan off at -O0, as natives)
         if: steps.reader.outputs.missing == 'true'
         run: |
@@ -303,7 +405,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/zig-bin"
           printf '#!/bin/sh\nif [ "${1:-}" = cc ]; then shift; exec "%s/zig" cc -fno-sanitize=undefined "$@"; fi\nexec "%s/zig" "$@"\n' "$d" "$d" > "$RUNNER_TEMP/zig-bin/zig"
           chmod +x "$RUNNER_TEMP/zig-bin/zig"
-      # (the reader's units natives compiled for this branch, where it ran before this job)
+
       - if: steps.reader.outputs.missing == 'true'
         uses: actions/cache/restore@v4
         with:
@@ -311,18 +413,22 @@ jobs:
           key: mbui-reader-linux-branch-v2-${{ github.sha }}
           restore-keys: mbui-reader-linux-branch-v2-
 
-      - name: Build linux-x64 with real libstillfail_shell.a and run smoke suite
+      - name: Build linux-x64 Pion + MB reader binaries, run smoke suite, and stage artifact
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          BIN="$RUNNER_TEMP/stillfail-pion-linux-x64"
-          bash pion/station/scripts/build.sh linux-x64 "$BIN"
-          ls -lh "$BIN"
-          ldd "$BIN"
+          STAGE="$RUNNER_TEMP/pion-station-bins"
+          mkdir -p "$STAGE"
+          BIN_PION="$STAGE/stillfail-pion-linux-x64"
+          BIN_MB="$STAGE/stillfail-reader-linux-x64"
+
+          bash pion/station/scripts/build.sh linux-x64 "$BIN_PION"
+          ls -lh "$BIN_PION"
+          ldd "$BIN_PION"
 
           # Strictly verify max GLIBC symbol version <= 2.28 (never swallow objdump errors).
-          objdump_out="$(objdump -T "$BIN")"
+          objdump_out="$(objdump -T "$BIN_PION")"
           max_glibc="$(printf '%s\n' "$objdump_out" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -n 1 || true)"
           echo "max_glibc=${max_glibc:-none}"
           test -n "$max_glibc"
@@ -333,44 +439,33 @@ jobs:
             exit 1
           fi
 
-          "$BIN" --version
-          node pion/station/scripts/smoke-stdio.mjs "$BIN"
-          "$BIN" --smoke-sqlite "$RUNNER_TEMP/smoke.db"
-          "$BIN" --smoke-sql-db "$RUNNER_TEMP/smoke-sql-db.db"
-          "$BIN" --smoke-shell "$RUNNER_TEMP/shell-dir"
-          "$BIN" --smoke-rc-soak 50000
+          "$BIN_PION" --version
+          node pion/station/scripts/smoke-stdio.mjs "$BIN_PION"
+          "$BIN_PION" --smoke-sqlite "$RUNNER_TEMP/smoke.db"
+          "$BIN_PION" --smoke-sql-db "$RUNNER_TEMP/smoke-sql-db.db"
+          "$BIN_PION" --smoke-shell "$RUNNER_TEMP/shell-dir"
+          "$BIN_PION" --smoke-rc-soak 50000
 
-          # Black-box 0-diff contract gate for `--builder footprint` & `--builder memory`.
-          pnpm --dir station install --frozen-lockfile --prefer-offline
-          node --test station/test/reader-contract-select.test.ts station/test/reader-config-select.test.ts
-          STILLFAIL_READER_CANDIDATE="$BIN" node --test station/test/reader-contract-footprint.test.ts
-          STILLFAIL_MB_READER="$BIN" node --test station/test/mb-footprint.test.ts
-          # (a branch's reader, where it is built here: by the zig above, -O0 in units of 8 MB, as natives on GitHub's runners)
-          PATH="$RUNNER_TEMP/zig-bin:$PATH" MBC_UNIT_KB=8192 MBC_INIT_SPLIT=0 node scripts/native.ts run reader -- env STILLFAIL_PION_READER="$BIN" node --test station/test/footprint-pion-switch.test.ts
-          STILLFAIL_READER_CANDIDATE="$BIN" node --test station/test/reader-contract-memory.test.ts
-          STILLFAIL_MB_READER="$BIN" node --test station/test/mb-memory-merge.test.ts
-          STILLFAIL_MB_READER="$BIN" node --test station/test/mb-share-skills.test.ts
-          STILLFAIL_PION_READER="$BIN" node --test station/test/memory-pion-switch.test.ts
+          # Acquire this SHA's real MoonBit stillfail-reader-linux-x64 once for all downstream gate jobs.
+          if [ "${{ steps.reader.outputs.missing }}" = "true" ]; then
+            MB_SRC="$(PATH="$RUNNER_TEMP/zig-bin:$PATH" MBC_UNIT_KB=8192 MBC_INIT_SPLIT=0 node scripts/native.ts run reader -- sh -c 'printf "%s" "$STILLFAIL_MB_READER"')"
+          else
+            MB_SRC="$(node scripts/native.ts file reader linux-x64)"
+          fi
+          test -x "$MB_SRC"
+          cp "$MB_SRC" "$BIN_MB"
+          chmod +x "$BIN_MB" "$BIN_PION"
+          ls -lh "$BIN_MB"
 
-          # Black-box 0-diff contract gate for `--builder packed`.
-          STILLFAIL_READER_CANDIDATE="$BIN" node --test station/test/reader-contract-packed.test.ts
-          STILLFAIL_MB_READER="$BIN" node --test station/test/mb-packed.test.ts
-          PATH="$RUNNER_TEMP/zig-bin:$PATH" MBC_UNIT_KB=8192 MBC_INIT_SPLIT=0 node scripts/native.ts run reader -- env STILLFAIL_PION_READER="$BIN" node --test station/test/packed-pion-switch.test.ts
+          (cd "$STAGE" && sha256sum stillfail-pion-linux-x64 stillfail-reader-linux-x64 > SHA256SUMS)
+          cat "$STAGE/SHA256SUMS"
 
-          # Black-box 0-diff contract gate for all 10 `builders_core` SQLite builders + real dual-engine production switch.
-          STILLFAIL_MB_READER="$BIN" node -e 'import { resolve } from "node:path"; import { mbReaderBinary } from "./station/src/read/mb-reader.ts"; const got = mbReaderBinary(); const want = resolve(process.env.STILLFAIL_MB_READER); if (got !== want) { console.error("mbReaderBinary mismatch:", { got, want }); process.exit(1); }'
-          PATH="$RUNNER_TEMP/zig-bin:$PATH" MBC_UNIT_KB=8192 MBC_INIT_SPLIT=0 node scripts/native.ts run reader -- env STILLFAIL_READER_CANDIDATE="$BIN" STILLFAIL_REQUIRE_DUAL_READER=1 node --test station/test/reader-contract-builders.test.ts
-          STILLFAIL_MB_READER="$BIN" node --test \
-            station/test/mb-archive-marks.test.ts \
-            station/test/mb-session-bindings.test.ts \
-            station/test/mb-session-counts.test.ts \
-            station/test/mb-signin-save.test.ts \
-            station/test/mb-post-blocks.test.ts \
-            station/test/mb-usage-retire.test.ts \
-            station/test/mb-widget-sources.test.ts \
-            station/test/mb-card-posts.test.ts \
-            station/test/mb-lookups.test.ts
-          PATH="$RUNNER_TEMP/zig-bin:$PATH" MBC_UNIT_KB=8192 MBC_INIT_SPLIT=0 node scripts/native.ts run reader -- env STILLFAIL_PION_READER="$BIN" node --test station/test/builders-core-pion-switch.test.ts
+      - name: Upload Linux binaries artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pion-station-linux-bins
+          path: ${{ runner.temp }}/pion-station-bins
+          retention-days: 1
 
       - name: Save Zig cache
         if: always() && steps.zig-cache.outputs.cache-hit != 'true'
@@ -379,3 +474,161 @@ jobs:
         with:
           path: ~/.cache/zig
           key: pion-station-zig-cache-linux-x64-0.16.0-${{ hashFiles('pion/station/**') }}
+
+  gate-workers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: build-linux
+    if: needs.build-linux.result == 'success'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup
+
+      - name: Download and verify Linux binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/download-artifact.sh "$GITHUB_RUN_ID" pion-station-linux-bins "$RUNNER_TEMP/bins"
+          (cd "$RUNNER_TEMP/bins" && sha256sum -c SHA256SUMS)
+          chmod +x "$RUNNER_TEMP/bins/stillfail-pion-linux-x64" "$RUNNER_TEMP/bins/stillfail-reader-linux-x64"
+          test "$(realpath "$RUNNER_TEMP/bins/stillfail-pion-linux-x64")" != "$(realpath "$RUNNER_TEMP/bins/stillfail-reader-linux-x64")"
+
+      # (the footprint tests mount a tmpfs in a user namespace, which Ubuntu 24.04's AppArmor keeps from a user's)
+      - run: sudo -n sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Run selector/config, footprint, memory, and packed gates
+        run: |
+          set -euo pipefail
+          BIN_PION="$RUNNER_TEMP/bins/stillfail-pion-linux-x64"
+          BIN_MB="$RUNNER_TEMP/bins/stillfail-reader-linux-x64"
+          pnpm --dir station install --frozen-lockfile --prefer-offline
+
+          node --test station/test/reader-contract-select.test.ts station/test/reader-config-select.test.ts
+
+          STILLFAIL_READER_CANDIDATE="$BIN_PION" node --test station/test/reader-contract-footprint.test.ts
+          STILLFAIL_MB_READER="$BIN_PION" node --test station/test/mb-footprint.test.ts
+          STILLFAIL_MB_READER="$BIN_MB" STILLFAIL_PION_READER="$BIN_PION" node --test station/test/footprint-pion-switch.test.ts
+
+          STILLFAIL_READER_CANDIDATE="$BIN_PION" node --test station/test/reader-contract-memory.test.ts
+          STILLFAIL_MB_READER="$BIN_PION" node --test station/test/mb-memory-merge.test.ts
+          STILLFAIL_MB_READER="$BIN_PION" node --test station/test/mb-share-skills.test.ts
+          STILLFAIL_MB_READER="$BIN_MB" STILLFAIL_PION_READER="$BIN_PION" node --test station/test/memory-pion-switch.test.ts
+
+          STILLFAIL_READER_CANDIDATE="$BIN_PION" node --test station/test/reader-contract-packed.test.ts
+          STILLFAIL_MB_READER="$BIN_PION" node --test station/test/mb-packed.test.ts
+          STILLFAIL_MB_READER="$BIN_MB" STILLFAIL_PION_READER="$BIN_PION" node --test station/test/packed-pion-switch.test.ts
+
+  gate-sqlite-w14:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: build-linux
+    if: needs.build-linux.result == 'success'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup
+
+      - name: Download and verify Linux binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/download-artifact.sh "$GITHUB_RUN_ID" pion-station-linux-bins "$RUNNER_TEMP/bins"
+          (cd "$RUNNER_TEMP/bins" && sha256sum -c SHA256SUMS)
+          chmod +x "$RUNNER_TEMP/bins/stillfail-pion-linux-x64" "$RUNNER_TEMP/bins/stillfail-reader-linux-x64"
+          test "$(realpath "$RUNNER_TEMP/bins/stillfail-pion-linux-x64")" != "$(realpath "$RUNNER_TEMP/bins/stillfail-reader-linux-x64")"
+
+      - name: Run Wave 4 SQLite builder contracts, mb-* compatibility, and dual-engine switch gates
+        run: |
+          set -euo pipefail
+          BIN_PION="$RUNNER_TEMP/bins/stillfail-pion-linux-x64"
+          BIN_MB="$RUNNER_TEMP/bins/stillfail-reader-linux-x64"
+          pnpm --dir station install --frozen-lockfile --prefer-offline
+
+          STILLFAIL_MB_READER="$BIN_PION" node -e 'import { resolve } from "node:path"; import { mbReaderBinary } from "./station/src/read/mb-reader.ts"; const got = mbReaderBinary(); const want = resolve(process.env.STILLFAIL_MB_READER); if (got !== want) { console.error("mbReaderBinary mismatch:", { got, want }); process.exit(1); }'
+
+          STILLFAIL_MB_READER="$BIN_MB" STILLFAIL_READER_CANDIDATE="$BIN_PION" STILLFAIL_REQUIRE_DUAL_READER=1 \
+            node --test station/test/reader-contract-builders.test.ts
+
+          STILLFAIL_MB_READER="$BIN_PION" node --test \
+            station/test/mb-archive-marks.test.ts \
+            station/test/mb-session-bindings.test.ts \
+            station/test/mb-session-counts.test.ts \
+            station/test/mb-signin-save.test.ts \
+            station/test/mb-post-blocks.test.ts \
+            station/test/mb-usage-retire.test.ts \
+            station/test/mb-widget-sources.test.ts \
+            station/test/mb-card-posts.test.ts \
+            station/test/mb-lookups.test.ts \
+            station/test/mb-session-up-jobs.test.ts \
+            station/test/mb-outflow-chats.test.ts \
+            station/test/mb-search-scope.test.ts \
+            station/test/mb-session-list.test.ts \
+            station/test/mb-archive-last.test.ts \
+            station/test/mb-page-letters.test.ts \
+            station/test/autoarchive-last-bounded.test.ts
+
+          STILLFAIL_MB_READER="$BIN_MB" STILLFAIL_PION_READER="$BIN_PION" node --test \
+            station/test/builders-core-pion-switch.test.ts \
+            station/test/builders-index-pion-switch.test.ts \
+            station/test/builders-stateful-pion-switch.test.ts
+
+  gate-sqlite-w5:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: build-linux
+    if: needs.build-linux.result == 'success'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup
+
+      - name: Download and verify Linux binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/download-artifact.sh "$GITHUB_RUN_ID" pion-station-linux-bins "$RUNNER_TEMP/bins"
+          (cd "$RUNNER_TEMP/bins" && sha256sum -c SHA256SUMS)
+          chmod +x "$RUNNER_TEMP/bins/stillfail-pion-linux-x64" "$RUNNER_TEMP/bins/stillfail-reader-linux-x64"
+          test "$(realpath "$RUNNER_TEMP/bins/stillfail-pion-linux-x64")" != "$(realpath "$RUNNER_TEMP/bins/stillfail-reader-linux-x64")"
+
+      - name: Run Wave 5 foundation gates and MB Permit regression suite
+        run: |
+          set -euo pipefail
+          BIN_PION="$RUNNER_TEMP/bins/stillfail-pion-linux-x64"
+          BIN_MB="$RUNNER_TEMP/bins/stillfail-reader-linux-x64"
+          pnpm --dir station install --frozen-lockfile --prefer-offline
+
+          STILLFAIL_MB_READER="$BIN_MB" STILLFAIL_PION_READER="$BIN_PION" \
+            node --test station/test/w5-foundation.test.ts
+
+          STILLFAIL_MB_READER="$BIN_MB" node --test \
+            station/test/mb-turn-counts.test.ts \
+            station/test/mb-said.test.ts
+
+  verify-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: [c-shims, pion-unit, build-linux, gate-workers, gate-sqlite-w14, gate-sqlite-w5]
+    if: always()
+    steps:
+      - name: Require all upstream jobs to succeed
+        env:
+          R_CSHIMS: ${{ needs.c-shims.result }}
+          R_UNIT: ${{ needs.pion-unit.result }}
+          R_BUILD: ${{ needs.build-linux.result }}
+          R_WORKERS: ${{ needs.gate-workers.result }}
+          R_W14: ${{ needs.gate-sqlite-w14.result }}
+          R_W5: ${{ needs.gate-sqlite-w5.result }}
+        run: |
+          set -euo pipefail
+          echo "c-shims=$R_CSHIMS pion-unit=$R_UNIT build-linux=$R_BUILD gate-workers=$R_WORKERS gate-sqlite-w14=$R_W14 gate-sqlite-w5=$R_W5"
+          for r in "$R_CSHIMS" "$R_UNIT" "$R_BUILD" "$R_WORKERS" "$R_W14" "$R_W5"; do
+            if [ "$r" != "success" ]; then
+              echo "FAIL: upstream job result is '$r' (expected 'success')" >&2
+              exit 1
+            fi
+          done

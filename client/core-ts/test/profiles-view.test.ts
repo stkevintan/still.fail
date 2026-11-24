@@ -287,6 +287,49 @@ test("a shared account lists all allowed stations while their copies or overview
   assert.equal(reading.state.text, "正在读取");
 });
 
+test("a share following the workspace's whitelist reaches the stations on it as the viewer knows them, and its page's stations say who is", () => {
+  const C = "c".repeat(64);
+  const sub = { email: "z@x.test", runtime: "codex" };
+  const on = (s: any, accept: boolean) => ({ ...s, overview: { ...s.overview, autoChats: { enabled: accept, canEdit: false } } });
+  const host = station(A, "Office", true, [profile("host", { ...sub, share: { id: "sh-1", role: "host", host: A, allow: [A], allowAuto: true } })]);
+  const row = workspaceProfiles([on(host, false), on(station(B, "Laptop", true, []), true), on(station(C, "Lab", true, []), false)]).items[0];
+  // (Laptop is on the whitelist though its host has not heard yet: a copy on its way; Lab is not)
+  assert.deepEqual(row.places.map((p: any) => [p.stationName, p.state?.text ?? null]), [["Office", null], ["Laptop", "等待同步"]]);
+  assert.deepEqual(row.stations.map((x: any) => [x.name, x.allowed, x.acceptAutoChats, x.tasksOnly]), [
+    ["Office", true, false, false], ["Laptop", true, true, false], ["Lab", false, false, false],
+  ]);
+  assert.equal(row.shareAuto, true);
+});
+
+test("the list's 多选 takes an account its station has alone and is up, sharing, else says why not", () => {
+  const C = "c".repeat(64);
+  const sub = (id: string, email: string, extra: Record<string, unknown> = {}) => profile(id, { email, runtime: "claude", ...extra });
+  const rows = workspaceProfiles([
+    { ...station(A, "Office", true, [
+      sub("mine", "a@x.test"),
+      sub("lent", "b@x.test", { share: { id: "sh-1", role: "host", host: A, allow: null } }),
+      sub("both", "c@x.test"),
+      profile("grok", { email: "d@x.test", runtime: "grok", shareable: false }),
+    ]), overview: { sharing: true, shareAllowAuto: true, profiles: [
+      sub("mine", "a@x.test"),
+      sub("lent", "b@x.test", { share: { id: "sh-1", role: "host", host: A, allow: null } }),
+      sub("both", "c@x.test"),
+      profile("grok", { email: "d@x.test", runtime: "grok", shareable: false }),
+    ] } },
+    station(B, "Laptop", true, [sub("both", "c@x.test"), sub("theirs", "e@x.test", { share: { id: "sh-2", role: "user", host: C, allow: null } })]),
+    station(C, "Lab", false, [sub("away", "f@x.test")]),
+  ]).items;
+  const of = (title: string) => rows.find((r: any) => r.title === title);
+  const said = (r: any) => [r.canBatchShare, r.batchShareWhy ?? null, r.batchShareAllowAuto, r.shared];
+  assert.deepEqual(said(of("a@x.test")), [true, null, true, false]);
+  assert.deepEqual(said(of("b@x.test")), [true, null, true, true]);
+  assert.deepEqual(said(of("c@x.test")).slice(0, 2), [false, "several"]);
+  assert.deepEqual(said(of("d@x.test")).slice(0, 2), [false, "unshareable"]);
+  assert.deepEqual(said(of("f@x.test")).slice(0, 2), [false, "offline"]);
+  // (a copy of Lab's, Lab away: the row is the copy's, not this station's to share)
+  assert.deepEqual(said(of("e@x.test")).slice(0, 2), [false, "borrowed"]);
+});
+
 test("a pending copy names the station cut off from still.fail cloud instead of waiting on", () => {
   const sub = { email: "z@x.test", runtime: "codex" };
   const host = station(A, "Studio", true, [profile("host", { ...sub, share: { id: "sh-1", role: "host", host: A, allow: [B] } })]);

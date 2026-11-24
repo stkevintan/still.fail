@@ -33,7 +33,14 @@
 //   first with the two stations alone (`shareFirst`), so the station it leaves borrows it and nothing there stops; back
 //   home, that share is undone where nobody opened it to another station meanwhile (`unshareMoved`).
 //
-// Config: a shared profile has `share: {id, allow}` on its host and `share: {id, borrowed: true, host}` where copied
+// - Who may use a profile can follow the workspace's whitelist instead of a list (`allowAuto`): every station that
+//   takes automatically assigned chats (`acceptAutoChats`, not one only running tasks), its host always, as each says
+//   of itself. Each station tells the others as that changes (share.autoChats); a host asks one it has not heard from
+//   this run (`describe`) and keeps what it heard in state.json `autoPeers`, a station it never heard of left out. Its
+//   `allow` then names only stations a move lent it to besides (`lendTo`), and what the stations are told is the list
+//   it makes now, so stations from before follow it as a list.
+//
+// Config: a shared profile has `share: {id, allow, allowAuto?}` on its host and `share: {id, borrowed: true, host}` where copied
 // (`paused`: this station does not use the copy, `hostOff`: its host disabled it; accounts/index.ts putProfile);
 // (made and removed only here). Shared skills are config.json `sharedSkills: {name: {id, allow}}`.
 import { createHash, randomBytes } from "node:crypto";
@@ -90,6 +97,10 @@ const KEEP_LENT_MS = 3600_000;
 const KEEP_AGY_MS = 10 * 60_000;
 /// How long a login wanted waits for the cloud to say the workspace's stations.
 const ROSTER_WAIT_MS = 10_000;
+/// How long a host waits for another station to say whether it is on the whitelist (`describe`).
+const DESCRIBE_MS = 10_000;
+/// What a host answers a station whose place on the whitelist it has not heard yet: for now, never NOT_FOR_IT.
+const AUTO_UNKNOWN = "this station has not heard yet whether the asking one is on the workspace's whitelist";
 /// Edits to a skill are taken once they have settled this long.
 const SETTLE_MS = 2000;
 /// The most directories of a skill shared from here watched.
@@ -105,7 +116,8 @@ export type ShareRole = "host" | "user";
 /// What the overview says of a shared profile or skill: for its host also the stations that have it (`users`); for a
 /// copy of a profile, that this station pauses it (`pausable`: accounts/index.ts putProfile; absent on a station from
 /// before, which refuses it).
-export type ShareView = { id: string; role: ShareRole; host: string; allow: string[] | null; reachable: boolean | null; users?: string[]; pausable?: true };
+/// `allowAuto`: who may use it follows the workspace's whitelist, `allow` then the stations that makes now.
+export type ShareView = { id: string; role: ShareRole; host: string; allow: string[] | null; allowAuto?: true; reachable: boolean | null; users?: string[]; pausable?: true };
 export type ShareKind = "profile" | "skill";
 
 export type SharingDeps = {
@@ -151,6 +163,9 @@ export type SharingDeps = {
   /// one, `formerly`): it is neither told nor asked anything, as this station would answer itself.
   itself?: (station: string) => boolean;
   clock?: Clock.Clock;
+  /// Whether this station takes automatically assigned chats (`acceptAutoChats`) and whether it only runs tasks (a rig
+  /// in its home workspace): what it tells the others of itself as that changes (share.autoChats).
+  autoChats?: () => { accept: boolean; tasksOnly: boolean };
   /// Tests: Codex's token endpoint.
   codexTokenUrl?: string;
   /// Tests: the MoonBit program that reads and writes the skills' files (readerBinary's where none is given).
@@ -170,9 +185,10 @@ type Hosted = { version: number; hash: string; kind: ShareKind; name: string; al
 export type Missing = "name" | "same-name" | "refused";
 /// `workspace`: of a skill, the workspace it was had in, whose agents' skills it is linked into (absent: the home one's,
 /// as files of before have it).
-type Borrowed = { version: number; hash: string; kind: ShareKind; name: string; host: string; allow: string[] | null; workspace?: string; pending?: boolean; stale?: boolean; quotaRevision?: number; resetPending?: string[]; profileUpdate?: { reset: boolean } };
+type Borrowed = { version: number; hash: string; kind: ShareKind; name: string; host: string; allow: string[] | null; allowAuto?: boolean; workspace?: string; pending?: boolean; stale?: boolean; quotaRevision?: number; resetPending?: string[]; profileUpdate?: { reset: boolean } };
 /// A share of this station's: what it is, who may use it, its content's hash (null: unreadable now, `unread` why).
-type Own = { kind: ShareKind; name: string; allow: string[] | null; hash: string | null; profile?: Json; skill?: string; unread?: string };
+/// `allowAuto`: who may use it follows the workspace's whitelist, `allow` the stations that makes now (autoAllow).
+type Own = { kind: ShareKind; name: string; allow: string[] | null; allowAuto?: boolean; hash: string | null; profile?: Json; skill?: string; unread?: string };
 /// A share of this station's as configured, nothing of it read.
 type Shared = Omit<Own, "hash" | "unread">;
 type State = {
@@ -186,6 +202,9 @@ type State = {
   /// Profiles not shared that other stations handed over to this one (`<station>/<their id>` → its id here): one asked
   /// again (its answer lost) is the one taken already.
   taken?: Record<string, string>;
+  /// Each other station as it said of itself last (share.autoChats, `describe`): whether it is on the workspace's
+  /// whitelist (takes automatically assigned chats, and is not one only running tasks).
+  autoPeers?: Record<string, boolean>;
 };
 
 /// Whose word a failed request is: the other station's (it answered with a refusal), or this one's (it could not ask, or
@@ -362,6 +381,16 @@ export class Sharing {
   private again = false;
   /// Copies asked about in this run (what changed while this station was away is found that way).
   private checked = new Set<string>();
+  /// Stations heard from this run on whether they are on the whitelist (share.autoChats, `describe`): one not heard
+  /// from is asked while a profile here follows the whitelist.
+  private autoPeersChecked = new Set<string>();
+  /// Stations asked that now (one `describe` each at a time).
+  private autoAsking = new Map<string, Promise<boolean>>();
+  /// Stations still to be told what this station says of itself (share.autoChats): each once a run, again as it
+  /// changes, again later where one did not answer.
+  private autoUntold = new Set<string>();
+  /// What this station told of itself last (null: nothing yet this run).
+  private autoSaid: string | null = null;
   /// The skills' files read, hashed and written off the station's thread (mb/src/memory skills.mbt), let go idle.
   private program: MemoryProgram;
   /// What reads the skills shared from here and changes `state.hosted` by it (`syncHosted`, `takeEdit`, a skill
@@ -468,6 +497,96 @@ export class Sharing {
     return allow === null || allow.includes(station);
   }
 
+  /// Who may use a profile that follows the workspace's whitelist (`allowAuto`): this station, each other one that
+  /// said it is on it (`autoPeers`), and those a move lent it to besides (`extra`, its config's `allow`).
+  private autoAllow(extra: unknown): string[] {
+    const out = new Set<string>();
+    const me = this.me();
+    if (me !== null) out.add(me);
+    for (const [station, on] of Object.entries(this.readState().autoPeers ?? {})) if (on === true) out.add(station);
+    if (Array.isArray(extra)) for (const s of extra) if (typeof s === "string") out.add(s);
+    return [...out];
+  }
+
+  /// What another station said of itself (share.autoChats) or answered `describe`: on the whitelist or not, kept. A
+  /// change brings the shares in line (who may use those that follow it changed).
+  private heardAuto(peer: string, on: boolean) {
+    this.autoPeersChecked.add(peer);
+    const state = this.readState();
+    if ((state.autoPeers ??= {})[peer] === on) return;
+    state.autoPeers[peer] = on;
+    this.writeState(state);
+    log.info("share", "a station's place on the workspace's whitelist heard", { station: peer.slice(0, 8), on });
+    void this.reconcile();
+  }
+
+  /// Asks station `peer` (in workspace `ws`) whether it is on the workspace's whitelist, as it describes itself; one
+  /// question a station at a time, an answer not come in DESCRIBE_MS a failure. True: it is.
+  private describeAuto(peer: string, ws: string | null): Promise<boolean> {
+    const asking = this.autoAsking.get(peer);
+    if (asking !== undefined) return asking;
+    const run = (async () => {
+      let stop = () => {};
+      const late = new Promise<never>((_, reject) => {
+        stop = this.time.after(DESCRIBE_MS, () => reject(new Error("no answer to describe"))); // timer: a deadline for an answer
+      });
+      try {
+        const got = await Promise.race([this.deps.ask(peer, ws, { method: "describe", ...(ws === null ? {} : { workspace: ws }) }), late]);
+        const on = got?.acceptAutoChats === true && got?.mode !== "tasks" && got?.sessions !== false;
+        this.heardAuto(peer, on);
+        return on;
+      } finally {
+        stop();
+        this.autoAsking.delete(peer);
+      }
+    })();
+    this.autoAsking.set(peer, run);
+    return run;
+  }
+
+  /// What this station says of itself to the others (share.autoChats), as its deps say it now (null: none said).
+  private autoSelf(): { acceptAutoChats: boolean; tasksOnly: boolean } | null {
+    const said = this.deps.autoChats?.();
+    return said === undefined ? null : { acceptAutoChats: said.accept, tasksOnly: said.tasksOnly };
+  }
+
+  /// Tells every other station of this one's workspaces what it says of itself (share.autoChats), where that changed
+  /// since it last told them (and once a run): without waiting on them, one that did not answer told again by a later
+  /// pass (`reconcileOnce`, its retries).
+  /// `send`: told now (a pass of `reconcileOnce` tells them itself, waiting on them).
+  notifyAutoChats(send = true): void {
+    const self = this.autoSelf();
+    const rosters = this.rosters();
+    if (self === null || rosters === null) return;
+    const said = JSON.stringify(self);
+    if (said === this.autoSaid) return;
+    this.autoSaid = said;
+    for (const peer of rosters.keys()) if (this.deps.itself?.(peer) !== true) this.autoUntold.add(peer);
+    if (send) void this.tellAuto(rosters);
+  }
+
+  /// Tells each station still to be told (`autoUntold`) what this station says of itself; false: one did not answer and
+  /// is to be told again (one that refused, a station from before, is not).
+  private async tellAuto(rosters: Map<string, string[]>): Promise<boolean> {
+    const self = this.autoSelf();
+    if (self === null) return true;
+    let all = true;
+    await Promise.all([...this.autoUntold].map(async (peer) => {
+      if (!rosters.has(peer)) {
+        this.autoUntold.delete(peer);
+        return;
+      }
+      try {
+        await this.deps.ask(peer, null, { method: "share.autoChats", ...self });
+        this.autoUntold.delete(peer);
+      } catch (e) {
+        if (e instanceof Refused) this.autoUntold.delete(peer);
+        else all = false;
+      }
+    }));
+    return all;
+  }
+
   // ── state ──
 
   /// The one copy of state.json in memory (read as the station starts, `constructor`): every change is made to it and
@@ -479,7 +598,7 @@ export class Sharing {
     if (this.state) return this.state;
     try {
       const s = JSON.parse(readFileSync(join(this.root, "state.json"), "utf8")); // sync: read once, before the station serves
-      this.state = { hosted: isObject(s.hosted) ? s.hosted : {}, borrowed: isObject(s.borrowed) ? s.borrowed : {}, moved: isObject(s.moved) ? s.moved : {}, taken: isObject(s.taken) ? s.taken : {} };
+      this.state = { hosted: isObject(s.hosted) ? s.hosted : {}, borrowed: isObject(s.borrowed) ? s.borrowed : {}, moved: isObject(s.moved) ? s.moved : {}, taken: isObject(s.taken) ? s.taken : {}, ...(isObject(s.autoPeers) ? { autoPeers: s.autoPeers } : {}) };
     } catch {
       this.state = { hosted: {}, borrowed: {}, moved: {} };
     }
@@ -574,7 +693,8 @@ export class Sharing {
     const out = new Map<string, Shared>();
     for (const p of this.profiles()) {
       if (!isObject(p.share) || p.share.borrowed === true || typeof p.share.id !== "string") continue;
-      out.set(p.share.id, { kind: "profile", name: String(p.name ?? p.id), allow: Array.isArray(p.share.allow) ? p.share.allow : null, profile: p });
+      const auto = p.share.allowAuto === true;
+      out.set(p.share.id, { kind: "profile", name: String(p.name ?? p.id), allow: auto ? this.autoAllow(p.share.allow) : Array.isArray(p.share.allow) ? p.share.allow : null, ...(auto ? { allowAuto: true } : {}), profile: p });
     }
     for (const [name, { id, allow }] of Object.entries(this.sharedSkills())) out.set(id, { kind: "skill", name, allow, skill: name });
     return out;
@@ -680,8 +800,10 @@ export class Sharing {
   // ── running ──
 
   start() {
-    this.stops.push(this.deps.cloud.listen(() => this.reconcile()));
-    this.stops.push(this.deps.config.listen(() => this.reconcile()));
+    // (what it says of itself told as it changes: its `acceptAutoChats` in the config, its mode in the cloud's word)
+    this.stops.push(this.deps.cloud.listen(() => (this.notifyAutoChats(), this.reconcile())));
+    this.stops.push(this.deps.config.listen(() => (this.notifyAutoChats(), this.reconcile())));
+    this.notifyAutoChats();
     this.reconcile();
   }
 
@@ -738,6 +860,23 @@ export class Sharing {
     let pending = false;
     const silent = new Set(this.unreachable.keys());
     const itself = (station: string) => this.deps.itself?.(station) === true;
+    // What this station says of itself: told once the stations are known, again to one that did not answer.
+    if (rosters !== null) {
+      if (this.autoSaid === null) this.notifyAutoChats(false);
+      if (this.autoUntold.size > 0 && !(await this.tellAuto(rosters))) pending = true;
+    }
+    // Where a profile here follows the workspace's whitelist: each station not heard from this run asked whether it is
+    // on it, before who may use it is worked out (syncHosted); one that does not answer keeps what it said last (a
+    // station never heard of is left out) and is asked again later.
+    if (rosters !== null && [...this.shares().values()].some((x) => x.allowAuto === true)) {
+      const unheard = [...rosters.keys()].filter((peer) => !itself(peer) && !this.autoPeersChecked.has(peer));
+      await Promise.all(unheard.map((peer) => this.describeAuto(peer, rosters.get(peer)?.[0] ?? null).catch((e) => {
+        pending = true;
+        log.info("share", "a station did not say whether it is on the workspace's whitelist", { station: peer.slice(0, 8), error: (e as Error).message });
+      })));
+      // (stations no longer of this station's workspaces: what they said forgotten)
+      for (const peer of Object.keys(state.autoPeers ?? {})) if (!rosters.has(peer)) delete state.autoPeers![peer];
+    }
     /// Its answer; a refusal kept on what it was of (`hosted`: shown where it is shared, till it is taken).
     const tell = async (peer: string, ws: string | null, request: Json, hosted?: Hosted): Promise<Json | Error> => {
       try {
@@ -770,7 +909,7 @@ export class Sharing {
           const version = hosted.version;
           if (hosted.told[peer] === version) continue;
           peers.push(
-            tell(peer, ws, { method: "share.changed", id, kind: now.kind, name: now.name, version, allow: now.allow }, hosted).then((r) => {
+            tell(peer, ws, { method: "share.changed", id, kind: now.kind, name: now.name, version, allow: now.allow, ...(now.allowAuto ? { allowAuto: true } : {}) }, hosted).then((r) => {
               if (!(r instanceof Error)) hosted.told[peer] = version;
             }),
           );
@@ -885,6 +1024,8 @@ export class Sharing {
           }
           had.version = Number(got?.version ?? 0);
           had.allow = Array.isArray(got?.allow) ? got.allow : null;
+          if (got?.allowAuto === true) had.allowAuto = true;
+          else delete had.allowAuto;
           had.stale = false;
           this.writeState(state);
         }
@@ -1193,11 +1334,28 @@ export class Sharing {
     }
     if (method === "share.take") return this.take(peer, request);
     if (method === "share.borrow") return this.borrow(peer, id, request);
+    // Another station says whether it is on the workspace's whitelist (takes automatically assigned chats, and not
+    // only tasks), as that changed: who may use what follows the whitelist here changes with it.
+    if (method === "share.autoChats") {
+      this.heardAuto(peer, request?.acceptAutoChats === true && request?.tasksOnly !== true);
+      return { heard: true };
+    }
     const state = this.readState();
     const moved = state.moved[id];
     if (moved && method === "share.version") return { moved: moved.to };
-    const own = this.shares().get(id);
+    let own = this.shares().get(id);
     if (!own) throw new Error(NOT_SHARED);
+    // One that follows the whitelist, asked by a station not heard from (this station just started, say): that one
+    // asked first. Not answered, refused for now (its copy kept), never as not its (NOT_FOR_IT).
+    if (own.allowAuto === true && !this.mayUse(own.allow, peer) && state.autoPeers?.[peer] === undefined) {
+      try {
+        await this.describeAuto(peer, workspace ?? null);
+      } catch {
+        throw new Error(AUTO_UNKNOWN);
+      }
+      own = this.shares().get(id);
+      if (!own) throw new Error(NOT_SHARED);
+    }
     // Who may use it is this station's own word, said as such (a copy is taken away on it, notOurs); where a station
     // is, the cloud's list (not known, or leaving it out a while): refused apart, a copy kept on that.
     if (!this.mayUse(own.allow, peer)) throw new Error(NOT_FOR_IT);
@@ -1226,7 +1384,7 @@ export class Sharing {
         const at = state.hosted[id]?.version ?? 0;
         // It has a copy now: it is told when this one changes.
         this.told(id, peer, at);
-        return { version: at, profile: portable(now.profile), email, allow: now.allow, workspaces: this.sharedIn(now.profile), quotaRevision: state.hosted[id]?.quotaRevision ?? 0 };
+        return { version: at, profile: portable(now.profile), email, allow: now.allow, ...(now.allowAuto ? { allowAuto: true } : {}), workspaces: this.sharedIn(now.profile), quotaRevision: state.hosted[id]?.quotaRevision ?? 0 };
       }
       if (method === "share.lend") {
         if (this.moving.has(id)) throw new Error("the login is being moved to another station");
@@ -1300,7 +1458,10 @@ export class Sharing {
       if (had?.kind === "skill" && had.name !== name) dropped = this.unlinkSkill(id, { ...had });
       // A skill of a joined workspace's station: linked into that workspace's skills.
       const where = kind === "skill" && had === undefined && ws !== null && ws !== this.deps.cloud.home() ? { workspace: ws } : {};
-      state.borrowed[id] = { ...(had ?? { version: -1, hash: "" }), ...where, kind, name, host: peer, allow: Array.isArray(request.allow) ? request.allow : null, stale: true };
+      const now: Borrowed = { ...(had ?? { version: -1, hash: "" }), ...where, kind, name, host: peer, allow: Array.isArray(request.allow) ? request.allow : null, stale: true };
+      if (request.allowAuto === true) now.allowAuto = true;
+      else delete now.allowAuto;
+      state.borrowed[id] = now;
     }
     this.writeState(state);
     if (dropped !== null) await dropped;
@@ -1739,8 +1900,10 @@ export class Sharing {
   /// keep what they had (allowAmong), so a choice made in one workspace never undoes one made in another, as a list made
   /// of one workspace's stations and written whole did (the user, 2026-11-13: 「我明明关掉对几个特定机子的 Profile 分享了，
   /// 但老是莫名其妙就重置了」).
-  /// `by`: who asked (said in the log, which is where a change nobody remembers making is found).
-  async shareProfile(profileId: string, on: boolean, allow: string[] | null, among: string[] | null = null, by: string | null = null) {
+  /// `by`: who asked (said in the log, which is where a change nobody remembers making is found). `allowAuto`: who may use
+  /// it follows the workspace's whitelist (autoAllow), `allow` then naming only those a move lent it to besides (none:
+  /// null), `among` not read; else a list as before, one that followed the whitelist taken as the stations that made.
+  async shareProfile(profileId: string, on: boolean, allow: string[] | null, among: string[] | null = null, by: string | null = null, allowAuto = false) {
     const p = this.profiles().find((x) => x.id === profileId);
     if (!p) throw new Error(`unknown profile ${profileId}`);
     if (isObject(p.share) && p.share.borrowed === true) throw new Error("this profile is another station's");
@@ -1748,7 +1911,7 @@ export class Sharing {
     if (refused !== null) throw new Error(refused);
     const had = isObject(p.share) && typeof p.share.id === "string" ? (p.share.id as string) : null;
     // (the stations it reaches are said by the cloud: a station just started waits for them, as a login wanted does)
-    if (on && among !== null) await this.rosterSaid();
+    if (on && among !== null && !allowAuto) await this.rosterSaid();
     const stored: { allow: string[] | null } = { allow: null };
     await this.deps.config.updateSoon((raw) => {
       for (const x of raw.profiles ?? []) {
@@ -1757,11 +1920,16 @@ export class Sharing {
           delete x.share;
           continue;
         }
+        if (allowAuto) {
+          stored.allow = allow !== null && allow.length > 0 ? allow : null;
+          x.share = { id: had ?? newId(), allow: stored.allow, allowAuto: true };
+          continue;
+        }
         stored.allow = among === null ? allow : this.allowAmong(x, allow, among);
         x.share = { id: had ?? newId(), allow: stored.allow };
       }
     });
-    const who = stored.allow === null ? "every station" : stored.allow.map((s) => s.slice(0, 8)).join(",");
+    const who = allowAuto ? `the workspace's whitelist${stored.allow === null ? "" : ` and ${stored.allow.map((s) => s.slice(0, 8)).join(",")}`}` : stored.allow === null ? "every station" : stored.allow.map((s) => s.slice(0, 8)).join(",");
     log.info("share", "who may use a shared profile changed", { profile: profileId, shared: on, allow: on ? who : null, by });
     await this.syncHosted();
     this.deps.changed();
@@ -1777,7 +1945,8 @@ export class Sharing {
     const me = this.me();
     const shown = new Set(among);
     const yes = new Set(allow ?? among);
-    const before: string[] | null = isObject(p.share) && Array.isArray(p.share.allow) ? p.share.allow : null;
+    // (one that followed the whitelist: the stations it made, so that another workspace's keep what they had)
+    const before: string[] | null = isObject(p.share) && p.share.allowAuto === true ? this.autoAllow(p.share.allow) : isObject(p.share) && Array.isArray(p.share.allow) ? p.share.allow : null;
     const rosters = this.rosters();
     const reached = rosters === null ? null : [...rosters.keys()].filter((peer) => this.reach({ kind: "profile", profile: p }, peer, rosters) !== null);
     if (before === null && among.every((s) => s === me || yes.has(s))) return null;
@@ -1845,7 +2014,11 @@ export class Sharing {
     if (!isObject(p.share) && !sharing) return this.moveOwn(p, to, ws, credentials, t, lang);
     const id = sharing ? newId() : (p.share.id as string);
     if (this.moving.has(id)) throw new Said(t("station.share.moving"));
-    const allow: string[] | null = sharing ? [me!, to] : Array.isArray(p.share.allow) ? p.share.allow : null;
+    // (one that follows the whitelist: the stations it makes now, said to the station it goes to with what it follows,
+    // and to one from before as the list it is)
+    const auto = !sharing && p.share.allowAuto === true;
+    const allow: string[] | null = sharing ? [me!, to] : auto ? this.autoAllow(p.share.allow) : Array.isArray(p.share.allow) ? p.share.allow : null;
+    const following = auto ? { allowAuto: true, extra: Array.isArray(p.share.allow) ? p.share.allow : null } : {};
     const state = this.readState();
     const was = sharing ? undefined : state.hosted[id];
     const done = Promise.withResolvers<void>();
@@ -1865,7 +2038,7 @@ export class Sharing {
         made = true;
         log.info("share", "a profile shared as it moves, with this station and the one it goes to only", { profile: profileId, to });
       }
-      const answer = await this.deps.ask(to, ws, { method: "share.take", id, profileId, profile: { ...portable(p), access: p.access }, served: this.sharedIn(p), lang, email, credentials, allow, version: (was?.version ?? 0) + 1, quotaRevision: was?.quotaRevision ?? 0, resetKeys: was?.resetKeys ?? [] });
+      const answer = await this.deps.ask(to, ws, { method: "share.take", id, profileId, profile: { ...portable(p), access: p.access }, served: this.sharedIn(p), lang, email, credentials, allow, ...following, version: (was?.version ?? 0) + 1, quotaRevision: was?.quotaRevision ?? 0, resetKeys: was?.resetKeys ?? [] });
       taken = true;
       if (typeof answer?.id === "string") there = answer.id;
       // Ours no more: the login forgotten (the new host renews it now), the profile kept as a copy under the same id.
@@ -1880,7 +2053,7 @@ export class Sharing {
       const after = this.readState();
       delete after.hosted[id];
       // Fetched from the new host at once: the workspaces it shares it in are its to say now.
-      if (keeps) after.borrowed[id] = { version: (was?.version ?? 0) + 1, hash: "", kind: "profile", name: String(p.name ?? p.id), host: to, allow, stale: true, quotaRevision: was?.quotaRevision ?? 0 };
+      if (keeps) after.borrowed[id] = { version: (was?.version ?? 0) + 1, hash: "", kind: "profile", name: String(p.name ?? p.id), host: to, allow, ...(auto ? { allowAuto: true } : {}), stale: true, quotaRevision: was?.quotaRevision ?? 0 };
       after.moved[id] = { to, tell: Object.keys(was?.told ?? {}) };
       this.writeState(after);
     } catch (e) {
@@ -1922,12 +2095,19 @@ export class Sharing {
     if (!isObject(p.share)) {
       await this.shareProfile(profileId, true, [me, to], null, "a move");
       made = true;
+    } else if (p.share.allowAuto === true) {
+      // (one that follows the whitelist and leaves `to` out: `to` let besides, the whitelist still followed)
+      if (!this.autoAllow(p.share.allow).includes(to)) {
+        await this.shareProfile(profileId, true, [...(Array.isArray(p.share.allow) ? p.share.allow : []), to], null, "a move", true);
+        widened = true;
+      }
     } else if (Array.isArray(p.share.allow) && !p.share.allow.includes(to)) {
       await this.shareProfile(profileId, true, [...p.share.allow, to], null, "a move");
       widened = true;
     }
     const now = this.profiles().find((x) => x.id === profileId)!;
     const share = String(now.share.id);
+    const allow = this.shares().get(share)?.allow ?? null;
     // (its account read first: its version and allowance's revision then of one moment)
     const email = now.access?.kind === "subscription" ? await this.emailOf(now) : null;
     const state = this.readState();
@@ -1935,7 +2115,7 @@ export class Sharing {
     try {
       await this.deps.ask(to, null, {
         method: "share.borrow", id: share, version, profile: portable(now), email,
-        allow: Array.isArray(now.share.allow) ? now.share.allow : null, workspaces: this.sharedIn(now), quotaRevision: state.hosted[share]?.quotaRevision ?? 0,
+        allow, ...(now.share.allowAuto === true ? { allowAuto: true } : {}), workspaces: this.sharedIn(now), quotaRevision: state.hosted[share]?.quotaRevision ?? 0,
       });
       this.told(share, to, version);
     } catch (e) {
@@ -1951,7 +2131,10 @@ export class Sharing {
     const p = this.profiles().find((x) => isObject(x.share) && x.share.id === share && x.share.borrowed !== true);
     if (p === undefined) return;
     if (made) await this.shareProfile(String(p.id), false, null, null, "a move done with it");
-    else if (widened && Array.isArray(p.share.allow)) await this.shareProfile(String(p.id), true, p.share.allow.filter((x: string) => x !== to), null, "a move done with it");
+    else if (widened && p.share.allowAuto === true) {
+      const rest = (Array.isArray(p.share.allow) ? p.share.allow : []).filter((x: string) => x !== to);
+      await this.shareProfile(String(p.id), true, rest.length > 0 ? rest : null, null, "a move done with it", true);
+    } else if (widened && Array.isArray(p.share.allow)) await this.shareProfile(String(p.id), true, p.share.allow.filter((x: string) => x !== to), null, "a move done with it");
   }
 
   /// A share lent to this station by its host for a move (`lendTo`): its copy placed here before this answers.
@@ -1970,6 +2153,8 @@ export class Sharing {
     const had: Borrowed = before
       ? { ...before, host: peer, allow }
       : { version: -1, hash: "", kind: "profile", name: String(request?.profile?.name ?? id), host: peer, allow, stale: true };
+    if (request?.allowAuto === true) had.allowAuto = true;
+    else delete had.allowAuto;
     const home = await this.placeProfile(id, had, request);
     had.version = Number(request?.version ?? 0);
     had.quotaRevision = Number(request?.quotaRevision ?? 0);
@@ -1997,7 +2182,8 @@ export class Sharing {
       return false;
     }
     const allow: string[] | null = Array.isArray(p.share.allow) ? p.share.allow : null;
-    if (allow === null || allow.some((s) => !stations.includes(s))) {
+    // (one a person set to follow the whitelist since stays shared too)
+    if (p.share.allowAuto === true || allow === null || allow.some((s) => !stations.includes(s))) {
       log.info("share", "a share a move made stays shared: a person allowed other stations since", { profile: p.id, share, allow: allow === null ? "every station" : allow.map((s) => s.slice(0, 8)).join(",") });
       return false;
     }
@@ -2147,7 +2333,10 @@ export class Sharing {
     await mkdir(home, { recursive: true });
     await this.writeSignIns(home, given, request.credentials);
     const allow = Array.isArray(request.allow) ? request.allow : null;
-    const made: Json = { ...portable(given), access: given.access, id: localId, home: `homes/${localId}`, share: { id, allow } };
+    // (one that follows the whitelist goes on following it here, with those a move lent it to besides)
+    const auto = request.allowAuto === true;
+    const extra = Array.isArray(request.extra) ? request.extra.filter((s: unknown) => typeof s === "string") : [];
+    const made: Json = { ...portable(given), access: given.access, id: localId, home: `homes/${localId}`, share: auto ? { id, allow: extra.length > 0 ? extra : null, allowAuto: true } : { id, allow } };
     if (withheld !== null && withheld.length > 0) made.withheld = withheld;
     if (!isObject(made.env)) made.env = {};
     // (hashed as it will be, its login written: the profile, the copy let go and the share then, in this share's turn)
@@ -2188,10 +2377,12 @@ export class Sharing {
       // The allowance is the host's, naming the stations of each of its workspaces: only this one's and the viewer's.
       const host = String(p.share.host ?? "");
       const had = this.readState().borrowed[id];
-      return { id, role: "user", host, allow: had?.allow?.filter(seen) ?? null, reachable: !this.unreachable.has(host), pausable: true };
+      return { id, role: "user", host, allow: had?.allow?.filter(seen) ?? null, ...(had?.allowAuto === true ? { allowAuto: true as const } : {}), reachable: !this.unreachable.has(host), pausable: true };
     }
     const told = this.readState().hosted[id]?.told ?? {};
     const users = Object.entries(told).filter(([k, v]) => v >= 0 && seen(k)).map(([k]) => k);
+    // (one that follows the whitelist: always a list, the stations it makes now, for apps from before that read it so)
+    if (p.share.allowAuto === true) return { id, role: "host", host: me ?? "", allow: this.autoAllow(p.share.allow).filter(seen), allowAuto: true, reachable: null, users };
     return { id, role: "host", host: me ?? "", allow: Array.isArray(p.share.allow) ? p.share.allow.filter(seen) : null, reachable: null, users };
   }
 

@@ -1,4 +1,5 @@
-import { MbBackfill, readerBinary } from "../read/mb-reader.ts";
+import { MbBackfill, resolveReaderSelection } from "../read/mb-reader.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import { log } from "../ops/log.ts";
 import { releaseStoppedBackfill } from "../store/backfill.ts";
 import { sessionDirectoriesReady, sessionDirectory, sessionDirectoryArguments, SESSION_DIR_LIVE_MANY, type DirectorySession } from "../store/session-directory.ts";
@@ -12,9 +13,10 @@ export class SessionDirectoryBuilder {
   private readonly cancelled = Promise.withResolvers<boolean>();
   private readonly previous: Promise<boolean>;
 
-  constructor(privateStore: Store, previous: Promise<void>, binary?: string) {
+  constructor(privateStore: Store, previous: Promise<void>, binary?: string, readers?: () => ReaderSelectConfig) {
     this.store = privateStore;
     this.binary = binary;
+    this.readers = readers;
     this.previous = previous.then(() => true, (error) => {
       log.warn("memory", "could not wait for the previous station before preparing directories", { error: (error as Error).message });
       return false;
@@ -23,6 +25,7 @@ export class SessionDirectoryBuilder {
 
   private readonly store: Store;
   private readonly binary: string | undefined;
+  private readonly readers: (() => ReaderSelectConfig) | undefined;
 
   find(dir: string): DirectorySession | null {
     if (this.stopped) return null;
@@ -79,7 +82,10 @@ export class SessionDirectoryBuilder {
     return new Promise<boolean>((resolve) => {
       // (by the MoonBit builder, station/mb's src/activity, directory.mbt: `MbBackfill`)
       let current: MbBackfill;
-      try { current = new MbBackfill(this.binary ?? readerBinary(), ["--builder", "session-backfill", "--db", path], this.store.backfillPriority, 20); }
+      try {
+        const bin = resolveReaderSelection("session-backfill", { binary: this.binary, config: this.readers, logAt: "readers" }).primaryBinary;
+        current = new MbBackfill(bin, ["--builder", "session-backfill", "--db", path], this.store.backfillPriority, 20);
+      }
       catch (error) {
         log.warn("memory", "the session directory worker could not start", { error: (error as Error).message });
         resolve(false);

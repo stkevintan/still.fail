@@ -14,8 +14,13 @@ type J = any;
 const isObject = (v: unknown): v is Record<string, any> => v !== null && typeof v === "object" && !Array.isArray(v);
 const KEYED = new Set(["opencode-go", "anthropic-api", "api-provider"]);
 
-/// A station of the workspace as the entries name it.
-export type ShareStation = { id: string; station: string; name: string; online: boolean; allowed: boolean };
+/// A station of the workspace as the entries name it: `acceptAutoChats`, `tasksOnly` whether it is on the workspace's
+/// whitelist (a share following it reaches it).
+export type ShareStation = { id: string; station: string; name: string; online: boolean; allowed: boolean; acceptAutoChats: boolean; tasksOnly: boolean };
+
+/// Whether a station is on the workspace's whitelist as its overview says it (`autoChats`, not one only running
+/// tasks), as the station hosting a share following it goes by (station share/index.ts `autoAllow`).
+const onWhitelist = (s: J) => s?.overview?.autoChats?.enabled === true && s?.mode !== "tasks";
 
 /// Which account a profile is: the same one on several stations has the same identity (null: none to tell by).
 function account(p: J): string | null {
@@ -56,7 +61,8 @@ function listedProfiles(overview: J, station: J): J[] {
   return profiles.filter((p: J) => !(isObject(p?.share) && p.share.role === "user" && !profileServes(p, ws, joined)));
 }
 
-/// `stations`: the `stations` view's items (each with its decorated overview).
+/// `stations`: the `stations` view's items (each with its decorated overview, its `autoChats` whether it is on the
+/// workspace's whitelist).
 export function workspaceProfiles(stations: J[]): J {
   const byId = new Map(stations.map((s) => [String(s.id), s]));
   const name = (id: string) => String(byId.get(id)?.name ?? id.slice(0, 8));
@@ -107,6 +113,8 @@ export function workspaceProfiles(stations: J[]): J {
     const at = [first((m, i) => owns(m) && m.usable && !troubled(i)), first((m) => owns(m) && m.usable), first((m) => owns(m) && m.online), first(owns), 0].find((i) => i >= 0)!;
     const [s, p] = list[at]!;
     const subscription = p.access?.kind === "subscription" || p.access?.login === true;
+    const editable = owns(members[at]);
+    const several = members.filter(owns).length > 1;
     const servesHere = list.map(([station, profile]) => profileServes(profile, String(station.station).split("/")[0] ?? "", station.joined === true));
     // The host's sharing permission and workspace scope are authoritative over an old copy's; different shares of
     // this account can each allow different stations. A copy whose host has not been read carries what it knows.
@@ -119,7 +127,10 @@ export function workspaceProfiles(stations: J[]): J {
         shares.set(share.id, { share, serves: servesHere[i]! });
       }
     }
-    const allowed = (share: J, stationId: string) => String(share.host) === stationId || share.allow == null || (Array.isArray(share.allow) && share.allow.includes(stationId));
+    // (one following the whitelist: its host's list of the stations it makes, and any on the whitelist as the viewer
+    // knows it, its host told the same as the viewer is)
+    const allowed = (share: J, stationId: string) => String(share.host) === stationId ||
+      (share.allowAuto === true ? (Array.isArray(share.allow) && share.allow.includes(stationId)) || onWhitelist(byId.get(stationId)) : share.allow == null || (Array.isArray(share.allow) && share.allow.includes(stationId)));
     // A station is a place once even when it has several profiles for this account. Use a working copy for its state
     // and link, preferring a local copy where equally well; one broken copy must not make the whole station look broken.
     const byStation = new Map<string, { i: number; rank: number }>();
@@ -178,6 +189,12 @@ export function workspaceProfiles(stations: J[]): J {
     const where = availableAt.length > 0 ? t("core-views.profiles.usableOn", { stations: availableAt.join(t("core-views.list_separator")) }) : "";
     const kind = group(p);
     const usable = members.some((m) => m.usable);
+    const hostOnline = byId.get(host)?.online === true;
+    const canShare = s.overview?.sharing === true;
+    // Whether the list's 多选 can share it or set its stations (`profile.share` on the row's station's profile), else why
+    // not: a copy of another station's, one signed in on several (each set on its own page), its station sharing
+    // nothing (one from before), down, or its kind of login that cannot be lent yet.
+    const batchWhy = !editable ? "borrowed" : several ? "several" : !canShare ? "unsupported" : !hostOnline ? "offline" : share === null && p.shareable === false ? "unshareable" : null;
     const state = stateOf(usable, name(host), p, signedIn.length > 1 ? troubleOn(list, members) : null);
     // A station's warning stays on the account row. A working copy still supplies the pool.
     const working = state.look ? [...byStation.values()].find(({ i }) =>
@@ -195,9 +212,13 @@ export function workspaceProfiles(stations: J[]): J {
       // copy may be named otherwise), a key by its profile's name.
       title: (subscription || p.access?.kind === "service") && typeof p.email === "string" && p.email !== "" ? p.email : String(p.name ?? ""),
       shared: share !== null,
+      shareAuto: share?.allowAuto === true,
+      canBatchShare: batchWhy === null,
+      ...(batchWhy === null ? {} : { batchShareWhy: batchWhy }),
+      batchShareAllowAuto: s.overview?.shareAllowAuto === true,
       host,
       hostName: name(host),
-      hostOnline: byId.get(host)?.online === true,
+      hostOnline,
       // Usable where any of its copies is.
       usable,
       ...state,
@@ -205,16 +226,20 @@ export function workspaceProfiles(stations: J[]): J {
       where,
       allow,
       stations: stations.map(
-        (x): ShareStation => ({ id: String(x.id), station: String(x.station), name: String(x.name), online: x.online === true, allowed: allow === null || allow.includes(String(x.id)) || String(x.id) === host }),
+        (x): ShareStation => ({
+          id: String(x.id), station: String(x.station), name: String(x.name), online: x.online === true,
+          allowed: share !== null ? allowed(share, String(x.id)) : allow === null || allow.includes(String(x.id)) || String(x.id) === host,
+          acceptAutoChats: x.overview?.autoChats?.enabled === true, tasksOnly: x.mode === "tasks",
+        }),
       ),
-      editable: owns(members[at]),
-      canShare: s.overview?.sharing === true,
+      editable,
+      canShare,
       members,
       places,
       // What its row says of its members and its profile's users, the row not carrying them (schema.ts ProfileRow):
       // whether it is signed in on more than one of its members (its row opens the account's page, else the profile's),
       // how many connects use it.
-      several: members.filter(owns).length > 1,
+      several,
       usedCount: Array.isArray(p.usedBy) ? p.usedBy.length : 0,
     });
   }

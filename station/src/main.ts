@@ -299,11 +299,21 @@ function run() {
     // one before stops saying it), with each sample of its thread, and as the cloud is heard or not.
     const mesh = yield* MeshNative;
     let heldMs = 0;
+    let lastOpenFds: number | null = null;
     let online = plane.state.reached;
     let healthWritten: Promise<void> = Promise.resolve();
     const sayHealth = () => {
       if (!healthSaid) return;
-      const health = { pid: process.pid, updatedAt: wall.now(), heldMaxMs: Math.round(heldMs), front: mesh.frontLink?.() ?? "direct" as const, presenceOnline: plane.state.reached, relayConflict: mesh.relayConflict?.() === true };
+      const health = {
+        pid: process.pid,
+        updatedAt: wall.now(),
+        heldMaxMs: Math.round(heldMs),
+        front: mesh.frontLink?.() ?? "direct" as const,
+        presenceOnline: plane.state.reached,
+        relayConflict: mesh.relayConflict?.() === true,
+        rssBytes: process.memoryUsage.rss(),
+        ...(lastOpenFds !== null ? { openFds: lastOpenFds } : {}),
+      };
       healthWritten = healthWritten.then(() => writeHealth(data, health)).catch((e: Error) => log.warn("station", "health.json not written", { error: e.message }));
     };
     sayHealth();
@@ -340,6 +350,7 @@ function run() {
     // What runs out on this machine said before it does (ops/forewarn.ts), looked at with each sample.
     const forewarn = new Forewarn();
     const forewarned = () => void lookAt(data, mesh.relayConflict?.() === true).then((l) => {
+      if (l.openFds !== null) lastOpenFds = l.openFds;
       for (const w of forewarn.look(l, wall.now())) log.warn(w.at, w.message, w.fields);
     }, () => {});
     const files = timeFiles();

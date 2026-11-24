@@ -116,12 +116,13 @@ async fn Actors::task(
   }
   if method == "task.list" {
     session_needed()
-    let tasks : Array[Json] = []
+    let listed : Array[(Int, Double, String, Json)] = []
     for t in self.tasks_of(workspace, room_peer, session) {
       let job = self.rstore("getJob", [jstr(self.job_of_task(t.dir))])
-      tasks.push({ "key": field_of(t.meta, "key"), "spec": field_of(t.meta, "spec"), "job": if job is Null { Json::null() } else { self.rnode("jobJson", [job]) } })
+      let shown = if job is Null { Json::null() } else { self.rnode("jobJson", [job]) }
+      listed.push((list_rank(shown), list_time(shown), text_of(t.meta, "key"), { "key": field_of(t.meta, "key"), "spec": field_of(t.meta, "spec"), "job": shown }))
     }
-    return { "tasks": Json::array(tasks) }
+    return list_bounded(listed)
   }
   if method == "session.close" {
     session_needed()
@@ -1243,4 +1244,172 @@ async fn Actors::revoke(self : Actors, rosters : Json, current : Bool) -> Unit r
       ignore(self.job_stop(id)) catch { _ => () }
     }
   }
+}
+
+///|
+/// `task.list` answers at most this many tasks, in at most this many bytes of JSON: a session's tasks are all its
+/// history there, and the answer goes back as one line a peer reads at most 1 MiB of (mesh/peer.ts `MAX_MESSAGE`).
+let list_most : Int = 100
+
+///|
+let list_bytes : Int = 256 * 1024
+
+///|
+/// A listed task's command, name and each path it brings back, at most (UTF-8 bytes); `task.get` says its job whole.
+let list_text_bytes : Int = 256
+
+///|
+/// A listed task's paths it brings back, at most.
+let list_back_most : Int = 16
+
+///|
+/// The longest start of `s` of at most `most` UTF-8 bytes (as `bytes_len` counts them), never half a character.
+fn clip_utf8(s : String, most : Int) -> String? {
+  if bytes_len(s) <= most {
+    return None
+  }
+  let mut n = 0
+  let mut i = 0
+  while i < s.length() {
+    let c = s.unsafe_get(i).to_int()
+    let (bytes, units) = if c < 0x80 {
+      (1, 1)
+    } else if c < 0x800 {
+      (2, 1)
+    } else if c >= 0xd800 && c <= 0xdbff && i + 1 < s.length() && s.unsafe_get(i + 1).to_int() >= 0xdc00 && s.unsafe_get(i + 1).to_int() <= 0xdfff {
+      (4, 2)
+    } else {
+      (3, 1)
+    }
+    if n + bytes > most {
+      break
+    }
+    n += bytes
+    i += units
+  }
+  Some(s.exact_view(end=i).to_owned() + "…")
+}
+
+///|
+/// `v` with its text `key` clipped to `list_text_bytes`, and whether it was.
+fn clip_field(v : Json, key : String) -> (Json, Bool) {
+  match field_of(v, key) {
+    String(t) =>
+      match clip_utf8(t, list_text_bytes) {
+        Some(c) => (with_field(v, key, jstr(c)), true)
+        None => (v, false)
+      }
+    _ => (v, false)
+  }
+}
+
+///|
+/// A listed task as `task.list` says it: its spec's and job's command and name clipped, its paths brought back at most
+/// `list_back_most`, each clipped (`backMore` says how many more there are), and whether anything was.
+fn list_entry(entry : Json) -> (Json, Bool) {
+  let mut clipped = false
+  let mut spec = field_of(entry, "spec")
+  for k in ["command", "name"] {
+    let (v, c) = clip_field(spec, k)
+    spec = v
+    clipped = clipped || c
+  }
+  if field_of(spec, "back") is Array(back) {
+    let kept : Array[Json] = []
+    for p in back {
+      if kept.length() >= list_back_most {
+        break
+      }
+      match p {
+        String(t) =>
+          match clip_utf8(t, list_text_bytes) {
+            Some(c) => {
+              kept.push(jstr(c))
+              clipped = true
+            }
+            None => kept.push(p)
+          }
+        _ => kept.push(p)
+      }
+    }
+    if back.length() > kept.length() {
+      spec = with_field(spec, "backMore", jnum((back.length() - kept.length()).to_double()))
+      clipped = true
+    }
+    if clipped {
+      spec = with_field(spec, "back", Json::array(kept))
+    }
+  }
+  let mut job = field_of(entry, "job")
+  if !(job is Null) {
+    for k in ["command", "name"] {
+      let (v, c) = clip_field(job, k)
+      job = v
+      clipped = clipped || c
+    }
+  }
+  ({ "key": field_of(entry, "key"), "spec": spec, "job": job }, clipped)
+}
+
+///|
+/// Where a task is listed: running first (holding a place of the station's), then waiting in its queue, then the rest.
+fn list_rank(job : Json) -> Int {
+  if text_of(job, "state") != "running" {
+    2
+  } else if field_of(job, "queued") is True {
+    1
+  } else {
+    0
+  }
+}
+
+///|
+/// When a task last did anything (its end, or its start), 0 if never started.
+fn list_time(job : Json) -> Double {
+  let n = (k : String) => match field_of(job, k) {
+    Number(x, ..) => x
+    _ => 0.0
+  }
+  if n("endedAt") > n("startedAt") { n("endedAt") } else { n("startedAt") }
+}
+
+///|
+/// `task.list`'s answer of the tasks listed (rank, time, key, entry): running and queued first, then the latest, ties by
+/// key; at most `list_most` of them in at most `list_bytes`. `total` says how many there are; `truncated`, only when
+/// not all are said, and `note`, when anything was left out or clipped.
+fn list_bounded(listed : Array[(Int, Double, String, Json)]) -> Json {
+  listed.sort_by((a, b) => if a.0 != b.0 {
+    a.0.compare(b.0)
+  } else if a.1 != b.1 {
+    b.1.compare(a.1)
+  } else {
+    @search.compare_units(a.2, b.2)
+  })
+  let tasks : Array[Json] = []
+  // `{"tasks":[` … `],"total":N,"truncated":true,"note":"…"}`: room kept for all but the tasks.
+  let mut used = 1024
+  let mut clipped = false
+  for one in listed {
+    if tasks.length() >= list_most {
+      break
+    }
+    let (entry, c) = list_entry(one.3)
+    let size = bytes_len(js_text(entry)) + 1
+    if used + size > list_bytes {
+      break
+    }
+    used += size
+    clipped = clipped || c
+    tasks.push(entry)
+  }
+  let answer : Map[String, Json] = { "tasks": Json::array(tasks), "total": jnum(listed.length().to_double()) }
+  if tasks.length() < listed.length() {
+    answer["truncated"] = jbool(true)
+  }
+  if tasks.length() < listed.length() || clipped {
+    answer["note"] = jstr(
+      "\{tasks.length()} of \{listed.length()} tasks listed (running and queued first, then the latest), long commands and paths clipped (…); action get with a task's key says its job whole",
+    )
+  }
+  Json::object(answer)
 }

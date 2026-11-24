@@ -113,8 +113,8 @@ export function heldIn(data: Data, transcriptSpared?: (station: string, key: str
     numbers: (c) => data.logNumbers(table(c), c.station, c.id),
     span: (c) => data.logSpan(table(c), c.station, c.id),
     count: (c, from, to) => data.logCount(table(c), c.station, c.id, from, to),
-    put: (c, items, cutAfter) => data.putItems(table(c), c.station, c.id, items, cutAfter),
-    letGo: (c) => data.evicted(table(c), c.station, c.id) || (c.kind === TRANSCRIPT && transcriptSpared?.(c.station, c.id) === true),
+    put: (c, items, cutAfter) => (c.kind === TRANSCRIPT && cutAfter === null ? data.putItemsSoon("transcript", c.station, c.id, items) : data.putItems(table(c), c.station, c.id, items, cutAfter)),
+    letGo: (c) => data.evicted(table(c), c.station, c.id) || (c.kind === TRANSCRIPT && (data.transcriptOverBudget(c.station, c.id) || transcriptSpared?.(c.station, c.id) === true)),
     head: (c) => (c.kind === ENTRIES ? data.threadLast(c.station, Number(c.id)) : c.kind === LETTERS ? lettersHead(c) : data.transcriptHead(c.station, c.id)),
     raise: (c, n) => {
       if (c.kind === ENTRIES) data.raiseLast(c.station, Number(c.id), n);

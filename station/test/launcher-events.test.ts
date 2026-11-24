@@ -57,6 +57,22 @@ test("only the launcher's own fields are said", () => {
   assert.deepEqual(event, { level: "error", kind: "node_crashed", fields: { at: 5, kind: "node_crashed", pid: 7, how: "was ended by signal 9", taken: true, failures: 0 } });
 });
 
+test("hung diagnostics fields pass through while unknown fields stay filtered", () => {
+  const diag = {
+    ...HUNG,
+    procState: "S",
+    wchan: "futex_wait_queue",
+    pcpu: 1.5,
+    threads: 14,
+    kernelStack: "futex_wait_queue+0x60/0x90 <- futex_wait+0x170/0x260",
+    mainStack: "start (in dyld) -> main (in node)",
+    argv: ["/Users/someone/secret"],
+  };
+  const event = launcherEventOf(JSON.stringify(diag));
+  const { level: _, argv: _argv, ...expected } = diag;
+  assert.deepEqual(event, { level: "error", kind: "node_hung_killed", fields: expected });
+});
+
 test("with no level said, a kill or a crash is an error and the rest warnings", () => {
   const level = (kind: string, said?: string) => launcherEventOf(JSON.stringify({ at: 1, kind, ...(said ? { level: said } : {}) }))?.level;
   assert.deepEqual(["node_hung_killed", "node_crashed", "front_hung_killed", "front_gone", "handoff_failed", "retiring_killed", "something_new"].map((k) => level(k)), ["error", "error", "error", "warn", "warn", "warn", "warn"]);

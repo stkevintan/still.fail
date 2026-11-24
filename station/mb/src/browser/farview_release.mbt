@@ -1,4 +1,4 @@
-// Farview's release (src/browser/farview-release.ts; AFK-surf/farview's `tools/package.sh`: bin/host.exe,
+// Farview's release (src/browser/farview-release.ts; AFK-surf/farview-legacy's `tools/package.sh`: bin/host.exe,
 // bin/agent.exe, lib/), got by a station that has it nowhere else: where config.json names no directory of its own, a
 // station on a system Farview is built for takes the release this station's version names (its commit, as
 // apps/mbui/farview.pin pins the client the app draws its tabs with, and the SHA-256 of its tarball), downloaded the
@@ -80,7 +80,7 @@ pub fn farview_sources(name : String, env : Map[String, String]) -> Array[String
   let repo = env.get("STILLFAIL_NATIVE_REPO").unwrap_or("AFK-surf/monoid")
   let release = env.get("STILLFAIL_NATIVE_RELEASE").unwrap_or("native-artifacts")
   [
-    "gh:AFK-surf/farview@builds/\{name}", "\{store}/\{name}", "https://github.com/\{repo}/releases/download/\{release}/\{name}",
+    "gh:AFK-surf/farview-legacy@builds/\{name}", "\{store}/\{name}", "https://github.com/\{repo}/releases/download/\{release}/\{name}",
   ]
 }
 

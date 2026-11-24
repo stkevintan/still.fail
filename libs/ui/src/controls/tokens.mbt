@@ -1360,8 +1360,57 @@ pub fn custom_hue(key : String) -> Int? {
 }
 
 ///|
-/// The colour theme a key names: one of the five, or one of a hue's own; None for one not known.
+/// The key kept in prefs for 五彩色 (picks a hue automatically each time the app opens).
+pub let rainbow_accent_key : String = "rainbow"
+
+///|
+/// The default hue for 五彩色 before a run seeds one from its opening wall clock: emerald, distinct from the five presets.
+let default_rainbow_hue : Int = 150
+
+///|
+/// The hue currently chosen for 五彩色 (0..359): a signal so changing it updates themes reactively.
+// kept across runs: put back as a Tester starts (icons.mbt)
+let rainbow_hue : @signals.Signal[Int] = @signals.signal(default_rainbow_hue, same=fn(a, b) { a == b })
+
+///|
+/// Maps an opening timestamp (or any integer seed) to a uniform hue in 0..359 via SplitMix64 mixing so consecutive
+/// openings land on independent colours while staying deterministic for a given seed.
+pub fn rainbow_hue_of_seed(seed : Int64) -> Int {
+  let mut z = seed.reinterpret_as_uint64() + 0x9E3779B97F4A7C15UL
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBUL
+  z = z ^ (z >> 31)
+  (z % 360UL).to_int()
+}
+
+///|
+/// Sets the hue used when `rainbow` (五彩色) is active (normalized to 0..359).
+pub fn set_rainbow_hue(hue : Int) -> Unit {
+  rainbow_hue.set(((hue % 360) + 360) % 360)
+}
+
+///|
+/// The hue currently picked for 五彩色 (0..359).
+pub fn rainbow_hue_now() -> Int {
+  rainbow_hue.get()
+}
+
+///|
+/// The concrete tone key for `key`: resolves `rainbow` to its current `custom:<hue>` so cached themes follow it.
+fn resolved_accent_key(key : String) -> String {
+  if key == rainbow_accent_key {
+    "custom:" + rainbow_hue.untracked().to_string()
+  } else {
+    key
+  }
+}
+
+///|
+/// The colour theme a key names: one of the five, `rainbow`, or one of a hue's own; None for one not known.
 pub fn tone_of(key : String) -> AccentTone? {
+  if key == rainbow_accent_key {
+    return Some({ ..custom_tone(rainbow_hue.untracked()), key: rainbow_accent_key })
+  }
   if key == "ios-blue" {
     return Some({
       key: "ios-blue",
@@ -1444,7 +1493,7 @@ fn accented(p : Palette, dark : Bool, key : String) -> Palette {
 /// is asked, not only as a frame begins.
 fn theme_of(dark : Bool, more : Bool) -> Theme {
   let touch = native_input() is Finger
-  let accent = accent_set.untracked()
+  let accent = resolved_accent_key(accent_set.untracked())
   // (one of each: the same whenever it is asked, what is made of it kept as long as it is)
   match themes_made.get((dark, touch, accent, more)) {
     Some(t) => return t
@@ -1502,7 +1551,9 @@ let behind_dark : Int64 = 0x00000059L
 pub fn theme() -> Theme {
   let dark = dark_set.get().unwrap_or(false)
   // (read as a signal too: what is made once of the accent follows it)
-  accent_set.get() |> ignore
+  if accent_set.get() == rainbow_accent_key {
+    rainbow_hue.get() |> ignore
+  }
   // (and the system asking for more contrast: @ui.more_contrast, followed as it changes)
   let more = @ui.more_contrast()
   theme_of(dark, more)
@@ -1511,7 +1562,13 @@ pub fn theme() -> Theme {
 ///|
 /// The palette, light or dark (what a page drawn apart from the frame's own is told: a visualization's, viz_file.mbt).
 pub fn palette_of(dark : Bool) -> Palette {
-  accented(if dark { dark_palette } else { light_palette }, dark, accent_set.get())
+  let a = accent_set.get()
+  let key = if a == rainbow_accent_key {
+    "custom:" + rainbow_hue.get().to_string()
+  } else {
+    a
+  }
+  accented(if dark { dark_palette } else { light_palette }, dark, key)
 }
 
 // ---------------------------------------------------------------------------

@@ -165,7 +165,7 @@ test "droplet_role: slot 7 packing survives at_strength while slot 21 scales lin
 }
 
 ///|
-test "droplet_role: continuous frost exempts switch lens (slot7=-32), contrast frosts, glass_solid degrades to solid" {
+test "droplet_role: frost=0 keeps clear switch lens (slot7=-32), frost>0 monotonically frosts, contrast frosts, glass_solid degrades to solid" {
   let sw_gl = Glass::liquid(blur=0.0, tint=0xFFFFFF00L, solid=0xFFFFFFFFL, refraction=9.0, rim=1.0, bezel=9.0, droplet_role=2)
   let t = Tester::tree(w=200.0, h=120.0, fn(root) {
     root.box(fn(b) {
@@ -182,14 +182,40 @@ test "droplet_role: continuous frost exempts switch lens (slot7=-32), contrast f
     }
     None
   }
-  for fr in [0.00009, 0.00011, 0.5, 0.00009] {
-    set_glass_frost(fr)
-    t.set_increase_contrast(false)
+  // Default clear (frost == 0.0 and 0.0001) keeps crystal droplet (slot7=-32, alpha=0)
+  set_glass_frost(0.0)
+  t.set_increase_contrast(false)
+  t.draw()
+  guard find_glass() is Some((slot7_0, alpha_0)) else { fail("expected switch glass at frost=0.0") }
+  assert_true((slot7_0 - -32.0).abs() < 0.001, msg="frost=0.0 must keep slot7=-32.0, got \{slot7_0}")
+  assert_true(alpha_0 < 0.001, msg="frost=0.0 must keep clear alpha=0, got \{alpha_0}")
+  // C0 continuity across 0 -> eps -> 0.05 -> 0.10: slot7 stays -32.0 (blur==0) while alpha rises monotonically
+  let low_frosts = [0.0001, 0.00011, 0.05, 0.10]
+  let mut prev_low_a = alpha_0
+  for f in low_frosts {
+    set_glass_frost(f)
     t.draw()
-    guard find_glass() is Some((slot7, alpha)) else { fail("expected switch glass at frost=\{fr}") }
-    assert_true((slot7 - -32.0).abs() < 0.001, msg="frost=\{fr} must keep slot7=-32.0, got \{slot7}")
-    assert_true(alpha < 0.001, msg="frost=\{fr} must keep clear alpha=0, got \{alpha}")
+    guard find_glass() is Some((s7, al)) else { fail("expected switch glass at frost=\{f}") }
+    assert_true((s7 - -32.0).abs() < 0.001, msg="frost=\{f} must preserve slot7=-32.0 while a_frac<=0.12, got \{s7}")
+    assert_true(al >= prev_low_a - 0.0001, msg="frost=\{f} alpha must be non-decreasing: \{al} < \{prev_low_a}")
+    prev_low_a = al
   }
+  assert_true(prev_low_a > 0.08 && prev_low_a < 0.12, msg="frost=0.10 alpha should be ~0.094, got \{prev_low_a}")
+  // Positive frost (0.3 -> 0.5) monotonically increases blur (slot7 > 0) and tint alpha
+  set_glass_frost(0.3)
+  t.draw()
+  guard find_glass() is Some((slot7_30, alpha_30)) else { fail("expected switch glass at frost=0.3") }
+  assert_true(slot7_30 > 0.5 && alpha_30 > prev_low_a, msg="frost=0.3 should frost droplet: slot7=\{slot7_30}, alpha=\{alpha_30}")
+  set_glass_frost(0.5)
+  t.draw()
+  guard find_glass() is Some((slot7_50, alpha_50)) else { fail("expected switch glass at frost=0.5") }
+  assert_true(slot7_50 > slot7_30 && alpha_50 > alpha_30, msg="frost=0.5 must be more frosted than 0.3: (\{slot7_50},\{alpha_50}) vs (\{slot7_30},\{alpha_30})")
+  // Returning to frost == 0.0 restores crystal droplet (slot7=-32, alpha=0)
+  set_glass_frost(0.0)
+  t.draw()
+  guard find_glass() is Some((slot7_back, alpha_back)) else { fail("expected switch glass restored at frost=0.0") }
+  assert_true((slot7_back - -32.0).abs() < 0.001, msg="restored frost=0.0 must keep slot7=-32.0, got \{slot7_back}")
+  assert_true(alpha_back < 0.001, msg="restored frost=0.0 must keep clear alpha=0, got \{alpha_back}")
   // Increase Contrast disables crystal droplet mode -> positive blur & tint alpha
   t.set_increase_contrast(true)
   t.draw()

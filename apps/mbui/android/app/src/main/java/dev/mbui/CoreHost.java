@@ -620,7 +620,15 @@ final class CoreHost {
         rest.get(iv);
         Cipher unwrap = Cipher.getInstance("RSA/ECB/OAEPPadding");
         unwrap.init(Cipher.DECRYPT_MODE, masterPriv, OAEP);
-        byte[] opened = unwrap.doFinal(wrapped);
+        byte[] opened;
+        try {
+            opened = unwrap.doFinal(wrapped);
+        } catch (javax.crypto.BadPaddingException e) {
+            // sealed to a master pair made before this one (`PERSON` made anew as the screen lock was taken off and
+            // something was kept since: ensureMasterPublic): it can never be opened, as one under an invalidated
+            // `PERSON` (key_invalidated), not a failure of its own the core would say is the device's
+            throw new android.security.keystore.KeyPermanentlyInvalidatedException("sealed to an earlier master key");
+        }
         try {
             Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
             c.init(Cipher.DECRYPT_MODE, new javax.crypto.spec.SecretKeySpec(opened, "AES"), new GCMParameterSpec(128, iv));

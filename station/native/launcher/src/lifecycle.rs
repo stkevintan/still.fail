@@ -185,6 +185,11 @@ pub trait Os {
     fn run_installer(&mut self, _script: &str, _env: &[(String, String)]) -> bool {
         false
     }
+    /// Best-effort bounded diagnostics of a hung Node before it is killed (process state, wait channel, memory/FDs,
+    /// stack): numbers, state codes and symbol names only (no paths, no arguments, nothing a person wrote).
+    fn diagnose_hung(&mut self, _node: &Self::Node) -> serde_json::Map<String, Value> {
+        serde_json::Map::new()
+    }
 }
 
 /// A Node and what the launcher knows of it.
@@ -440,10 +445,10 @@ impl<O: Os> Lifecycle<O> {
         let level = if matches!(kind, "node_hung_killed" | "node_crashed" | "front_hung_killed") { "error" } else { "warn" };
         let mut event = serde_json::json!({ "at": at, "kind": kind, "level": level });
         if let (Some(event), Value::Object(fields)) = (event.as_object_mut(), fields) {
-            event.extend(fields);
             if health {
                 event.extend(self.health_of(at));
             }
+            event.extend(fields);
         }
         let path = self.run.join(EVENTS);
         let before = std::fs::read_to_string(&path).unwrap_or_default();
@@ -947,14 +952,33 @@ impl<O: Os> Lifecycle<O> {
         }
         if let Some(by) = self.heartbeat_by()
             && now >= by
-            && let Some(node) = self.current.as_mut()
+            && self.current.is_some()
         {
-            node.hung = true;
-            let pid = node.process.pid();
-            log::error(&format!("Node {pid} said nothing for {} s (its main thread held or hung); killed, and one started again", self.times.heartbeat.as_secs_f32()));
-            let mut fields = serde_json::json!({ "pid": pid, "version": node.version, "heartbeatTimeoutMs": self.times.heartbeat.as_millis() as u64 });
-            if let Some(ready) = node.ready {
+            let (pid, version, ready) = {
+                let node = self.current.as_mut().unwrap();
+                node.hung = true;
+                (node.process.pid(), node.version.clone(), node.ready)
+            };
+            // Collect bounded diagnostics before SIGKILL (on macOS this runs up to ~3 s); `node.hung = true` is
+            // already set above, so `heartbeat_by()` will not fire a second time.
+            let diag = {
+                let Lifecycle { os, current, .. } = self;
+                os.diagnose_hung(&current.as_ref().unwrap().process)
+            };
+            let mut summary = String::new();
+            if let Some(state) = diag.get("procState").and_then(Value::as_str) {
+                summary.push_str(&format!(" state={state}"));
+            }
+            if let Some(wchan) = diag.get("wchan").and_then(Value::as_str) {
+                summary.push_str(&format!(" wchan={wchan}"));
+            }
+            log::error(&format!("Node {pid} said nothing for {} s (its main thread held or hung){summary}; killed, and one started again", self.times.heartbeat.as_secs_f32()));
+            let mut fields = serde_json::json!({ "pid": pid, "version": version, "heartbeatTimeoutMs": self.times.heartbeat.as_millis() as u64 });
+            if let Some(ready) = ready {
                 fields["uptimeMs"] = (now.saturating_duration_since(ready).as_millis() as u64).into();
+            }
+            if let Some(obj) = fields.as_object_mut() {
+                obj.extend(diag);
             }
             self.record("node_hung_killed", fields, true);
             // Not asked to hand over: a thread that does not run would not hear it. Its end is a crash's (`crashed`).
@@ -1101,6 +1125,9 @@ mod tests {
         restarted_fronts: u32,
         /// The installers started as a Node asked (`run_installer`): the script and what it was told.
         installers: Vec<(String, Vec<(String, String)>)>,
+        /// Diagnostics returned by `diagnose_hung`, and `(pid, called_before_kill)` calls recorded.
+        hung_diag: serde_json::Map<String, Value>,
+        diagnosed_before_kill: Vec<(u32, bool)>,
     }
 
     impl Os for Fake {
@@ -1154,6 +1181,10 @@ mod tests {
             self.installers.push((script.to_string(), env.to_vec()));
             true
         }
+        fn diagnose_hung(&mut self, node: &FakeNode) -> serde_json::Map<String, Value> {
+            self.diagnosed_before_kill.push((node.pid, !self.killed.contains(&node.pid)));
+            self.hung_diag.clone()
+        }
     }
 
     impl Drop for Fake {
@@ -1177,7 +1208,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
         let run = data.join("run");
         std::fs::create_dir_all(&run).unwrap();
-        let fake = Fake { dir: data, now: Instant::now(), pid: 100, told: vec![], killed: vec![], parent_gone: false, routes: vec![], renewed: vec![], takes_place: false, front: false, front_starts: vec![], started_fronts: 0, probed: vec![], front_killed: 0, restarted_fronts: 0, installers: vec![] };
+        let fake = Fake { dir: data, now: Instant::now(), pid: 100, told: vec![], killed: vec![], parent_gone: false, routes: vec![], renewed: vec![], takes_place: false, front: false, front_starts: vec![], started_fronts: 0, probed: vec![], front_killed: 0, restarted_fronts: 0, installers: vec![], hung_diag: serde_json::Map::new(), diagnosed_before_kill: vec![] };
         let times = Times { ready: s(60), exit: s(30), stop: s(30), backoff: s(1), backoff_max: s(4), stable: s(60), parent: s(2), drained: s(300), take: s(90), rollback: s(10), front: s(10), heartbeat: s(90), front_retry: s(300), front_probe: s(30) };
         let mut station = Lifecycle::new(fake, times, run, with_parent);
         station.start();
@@ -2056,6 +2087,33 @@ mod tests {
         assert!(e["healthAgeMs"].as_u64().is_some_and(|age| age >= 5000));
         assert!(e.get("home").is_none() && e.get("updatedAt").is_none(), "only the summary's fields");
         assert!(e["at"].as_u64().is_some());
+    }
+
+    #[test]
+    fn a_node_killed_as_hung_collects_diagnostics_before_kill_and_overrides_stale_health() {
+        let mut station = station("eventshungdiag", false);
+        let node = station.last();
+        std::fs::write(station.run.join("health.json"), health()).unwrap();
+        let mut diag = serde_json::Map::new();
+        diag.insert("procState".into(), "S".into());
+        diag.insert("wchan".into(), "futex_wait_queue".into());
+        diag.insert("rssBytes".into(), 999_000_000u64.into());
+        diag.insert("openFds".into(), 950u64.into());
+        diag.insert("threads".into(), 16u64.into());
+        diag.insert("kernelStack".into(), "futex_wait_queue+0x60/0x90".into());
+        station.os.hung_diag = diag;
+        station.said(Slot::Current, heartbeat());
+        station.up(Slot::Current, "0.1.0", 5000);
+        station.pass(s(90));
+        assert_eq!(station.os.diagnosed_before_kill, [(node, true)], "diagnose_hung must run before kill");
+        assert_eq!(station.os.killed, [node]);
+        let events = station.events();
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!((e["rssBytes"].as_u64(), e["openFds"].as_u64()), (Some(999_000_000), Some(950)), "live diagnostics override stale health.json");
+        assert_eq!((e["heldMaxMs"].as_u64(), e["front"].as_str(), e["presenceOnline"].as_bool(), e["relayConflict"].as_bool()), (Some(1200), Some("ok"), Some(true), Some(false)));
+        assert!(e["healthAgeMs"].as_u64().is_some_and(|age| age >= 5000));
+        assert_eq!((e["procState"].as_str(), e["wchan"].as_str(), e["threads"].as_u64(), e["kernelStack"].as_str()), (Some("S"), Some("futex_wait_queue"), Some(16), Some("futex_wait_queue+0x60/0x90")));
     }
 
     #[test]

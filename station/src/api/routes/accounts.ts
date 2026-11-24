@@ -192,9 +192,11 @@ export const routes = ({ accounts, sharing, overview, policies }: AccountsRouteD
         manager(r.viewer, r.lang);
         const body = input(r);
         // `among`: the stations the page chose from (a workspace's): only theirs change (share/index.ts shareProfile).
-        const among = body.among === undefined || body.among === null ? null : stations(body.among);
+        // `allowAuto`: who may use it follows the workspace's whitelist (neither `allow` nor `among` read then).
+        const auto = body.on !== false && body.allowAuto === true;
+        const among = auto || body.among === undefined || body.among === null ? null : stations(body.among);
         try {
-          await sharing.shareProfile(segment(id!), body.on !== false, stations(body.allow), among, r.viewer.email);
+          await sharing.shareProfile(segment(id!), body.on !== false, auto ? null : stations(body.allow), among, r.viewer.email, auto);
         } catch (e) {
           if (e instanceof Refusal) throw e;
           throw new Refusal(409, (e as Error).message);

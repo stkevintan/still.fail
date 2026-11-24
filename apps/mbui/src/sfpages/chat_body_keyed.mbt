@@ -9,10 +9,53 @@
 // chat_body_rows' still: while there is any, the list goes by it (ChatBodyList::of_made).
 
 ///|
+/// Build `(first_index, dup_last_index)` maps for `ks`.
+/// `first_index` keeps the first occurrence (matching `Array::search`); `dup_last_index` is only populated when a key
+/// appears more than once (matching reverse-scan last-occurrence lookup with zero extra entries for unique keys).
+fn chat_keys_index_of(ks : Array[String]) -> (Map[String, Int], Map[String, Int]) {
+  let first : Map[String, Int] = Map([], capacity=ks.length())
+  let dup_last : Map[String, Int] = Map([])
+  for i, k in ks {
+    if first.contains(k) {
+      dup_last[k] = i
+    } else {
+      first[k] = i
+    }
+  }
+  (first, dup_last)
+}
+
+///|
+/// Single-slot cache returning `(first_index, dup_last_index)` for `ks`, rebuilt only when `ks` changes identity,
+/// paired with a `clear` closure called when the page parks so parked views release the cached array and maps.
+fn chat_keys_index_cache() -> ((Array[String]) -> (Map[String, Int], Map[String, Int]), () -> Unit) {
+  let cached_ks : Ref[Array[String]?] = Ref(None)
+  let cached_idx : Ref[(Map[String, Int], Map[String, Int])] = Ref((Map([]), Map([])))
+  let lookup = fn(ks : Array[String]) -> (Map[String, Int], Map[String, Int]) {
+    match cached_ks.val {
+      Some(prev) if physical_equal(prev, ks) => cached_idx.val
+      _ => {
+        let m = chat_keys_index_of(ks)
+        cached_ks.val = Some(ks)
+        cached_idx.val = m
+        m
+      }
+    }
+  }
+  let clear = fn() -> Unit {
+    cached_ks.val = None
+    cached_idx.val = (Map([]), Map([]))
+  }
+  (lookup, clear)
+}
+
+///|
 /// A chat's list as its rows read it: its keys (told only as they change) and each row by its key (told only as that
 /// row is another).
 priv struct ChatBodyList {
   keys : () -> Array[String]
+  /// cached `(first_index, dup_last_index)` maps for a `keys` snapshot returned by `self.keys`
+  keys_index : (Array[String]) -> (Map[String, Int], Map[String, Int])
   row : (String) -> ChatBodyRow?
   /// how many slices row `k` is drawn in (chat_body_pieces': a long agent's message a block a piece; 1 for any other),
   /// told only as that changes
@@ -33,15 +76,20 @@ fn ChatBodyList::has(self : ChatBodyList, k : String) -> Bool {
 ///|
 /// The list of rows chat_body_rows made, as `made` gives them as they change (each read of a row reads all of them).
 fn ChatBodyList::of_made(made : () -> ChatBodyRows, rest? : () -> Unit = fn() {  }) -> ChatBodyList {
+  let (keys_index, clear_index) = chat_keys_index_cache()
   {
     keys: fn() { made().keys },
+    keys_index,
     row: fn(k) { made().rows.get(k) },
     slices: fn(k) { made().rows.get(k).map_or(1, fn(r) { r.slices }) },
     taken: fn() {
       made() |> ignore
       0
     },
-    rest_unwatched: rest,
+    rest_unwatched: fn() {
+      clear_index()
+      rest()
+    },
   }
 }
 
@@ -595,9 +643,11 @@ fn chat_body_keyed(
     },
     same=fn(a, b) { physical_equal(a, b) || a == b },
   )
+  let (keys_index, clear_index) = chat_keys_index_cache()
   // (what nothing follows let go of, from what reads the others down: each let go leaves what it read unread by it, so
   // that, where nothing else reads it, is let go of next)
   let rest_unwatched = fn() {
+    clear_index()
     if !keys.watched() {
       keys.dispose()
     }
@@ -629,6 +679,7 @@ fn chat_body_keyed(
   {
     rest_unwatched,
     keys: fn() { keys.get() },
+    keys_index,
     taken: fn() { taken.get().1 },
     row: fn(k) {
       keys.get() |> ignore
@@ -655,9 +706,12 @@ fn chat_body_keyed(
 }
 
 ///|
-/// A chat's list as read at once (ChatBodyList::read): its keys then, and each row by its key as it is asked.
+/// A chat's list as read at once (ChatBodyList::read): its keys then, their snapshot-bound key indices, and each row by
+/// its key as it is asked.
 priv struct ChatBodyNow {
   keys : Array[String]
+  key_index : Map[String, Int]
+  key_dup_last : Map[String, Int]
   row_of : (String) -> ChatBodyRow?
   slices_of : (String) -> Int
 }
@@ -665,7 +719,24 @@ priv struct ChatBodyNow {
 ///|
 /// Its keys as they are now, and its rows as each is asked (what reads them in a computed follows what it reads).
 fn ChatBodyList::read(self : ChatBodyList) -> ChatBodyNow {
-  { keys: (self.keys)(), row_of: self.row, slices_of: self.slices }
+  let ks = (self.keys)()
+  let (key_index, key_dup_last) = (self.keys_index)(ks)
+  { keys: ks, key_index, key_dup_last, row_of: self.row, slices_of: self.slices }
+}
+
+///|
+/// First index of key `k` in this `ChatBodyNow.keys` snapshot (matching `Array::search`).
+fn ChatBodyNow::index_of(self : ChatBodyNow, k : String) -> Int? {
+  self.key_index.get(k)
+}
+
+///|
+/// Last index of key `k` in this `ChatBodyNow.keys` snapshot (matching a reverse scan from the end).
+fn ChatBodyNow::last_index_of(self : ChatBodyNow, k : String) -> Int? {
+  match self.key_dup_last.get(k) {
+    Some(i) => Some(i)
+    None => self.key_index.get(k)
+  }
 }
 
 ///|

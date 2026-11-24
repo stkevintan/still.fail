@@ -3,7 +3,10 @@ members = [
   "packages/host_shim",
   "packages/sqlite_ffi",
   "packages/sql_db",
+  "packages/js_json",
   "packages/builders_core",
+  "packages/builders_index",
+  "packages/builders_stateful",
   "packages/footprint",
   "packages/memory",
   "packages/packed",
@@ -18,7 +21,10 @@ base_codec = { path = "../base/packages/base_codec" }
 host_shim = { path = "packages/host_shim" }
 sqlite_ffi = { path = "packages/sqlite_ffi" }
 sql_db = { path = "packages/sql_db" }
+js_json = { path = "packages/js_json" }
 builders_core = { path = "packages/builders_core" }
+builders_index = { path = "packages/builders_index" }
+builders_stateful = { path = "packages/builders_stateful" }
 footprint = { path = "packages/footprint" }
 memory = { path = "packages/memory" }
 packed = { path = "packages/packed" }

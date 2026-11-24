@@ -4,7 +4,9 @@
 // Tester's `replay_frames` hands each on again at its place, at its time: the run's whole input, seen again frame by
 // frame.
 //
-//   INPUT {"k":"pointer","t":T,"a":[kind,x,y,button,mods]} (mods: the keys held as it went down; none before them)   "wheel" [x,y,dx,dy,phase]   "key" [code,mods]
+//   INPUT {"k":"pointer","t":T,"a":[kind,x,y,button,mods]} (optional by, more=1 for batched moves; mods: keys held as it went down)
+//   INPUT {"k":"pointer-flush","t":T,"a":[]} (unrouted finger ending a batched touch-move)
+//   INPUT {"k":"wheel","t":T,"a":[x,y,dx,dy,phase]}   "key" [code,mods]
 //   INPUT {"k":"text","t":T,"a":[kind,a,b],"s":TEXT}    "back" [kind,x,progress,edge]   "app" [state]
 
 ///|
@@ -118,6 +120,13 @@ fn replay_input(f : FakeHost, line : String) -> Unit {
       let more = a.length() > 6 && n(6) == 1.0
       pointer_in(n(0).to_int(), n(1), n(2), n(3).to_int(), n(4).to_int(), by~, more~)
     }
+    Some(String("pointer-flush")) =>
+      view_event_said(fn() { pointing_said_by_host(1) }, fn() {
+        if moves_batched.val {
+          moves_batched.val = false
+          view_pointed(bring=true)
+        }
+      }, what="pointer-flush")
     Some(String("wheel")) => on_wheel(n(0), n(1), n(2), n(3), n(4).to_int())
     Some(String("key")) => on_key(n(0).to_int(), n(1).to_int())
     Some(String("text")) => {

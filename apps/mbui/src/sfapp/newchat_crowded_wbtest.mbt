@@ -530,3 +530,24 @@ test "narrow: how hard it thinks shares its row with its stops and the models' l
   })
 }
 
+///|
+test "narrow: how hard it thinks held in the model's sheet at either end, its thumb drawn whole, nothing of it cut by the sheet's list over the foot" {
+  let t = crowded("newchat-crowded-model")
+  run_to_sheet_rest(t)
+  let (x, y, w, h) = t.get(Slider, label="思考深度").rect
+  let mid = y + h / 2.0
+  for at in [x + 10.0, x + w - 10.0] {
+    t.touch(0, at, mid)
+    t.run_for(@ui.move_most_ms)
+    // (the thumb's lens, the glass the sheet's own and the bar's aside: as large as it is drawn, as far as it is drawn)
+    let lens = t.drawn_glass().filter(fn(g) { g.1 < mid && g.1 + g.3 > mid && g.2 < w / 2.0 })
+    assert_eq(lens.length(), 1, msg="\{Repr(t.drawn_glass())}")
+    let (lx, ly, lw, lh, _, _) = lens[0]
+    assert_true(
+      t.drawn_glass_cut().iter().any(fn(c) { (c.0 - lx).abs() < 0.01 && (c.1 - ly).abs() < 0.01 && (c.2 - lw).abs() < 0.01 && (c.3 - lh).abs() < 0.01 }),
+      msg="\{Repr(lens)} cut to \{Repr(t.drawn_glass_cut())}",
+    )
+    t.touch(2, at, mid)
+    t.run_for(@ui.move_most_ms)
+  }
+}

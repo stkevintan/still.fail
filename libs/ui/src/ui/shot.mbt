@@ -734,12 +734,14 @@ pub fn Tester::picture_images(self : Tester) -> Array[(String, Double, Double)] 
 }
 
 ///|
-/// The box a node on its way is cut to (Content::clips_self) at `x`, `y`, `w` by `h` drawn: all of it (`way` 0), or
-/// open across where its way goes down a column (1) or along a row (2): nothing it holds cut where no way goes.
+/// The box a node on its way is cut to (Content::clips_self) at `x`, `y`, `w` by `h` drawn: all of it (`way` 0),
+/// open across where its way goes down a column (1) or along a row (2), or open across and above its top (3: cut at
+/// its foot alone): nothing it holds cut where no way goes.
 fn clip_way_box(way : Int, x : Double, y : Double, w : Double, h : Double) -> (Double, Double, Double, Double) {
   match way {
     1 => (x - clip_way_open, y, w + 2.0 * clip_way_open, h)
     2 => (x, y - clip_way_open, w, h + 2.0 * clip_way_open)
+    3 => (x - clip_way_open, y - clip_way_open, w + 2.0 * clip_way_open, h + clip_way_open)
     _ => (x, y, w, h)
   }
 }

@@ -1,0 +1,368 @@
+// Stateful archive-last-message builder (`--builder archive-last`), 1:1 aligned with
+// `station/mb/src/archivelast/archivelast.mbt` and `station/mb/src/reader/main.mbt:1083-1100`.
+// All write transactions go exclusively through `db.tx_err(...)` (never raw transaction SQL).
+
+import "base_codec"
+import "builders_core"
+import "sql_db"
+
+let ARCHIVE_LAST_VERSION : Int = 1
+
+let ARCHIVE_LAST_MARK : String = "archive_last_v1"
+
+fn archive_last_names() -> Array[String] {
+  [
+    "archive_last_insert",
+    "archive_last_update",
+    "archive_last_delete",
+    "archive_last_thread_delete",
+  ]
+}
+
+fn archive_last_triggers() -> Array[String] {
+  [
+    "CREATE TRIGGER archive_last_insert BEFORE INSERT ON entries WHEN EXISTS (SELECT 1 FROM archive_last_guard LIMIT 1) BEGIN\n-- archive_last_v1\nDELETE FROM archive_last_guard WHERE thread=NEW.thread AND (NEW.kind='message' OR (EXISTS (SELECT 1 FROM entries e WHERE e.thread=NEW.thread AND e.n=NEW.n AND e.kind='message') OR (NEW.ts IS NOT NULL AND EXISTS (SELECT 1 FROM entries e WHERE e.thread=NEW.thread AND e.ts=NEW.ts AND e.kind='message')))); DELETE FROM archive_last_guard WHERE thread=(SELECT e.thread FROM entries e WHERE e.rowid=NEW.rowid AND e.kind='message'); END;",
+    "CREATE TRIGGER archive_last_update BEFORE UPDATE OF thread,n,rowid,_rowid_,oid,kind,at,ts ON entries WHEN EXISTS (SELECT 1 FROM archive_last_guard LIMIT 1) AND (OLD.thread IS NOT NEW.thread OR OLD.n IS NOT NEW.n OR OLD.rowid IS NOT NEW.rowid OR OLD.kind IS NOT NEW.kind OR OLD.at IS NOT NEW.at OR OLD.ts IS NOT NEW.ts) BEGIN\n-- archive_last_v1\nDELETE FROM archive_last_guard WHERE thread=OLD.thread AND OLD.kind='message'; DELETE FROM archive_last_guard WHERE thread=NEW.thread AND (NEW.kind='message' OR (EXISTS (SELECT 1 FROM entries e WHERE e.thread=NEW.thread AND e.n=NEW.n AND e.kind='message') OR (NEW.ts IS NOT NULL AND EXISTS (SELECT 1 FROM entries e WHERE e.thread=NEW.thread AND e.ts=NEW.ts AND e.kind='message')))); DELETE FROM archive_last_guard WHERE thread=(SELECT e.thread FROM entries e WHERE e.rowid=NEW.rowid AND e.kind='message' AND OLD.rowid IS NOT NEW.rowid); END;",
+    "CREATE TRIGGER archive_last_delete BEFORE DELETE ON entries WHEN OLD.kind='message' BEGIN\n-- archive_last_v1\nDELETE FROM archive_last_guard WHERE thread=OLD.thread; END;",
+    "CREATE TRIGGER archive_last_thread_delete AFTER DELETE ON threads BEGIN\n-- archive_last_v1\nDELETE FROM archive_last_guard WHERE thread=OLD.id; END;",
+  ]
+}
+
+let ARCHIVE_SLICE_FIRST : String = "SELECT CAST(e.n AS TEXT) AS n,CASE WHEN e.kind='message' THEN e.at END AS at FROM entries e WHERE e.thread=? ORDER BY e.n DESC LIMIT ?"
+
+let ARCHIVE_SLICE_BEFORE : String = "SELECT CAST(e.n AS TEXT) AS n,CASE WHEN e.kind='message' THEN e.at END AS at FROM entries e WHERE e.thread=?1 AND e.n<CAST(?2 AS INTEGER) ORDER BY e.n DESC LIMIT ?3"
+
+fn str_contains(haystack : String, needle : String) -> Bool {
+  let h = haystack.to_bytes()
+  let n = needle.to_bytes()
+  if n.length() == 0 {
+    return true
+  }
+  if n.length() > h.length() {
+    return false
+  }
+  let last = h.length() - n.length()
+  for i in 0..<(last + 1) {
+    let mut matched = true
+    for j in 0..<n.length() {
+      if h[i + j] != n[j] {
+        matched = false
+        break
+      }
+    }
+    if matched {
+      return true
+    }
+  }
+  false
+}
+
+fn is_json_null(j : base_codec::Json) -> Bool {
+  match j {
+    base_codec::Json::Null => true
+    _ => false
+  }
+}
+
+fn opt_json_eq(a : Option[base_codec::Json], b : base_codec::Json) -> Bool {
+  match a {
+    Some(x) => base_codec::json_eq(x, b)
+    None => false
+  }
+}
+
+fn archive_last_current(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match db.sqlite_master_sql("table", "archive_last_meta") {
+    Ok(Some(_)) => ()
+    Ok(None) => return Ok(false)
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  match db.sqlite_master_sql("table", "archive_last_guard") {
+    Ok(Some(_)) => ()
+    Ok(None) => return Ok(false)
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let v = match db.first("SELECT version FROM archive_last_meta WHERE id=1", []) {
+    Ok(Some(row)) => row
+    Ok(None) => return Ok(false)
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ver_ok = match sql_db::row_val(v, "version") {
+    base_codec::Json::Num(n, _) => n.to_int() == ARCHIVE_LAST_VERSION
+    _ => false
+  }
+  if !ver_ok {
+    return Err(builders_core::StepError::App("archive last metadata has an unsupported version"))
+  }
+  let names = archive_last_names()
+  for i in 0..<names.length() {
+    match db.sqlite_master_sql("trigger", names[i]) {
+      Ok(Some(sql)) => {
+        if !str_contains(sql, ARCHIVE_LAST_MARK) {
+          return Ok(false)
+        }
+      }
+      Ok(None) => return Ok(false)
+      Err(e) => return Err(builders_core::StepError::Sql(e))
+    }
+  }
+  Ok(true)
+}
+
+/// The builder's state: the schema version its install was checked at.
+pub struct Archive {
+  db : sql_db::Db
+  mut checked : Option[base_codec::Json]
+}
+
+pub fn Archive::new(db : sql_db::Db) -> Archive {
+  Archive::{ db: db, checked: None }
+}
+
+fn Archive::install(self : Archive) -> Result[Bool, builders_core::StepError] {
+  let db = self.db
+  let initial = match db.schema_version() {
+    Ok(v) => v
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  if opt_json_eq(self.checked, initial) {
+    return Ok(true)
+  }
+  match archive_last_current(db) {
+    Ok(true) => {
+      self.checked = Some(initial)
+      return Ok(true)
+    }
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  match db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      let cur = match archive_last_current(tx_db) {
+        Ok(b) => b
+        Err(e) => return Err(e)
+      }
+      if !cur {
+        match tx_db.exec(
+          "CREATE TABLE IF NOT EXISTS archive_last_meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL, epoch TEXT NOT NULL) WITHOUT ROWID; CREATE TABLE IF NOT EXISTS archive_last_guard(thread INTEGER PRIMARY KEY,epoch TEXT NOT NULL, before_n INTEGER,at INTEGER,ready INTEGER NOT NULL) WITHOUT ROWID;",
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        match tx_db.first("SELECT version FROM archive_last_meta WHERE id=1", []) {
+          Ok(Some(v)) => {
+            let ver = sql_db::row_val(v, "version")
+            let ok_ver = match ver {
+              base_codec::Json::Num(n, _) => n.to_int() == ARCHIVE_LAST_VERSION
+              _ => false
+            }
+            if !ok_ver {
+              return Err(
+                builders_core::StepError::App(
+                  "archive last version " + sql_db::stringify_json(ver) + " is incompatible",
+                ),
+              )
+            }
+          }
+          Ok(None) => ()
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let _ = match tx_db.run(
+          "INSERT INTO archive_last_meta VALUES(1,?,lower(hex(randomblob(16)))) ON CONFLICT(id) DO UPDATE SET epoch=excluded.epoch",
+          [base_codec::json_num(ARCHIVE_LAST_VERSION.to_double())],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        let names = archive_last_names()
+        for i in 0..<names.length() {
+          match tx_db.exec("DROP TRIGGER IF EXISTS " + names[i]) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        let trigs = archive_last_triggers()
+        for i in 0..<trigs.length() {
+          match tx_db.exec(trigs[i]) {
+            Ok(_) => ()
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+      }
+      Ok(())
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  ) {
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  let after_ver = match db.schema_version() {
+    Ok(v) => v
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  self.checked = Some(after_ver)
+  Ok(true)
+}
+
+/// One slice of at most `limit` (64 at most) of `thread`'s entries from its newest back;
+/// returns whether its latest message is known then.
+pub fn Archive::step(
+  self : Archive,
+  thread : Int64,
+  limit : Int = 64,
+) -> Result[Bool, builders_core::StepError] {
+  if limit < 1 || limit > 64 {
+    return Err(builders_core::StepError::App("archive last batch must be 1–64"))
+  }
+  let db = self.db
+  match self.install() {
+    Ok(true) => ()
+    Ok(false) => return Ok(false)
+    Err(e) => return Err(e)
+  }
+  let checked = self.checked
+  let t = base_codec::json_num(thread.to_double())
+  let res = db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[(Bool, Bool), builders_core::StepError] {
+      let cur_ver = match tx_db.schema_version() {
+        Ok(v) => v
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if !opt_json_eq(checked, cur_ver) {
+        return Ok((false, false))
+      }
+      let meta = match tx_db.first("SELECT version,epoch FROM archive_last_meta WHERE id=1", []) {
+        Ok(Some(m)) => m
+        Ok(None) => return Ok((false, true))
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let ver_ok = match sql_db::row_val(meta, "version") {
+        base_codec::Json::Num(n, _) => n.to_int() == ARCHIVE_LAST_VERSION
+        _ => false
+      }
+      if !ver_ok {
+        return Err(
+          builders_core::StepError::App("archive last metadata has an unsupported version"),
+        )
+      }
+      let epoch = sql_db::row_val(meta, "epoch")
+      let _ = match tx_db.run(
+        "INSERT INTO archive_last_guard(thread,epoch,before_n,at,ready) VALUES(?,?,NULL,NULL,0) ON CONFLICT(thread) DO UPDATE SET epoch=excluded.epoch,before_n=NULL,at=NULL,ready=0 WHERE archive_last_guard.epoch!=excluded.epoch",
+        [t, epoch],
+      ) {
+        Ok(n) => n
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let state = match tx_db.first(
+        "SELECT CAST(before_n AS TEXT) AS before_n,at,ready FROM archive_last_guard WHERE thread=? AND epoch=?",
+        [t, epoch],
+      ) {
+        Ok(Some(s)) => s
+        Ok(None) => return Err(builders_core::StepError::App("archive last guard is missing"))
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let ready = match sql_db::row_val(state, "ready") {
+        base_codec::Json::Num(r, _) => r != 0.0
+        _ => false
+      }
+      let state_before_n = sql_db::row_val(state, "before_n")
+      let state_at = sql_db::row_val(state, "at")
+      if ready && (!is_json_null(state_before_n) || is_json_null(state_at)) {
+        return Ok((true, false))
+      }
+      let lim = base_codec::json_num(limit.to_double())
+      let rows = if is_json_null(state_before_n) {
+        match tx_db.all(ARCHIVE_SLICE_FIRST, [t, lim]) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        match tx_db.all(ARCHIVE_SLICE_BEFORE, [t, state_before_n, lim]) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      let mut last : Option[Map[String, base_codec::Json]] = None
+      for i in 0..<rows.length() {
+        if !is_json_null(sql_db::row_val(rows[i], "at")) {
+          last = Some(rows[i])
+          break
+        }
+      }
+      let found_last = match last {
+        Some(_) => true
+        None => false
+      }
+      let done = found_last || rows.length() < limit
+      let before = match last {
+        Some(l) => sql_db::row_val(l, "n")
+        None => {
+          if done {
+            base_codec::json_null()
+          } else {
+            sql_db::row_val(rows[rows.length() - 1], "n")
+          }
+        }
+      }
+      let at = match last {
+        Some(l) => sql_db::row_val(l, "at")
+        None => base_codec::json_null()
+      }
+      let _ = match tx_db.run(
+        "UPDATE archive_last_guard SET before_n=CAST(? AS INTEGER),at=?,ready=? WHERE thread=? AND epoch=?",
+        [
+          before,
+          at,
+          base_codec::json_num(if done { 1.0 } else { 0.0 }),
+          t,
+          epoch,
+        ],
+      ) {
+        Ok(n) => n
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      Ok((done, false))
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+  match res {
+    Ok((done, clear_checked)) => {
+      if clear_checked {
+        self.checked = None
+      }
+      Ok(done)
+    }
+    Err(e) => Err(e)
+  }
+}
+
+struct ArchiveCell {
+  mut state : Option[Archive]
+}
+
+pub fn run_archive_last(db_path : String) -> Int {
+  let cell = ArchiveCell::{ state: None }
+  builders_core::builder_loop(
+    db_path,
+    "archive last message",
+    fn(db : sql_db::Db, ask : base_codec::Json) -> Result[Option[Bool], builders_core::StepError] {
+      let a = match cell.state {
+        Some(existing) => existing
+        None => {
+          let created = Archive::new(db)
+          cell.state = Some(created)
+          created
+        }
+      }
+      match builders_core::json_get_last(ask, "thread") {
+        Some(base_codec::Json::Num(thread, _)) => {
+          match a.step(builders_core::double_to_i64_saturating(thread), limit=64) {
+            Ok(done) => Ok(Some(done))
+            Err(e) => Err(e)
+          }
+        }
+        _ => Ok(None)
+      }
+    },
+  )
+}

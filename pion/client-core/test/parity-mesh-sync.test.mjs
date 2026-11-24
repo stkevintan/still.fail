@@ -853,6 +853,7 @@ const OP_VECTORS = [
   ["profile.addModel", { station: "ws/st1", id: "pr-1", model: "gemini-4-neon" }],
   ["profile.delete", { station: "ws/st1", id: "pr-1" }],
   ["profile.share", { station: "ws/st1", id: "pr-1", on: true, allow: ["st2"], among: ["st1", "st2"] }],
+  ["profile.share", { station: "ws/st1", id: "pr-1", on: true, allowAuto: true }],
   ["profile.move", { station: "ws/st1", id: "pr-1", to: "st2" }],
   ["skill.share", { station: "ws/st1", name: "my skill", on: true }],
   ["profile.resetQuota", { station: "ws/st1", id: "pr-1", reset: "daily" }],

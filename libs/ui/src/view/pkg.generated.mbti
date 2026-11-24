@@ -1270,7 +1270,7 @@ pub fn Tree::each_drawn_laid(Self, (Content, Double, Double, Double, Double, Dou
 pub fn Tree::each_drawn_laid_or_past(Self, (Content, Double, Double, Double, Double, Double, Double) -> Bool, draws? : (Content) -> Bool, offsets? : (Content) -> Bool, draws_rev? : Int32) -> Unit
 pub fn Tree::each_drawn_scaled(Self, (Content, Double, Double, Double, Double) -> Unit, inputs_only? : Bool) -> Unit
 pub fn Tree::event(Self, Double, () -> Unit) -> Unit
-pub fn Tree::event_said(Self, Double, () -> Unit, () -> Unit, brings? : Bool) -> Unit
+pub fn Tree::event_said(Self, Double, () -> Unit, () -> Unit, brings? : Bool, more? : Bool) -> Unit
 pub fn Tree::fades_of(Self, NodeId) -> (Double, Double, Double, Double)
 pub fn Tree::fault(Self, NodeId, String) -> Unit
 pub fn Tree::finger_areas(Self, NodeId) -> FingerAreas

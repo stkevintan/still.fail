@@ -1,0 +1,163 @@
+name: pion-ui
+
+on:
+  push:
+    paths:
+      - "pion/ui/**"
+      - "pion/app/**"
+      - "pion/tools/mbt2pion-monoid/**"
+      - "libs/ui/src/controls/font_assets.mbt"
+      - "libs/ui/src/controls/math_glyphs.mbt"
+      - "libs/ui/src/controls/icon_data.mbt"
+      - "libs/ui/src/controls/palette_data.mbt"
+      - "libs/ui/src/controls/math.json"
+      - "libs/ui/src/controls/math-mac.textrec"
+      - "libs/ui/src/controls/numbers.mbt"
+      - "libs/ui/src/controls/marked.mbt"
+      - "libs/ui/src/controls/tokens_data.mbt"
+      - "libs/ui/src/controls/clock_read_known.mbt"
+      - "libs/ui/src/controls/table_copy.mbt"
+      - "libs/ui/src/controls/reader_marks.mbt"
+      - "libs/ui/src/ui/style_css.mbt"
+      - ".github/workflows/pion-ui.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: pion-ui-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  pion-ui-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/node
+
+      - name: Static pin & read-only asset gates
+        run: |
+          sh pion/tools/mbt2pion-monoid/check_single_invar_pin.sh
+          node pion/tools/mbt2pion-monoid/gen_assets.mjs --check
+          sh pion/tools/mbt2pion-monoid/regen.sh --assets-only --check
+
+      - name: Verify access to AFK-surf/pion, pion-packages, and invar (fail loudly)
+        env:
+          PION_TOKEN: ${{ secrets.PION_TOKEN }}
+        run: |
+          if [ -n "${PION_TOKEN:-}" ]; then
+            auth_b64="$(printf 'x-access-token:%s' "$PION_TOKEN" | base64 | tr -d '\n\r')"
+            git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth_b64"
+          fi
+          for repo in pion pion-packages invar; do
+            if ! GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "https://github.com/AFK-surf/${repo}.git" HEAD >/dev/null 2>&1; then
+              echo "::error::Cannot reach https://github.com/AFK-surf/${repo}.git (check PION_TOKEN secret scope)."
+              exit 1
+            fi
+          done
+
+      - name: Read pinned mbt2pion commit from manifest.toml
+        id: pin
+        run: |
+          sha="$(sed -n 's/^mbt2pion_commit *= *"\([0-9a-f]\{40\}\)".*/\1/p' pion/tools/mbt2pion-monoid/manifest.toml | head -n 1)"
+          test "${#sha}" -eq 40
+          echo "pion_sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pinned Pion toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pion-ui-toolchain
+          key: pion-ui-toolchain-linux-x64-v1-${{ steps.pin.outputs.pion_sha }}
+
+      - name: Build or restore pinned pionc
+        run: |
+          PREFIX="$HOME/.cache/pion-ui-toolchain/${{ steps.pin.outputs.pion_sha }}"
+          if [ ! -x "$PREFIX/bin/pionc" ]; then
+            PION_SRC="$RUNNER_TEMP/pion-src"
+            git clone --filter=blob:none --no-checkout https://github.com/AFK-surf/pion.git "$PION_SRC"
+            git -C "$PION_SRC" checkout "${{ steps.pin.outputs.pion_sha }}"
+            (cd "$PION_SRC" && bash scripts/install.sh --prefix "$PREFIX")
+          fi
+          echo "$PREFIX/bin" >> "$GITHUB_PATH"
+          echo "PIONC=$PREFIX/bin/pionc" >> "$GITHUB_ENV"
+          "$PREFIX/bin/pionc" --version
+
+      - name: Pion fmt, check, unit tests, wasm32 build & 4-FPS app_state/sf_smoke
+        run: |
+          "$PIONC" fmt --check pion/ui pion/app
+          "$PIONC" check --json pion/ui
+          "$PIONC" check --json pion/app
+          "$PIONC" test --json pion/ui
+          "$PIONC" build --target wasm32 pion/ui -o "$RUNNER_TEMP/pion_ui.wasm"
+          ls -lh "$RUNNER_TEMP/pion_ui.wasm"
+          for fps in 60 120 24 7; do
+            INVAR_TEST_FPS="$fps" INVAR_FPS="$fps" "$PIONC" test --json --package sf_smoke pion/app
+            INVAR_TEST_FPS="$fps" INVAR_FPS="$fps" "$PIONC" test --json --package app_state pion/app
+          done
+
+  mbt2pion-pilot-gates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/node
+
+      - uses: ./.github/actions/mbui-moonbit
+        with:
+          tools: ''
+          farview: 'false'
+
+      - name: Verify access to AFK-surf/pion, pion-packages, and invar (fail loudly)
+        env:
+          PION_TOKEN: ${{ secrets.PION_TOKEN }}
+        run: |
+          if [ -n "${PION_TOKEN:-}" ]; then
+            auth_b64="$(printf 'x-access-token:%s' "$PION_TOKEN" | base64 | tr -d '\n\r')"
+            git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth_b64"
+          fi
+          for repo in pion pion-packages invar; do
+            if ! GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "https://github.com/AFK-surf/${repo}.git" HEAD >/dev/null 2>&1; then
+              echo "::error::Cannot reach https://github.com/AFK-surf/${repo}.git (check PION_TOKEN secret scope)."
+              exit 1
+            fi
+          done
+
+      - name: Read pinned mbt2pion commit from manifest.toml
+        id: pin
+        run: |
+          sha="$(sed -n 's/^mbt2pion_commit *= *"\([0-9a-f]\{40\}\)".*/\1/p' pion/tools/mbt2pion-monoid/manifest.toml | head -n 1)"
+          test "${#sha}" -eq 40
+          echo "pion_sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pinned Pion toolchain & mbt2pion binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pion-ui-toolchain
+          key: pion-ui-toolchain-linux-x64-v1-${{ steps.pin.outputs.pion_sha }}
+
+      - name: Build or restore pinned pionc, mbt2pion, and mbt_compat
+        run: |
+          PREFIX="$HOME/.cache/pion-ui-toolchain/${{ steps.pin.outputs.pion_sha }}"
+          PION_SRC="$RUNNER_TEMP/pion-src"
+          git clone --filter=blob:none --no-checkout https://github.com/AFK-surf/pion.git "$PION_SRC"
+          git -C "$PION_SRC" checkout "${{ steps.pin.outputs.pion_sha }}"
+          if [ ! -x "$PREFIX/bin/pionc" ]; then
+            (cd "$PION_SRC" && bash scripts/install.sh --prefix "$PREFIX")
+          fi
+          if [ ! -x "$PREFIX/bin/mbt2pion" ]; then
+            "$PREFIX/bin/pionc" build "$PION_SRC/tools/mbt2pion_cli" -o "$PREFIX/bin/mbt2pion"
+          fi
+          echo "$PREFIX/bin" >> "$GITHUB_PATH"
+          echo "PIONC=$PREFIX/bin/pionc" >> "$GITHUB_ENV"
+          echo "MBT2PION_BIN=$PREFIX/bin/mbt2pion" >> "$GITHUB_ENV"
+          echo "MBT_COMPAT_DIR=$PION_SRC/tools/mbt_compat" >> "$GITHUB_ENV"
+          "$PREFIX/bin/pionc" fetch pion/ui >/dev/null
+
+      - name: Run 4 negative mutation CI gates & 19-case 3-engine vertical pilot
+        run: |
+          sh pion/tools/mbt2pion-monoid/test_negative_gates.sh
+          sh pion/tools/mbt2pion-monoid/pilot/run_pilot.sh

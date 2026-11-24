@@ -1,0 +1,99 @@
+// Lifecycle tests for `sf_assets_web`:
+//   1. Initial absent state (empty code face, None math glyph table -> text fallback)
+//   2. Late-arrival registration triggering redraw callbacks
+//   3. Post-decompress cache release (`drop` clears compressed gzip buffer once unzipped)
+//   4. Graceful fallback on disconnect and on corrupt gzip payload
+
+import "sf"
+import "signals"
+
+fn bytes_from_ints(xs : Array[Int]) -> Bytes {
+  let out = Bytes::new(xs.length())
+  for i in 0..<xs.length() {
+    out[i] = xs[i] as Byte
+  }
+  out
+}
+
+// Valid gzip stream encoding plain text "OK" (must be rejected by valid_math_glyph_table)
+fn sample_gzip_text_ok() -> Bytes {
+  bytes_from_ints([
+    0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x02, 0xFF, 0xF3, 0xF7, 0x06, 0x00, 0x2D, 0xD9,
+    0x36, 0xD7, 0x02, 0x00, 0x00, 0x00,
+  ])
+}
+
+// Valid gzip stream encoding a well-formed 1-glyph table (16 B: n=1, id=1, off=[0, 0])
+fn sample_valid_gz() -> Bytes {
+  bytes_from_ints([
+    0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x02, 0xFF, 0x63, 0x64, 0x60, 0x60, 0x60, 0x64,
+    0x40, 0x00, 0x00, 0xAB, 0x96, 0x76, 0xD9, 0x10,
+    0x00, 0x00, 0x00,
+  ])
+}
+
+test "sf_assets_web full lifecycle: absent -> late arrival + redraw -> decompress + cache release -> corrupt & disconnect fallback" {
+  sf::reset_assets()
+  let store = WebAssetStore::new()
+  let sf_notifies = signals::ref_new(0)
+  let host_redraws = signals::ref_new(0)
+  sf::on_assets_changed(fn() { sf_notifies.v = sf_notifies.v + 1 })
+  store.on_redraw(fn() { host_redraws.v = host_redraws.v + 1 })
+  store.install()
+
+  // 1. Initial absent state
+  debug_assert(sf::code_face().length() == 0, "initial code_face empty")
+  debug_assert(sf::math_glyph_table() is None, "initial math_glyph_table None")
+  debug_assert(!store.has_code_face(), "store initially has no code face")
+  debug_assert(!store.has_compressed_math_cache(), "store initially has no math cache")
+
+  // 2. Late-arrival code face triggers redraw
+  store.provide_code_face(bytes_from_ints([0x00, 0x01, 0x00, 0x00, 0x54, 0x54, 0x46, 0x30]))
+  debug_assert(store.has_code_face(), "store has code face after arrival")
+  debug_assert(sf::code_face().length() == 8, "sf::code_face returns arrived bytes")
+  debug_assert(store.redraw_count() == 1, "code face arrival triggered redraw")
+  debug_assert(host_redraws.v == 1, "host redraw callback fired")
+
+  // 3. Corrupt math payload fails gunzip cleanly and keeps fallback active (no crash, no drop)
+  store.provide_math_glyphs("not-a-gzip".to_bytes())
+  debug_assert(store.redraw_count() == 2, "corrupt math arrival triggered redraw")
+  debug_assert(sf::math_glyph_table() is None, "corrupt gzip stays in fallback")
+  debug_assert(store.math_drops() == 0, "corrupt gzip not dropped")
+
+  // 3b. Valid gzip whose payload is NOT a math glyph table (plain text "OK") must be rejected without caching or dropping
+  store.provide_math_glyphs(sample_gzip_text_ok())
+  debug_assert(store.redraw_count() == 3, "invalid-table gzip arrival triggered redraw")
+  debug_assert(sf::math_glyph_table() is None, "valid gzip of plain text OK rejected as invalid glyph table")
+  debug_assert(store.math_drops() == 0, "invalid glyph table must not trigger drop")
+
+  // 4. Valid late-arrival gzipped math table triggers redraw, decompresses once, and releases compressed cache
+  store.provide_math_glyphs(sample_valid_gz())
+  debug_assert(store.redraw_count() == 4, "valid math arrival triggered redraw")
+  debug_assert(store.has_compressed_math_cache(), "compressed cache held before decompress")
+  let table = match sf::math_glyph_table() {
+    Some(t) => t
+    None => panic("expected valid gzipped math table to decompress")
+  }
+  debug_assert(table.length() == 16, "decompressed math table length == 16")
+  debug_assert(store.math_drops() == 1, "compressed cache dropped once after decompress")
+  debug_assert(!store.has_compressed_math_cache(), "compressed cache released")
+
+  // Subsequent reads hit cached unzipped table without triggering another drop
+  let table2 = match sf::math_glyph_table() {
+    Some(t) => t
+    None => panic("expected cached unzipped math table")
+  }
+  debug_assert(table2.length() == 16, "cached math table length == 16")
+  debug_assert(store.math_drops() == 1, "no duplicate drop on cached read")
+
+  // 5. Disconnect clears caches and triggers redraw back to fallback
+  store.clear_on_disconnect()
+  debug_assert(!store.has_code_face(), "code face cleared on disconnect")
+  debug_assert(!store.has_compressed_math_cache(), "math cache cleared on disconnect")
+  debug_assert(sf::code_face().length() == 0, "sf::code_face empty after disconnect")
+  debug_assert(sf::math_glyph_table() is None, "sf::math_glyph_table None after disconnect")
+  debug_assert(store.redraw_count() == 5, "disconnect triggered redraw")
+  debug_assert(sf_notifies.v >= 6, "sf::on_assets_changed notified across lifecycle")
+}

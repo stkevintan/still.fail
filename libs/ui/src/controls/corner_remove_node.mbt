@@ -56,6 +56,7 @@ pub fn with_corner_remove_node(
             .offset(Is((reach, -reach)))
             .ground(By(fn() { theme().p.text }))
             .focus_ring_theme()
+            .flies_fade()
             |> ignore
             let mark = icon_node(x, "close", card_close_icon, By(fn() { theme().p.canvas }))
             match turn {

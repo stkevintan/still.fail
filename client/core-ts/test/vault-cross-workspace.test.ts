@@ -14,11 +14,13 @@ import { HostWire, type RequestHead, type StationWire } from "../src/station/wir
 import type { FakeHost } from "../src/testing.ts";
 import { type Entry, Signer, entryHash, signedBytes } from "../src/lock.ts";
 import { utf8 } from "../src/util.ts";
+import { HostError } from "../src/error.ts";
+import { t } from "../src/i18n.ts";
 import {
   type BoxCert, type BrowseAnswer, type Grant, type Item, type Request, type Vault,
   TAG, boxPublic, encryptWith, grantContext, itemContext, keyContext, openSeal, sealWith, sign, signedOk,
 } from "../src/vault/crypto.ts";
-import { askAnswers, browseCandidates, readStation, vaultsView } from "../src/views/vault.ts";
+import { BOX_PUB, askAnswers, browseCandidates, readStation, vaultsView } from "../src/views/vault.ts";
 import { call, subscribe } from "./helpers.ts";
 import { base, started, stationReplies, status } from "./station-fixture.ts";
 
@@ -739,6 +741,43 @@ test("cold-start browseRead waits for reachable station link and also.resumed re
     // Second resumed call with populated vault record must be a strict no-op.
     await runResumed();
     assert.equal(r.stA.counts.vaults, readsBeforeExisting + 1, "resumed should no-op once vault record is present");
+  } finally {
+    r.core.close();
+  }
+});
+
+test("FB-51: the box key the screen lock taken off ended, read in one workspace: made anew and certified in every workspace, so none shows a vault keyed here that it cannot open; the recovery words key each back in", async () => {
+  const r = await multiWsRig();
+  try {
+    const a = await r.ask("vault.setup", { workspace: "ws" });
+    const b = await r.ask("vault.setup", { workspace: "wsB" });
+    const inA = await r.ask("vault.putItem", { workspace: "ws", vault: a.made, plain: { kind: "token", name: "A", fields: { value: "a" }, domains: [], notes: "" } });
+    const inB = await r.ask("vault.putItem", { workspace: "wsB", vault: b.made, plain: { kind: "token", name: "B", fields: { value: "b" }, domains: [], notes: "" } });
+    await r.ask("vault.lock", { workspace: "ws" });
+    const dead = new TextDecoder().decode(r.host.storage.get(BOX_PUB)!);
+    // (Android after the screen lock was taken off: what was kept for the person cannot be read; kept since, it can)
+    const gone = new Set([...r.host.secure].filter(([, v]) => v.user).map(([k]) => k));
+    const get = r.host.secureGet!, set = r.host.secureSet!;
+    r.host.secureGet = (k, o) => (o.user && gone.has(k) ? Effect.fail(new HostError("key_invalidated")) : get(k, o));
+    r.host.secureSet = (k, v, o) => Effect.tap(set(k, v, o), () => Effect.sync(() => void gone.delete(k)));
+    await assert.rejects(r.ask("vault.open", { workspace: "ws", item: inA.id }), (e: Error & { code?: string }) => {
+      assert.deepEqual([e.code, e.message], ["key_invalidated", t("core-misc.vault.keyRenewed")]);
+      return true;
+    });
+    await r.host.time.pass(2_000);
+    const fresh = new TextDecoder().decode(r.host.storage.get(BOX_PUB)!);
+    assert.notEqual(fresh, dead);
+    // Certified anew in both, the one never read in too; neither says this device has a key to its vault.
+    assert.deepEqual([r.stA.boxes.get(r.devId)!.box, r.stB.boxes.get(r.devId)!.box], [fresh, fresh]);
+    for (const ws of ["ws", "wsB"]) {
+      const v = vaultsView(r.core.inner, ws) as any;
+      assert.deepEqual([v.setUp, v.vaults.map((x: any) => x.keyed)], [true, [false]], ws);
+    }
+    assert.deepEqual(await r.ask("vault.recover", { workspace: "wsB", words: b.words }), { recovered: 1, others: 0 });
+    assert.deepEqual(await r.ask("vault.recover", { workspace: "ws", words: a.words }), { recovered: 1, others: 0 });
+    await r.ask("vault.lock", { workspace: "ws" });
+    assert.equal((await r.ask("vault.open", { workspace: "wsB", item: inB.id })).plain.fields.value, "b");
+    assert.equal((await r.ask("vault.open", { workspace: "ws", item: inA.id })).plain.fields.value, "a");
   } finally {
     r.core.close();
   }

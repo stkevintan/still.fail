@@ -338,3 +338,139 @@ test "a draft's quote with no id of its own takes no cursor on a phone, on the o
   t.run_for(@ui.move_most_ms)
   assert_eq(focused_field(t), "", msg="its quote taken out")
 }
+
+///|
+test "小屏: quote card enters near full width without overlapping bottom controls, removes cleanly, and restores composer caret after settle or immediate typing" {
+  let calls : Array[Made] = []
+  let made : Ref[Source?] = Ref(None)
+  let t = fake_core(calls, made~)
+  let src = made.val.unwrap()
+  t.draw()
+  let assert_quote_above_send = fn(phase : String) -> Unit raise {
+    let send_y = match t.query(Button, label=@sf.t("web-main.composer.send")) {
+      Some(b) => b.rect.1
+      None => return
+    }
+    let q_words = t.words().filter(fn(w) { w.0.contains(quote_passage) && w.5 > 0.02 && w.2 > 60.0 })
+    if q_words.is_empty() {
+      return
+    }
+    let (_, qx, qy, _, _, _) = q_words[0]
+    for a in t.drawn_instances_keyed() {
+      let kind = a[5]
+      let rx = a[0]
+      let ry = a[1]
+      let rw = a[2]
+      let rh = a[3]
+      let alpha = a[11]
+      let cy0 = a[17]
+      let cy1 = a[19]
+      if kind == 0.0 &&
+        alpha > 0.01 &&
+        rw >= 100.0 &&
+        rh >= 16.0 &&
+        rh < 120.0 &&
+        rx <= qx + 2.0 &&
+        ry <= qy + 2.0 &&
+        rx + rw >= qx + 2.0 &&
+        ry + rh >= qy + 2.0 {
+        let vis_bottom = @sf.dmin(ry + rh, cy1)
+        assert_true(
+          vis_bottom <= send_y + 0.5,
+          msg="\{phase}: quote card visible bottom \{vis_bottom} overlapped send button top \{send_y} (ry=\{ry}, rh=\{rh}, clip=[\{cy0}, \{cy1}]) at \{t.time()}",
+        )
+      }
+    }
+  }
+  // 1) Add a quote from the shut capsule: width stays >= 94% of resting width AND clipped bottom never overlaps `+`/`↑`.
+  @sfbase.writing_quote(src, @sfbase.writing(src, "ws1/st1:s-c1"), {
+    "author": "Claude",
+    "text": quote_passage,
+    "ts": "ts8",
+  })
+  let add_at = t.time()
+  let mut min_w = 1.0e9
+  while t.time() - add_at < @ui.move_most_ms {
+    t.frame_as_host() |> ignore
+    assert_quote_above_send("enter")
+    if quote_seen(t).length() > 0 {
+      let gw = quote_ground(t).2
+      if gw < min_w {
+        min_w = gw
+      }
+    }
+  }
+  t.run_for(@ui.move_most_ms)
+  let rest_w = quote_ground(t).2
+  assert_true(min_w >= rest_w * 0.94, msg="entering quote card shrank to \{min_w} (< 94% of \{rest_w})")
+  let assert_no_orphan_x = fn(phase : String) -> Unit raise {
+    let xa = x_seen(t)
+    if xa <= 0.02 {
+      return
+    }
+    let mut best_vis_h = 0.0
+    for a in t.drawn_instances_keyed() {
+      if a[5] == 0.0 && a[11] > 0.005 && a[2] >= 100.0 && a[3] >= 30.0 && a[3] < 120.0 {
+        let vis_h = @sf.dmin(a[1] + a[3], a[19]) - @sf.dmax(a[1], a[17])
+        if vis_h > best_vis_h {
+          best_vis_h = vis_h
+        }
+      }
+    }
+    assert_true(
+      best_vis_h >= 24.0,
+      msg="\{phase}: orphan ✕ visible (alpha=\{xa}) after quote card collapsed (best_vis_h=\{best_vis_h}) at \{t.time()}",
+    )
+  }
+  // 2) Delete single quote via ✕: collapsing quote card must never overlap `+`/`↑` and ✕ must vanish before card collapses.
+  t.click(Button, label=@sf.t("web-main.quote.remove"))
+  let rm_at = t.time()
+  while t.time() - rm_at < @ui.move_most_ms {
+    t.frame_as_host() |> ignore
+    assert_quote_above_send("remove")
+    assert_no_orphan_x("remove")
+  }
+  t.run_for(@ui.move_most_ms)
+  // 3) Re-add quote, type a comment, send: composer caret stays hidden past sent_out_away_ms (where composer is still collapsing)
+  //    and until composer hold+down finishes, then cleanly returns.
+  @sfbase.writing_quote(src, @sfbase.writing(src, "ws1/st1:s-c1"), {
+    "author": "Claude",
+    "text": quote_passage,
+    "ts": "ts8",
+  })
+  t.run_for(@ui.move_most_ms)
+  t.type_text("手机引用说明")
+  t.draw()
+  guard composer_field(t) is Some((fx, _, fw, _)) else { fail("no composer field") }
+  let quote_away_ms = @sf.dmax(@sfbase.sent_out_away_ms(), @sfbase.sent_out_hold_ms + @sfbase.sent_down_ms)
+  assert_true(quote_away_ms > @sfbase.sent_out_away_ms() + 100.0, msg="quote away_ms did not extend past plain sent_out_away_ms")
+  tap_send(t)
+  let sent_at = t.time()
+  let mut checked_past_plain_away = false
+  while t.time() - sent_at < quote_away_ms - 1.0 {
+    let dt = t.time() - sent_at
+    if dt > @sfbase.sent_out_away_ms() + 16.0 {
+      checked_past_plain_away = true
+    }
+    match mf_caret(t, fx, fw) {
+      Some(r) => fail("caret appeared mid-flight at +\{dt}ms: \{Repr(r)}")
+      None => ()
+    }
+    t.frame_as_host() |> ignore
+  }
+  assert_true(checked_past_plain_away, msg="did not check caret past plain sent_out_away_ms")
+  t.run_for(@sfbase.sent_out_hold_ms)
+  assert_true(mf_caret(t, fx, fw) is Some(_), msg="composer caret did not return after quote send settled")
+  // 4) Immediate typing right after sending a quote restores the caret immediately without waiting move_most_ms.
+  @sfbase.writing_quote(src, @sfbase.writing(src, "ws1/st1:s-c1"), {
+    "author": "Claude",
+    "text": quote_passage,
+    "ts": "ts8",
+  })
+  t.run_for(@ui.move_most_ms)
+  tap_send(t)
+  t.run_for(@sfbase.sent_out_hold_ms)
+  t.type_text("先上屏")
+  t.draw()
+  assert_true(mf_caret(t, fx, fw) is Some(_), msg="immediate typing after quote send kept caret hidden")
+}

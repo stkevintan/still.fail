@@ -18,7 +18,7 @@ import { lanAddrs } from "../mesh/lan.ts";
 import { applyNetwork, keptRunning } from "../mesh/mesh.ts";
 import { bindStation } from "../mesh/native.ts";
 import { PEER_ALPN, PEER_BYTES_ALPN, peerCall, servePeer } from "../mesh/peer.ts";
-import { DeviceRefused, PEER_HTTP_ALPN, serveHttp } from "../mesh/peer-http.ts";
+import { DeviceRefused, PEER_HTTP_ALPN, rigAllowed, serveHttp } from "../mesh/peer-http.ts";
 import { keepRelays, wantedRelays } from "../mesh/relays.ts";
 import { congestionOf } from "../mesh/settings.ts";
 import { Fibers } from "../ops/fibers.ts";
@@ -298,7 +298,7 @@ export const RigMeshLive = Layer.effectDiscard(
         serve: (conn) =>
           conn.alpn().equals(PEER_HTTP_ALPN)
             ? serveHttp(conn, cloud, {
-                allowed: (peer, workspace) => rig.current?.stationRefusal(peer, workspace) ?? "the rig is starting",
+                allowed: rigAllowed(rig),
                 device: (peer, workspace, session, device, probe) => rig.current === null ? Promise.reject(new DeviceRefused(503, "the rig is starting")) : rig.current.device(peer, workspace, session, device, probe),
               })
             : servePeer(conn, cloud, peers),

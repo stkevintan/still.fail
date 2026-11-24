@@ -1,25 +1,35 @@
 [workspace]
 members = [
   "packages/app_state",
+  "packages/sf_smoke",
 ]
 
 [workspace.dependencies]
 # Official AFK-surf/pion-packages release tags
 base64 = { git = "https://github.com/AFK-surf/pion-packages.git", tag = "base64-v0.1.0", subdir = "packages/base64" }
 effect = { git = "https://github.com/AFK-surf/pion-packages.git", tag = "effect-v0.1.0", subdir = "packages/effect" }
-crypto = { git = "https://github.com/AFK-surf/pion-packages.git", tag = "crypto-v0.2.0", subdir = "packages/crypto" }
+crypto = { git = "https://github.com/AFK-surf/pion-packages.git", tag = "crypto-v0.4.1", subdir = "packages/crypto" }
 flate = { git = "https://github.com/AFK-surf/pion-packages.git", tag = "flate-v0.1.0", subdir = "packages/flate" }
 url = { git = "https://github.com/AFK-surf/pion-packages.git", tag = "url-v0.1.0", subdir = "packages/url" }
 time = { git = "https://github.com/AFK-surf/pion-packages.git", tag = "time-v0.1.0", subdir = "packages/time" }
 http1 = { git = "https://github.com/AFK-surf/pion-packages.git", tag = "http1-v0.1.0", subdir = "packages/http1" }
 json5 = { git = "https://github.com/AFK-surf/pion-packages.git", tag = "json5-v0.1.0", subdir = "packages/json5" }
+markdown = { git = "https://github.com/AFK-surf/pion-packages.git", tag = "markdown-v0.3.0", subdir = "packages/markdown" }
+regex = { git = "https://github.com/AFK-surf/pion-packages.git", tag = "regex-v0.1.0", subdir = "packages/regex" }
 
-# Official AFK-surf/invar pinned main rev (headless reactive & frame-wake primitives only)
-signals = { git = "https://github.com/AFK-surf/invar.git", rev = "ae44931399a65d6ce68c59544216e359cc29b8db", subdir = "packages/signals" }
-view = { git = "https://github.com/AFK-surf/invar.git", rev = "ae44931399a65d6ce68c59544216e359cc29b8db", subdir = "packages/view" }
-ui = { git = "https://github.com/AFK-surf/invar.git", rev = "ae44931399a65d6ce68c59544216e359cc29b8db", subdir = "packages/ui" }
+# Official AFK-surf/invar pinned main rev (single repo-wide pin enforced by check_single_invar_pin.sh)
+signals = { git = "https://github.com/AFK-surf/invar.git", rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3", subdir = "packages/signals" }
+view = { git = "https://github.com/AFK-surf/invar.git", rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3", subdir = "packages/view" }
+ui = { git = "https://github.com/AFK-surf/invar.git", rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3", subdir = "packages/ui" }
+zip = { git = "https://github.com/AFK-surf/invar.git", rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3", subdir = "packages/zip" }
+pixels = { git = "https://github.com/AFK-surf/invar.git", rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3", subdir = "packages/pixels" }
+paint = { git = "https://github.com/AFK-surf/invar.git", rev = "339c271e0bd4ea9e2680f13adcec8075d6da9cf3", subdir = "packages/paint" }
+
+# Official AFK-surf/pion mbt_compat pinned main rev (used transitively by sf)
+mbt_compat = { git = "https://github.com/AFK-surf/pion.git", rev = "6d22ff1f90bd19012a5997f7fdfdc56ee3012408", subdir = "tools/mbt_compat" }
 
 # Local monoid pure-Pion workspaces
+sf = { path = "../ui/packages/sf" }
 base_codec = { path = "../base/packages/base_codec" }
 wire = { path = "../base/packages/wire" }
 shell = { path = "../base/packages/shell" }

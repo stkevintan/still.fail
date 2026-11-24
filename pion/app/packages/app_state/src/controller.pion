@@ -460,7 +460,7 @@ fn AppController::rollback_chat_overlay(
   let next : Array[ChatSummary] = []
   for c in cur {
     if c.id == target {
-      let restored_title = if kind == "rename" {
+      let restored_title = if kind == "rename" || kind == "chat.rename" {
         match self.prev_chat_titles.get(target) {
           Some(old_t) => old_t
           None => c.title
@@ -468,7 +468,7 @@ fn AppController::rollback_chat_overlay(
       } else {
         c.title
       }
-      let restored_arch = if kind == "archive" {
+      let restored_arch = if kind == "archive" || kind == "chat.archive" {
         match self.prev_chat_archived.get(target) {
           Some(old_a) => old_a
           None => false

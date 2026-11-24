@@ -1,0 +1,622 @@
+// Search candidate scopes SQLite builder (`--builder search-scope`), 1:1 aligned with
+// `station/mb/src/searchscope/scope.mbt` and `station/mb/src/reader/main.mbt:1005-1016`.
+// Maintains per-process `turn` rotation across requests via closure-captured mutable cell.
+// All write transactions go exclusively through `db.tx_err(...)` (never raw transaction SQL).
+
+import "base_codec"
+import "builders_core"
+import "sql_db"
+
+fn scope_safe(value : String) -> String {
+  "(typeof(" + value + ") = 'text' AND instr(" + value + ", char(0)) = 0 AND " + value + " NOT GLOB '*[^ -~]*')"
+}
+
+fn scope_member_kind() -> String {
+  "CASE WHEN NOT " +
+  scope_safe("m.session") +
+  " THEN 2\n  WHEN s.key IS NULL OR s.ws IS NULL THEN 0 WHEN NOT " +
+  scope_safe("s.ws") +
+  " THEN 2 ELSE 1 END"
+}
+
+fn scope_member_ws() -> String {
+  "CASE WHEN " +
+  scope_safe("m.session") +
+  " AND s.key IS NOT NULL AND s.ws IS NOT NULL AND " +
+  scope_safe("s.ws") +
+  "\n  THEN s.ws ELSE '' END"
+}
+
+fn scope_insert_member(thread : String, session : String) -> String {
+  "INSERT INTO search_scope_members(thread, session, kind, ws)\n  SELECT m.thread, m.session, " +
+  scope_member_kind() +
+  ", " +
+  scope_member_ws() +
+  " FROM thread_sessions m LEFT JOIN sessions s ON s.key = m.session\n  WHERE m.thread = " +
+  thread +
+  " AND m.session = " +
+  session +
+  " AND NOT EXISTS\n    (SELECT 1 FROM search_scope_members x WHERE x.thread = m.thread AND x.session = m.session)"
+}
+
+fn scope_update_orphan(thread : String) -> String {
+  "\n  DELETE FROM search_scope_orphans WHERE thread = " +
+  thread +
+  ";\n  INSERT INTO search_scope_orphans(thread) SELECT " +
+  thread +
+  " WHERE " +
+  thread +
+  " IS NOT NULL\n    AND EXISTS (SELECT 1 FROM threads WHERE id = " +
+  thread +
+  ")\n    AND NOT EXISTS (SELECT 1 FROM thread_sessions WHERE thread = " +
+  thread +
+  ")\n    AND NOT EXISTS (SELECT 1 FROM search_scope_orphans WHERE thread = " +
+  thread +
+  ");"
+}
+
+fn scope_mark_member(thread : String, session : String) -> String {
+  "\n  INSERT INTO search_scope_members_dirty(thread, session) SELECT " +
+  thread +
+  ", " +
+  session +
+  "\n    WHERE " +
+  thread +
+  " IS NOT NULL AND " +
+  session +
+  " IS NOT NULL AND NOT EXISTS\n      (SELECT 1 FROM search_scope_members_dirty WHERE thread = " +
+  thread +
+  " AND session = " +
+  session +
+  ");"
+}
+
+fn scope_mark_thread(thread : String) -> String {
+  "\n  INSERT INTO search_scope_threads_dirty(thread) SELECT " +
+  thread +
+  " WHERE " +
+  thread +
+  " IS NOT NULL\n    AND NOT EXISTS (SELECT 1 FROM search_scope_threads_dirty WHERE thread = " +
+  thread +
+  ");"
+}
+
+fn scope_mark_session(session : String) -> String {
+  "\n  UPDATE search_scope_sessions_dirty SET after_rowid = NULL WHERE session = " +
+  session +
+  ";\n  INSERT INTO search_scope_sessions_dirty(session, after_rowid) SELECT " +
+  session +
+  ", NULL\n    WHERE " +
+  session +
+  " IS NOT NULL AND EXISTS (SELECT 1 FROM thread_sessions INDEXED BY thread_sessions_session WHERE session = " +
+  session +
+  ")\n      AND NOT EXISTS (SELECT 1 FROM search_scope_sessions_dirty WHERE session = " +
+  session +
+  ");"
+}
+
+fn scope_member_by_rowid(part : String, condition : String = "") -> String {
+  "(SELECT " + part + " FROM thread_sessions WHERE rowid = NEW.rowid " + condition + ")"
+}
+
+fn scope_member_by_key(part : String) -> String {
+  "(SELECT " + part + " FROM thread_sessions WHERE thread = NEW.thread AND session = NEW.session)"
+}
+
+fn scope_session_by(condition : String) -> String {
+  "(SELECT key FROM sessions WHERE " + condition + ")"
+}
+
+let SCOPE_THREAD_BY_ADDRESS : String = "(SELECT id FROM threads WHERE surface = NEW.surface AND channel = NEW.channel AND thread_ts = NEW.thread_ts)"
+
+fn scope_refresh_member(thread : String, session : String) -> String {
+  "\n  DELETE FROM search_scope_members WHERE thread = " +
+  thread +
+  " AND session = " +
+  session +
+  ";\n  " +
+  scope_insert_member(thread, session) +
+  ";"
+}
+
+pub fn search_scope_schema() -> String {
+  let stmts = [
+    "CREATE TABLE search_scope_meta (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL,\n  thread_after INTEGER, thread_through INTEGER, threads_done INTEGER NOT NULL,\n  member_after INTEGER, member_through INTEGER, members_done INTEGER NOT NULL);",
+    "INSERT INTO search_scope_meta SELECT 1, 1, NULL, (SELECT MAX(id) FROM threads),\n  NOT EXISTS (SELECT 1 FROM threads LIMIT 1), NULL, (SELECT MAX(rowid) FROM thread_sessions),\n  NOT EXISTS (SELECT 1 FROM thread_sessions LIMIT 1);",
+    "CREATE TABLE search_scope_members (thread INTEGER NOT NULL, session NOT NULL, kind INTEGER NOT NULL,\n  ws TEXT NOT NULL, PRIMARY KEY(thread, session)) WITHOUT ROWID;",
+    "CREATE TABLE search_scope_threads (kind INTEGER NOT NULL, ws TEXT NOT NULL, thread INTEGER NOT NULL,\n  refs INTEGER NOT NULL, PRIMARY KEY(kind, ws, thread)) WITHOUT ROWID;",
+    "CREATE TABLE search_scope_orphans (thread INTEGER PRIMARY KEY);",
+    "CREATE TABLE search_scope_members_dirty (thread INTEGER NOT NULL, session NOT NULL,\n  PRIMARY KEY(thread, session)) WITHOUT ROWID;",
+    "CREATE TABLE search_scope_threads_dirty (thread INTEGER PRIMARY KEY);",
+    "CREATE TABLE search_scope_sessions_dirty (session PRIMARY KEY, after_rowid INTEGER) WITHOUT ROWID;",
+    "CREATE TRIGGER search_scope_member_added AFTER INSERT ON search_scope_members BEGIN\n  INSERT INTO search_scope_threads(kind, ws, thread, refs) SELECT NEW.kind, NEW.ws, NEW.thread, 0\n    WHERE NOT EXISTS (SELECT 1 FROM search_scope_threads WHERE kind = NEW.kind AND ws = NEW.ws AND thread = NEW.thread);\n  UPDATE search_scope_threads SET refs = refs + 1 WHERE kind = NEW.kind AND ws = NEW.ws AND thread = NEW.thread;\nEND;",
+    "CREATE TRIGGER search_scope_member_removed AFTER DELETE ON search_scope_members BEGIN\n  UPDATE search_scope_threads SET refs = refs - 1 WHERE kind = OLD.kind AND ws = OLD.ws AND thread = OLD.thread;\n  DELETE FROM search_scope_threads WHERE kind = OLD.kind AND ws = OLD.ws AND thread = OLD.thread AND refs = 0;\nEND;",
+    "CREATE TRIGGER search_scope_membership_before_add BEFORE INSERT ON thread_sessions BEGIN\n  " +
+    scope_mark_member(scope_member_by_rowid("thread"), scope_member_by_rowid("session")) +
+    "\nEND;",
+    "CREATE TRIGGER search_scope_membership_add AFTER INSERT ON thread_sessions BEGIN\n  " +
+    scope_refresh_member("NEW.thread", "NEW.session") +
+    "\n  " +
+    scope_update_orphan("NEW.thread") +
+    "\nEND;",
+    "CREATE TRIGGER search_scope_membership_before_change BEFORE UPDATE ON thread_sessions\n  WHEN OLD.thread IS NOT NEW.thread OR OLD.session IS NOT NEW.session OR OLD.rowid IS NOT NEW.rowid BEGIN\n    " +
+    scope_mark_member(
+      scope_member_by_rowid("thread", condition="AND rowid IS NOT OLD.rowid"),
+      scope_member_by_rowid("session", condition="AND rowid IS NOT OLD.rowid"),
+    ) +
+    "\n    " +
+    scope_mark_member(scope_member_by_key("thread"), scope_member_by_key("session")) +
+    "\nEND;",
+    "CREATE TRIGGER search_scope_membership_change AFTER UPDATE OF thread, session ON thread_sessions\n  WHEN OLD.thread IS NOT NEW.thread OR OLD.session IS NOT NEW.session BEGIN\n    DELETE FROM search_scope_members WHERE thread = OLD.thread AND session = OLD.session;\n    " +
+    scope_refresh_member("NEW.thread", "NEW.session") +
+    "\n    " +
+    scope_update_orphan("OLD.thread") +
+    " " +
+    scope_update_orphan("NEW.thread") +
+    "\nEND;",
+    "CREATE TRIGGER search_scope_membership_drop AFTER DELETE ON thread_sessions BEGIN\n  DELETE FROM search_scope_members WHERE thread = OLD.thread AND session = OLD.session;\n  " +
+    scope_update_orphan("OLD.thread") +
+    "\nEND;",
+    "CREATE TRIGGER search_scope_thread_before_add BEFORE INSERT ON threads BEGIN\n  " +
+    scope_mark_thread("(SELECT id FROM threads WHERE id = NEW.id)") +
+    " " +
+    scope_mark_thread(SCOPE_THREAD_BY_ADDRESS) +
+    "\nEND;",
+    "CREATE TRIGGER search_scope_thread_before_change BEFORE UPDATE OF id, surface, channel, thread_ts ON threads BEGIN\n  " +
+    scope_mark_thread("(SELECT id FROM threads WHERE id = NEW.id AND id IS NOT OLD.id)") +
+    "\n  " +
+    scope_mark_thread("(SELECT id FROM threads WHERE surface = NEW.surface AND channel = NEW.channel\n    AND thread_ts = NEW.thread_ts AND id IS NOT OLD.id)") +
+    "\nEND;",
+    "CREATE TRIGGER search_scope_thread_add AFTER INSERT ON threads BEGIN " +
+    scope_update_orphan("NEW.id") +
+    " END;",
+    "CREATE TRIGGER search_scope_thread_change AFTER UPDATE OF id ON threads WHEN OLD.id IS NOT NEW.id BEGIN\n  " +
+    scope_update_orphan("OLD.id") +
+    " " +
+    scope_update_orphan("NEW.id") +
+    "\nEND;",
+    "CREATE TRIGGER search_scope_thread_drop AFTER DELETE ON threads BEGIN " +
+    scope_update_orphan("OLD.id") +
+    " END;",
+    "CREATE TRIGGER search_scope_session_before_add BEFORE INSERT ON sessions BEGIN\n  " +
+    scope_mark_session(scope_session_by("key = NEW.key")) +
+    " " +
+    scope_mark_session(scope_session_by("token = NEW.token")) +
+    "\n  " +
+    scope_mark_session(scope_session_by("rowid = NEW.rowid")) +
+    "\nEND;",
+    "CREATE TRIGGER search_scope_session_add AFTER INSERT ON sessions BEGIN " +
+    scope_mark_session("NEW.key") +
+    " END;",
+    "CREATE TRIGGER search_scope_session_before_change BEFORE UPDATE ON sessions\n  WHEN OLD.key IS NOT NEW.key OR OLD.ws IS NOT NEW.ws OR OLD.token IS NOT NEW.token OR OLD.rowid IS NOT NEW.rowid BEGIN\n    " +
+    scope_mark_session("OLD.key") +
+    " " +
+    scope_mark_session(scope_session_by("key = NEW.key AND rowid IS NOT OLD.rowid")) +
+    "\n    " +
+    scope_mark_session(scope_session_by("token = NEW.token AND rowid IS NOT OLD.rowid")) +
+    "\n    " +
+    scope_mark_session(scope_session_by("rowid = NEW.rowid AND rowid IS NOT OLD.rowid")) +
+    "\nEND;",
+    "CREATE TRIGGER search_scope_session_change AFTER UPDATE OF key, ws ON sessions\n  WHEN OLD.key IS NOT NEW.key OR OLD.ws IS NOT NEW.ws BEGIN " +
+    scope_mark_session("NEW.key") +
+    " END;",
+    "CREATE TRIGGER search_scope_session_drop BEFORE DELETE ON sessions BEGIN " +
+    scope_mark_session("OLD.key") +
+    " END;",
+  ]
+  let sb = StringBuilder::new()
+  for i in 0..<stmts.length() {
+    if i > 0 {
+      sb.write_string("\n")
+    }
+    sb.write_string(stmts[i])
+  }
+  sb.to_string()
+}
+
+fn scope_installed(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match db.all("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'search_scope_meta'", []) {
+    Ok(rows) => Ok(rows.length() > 0)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+fn scope_check_version(db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+  let rows = match db.all("SELECT version FROM search_scope_meta WHERE id = 1", []) {
+    Ok(r) => r
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let ok = rows.length() > 0 &&
+  match rows[0].get("version") {
+    Some(base_codec::Json::Num(n, _)) => n == 1.0
+    _ => false
+  }
+  if !ok {
+    return Err(builders_core::StepError::App("search scope index has an incompatible version"))
+  }
+  Ok(())
+}
+
+fn scope_install(db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+  match scope_installed(db) {
+    Ok(true) => return scope_check_version(db)
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      match scope_installed(tx_db) {
+        Ok(true) => Ok(())
+        Ok(false) => {
+          match tx_db.exec(search_scope_schema()) {
+            Ok(_) => Ok(())
+            Err(e) => Err(builders_core::StepError::Sql(e))
+          }
+        }
+        Err(e) => Err(e)
+      }
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+fn scope_text_key(storage : String, parameter : String) -> String {
+  if storage == "text" {
+    "CAST(" + parameter + " AS TEXT)"
+  } else {
+    parameter
+  }
+}
+
+fn scope_storage_of(row : Map[String, base_codec::Json]) -> String {
+  match row.get("storage") {
+    Some(base_codec::Json::Str(s)) => s
+    _ => ""
+  }
+}
+
+fn scope_put_member(storage : String) -> String {
+  scope_insert_member("CAST(?1 AS INTEGER)", scope_text_key(storage, "?2"))
+}
+
+fn scope_repair_orphan(db : sql_db::Db, thread : base_codec::Json) -> Result[Unit, builders_core::StepError] {
+  let _ = match db.run("DELETE FROM search_scope_orphans WHERE thread = CAST(? AS INTEGER)", [thread]) {
+    Ok(n) => n
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let _ = match db.run(
+    "INSERT INTO search_scope_orphans(thread) SELECT CAST(?1 AS INTEGER) WHERE EXISTS (SELECT 1 FROM threads WHERE id = CAST(?1 AS INTEGER))\n    AND NOT EXISTS (SELECT 1 FROM thread_sessions WHERE thread = CAST(?1 AS INTEGER))\n    AND NOT EXISTS (SELECT 1 FROM search_scope_orphans WHERE thread = CAST(?1 AS INTEGER))",
+    [thread],
+  ) {
+    Ok(n) => n
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  Ok(())
+}
+
+fn scope_repair_member(
+  db : sql_db::Db,
+  thread : base_codec::Json,
+  bytes : base_codec::Json,
+  storage : String,
+) -> Result[Unit, builders_core::StepError] {
+  let key = scope_text_key(storage, "?2")
+  let _ = match db.run(
+    "DELETE FROM search_scope_members WHERE thread = CAST(?1 AS INTEGER) AND session = " + key,
+    [thread, bytes],
+  ) {
+    Ok(n) => n
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let _ = match db.run(scope_put_member(storage), [thread, bytes]) {
+    Ok(n) => n
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  Ok(())
+}
+
+/// One bounded step (`scope-prepare.ts` `step`), lanes taken in turn from `turn`:
+/// returns `(done, next_turn)`.
+pub fn search_scope_step(
+  db : sql_db::Db,
+  turn : Int,
+  limit : Int = 64,
+) -> Result[(Bool, Int), builders_core::StepError] {
+  match scope_install(db) {
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[(Bool, Int), builders_core::StepError] {
+      let metas = match tx_db.all(
+        "SELECT CAST(thread_after AS TEXT) AS thread_after, CAST(thread_through AS TEXT) AS thread_through, threads_done, CAST(member_after AS TEXT) AS member_after, CAST(member_through AS TEXT) AS member_through, members_done FROM search_scope_meta WHERE id = 1 AND version = 1",
+        [],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if metas.length() == 0 {
+        return Err(builders_core::StepError::App("search scope index has an incompatible version"))
+      }
+      let meta = metas[0]
+      let session_rows = match tx_db.all(
+        "SELECT CAST(session AS BLOB) AS bytes, typeof(session) AS storage, CAST(after_rowid AS TEXT) AS after_rowid FROM search_scope_sessions_dirty ORDER BY session LIMIT 1",
+        [],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let member_rows = match tx_db.all(
+        "SELECT CAST(thread AS TEXT) AS thread, CAST(session AS BLOB) AS bytes, typeof(session) AS storage FROM search_scope_members_dirty d ORDER BY d.thread, d.session LIMIT 1",
+        [],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let thread_rows = match tx_db.all(
+        "SELECT CAST(thread AS TEXT) AS thread FROM search_scope_threads_dirty d ORDER BY d.thread LIMIT 1",
+        [],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+
+      let threads_done = match sql_db::row_val(meta, "threads_done") {
+        base_codec::Json::Num(n, _) => n == 1.0
+        _ => false
+      }
+      let members_done = match sql_db::row_val(meta, "members_done") {
+        base_codec::Json::Num(n, _) => n == 1.0
+        _ => false
+      }
+      let pending = [
+        session_rows.length() > 0,
+        member_rows.length() > 0,
+        thread_rows.length() > 0,
+        !threads_done,
+        !members_done,
+      ]
+      let mut any_pending = false
+      for i in 0..<pending.length() {
+        if pending[i] {
+          any_pending = true
+          break
+        }
+      }
+      if !any_pending {
+        return Ok((true, turn))
+      }
+      let mut lane = 0
+      for i in 0..<pending.length() {
+        lane = (turn + i) % pending.length()
+        if pending[lane] {
+          break
+        }
+      }
+      let next_turn = (lane + 1) % pending.length()
+      let lim = base_codec::json_int(limit)
+
+      if lane == 0 && session_rows.length() > 0 {
+        let s = session_rows[0]
+        let storage = scope_storage_of(s)
+        let bytes = sql_db::row_val(s, "bytes")
+        let key = scope_text_key(storage, "?1")
+        let after = sql_db::row_val(s, "after_rowid")
+        let rows = match after {
+          base_codec::Json::Null => {
+            match tx_db.all(
+              "SELECT CAST(rowid AS TEXT) AS n, CAST(thread AS TEXT) AS thread FROM thread_sessions INDEXED BY thread_sessions_session WHERE session = " +
+              key +
+              " ORDER BY rowid LIMIT ?2",
+              [bytes, lim],
+            ) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+          _ => {
+            match tx_db.all(
+              "SELECT CAST(rowid AS TEXT) AS n, CAST(thread AS TEXT) AS thread FROM thread_sessions INDEXED BY thread_sessions_session WHERE session = " +
+              key +
+              " AND rowid > CAST(?2 AS INTEGER) ORDER BY rowid LIMIT ?3",
+              [bytes, after, lim],
+            ) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+        }
+        for i in 0..<rows.length() {
+          match scope_repair_member(tx_db, sql_db::row_val(rows[i], "thread"), bytes, storage) {
+            Ok(_) => ()
+            Err(e) => return Err(e)
+          }
+        }
+        if rows.length() < limit {
+          let _ = match tx_db.run(
+            "DELETE FROM search_scope_sessions_dirty WHERE session = " + key,
+            [bytes],
+          ) {
+            Ok(n) => n
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        } else {
+          let _ = match tx_db.run(
+            "UPDATE search_scope_sessions_dirty SET after_rowid = CAST(?2 AS INTEGER) WHERE session = " + key,
+            [bytes, sql_db::row_val(rows[rows.length() - 1], "n")],
+          ) {
+            Ok(n) => n
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+      } else if lane == 1 && member_rows.length() > 0 {
+        let m = member_rows[0]
+        let storage = scope_storage_of(m)
+        let t = sql_db::row_val(m, "thread")
+        let bytes = sql_db::row_val(m, "bytes")
+        match scope_repair_member(tx_db, t, bytes, storage) {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+        match scope_repair_orphan(tx_db, t) {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+        let _ = match tx_db.run(
+          "DELETE FROM search_scope_members_dirty WHERE thread = CAST(?1 AS INTEGER) AND session = " +
+          scope_text_key(storage, "?2"),
+          [t, bytes],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else if lane == 2 && thread_rows.length() > 0 {
+        let t = sql_db::row_val(thread_rows[0], "thread")
+        match scope_repair_orphan(tx_db, t) {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+        let _ = match tx_db.run(
+          "DELETE FROM search_scope_threads_dirty WHERE thread = CAST(? AS INTEGER)",
+          [t],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else if lane == 3 {
+        let after = sql_db::row_val(meta, "thread_after")
+        let through = sql_db::row_val(meta, "thread_through")
+        let rows = match through {
+          base_codec::Json::Null => []
+          _ => {
+            match after {
+              base_codec::Json::Null => {
+                match tx_db.all(
+                  "SELECT CAST(id AS TEXT) AS id FROM threads WHERE id <= CAST(?1 AS INTEGER) ORDER BY threads.id LIMIT ?2",
+                  [through, lim],
+                ) {
+                  Ok(r) => r
+                  Err(e) => return Err(builders_core::StepError::Sql(e))
+                }
+              }
+              _ => {
+                match tx_db.all(
+                  "SELECT CAST(id AS TEXT) AS id FROM threads WHERE id > CAST(?1 AS INTEGER) AND id <= CAST(?2 AS INTEGER) ORDER BY threads.id LIMIT ?3",
+                  [after, through, lim],
+                ) {
+                  Ok(r) => r
+                  Err(e) => return Err(builders_core::StepError::Sql(e))
+                }
+              }
+            }
+          }
+        }
+        for i in 0..<rows.length() {
+          match scope_repair_orphan(tx_db, sql_db::row_val(rows[i], "id")) {
+            Ok(_) => ()
+            Err(e) => return Err(e)
+          }
+        }
+        let reached = if rows.length() > 0 {
+          sql_db::row_val(rows[rows.length() - 1], "id")
+        } else {
+          after
+        }
+        let _ = match tx_db.run(
+          "UPDATE search_scope_meta SET thread_after = CAST(? AS INTEGER), threads_done = ? WHERE id = 1",
+          [reached, base_codec::json_int(if rows.length() < limit { 1 } else { 0 })],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else if lane == 4 {
+        let after = sql_db::row_val(meta, "member_after")
+        let through = sql_db::row_val(meta, "member_through")
+        let rows = match through {
+          base_codec::Json::Null => []
+          _ => {
+            match after {
+              base_codec::Json::Null => {
+                match tx_db.all(
+                  "SELECT CAST(rowid AS TEXT) AS n, CAST(thread AS TEXT) AS thread, CAST(session AS BLOB) AS bytes, typeof(session) AS storage FROM thread_sessions WHERE rowid <= CAST(?1 AS INTEGER) ORDER BY rowid LIMIT ?2",
+                  [through, lim],
+                ) {
+                  Ok(r) => r
+                  Err(e) => return Err(builders_core::StepError::Sql(e))
+                }
+              }
+              _ => {
+                match tx_db.all(
+                  "SELECT CAST(rowid AS TEXT) AS n, CAST(thread AS TEXT) AS thread, CAST(session AS BLOB) AS bytes, typeof(session) AS storage FROM thread_sessions WHERE rowid > CAST(?1 AS INTEGER) AND rowid <= CAST(?2 AS INTEGER) ORDER BY rowid LIMIT ?3",
+                  [after, through, lim],
+                ) {
+                  Ok(r) => r
+                  Err(e) => return Err(builders_core::StepError::Sql(e))
+                }
+              }
+            }
+          }
+        }
+        for i in 0..<rows.length() {
+          let row = rows[i]
+          let _ = match tx_db.run(
+            scope_put_member(scope_storage_of(row)),
+            [sql_db::row_val(row, "thread"), sql_db::row_val(row, "bytes")],
+          ) {
+            Ok(n) => n
+            Err(e) => return Err(builders_core::StepError::Sql(e))
+          }
+        }
+        let reached = if rows.length() > 0 {
+          sql_db::row_val(rows[rows.length() - 1], "n")
+        } else {
+          after
+        }
+        let _ = match tx_db.run(
+          "UPDATE search_scope_meta SET member_after = CAST(? AS INTEGER), members_done = ? WHERE id = 1",
+          [reached, base_codec::json_int(if rows.length() < limit { 1 } else { 0 })],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      }
+      Ok((false, next_turn))
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+pub struct TurnCell {
+  mut current : Int
+}
+
+/// Request dispatcher for `--builder search-scope` (matches `main.mbt:1005-1016`).
+pub fn search_scope_dispatch(
+  turn : TurnCell,
+  db : sql_db::Db,
+  ask : base_codec::Json,
+) -> Result[Option[Bool], builders_core::StepError] {
+  match builders_core::json_get_last(ask, "scope") {
+    Some(base_codec::Json::Str("all")) => {
+      match search_scope_step(db, turn.current, limit=64) {
+        Ok((done, next)) => {
+          turn.current = next
+          Ok(Some(done))
+        }
+        Err(e) => Err(e)
+      }
+    }
+    _ => Ok(None)
+  }
+}
+
+pub fn run_search_scope(db_path : String) -> Int {
+  let turn = TurnCell::{ current: 0 }
+  builders_core::builder_loop(
+    db_path,
+    "search scope",
+    fn(db : sql_db::Db, ask : base_codec::Json) -> Result[Option[Bool], builders_core::StepError] {
+      search_scope_dispatch(turn, db, ask)
+    },
+  )
+}

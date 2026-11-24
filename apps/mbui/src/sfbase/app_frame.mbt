@@ -123,7 +123,7 @@ pub fn appearance_from_prefs(prefs : Json?, system_dark : Bool) -> Bool {
     _ => None
   })
   // liquid glass frost as this device is set (the prefs' `glassFrost`: 0..100), else 0 (default clear)
-  let frost_s = text(prefs, "glassFrost")
+  let frost_s = @settings.pref_from(prefs, "glassFrost")
   let frost_v = match parse_frost_pct(frost_s) {
     Some(n) => n.to_double() / 100.0
     None => 0.0
@@ -159,6 +159,20 @@ let accent_set_here : Ref[String] = Ref("")
 let accent_shown : Ref[String?] = Ref(None)
 
 ///|
+// kept across runs: put back by accent_preview_reset (reset)
+let rainbow_seeded : Ref[Bool] = Ref(false)
+
+///|
+/// Picks this run's colour for 五彩色 (`rainbow`) once from the opening wall time `now_ms`, so each page load or app
+/// launch lands on a fresh hue while staying deterministic for a given clock in tests.
+pub fn rainbow_seed_once(now_ms : Double) -> Unit {
+  if !rainbow_seeded.val {
+    rainbow_seeded.val = true
+    @sf.set_rainbow_hue(@sf.rainbow_hue_of_seed(now_ms.to_int64()))
+  }
+}
+
+///|
 /// The window shown a moment in the colour theme `key` (its dot pointed at in 外观), over the one set, till
 /// accent_preview_end; or, None, back to the one set.
 pub fn accent_preview(key : String?) -> Unit {
@@ -178,6 +192,7 @@ pub fn accent_chosen(key : String) -> Unit {
 pub fn accent_preview_reset() -> Unit {
   accent_set_here.val = ""
   accent_shown.val = None
+  rainbow_seeded.val = false
 }
 
 ///|

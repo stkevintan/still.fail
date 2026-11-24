@@ -1,0 +1,233 @@
+fn expect(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+fn fmt_simple(d : Double) -> String {
+  if d == 0.0 { "0" } else { d.to_string() }
+}
+
+test "parse and stringify preserve lone surrogates and NUL losslessly" {
+  let raw = "{\"\\uD800\":\"a\\u0000\\uDC00\\uD83D\\uDE80\"}"
+  let v = match parse(raw) {
+    Ok(x) => x
+    Err(e) => panic("parse failed: " + e)
+  }
+  match v {
+    JValue::Obj(entries) => {
+      expect(entries.length() == 1, "1 entry")
+      let (k, jv) = entries[0]
+      expect(k.length() == 1 && k[0] == 0xD800, "key is lone high surrogate 0xD800")
+      match jv {
+        JValue::Str(u) => {
+          expect(u.length() == 5, "5 UTF-16 code units")
+          expect(u[0] == 0x61 && u[1] == 0x0000 && u[2] == 0xDC00 && u[3] == 0xD83D && u[4] == 0xDE80, "exact units")
+          expect(sanitize_str(u) == "a\u{0000}\u{FFFD}🚀", "sanitize replaces lone surrogate only")
+          expect(text(u) == "a\u{0000}\u{FFFD}🚀", "text matches sanitize_str")
+          let le = utf16le_bytes(u)
+          expect(le.length() == 10, "10 UTF-16LE bytes")
+          expect((le[0].to_int() & 0xFF) == 0x61 && (le[1].to_int() & 0xFF) == 0x00, "'a' LE")
+          expect((le[2].to_int() & 0xFF) == 0x00 && (le[3].to_int() & 0xFF) == 0x00, "NUL LE")
+          expect((le[4].to_int() & 0xFF) == 0x00 && (le[5].to_int() & 0xFF) == 0xDC, "0xDC00 LE")
+        }
+        _ => panic("expected Str")
+      }
+    }
+    _ => panic("expected Obj")
+  }
+  let s = stringify_with_num(v, fmt_simple)
+  expect(s == "{\"\\ud800\":\"a\\u0000\\udc00🚀\"}", "stringify preserves lone surrogates and NUL: " + s)
+}
+
+test "duplicate keys keep first position and last value (small and large objects)" {
+  let v1 = match parse("{\"b\":1,\"a\":2,\"b\":3,\"c\":4,\"a\":5}") {
+    Ok(x) => x
+    Err(e) => panic(e)
+  }
+  expect(stringify_with_num(v1, fmt_simple) == "{\"b\":3,\"a\":5,\"c\":4}", "small dup keys")
+
+  // Trigger map fast-path (>= 16 keys) including lone-surrogate keys that must not collide with U+FFFD.
+  let sb = StringBuilder::new()
+  sb.write_string("{\"\\uD800\":1,\"\\uFFFD\":2,")
+  for i in 0..<20 {
+    sb.write_string("\"k" + i.to_string() + "\":" + i.to_string() + ",")
+  }
+  sb.write_string("\"\\uD800\":99,\"k3\":333}")
+  let v2 = match parse(sb.to_string()) {
+    Ok(x) => x
+    Err(e) => panic(e)
+  }
+  match v2 {
+    JValue::Obj(entries) => {
+      expect(entries.length() == 22, "22 distinct keys")
+      let (k0, val0) = entries[0]
+      let (k1, val1) = entries[1]
+      expect(k0.length() == 1 && k0[0] == 0xD800, "first key stayed 0xD800")
+      expect(k1.length() == 1 && k1[0] == 0xFFFD, "second key stayed 0xFFFD")
+      expect(jvalue_eq(val0, JValue::Num(99.0)), "0xD800 updated to 99")
+      expect(jvalue_eq(val1, JValue::Num(2.0)), "0xFFFD untouched")
+    }
+    _ => panic("expected Obj")
+  }
+}
+
+test "stringify orders canonical array index keys ascending before other keys" {
+  let raw = "{\"b\":1,\"10\":2,\"2\":3,\"0\":4,\"01\":5,\"4294967295\":6,\"4294967294\":7,\"a\":8}"
+  let v = match parse(raw) {
+    Ok(x) => x
+    Err(e) => panic(e)
+  }
+  let out = stringify_with_num(v, fmt_simple)
+  let want = "{\"0\":4,\"2\":3,\"10\":2,\"4294967294\":7,\"b\":1,\"01\":5,\"4294967295\":6,\"a\":8}"
+  expect(out == want, "key order mismatch: " + out)
+}
+
+test "nesting depth limit 1024 and UTF-16 code-unit error offset" {
+  // 1024 nested arrays is allowed (depth 0..1024); 1025 exceeds limit.
+  let sb_ok = StringBuilder::new()
+  for _ in 0..<1024 {
+    sb_ok.write_string("[")
+  }
+  for _ in 0..<1024 {
+    sb_ok.write_string("]")
+  }
+  match parse(sb_ok.to_string()) {
+    Ok(_) => ()
+    Err(e) => panic("depth 1024 should succeed, got: " + e)
+  }
+
+  let sb_deep = StringBuilder::new()
+  for _ in 0..<1025 {
+    sb_deep.write_string("[")
+  }
+  sb_deep.write_string("1")
+  for _ in 0..<1025 {
+    sb_deep.write_string("]")
+  }
+  match parse(sb_deep.to_string()) {
+    Ok(_) => panic("depth 1025 should fail")
+    Err(e) => expect(e == "maximum nesting depth exceeded at 1025", "depth err: " + e)
+  }
+
+  // UTF-16 offset: "[\"🚀\",!]" -> '['(0) '"'(1) hi(2) lo(3) '"'(4) ','(5) '!'(6)
+  match parse("[\"🚀\",!]") {
+    Ok(_) => panic("expected syntax error")
+    Err(e) => expect(e == "unexpected input at 6", "UTF-16 error offset mismatch: " + e)
+  }
+  // Illegal escape after astral char: "\"🚀\\q\"" -> '"'(0) hi(1) lo(2) '\\'(3) 'q'(4) => fails after reading 'q' at 5
+  match parse("\"🚀\\q\"") {
+    Ok(_) => panic("expected illegal escape error")
+    Err(e) => expect(e == "unexpected input at 5", "illegal escape offset mismatch: " + e)
+  }
+  // Unescaped control char (0x01) after astral char: "\"🚀\u{0001}\"" -> fails at offset 3
+  match parse("\"🚀\u{0001}\"") {
+    Ok(_) => panic("expected control char error")
+    Err(e) => expect(e == "unexpected input at 3", "control char offset mismatch: " + e)
+  }
+  // Invalid UTF-8 byte replaced by single U+FFFD (1 UTF-16 unit) before error: ["<0xFF>",!]
+  let bad_utf8 = Bytes::new(8)
+  bad_utf8[0] = 0x5B as Byte // '['
+  bad_utf8[1] = 0x22 as Byte // '"'
+  bad_utf8[2] = 0xFF as Byte // invalid -> 1 U+FFFD at unit 2
+  bad_utf8[3] = 0x22 as Byte // '"' (unit 3)
+  bad_utf8[4] = 0x2C as Byte // ',' (unit 4)
+  bad_utf8[5] = 0x21 as Byte // '!' (unit 5)
+  bad_utf8[6] = 0x5D as Byte // ']'
+  bad_utf8[7] = 0x20 as Byte
+  let sb_bad = StringBuilder::new()
+  for i in 0..<bad_utf8.length() {
+    sb_bad.write_byte(bad_utf8[i])
+  }
+  match parse(sb_bad.to_string()) {
+    Ok(_) => panic("expected invalid utf8 json error")
+    Err(e) => expect(e == "unexpected input at 5", "invalid utf8 offset mismatch: " + e)
+  }
+}
+
+test "numbers: overflow, underflow, 0e999999, -0, 5e-324, 1e21, 1e-7, +-(2^53+1), NaN/Inf -> null" {
+  match parse("0e999999") {
+    Ok(JValue::Num(d)) => expect(d == 0.0 && !is_nan_or_inf(d), "0e999999 -> 0")
+    _ => panic("0e999999")
+  }
+  match parse("-0e999999") {
+    Ok(JValue::Num(d)) => expect(d == 0.0 && !is_nan_or_inf(d), "-0e999999 -> -0")
+    _ => panic("-0e999999")
+  }
+  match parse("1e400") {
+    Ok(JValue::Num(d)) => expect(is_nan_or_inf(d) && d > 0.0, "1e400 -> +Inf")
+    _ => panic("1e400")
+  }
+  match parse("-1e400") {
+    Ok(JValue::Num(d)) => expect(is_nan_or_inf(d) && d < 0.0, "-1e400 -> -Inf")
+    _ => panic("-1e400")
+  }
+  match parse("1e-400") {
+    Ok(JValue::Num(d)) => expect(d == 0.0, "1e-400 -> 0")
+    _ => panic("1e-400")
+  }
+  match parse("5e-324") {
+    Ok(JValue::Num(d)) => expect(d > 0.0 && d < 1.0e-300, "5e-324 subnormal")
+    _ => panic("5e-324")
+  }
+  match parse("1e21") {
+    Ok(JValue::Num(d)) => expect(d == 1.0e21, "1e21")
+    _ => panic("1e21")
+  }
+  match parse("1e-7") {
+    Ok(JValue::Num(d)) => expect(d == 1.0e-7, "1e-7")
+    _ => panic("1e-7")
+  }
+  match parse("9007199254740993") {
+    Ok(JValue::Num(d)) => expect(d == 9007199254740992.0, "2^53+1 rounds to 2^53")
+    _ => panic("2^53+1")
+  }
+  match parse("-9007199254740993") {
+    Ok(JValue::Num(d)) => expect(d == -9007199254740992.0, "-(2^53+1) rounds to -2^53")
+    _ => panic("-(2^53+1)")
+  }
+  expect(stringify_with_num(JValue::Num(0.0 / 0.0), fmt_simple) == "null", "NaN -> null")
+  expect(stringify_with_num(JValue::Num(1.0 / 0.0), fmt_simple) == "null", "+Inf -> null")
+  expect(stringify_with_num(JValue::Num(-1.0 / 0.0), fmt_simple) == "null", "-Inf -> null")
+  expect(stringify_with_num(JValue::Num(-0.0), fmt_simple) == "0", "-0 -> 0")
+}
+
+test "UTF-16 helpers: utf16_len, utf16_slice, utf16_find_from, utf8_bytes, is_safe_integer" {
+  let s = "a🚀中b"
+  // 'a'(1) + '🚀'(2) + '中'(1) + 'b'(1) = 5 UTF-16 code units
+  expect(utf16_len(s) == 5, "utf16_len == 5")
+  expect(utf16_slice(s, 0, 3) == "a🚀", "slice [0,3)")
+  expect(utf16_slice(s, 1, 4) == "🚀中", "slice [1,4)")
+  expect(utf16_slice(s, 2, 4) == "\u{FFFD}中", "split surrogate -> U+FFFD")
+  expect(utf16_slice(s, 4, 2) == "", "empty inverted slice")
+  match utf16_find_from(s, "中", 0) {
+    Some(3) => ()
+    _ => panic("find 中 at 3")
+  }
+  match utf16_find_from(s, "中", 4) {
+    None => ()
+    _ => panic("find 中 from 4 -> None")
+  }
+  match utf16_find_from("abab", "ab", 1) {
+    Some(2) => ()
+    _ => panic("find ab from 1 -> 2")
+  }
+  match utf16_find_from(s, "", 99) {
+    Some(5) => ()
+    _ => panic("empty needle from > len clamps to len (5)")
+  }
+  match utf16_find_from(s, "", -3) {
+    Some(0) => ()
+    _ => panic("empty needle from < 0 clamps to 0")
+  }
+  expect(utf8_bytes(s).length() == 9, "utf8_bytes len == 9")
+  expect(is_safe_integer(0.0), "0 safe")
+  expect(is_safe_integer(-0.0), "-0 safe")
+  expect(is_safe_integer(9007199254740991.0), "MAX_SAFE_INTEGER")
+  expect(is_safe_integer(-9007199254740991.0), "MIN_SAFE_INTEGER")
+  expect(!is_safe_integer(9007199254740992.0), "2^53 not safe")
+  expect(!is_safe_integer(-9007199254740992.0), "-2^53 not safe")
+  expect(!is_safe_integer(1.5), "1.5 not safe")
+  expect(!is_safe_integer(0.0 / 0.0), "NaN not safe")
+  expect(!is_safe_integer(1.0 / 0.0), "Inf not safe")
+}

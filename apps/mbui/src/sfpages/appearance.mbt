@@ -105,6 +105,7 @@ fn appearance_setting(v : @view.View, core : Core, key : String, wide : () -> Bo
           @sf.accent_pick_node(
             r,
             fn() { accent_names.map(fn(k) { @sf.t(k) }) },
+            fn() { @sf.t("web-pages.appearance.accent.rainbow") },
             fn() { @sf.t("web-pages.appearance.accent.custom") },
             fn() { @sf.t("web-pages.appearance.accent.hue") },
             shown,

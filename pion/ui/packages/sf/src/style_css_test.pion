@@ -1,0 +1,68 @@
+// Unit tests for `sf::css_read` / `sf::css` (1:1 parity with `libs/ui/src/ui/style_css.mbt`).
+
+import "ui"
+
+test "css_read parses valid styles, state blocks, and nested color/radius/shadow constructors" {
+  let st1 = match css_read("row h=S7 px=S2 radius=Lg hovered{bg=Hover}") {
+    Ok(s) => s
+    Err(e) => panic("unexpected css_read error: " + e)
+  }
+  debug_assert(st1.base.row is Some(true), "row == Some(true)")
+  debug_assert(st1.base.h is Some(ui::Len::S7), "h == Some(S7)")
+  debug_assert(st1.base.px is Some(ui::Space::S2), "px == Some(S2)")
+  debug_assert(st1.base.radius is Some(ui::Radius::Lg), "radius == Some(Lg)")
+  match st1.hovered {
+    Some(h) => debug_assert(h.bg is Some(ui::Color::Hover), "hovered.bg == Some(Hover)")
+    None => panic("expected hovered block")
+  }
+
+  let st2 = match css_read("w=Grow(1.0) radius=Exact(3.5) shadow=Cast(8.0, 2.0, 0x00000033) pressed{bg=Over(Card, A(Fg, O5))}") {
+    Ok(s) => s
+    Err(e) => panic("unexpected css_read error: " + e)
+  }
+  debug_assert(st2.base.w is Some(ui::Len::Grow(_)), "w == Some(Grow(1.0))")
+  debug_assert(st2.base.radius is Some(ui::Radius::Exact(_)), "radius == Some(Exact(3.5))")
+  debug_assert(st2.base.shadow is Some(ui::Shadow::Cast(_, _, _)), "shadow == Some(Cast)")
+  match st2.pressed {
+    Some(pr) => debug_assert(pr.bg is Some(ui::Color::Over(_, _)), "pressed.bg == Some(Over)")
+    None => panic("expected pressed block")
+  }
+}
+
+test "css_read reports exact error text and cursor offsets matching libs/ui/src/ui/style_css.mbt" {
+  match css_read("row h=S7 badprop=1") {
+    Err(e) => debug_assert(
+      e == "css: no property badprop at 17 in \"row h=S7 badprop=1\"",
+      "badprop error mismatch: " + e,
+    )
+    Ok(_) => panic("expected Err for badprop")
+  }
+  match css_read("row h=NOPE") {
+    Err(e) => debug_assert(
+      e == "css: no Len NOPE at 10 in \"row h=NOPE\"",
+      "bad Len error mismatch: " + e,
+    )
+    Ok(_) => panic("expected Err for NOPE")
+  }
+  match css_read("hovered{bg=Hover") {
+    Err(e) => debug_assert(
+      e == "css: a block not closed at 16 in \"hovered{bg=Hover\"",
+      "unclosed block error mismatch: " + e,
+    )
+    Ok(_) => panic("expected Err for unclosed block")
+  }
+  match css_read("hovered{pressed{bg=Hover}}") {
+    Err(e) => debug_assert(
+      e == "css: a block in a block at 16 in \"hovered{pressed{bg=Hover}}\"",
+      "nested block error mismatch: " + e,
+    )
+    Ok(_) => panic("expected Err for block in block")
+  }
+  match css_read("row align=AFirstLine") {
+    Err(e) => debug_assert(
+      e == "css: unsupported Align AFirstLine (missing in invar ui::Align) at 20 in \"row align=AFirstLine\"",
+      "AFirstLine fail-loud error mismatch: " + e,
+    )
+    Ok(_) => panic("expected Err for unsupported Align AFirstLine (must not silently downgrade)")
+  }
+}

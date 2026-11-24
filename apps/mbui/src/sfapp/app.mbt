@@ -628,7 +628,7 @@ fn app_looks_told(root : @view.View, src : Source, words_set~ : Bool = true) -> 
     fn() {
       let p = src.topic("prefs", {}).get().value
       let sys = @ui.system_dark()
-      (p, sys, @settings.dark(p, sys), @settings.pref_from(p, "accent"))
+      (p, sys, @settings.dark(p, sys), @settings.pref_from(p, "accent"), @settings.pref_from(p, "glassFrost"))
     },
     fn(a) {
       @sfbase.appearance_from_prefs(a.0, a.1) |> ignore
@@ -656,6 +656,8 @@ fn app_looks_told(root : @view.View, src : Source, words_set~ : Bool = true) -> 
 /// theme, the window's sides, the layers over it).
 pub fn app_tree(src : Source) -> (@view.View) -> Unit {
   fn(root) {
+    // Pick this run's colour for 五彩色 once from the opening wall clock before prefs apply the theme.
+    @sfbase.rainbow_seed_once(@signals.untracked(src.now))
     // (how it looks and what it is set in, told first of all, before any page of nodes is made: app_looks_told)
     app_looks_told(root, src)
     // (the source the sheets show what they show of, said before one is put up: sheet.mbt)

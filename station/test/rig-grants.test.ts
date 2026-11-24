@@ -10,6 +10,7 @@ import { test } from "node:test";
 import { type GrantBody, type Kind, type Timeout, latest, signedBytes } from "../../client/core-ts/src/rig-form.ts";
 import { type Entry, entryHash, signedBytes as entryBytes } from "../../shared/lock.ts";
 import { applyState, replaySkippedRigFrame } from "../src/cloud/presence.ts";
+import { rigAllowed } from "../src/mesh/peer-http.ts";
 import { Cloud, MODE_PENDING_S, readState, rigGrantsPath, writeState } from "../src/cloud/state.ts";
 import { Fibers } from "../src/ops/fibers.ts";
 import { type Ended, RigGrants } from "../src/rig/grants.ts";
@@ -205,6 +206,34 @@ test("免批准: on, every chat of the workspace uses the rig; off again, those 
     assert.equal(rig.open(WS), false);
     assert.match(rig.refusal(WS, OTHER, "free")!, /no grant/);
     assert.equal(rig.refusal(WS, STATION, "s1"), null);
+  } finally {
+    await w.close();
+  }
+});
+
+test("what another station may reach of a rig's services (mesh/peer-http.ts `allowed`): a grant of a chat of it or 免批准 lets it, nothing else", async () => {
+  const w = await world();
+  try {
+    const grants = w.make();
+    // As rig/module.ts asks its grants, and as rig/main.ts (a rig alone) and mesh.ts (a rig in WS beside whole ones) ask it.
+    const side: { current: { stationRefusal(peer: string, workspace: string): string | null } | null } = { current: null };
+    const alone = rigAllowed(side);
+    const beside = rigAllowed(side, (ws) => ws === WS);
+    for (const allowed of [alone, beside]) assert.equal(allowed(STATION, WS), "the rig is starting");
+    assert.equal(beside(STATION, "whole"), null, "a whole workspace refuses none of its stations");
+    side.current = { stationRefusal: (peer, workspace) => grants.stationRefusal(workspace, peer) };
+    for (const allowed of [alone, beside]) {
+      assert.equal(allowed(STATION, WS), "no chat of that station has a grant of this one");
+      assert.equal(allowed(OTHER, WS), "no chat of that station has a grant of this one");
+    }
+    grants.grant(WS, STATION, w.grant("r1", "s1", { kind: "idle", seconds: 3600 }), w.owner.chain);
+    for (const allowed of [alone, beside]) {
+      assert.equal(allowed(STATION, WS), null, "a station with a granted chat is let through");
+      assert.equal(allowed(OTHER, WS), "no chat of that station has a grant of this one");
+    }
+    grants.settings(WS, w.owner.says("settings", { v: 1 as const, sub: "pat", ws: WS, rig: RIG, seq: 1, open: true, at: w.now() }), w.owner.chain);
+    for (const allowed of [alone, beside]) assert.equal(allowed(OTHER, WS), null, "免批准 lets every station of the workspace through");
+    assert.equal(alone(OTHER, WS2), "this rig is of another workspace");
   } finally {
     await w.close();
   }

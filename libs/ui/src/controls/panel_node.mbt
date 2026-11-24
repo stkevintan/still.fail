@@ -91,6 +91,10 @@ fn panel_node(
       // (what its fields offer made in it: offers_layer_lent)
       offers_layer_lend(layer)
       layer.over(Is(true)) |> ignore
+      // (`scrolls_under`: a wheel nothing in it moves on to the page under its modal layer: Tree::wheelless_at)
+      if x.scrolls_under {
+        layer.wheel_passes() |> ignore
+      }
       // (what opened it, where it is drawn, or the small panel it stands flush with (`match_panel`): what its panel
       // goes beside)
       let matched = if x.match_panel > 0 { presented_popovers.get(x.match_panel) } else { None }

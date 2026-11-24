@@ -83,7 +83,10 @@ for (const threadMode of [false, true]) {
       await r.say({ id: "om_img", user: "ou_bob", type: "image", content: { image_key: "img_k" } });
       assert.equal(r.rig.store.threadAt("feishu:fs", "oc_g", "om_img"), null);
       await r.say({ id: "om_q", text: "这张图是什么", at: true, parent: "om_img" });
-      const rows = r.said(threadMode ? "om_img" : "om_q");
+      // A quote from the chat itself begins a conversation of its own, thread mode or not: not one in the quoted
+      // message's thread.
+      assert.equal(r.rig.store.threadAt("feishu:fs", "oc_g", "om_img"), null);
+      const rows = r.said("om_q");
       assert.equal(rows.length, 1);
       assert.equal(rows[0]!.ts, "om_q");
       assert.equal(rows[0]!.text, "@Codex 机器人 这张图是什么");

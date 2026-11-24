@@ -1889,7 +1889,7 @@ pub let panel_in : @ui.Radius
 #callsite(autofill(loc))
 pub fn[K : Hash + Eq] panel_list_node(@view.View, () -> Array[K], (@view.View, K) -> Unit, est~ : Double, fills? : Bool, most? : () -> Double, place? : @view.ListPlace[K], stick_end? : Bool, loc~ : SourceLoc) -> @view.View
 
-pub fn panel_nodes(String, (@view.View, () -> Unit) -> Unit, from~ : Anchor, w? : Double, fits? : Bool, heads_itself? : Bool, fade_out_together? : Bool, description? : String, foot? : (@view.View, () -> Unit) -> Unit, wide? : Bool, live? : () -> (String, String, String), gone? : () -> Unit, tall? : Double, focus? : Bool, ruled? : Bool, form? : Bool, grows? : Bool, popover? : Bool, side? : @view.Side, along? : @view.Along, offset? : Double, hugs? : Bool, hugs_centred? : Bool, match_panel? : Int32, steps? : Bool, back? : () -> Unit, top_share? : Double, most? : () -> Double, stage? : Bool, above? : (@view.View) -> Unit, head_end? : (@view.View) -> Unit) -> Unit
+pub fn panel_nodes(String, (@view.View, () -> Unit) -> Unit, from~ : Anchor, w? : Double, fits? : Bool, heads_itself? : Bool, fade_out_together? : Bool, description? : String, foot? : (@view.View, () -> Unit) -> Unit, wide? : Bool, live? : () -> (String, String, String), gone? : () -> Unit, tall? : Double, focus? : Bool, ruled? : Bool, form? : Bool, grows? : Bool, popover? : Bool, side? : @view.Side, along? : @view.Along, offset? : Double, hugs? : Bool, hugs_centred? : Bool, match_panel? : Int32, steps? : Bool, back? : () -> Unit, top_share? : Double, most? : () -> Double, stage? : Bool, above? : (@view.View) -> Unit, head_end? : (@view.View) -> Unit, scrolls_under? : Bool) -> Unit
 
 #callsite(autofill(loc))
 pub fn panel_note_node(@view.View, () -> String, loc~ : SourceLoc) -> Unit

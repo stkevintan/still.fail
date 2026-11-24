@@ -4,8 +4,11 @@
 // words_over when particles sweep over another text node.
 
 ///|
+let pf_dur_ms : Double = 400.0
+
+///|
 let pf_flight : @view.Flight = {
-  way: fn(_) { if reduced_motion() { (0.0, fn(_) { 1.0 }) } else { (400.0, fn(ms) { dclamp(ms / 400.0, 0.0, 1.0) }) } },
+  way: fn(_) { if reduced_motion() { (0.0, fn(_) { 1.0 }) } else { (pf_dur_ms, fn(ms) { dclamp(ms / pf_dur_ms, 0.0, 1.0) }) } },
 }
 
 ///|
@@ -120,6 +123,7 @@ test "particle flight: colour glyph atlas 16384 offset is preserved when splitti
       to_y: 100.0,
       to_w: 18.0,
       to_h: 18.0,
+      to_r: 0.0,
       t_lin: 0.5,
       p: 0.5,
       bare: true,
@@ -128,7 +132,7 @@ test "particle flight: colour glyph atlas 16384 offset is preserved when splitti
       has_old: false,
       seed: 42,
     }
-    let at : ParticleAt = { id: { at: 1, gen: 0 }, pf, k0: 0, outer_clip, base_x: 100.0, base_y: 200.0, base_s: 1.0 }
+    let at : ParticleAt = { id: { at: 1, gen: 0 }, pf, k0: 0, outer_clip, base_x: 100.0, base_y: 200.0, base_s: 1.0, fast_fade: [] }
     c.particle_apply(at, 0, c.ninst)
   })
   assert_true(c.ninst > 1, msg="colour glyph should split into particles, got \{c.ninst}")
@@ -256,6 +260,7 @@ test "particle flight: kind 4 image splits into valid sub-UV tiles across thumbn
       to_y: 120.0,
       to_w: 200.0,
       to_h: 140.0,
+      to_r: 14.0,
       t_lin: 0.45,
       p: 0.45,
       bare: false,
@@ -264,7 +269,7 @@ test "particle flight: kind 4 image splits into valid sub-UV tiles across thumbn
       has_old: false,
       seed: 77,
     }
-    let at : ParticleAt = { id: { at: 2, gen: 0 }, pf, k0: 0, outer_clip, base_x: 40.0, base_y: 500.0, base_s: 1.0 }
+    let at : ParticleAt = { id: { at: 2, gen: 0 }, pf, k0: 0, outer_clip, base_x: 40.0, base_y: 500.0, base_s: 1.0, fast_fade: [] }
     c.particle_apply(at, 0, c.ninst)
   })
   assert_true(c.ninst >= 16 && c.ninst <= 1600, msg="expected 16..1600 image tiles, got \{c.ninst}")
@@ -414,6 +419,7 @@ test "particle flight: kind 4 image holds rounded thumbnail at takeoff, fine san
         to_y: 120.0,
         to_w: 200.0,
         to_h: 140.0,
+        to_r: 14.0,
         t_lin,
         p: t_lin,
         bare: false,
@@ -422,7 +428,7 @@ test "particle flight: kind 4 image holds rounded thumbnail at takeoff, fine san
         has_old: false,
         seed: 77,
       }
-      let at : ParticleAt = { id: { at: 2, gen: 0 }, pf, k0: 0, outer_clip, base_x: 40.0, base_y: 500.0, base_s: 1.0 }
+      let at : ParticleAt = { id: { at: 2, gen: 0 }, pf, k0: 0, outer_clip, base_x: 40.0, base_y: 500.0, base_s: 1.0, fast_fade: [] }
       c.particle_apply(at, 0, c.ninst)
     })
     let out : Array[Array[Double]] = []
@@ -474,6 +480,7 @@ test "particle flight: file card container=true keeps 236pt takeoff width, emits
         to_y: 120.0,
         to_w: 118.0,
         to_h: 44.0,
+        to_r: 12.0,
         t_lin,
         p: t_lin,
         bare: false,
@@ -482,7 +489,7 @@ test "particle flight: file card container=true keeps 236pt takeoff width, emits
         has_old: false,
         seed: 99,
       }
-      let at : ParticleAt = { id: { at: 3, gen: 0 }, pf, k0: 0, outer_clip, base_x: 40.0, base_y: 500.0, base_s: 1.0 }
+      let at : ParticleAt = { id: { at: 3, gen: 0 }, pf, k0: 0, outer_clip, base_x: 40.0, base_y: 500.0, base_s: 1.0, fast_fade: [] }
       c.particle_apply(at, 0, c.ninst)
     })
     let out : Array[Array[Double]] = []
@@ -576,4 +583,179 @@ test "particle flight: sizes_steady and sizes_across skip particle-flight nodes 
   let (down2, across2) = across_frames(t2, 4)
   assert_true(down2.length() > 0, msg="non-particle height snap was not caught by sizes_steady")
   assert_true(across2.length() > 0, msg="non-particle width snap was not caught by sizes_across")
+}
+
+///|
+test "particle flight: shared_box old->new handoff keeps identical card dust, icon continuity, immediate short-quote launch, bounded long-quote destination, and flies_fade" {
+  // 1) Direct particle_apply check with mismatched layouts & radii:
+  //    old (358x66 composer quote, radius 14, single wide line rx=310, gw=12) vs
+  //    new (180x50 message quote, radius 18, wrapped 2-line layout), both sharing to_r=18.
+  let run_mismatched = fn(old : Bool, t_lin : Double, long_quote : Bool) -> Array[Array[Double]] {
+    let c = Ctx::new()
+    pf_with_unclipped(fn() {
+      let ck = clip_top()
+      let outer_clip = FixedArray::makei(24, fn(j) { clip_stack[ck + j] })
+      let fast_fade : Array[(Int, Int)] = []
+      let to_w = if long_quote { 180.0 } else { 86.0 }
+      let to_h = if long_quote { 50.0 } else { 34.0 }
+      let card_w = if old { 358.0 } else { to_w }
+      let card_h = if old { 66.0 } else { to_h }
+      let card_r = if old { 14.0 } else { 18.0 }
+      c.push_inst(16.0, 650.0, card_w, card_h, card_r, 0.0, 0.0, 0.0, 0x1D1D1FFFL, 0.04, 0.0, 0.0, 0.0, 0.0)
+      if old {
+        // Extra composer wrapper instance before icon to ensure shape_idx ignores raw instance index i
+        c.push_inst(16.0, 650.0, card_w, card_h, card_r, 0.0, 0.0, 0.0, 0x00000000L, 0.0, 0.0, 0.0, 0.0, 0.0)
+      }
+      // Quote-open icon at top-left (same rx/ry on both sides even when text wrapping differs!)
+      c.push_inst(28.0, 660.0, 12.0, 12.0, 0.0, 10.0, 0.0, 0.0, 0xE05A2BFFL, 1.0, 0.0, 0.0, 12.0, 12.0)
+      if long_quote {
+        if old {
+          // Wide single line reaching rx=310, gw=12 (right edge 322 > to_w - 8 = 172 -> triggers old_dest_sx < 1)
+          c.push_inst(326.0, 660.0, 12.0, 12.0, 0.0, 1.0, 0.0, 0.0, 0x1D1D1FFFL, 1.0, 8.0, 8.0, 12.0, 12.0)
+        } else {
+          // Wrapped 2-line layout in narrower destination card (different content bbox!)
+          c.push_inst(140.0, 660.0, 12.0, 12.0, 0.0, 1.0, 0.0, 0.0, 0x1D1D1FFFL, 1.0, 8.0, 8.0, 12.0, 12.0)
+          c.push_inst(70.0, 682.0, 12.0, 12.0, 0.0, 1.0, 0.0, 0.0, 0x1D1D1FFFL, 1.0, 8.0, 8.0, 12.0, 12.0)
+        }
+      } else {
+        // Short quote text glyph at right end of short quote (rx = 60, well inside 358pt wide composer card)
+        c.push_inst(76.0, 660.0, 10.0, 12.0, 0.0, 1.0, 0.0, 0.0, 0x1D1D1FFFL, 1.0, 8.0, 8.0, 10.0, 12.0)
+      }
+      if old {
+        // Empty field placeholder glyph marked fast_fade
+        let p0 = c.ninst
+        c.push_inst(28.0, 684.0, 10.0, 12.0, 0.0, 1.0, 0.0, 0.0, 0x8E8E93FFL, 1.0, 20.0, 8.0, 10.0, 12.0)
+        fast_fade.push((p0, c.ninst))
+      }
+      let pf : @view.LiftParticle = {
+        from_x: 16.0,
+        from_y: 650.0,
+        from_w: 358.0,
+        from_h: 66.0,
+        to_x: 374.0 - to_w,
+        to_y: 550.0,
+        to_w,
+        to_h,
+        to_r: 18.0,
+        t_lin,
+        p: t_lin,
+        bare: false,
+        old,
+        shared_box: true,
+        has_old: true,
+        seed: 12345,
+      }
+      let at : ParticleAt = { id: { at: 9, gen: 0 }, pf, k0: 0, outer_clip, base_x: 16.0, base_y: 650.0, base_s: 1.0, fast_fade }
+      c.particle_apply(at, 0, c.ninst)
+    })
+    let out : Array[Array[Double]] = []
+    for k in 0..<c.ninst {
+      let b = k * inst_size
+      out.push(Array::makei(inst_size, fn(j) { c.inst[b + j] }))
+    }
+    out
+  }
+  // Both short and long (mismatched layout + mismatched radius 14 vs 18 + old_dest_sx < 1) must match bit-for-bit at t=0.44!
+  for long_quote in [false, true] {
+    let old_mid = run_mismatched(true, 0.44, long_quote)
+    let new_mid = run_mismatched(false, 0.44, long_quote)
+    let old_dust = old_mid.filter(fn(a) { a[5] == 0.0 && a[2] <= 4.0 && a[3] <= 4.0 })
+    let new_dust = new_mid.filter(fn(a) { a[5] == 0.0 && a[2] <= 4.0 && a[3] <= 4.0 })
+    assert_eq(old_dust.length(), new_dust.length(), msg="card dust count jumped (long=\{long_quote})")
+    assert_true(old_dust.length() >= 40, msg="expected >= 40 card dust particles, got \{old_dust.length()}")
+    for i in 0..<old_dust.length() {
+      assert_true(
+        (old_dust[i][0] - new_dust[i][0]).abs() < 0.01 && (old_dust[i][1] - new_dust[i][1]).abs() < 0.01,
+        msg="card dust[\{i}] jumped (long=\{long_quote}): (\{old_dust[i][0]}, \{old_dust[i][1]}) vs (\{new_dust[i][0]}, \{new_dust[i][1]})",
+      )
+    }
+    let old_icon = old_mid.filter(fn(a) { a[5] == 10.0 })
+    let new_icon = new_mid.filter(fn(a) { a[5] == 10.0 })
+    assert_eq(old_icon.length(), 1)
+    assert_eq(new_icon.length(), 1)
+    assert_true(
+      (old_icon[0][0] - new_icon[0][0]).abs() < 0.01 && (old_icon[0][1] - new_icon[0][1]).abs() < 0.01,
+      msg="quote icon jumped (long=\{long_quote}): (\{old_icon[0][0]}, \{old_icon[0][1]}) vs (\{new_icon[0][0]}, \{new_icon[0][1]})",
+    )
+  }
+  // Long quote at t=0.90: old glyphs' right edge must stay within destination card (to_x + to_w - 8.0 + spread margin)
+  let old_long_end = run_mismatched(true, 0.99, true).filter(fn(a) { a[5] == 1.0 && a[12] < 20.0 })
+  for g in old_long_end {
+    assert_true(g[0] + g[2] <= 374.0 - 8.0 + 0.5, msg="long quote old glyph poked past right margin: \{g[0] + g[2]}")
+  }
+  // Empty field placeholder (fast_fade) must fade alpha while preserving glyph atlas UV height vh at t_lin = 0.05,
+  // and be completely gone by t_lin = 0.12 (never flying as sand).
+  let old_t05 = run_mismatched(true, 0.05, false)
+  let fade_ph = old_t05.filter(fn(a) { a[5] == 1.0 && a[12] >= 20.0 })
+  assert_eq(fade_ph.length(), 1, msg="expected 1 fast-fading placeholder glyph at t=0.05")
+  assert_true((fade_ph[0][15] - 12.0).abs() < 0.001, msg="fast-fading placeholder corrupted glyph UV vh: \{fade_ph[0][15]}")
+  assert_true(fade_ph[0][11] > 0.1 && fade_ph[0][11] < 0.9, msg="fast-fading placeholder alpha did not fade: \{fade_ph[0][11]}")
+  let old_t12 = run_mismatched(true, 0.12, false)
+  let stray_ph = old_t12.filter(fn(a) { a[5] == 1.0 && a[12] >= 20.0 })
+  assert_eq(stray_ph.length(), 0, msg="empty-field placeholder lingered as flying particles at t=0.12: \{stray_ph.length()}")
+  // Short quote right-end glyph must already be moving by t_lin = 0.06 (no ~120ms dead stall)
+  let old_t06 = run_mismatched(true, 0.06, false)
+  let right_glyphs = old_t06.filter(fn(a) { a[5] == 1.0 && a[12] < 20.0 })
+  assert_true(right_glyphs.length() > 1, msg="short quote did not begin dissolving by t=0.06 (got \{right_glyphs.length()} insts)")
+  // 2) End-to-end View::shared(container=true, particle=true) with an empty TreeField AND an oversized 32x32
+  //    View::flies_fade() corner badge verifies both fast-fade cleanly without geometric size assumptions.
+  let sent = @signals.signal(false)
+  let comment_f = Field::new()
+  let t = Tester::new(fn(_c) {  }, w=390.0, h=844.0)
+  t.check_looks(false)
+  set_view_app(fn(root) {
+    root.lines_up(Is(Some(Start))) |> ignore
+    root.show(fn() { !sent.get() }, at_once=true, fn(slot) {
+      slot.box(fn(b) {
+        b
+        .margin(Is((16.0, 640.0, 0.0, 0.0)))
+        .width(Is(Some(358.0)))
+        .padding(Is((10.0, 8.0, 10.0, 8.0)))
+        .ground(Is(0xEAEAEAFFL))
+        .shared(Is("quote-empty-field"), pf_flight, container=true, particle=true)
+        |> ignore
+        b.box(fn(w) { w.words(Is("Claude: 了")) |> ignore }) |> ignore
+        field(b, comment_f, placeholder="添加说明（可选）", placeholder_color=0x0088CCFFL, max_lines=1) |> ignore
+        // Oversized 32x32 flies_fade() corner badge (red 0xDD2222) that would fail any <=24px geometric heuristic
+        b.box(fn(badge) {
+          badge
+          .over(Is(true))
+          .width(Is(Some(32.0)))
+          .height(Is(Some(32.0)))
+          .ground(Is(0xDD2222FFL))
+          .flies_fade()
+          |> ignore
+          badge.box(fn(lbl) { lbl.words(Is("X")).ink(Is(0xFFFFFFFFL)) |> ignore }) |> ignore
+        })
+        |> ignore
+      })
+      |> ignore
+    })
+    root.show(fn() { sent.get() }, at_once=true, fn(slot) {
+      slot.box(fn(b) {
+        b
+        .margin(Is((280.0, 520.0, 0.0, 0.0)))
+        .width(Is(Some(94.0)))
+        .padding(Is((10.0, 8.0, 10.0, 8.0)))
+        .ground(Is(0xEAEAEAFFL))
+        .shared(Is("quote-empty-field"), pf_flight, container=true, particle=true)
+        |> ignore
+        b.box(fn(w) { w.words(Is("Claude: 了")) |> ignore }) |> ignore
+      })
+      |> ignore
+    })
+  })
+  t.draw()
+  // Confirm placeholder glyphs (blue 0x0088CC) and red flies_fade badge (0xDD2222) are present before sending
+  let before_ph = t.drawn_instances_keyed().filter(fn(a) { (a[5] == 1.0 || a[5] == 3.0) && a[11] > 0.01 && a[10] > 0.7 && a[8] < 0.1 })
+  let before_badge = t.drawn_instances_keyed().filter(fn(a) { a[5] == 0.0 && a[11] > 0.5 && a[8] > 0.7 && a[9] < 0.2 })
+  assert_true(before_ph.length() > 0, msg="expected empty comment placeholder before send")
+  assert_true(before_badge.length() > 0, msg="expected flies_fade badge before send")
+  sent.set(true)
+  t.run_for(pf_dur_ms * 0.30)
+  // By t = 120ms (t_lin = 0.30), BOTH empty comment placeholder and 32x32 flies_fade badge must be completely gone.
+  let ph_glyphs = t.drawn_instances_keyed().filter(fn(a) { (a[5] == 1.0 || a[5] == 3.0) && a[11] > 0.01 && a[10] > 0.7 && a[8] < 0.1 })
+  let badge_left = t.drawn_instances_keyed().filter(fn(a) { a[5] == 0.0 && a[11] > 0.01 && a[8] > 0.7 && a[9] < 0.2 })
+  assert_eq(ph_glyphs.length(), 0, msg="empty comment placeholder glyphs stayed visible at 120ms: \{ph_glyphs.length()}")
+  assert_eq(badge_left.length(), 0, msg="flies_fade badge lingered at 120ms: \{badge_left.length()}")
 }

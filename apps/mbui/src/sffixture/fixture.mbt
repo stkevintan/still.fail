@@ -482,6 +482,19 @@ fn fix_row_share(r : Json) -> Json {
 }
 
 ///|
+/// 整理发布清单 as its row says its menu offers moving it to another station (home-move): the viewer an owner.
+fn fix_row_move(r : Json) -> Json {
+  match r {
+    Object(m) if text(Some(r), "id") == "c1" => {
+      let o = m.copy()
+      o["mayMove"] = Json::boolean(true)
+      Json::object(o)
+    }
+    other => other
+  }
+}
+
+///|
 /// A row as a station that knows pins says it (home-pins): 给设置页加一个深色模式开关 pinned, 盯着 CI，绿了告诉我 kept
 /// (保留), the rest neither.
 fn fix_pins(r : Json) -> Json {
@@ -1373,6 +1386,8 @@ fn fixture_days_head(f : Fixture) -> Array[Json] {
   // home-pins: rows from a station that knows pins, for their menus' 固定 and 保留
   let today = if f.mode == "home-pins" || f.mode == "chat-actions" { today.map(fix_pins) } else { today }
   let today = if f.mode == "home-share" { today.map(fix_row_share) } else { today }
+  // home-move: 整理发布清单's menu offers 迁移到另一台 station (its viewer an owner: the core's mayMove)
+  let today = if f.mode == "home-move" { today.map(fix_row_move) } else { today }
   // chat-opener: the first row's chat and 夜里的构建 opened by 和 Ana 一起看新版的引导页's agent (chat_create)
   let today = if f.mode.has_prefix("chat-opener") {
     today.mapi(fn(i, r) { if i == 0 || i == 2 { with_opener(Some(r)).unwrap_or(r) } else { r } })
@@ -1626,7 +1641,7 @@ pub fn whole_row_in(chats : Json?, station : String, session : String) -> Json? 
 /// the list's shape, ListedChat, has not: its time in words, its kept and muted, whom it is shared with): read of the
 /// chat's whole row (`chatRow`) as a press, a hold, a swipe or a pointer begins.
 let whole_only : Array[String] = [
-  "time", "swipeAsk", "watch", "decision", "xshare", "mayShare", "mayPublish", "slackUrl", "slackApp", "feishuUrl",
+  "time", "swipeAsk", "watch", "decision", "xshare", "mayShare", "mayPublish", "mayMove", "slackUrl", "slackApp", "feishuUrl",
   "commaUrl", "commaApp", "kept", "muted",
 ]
 

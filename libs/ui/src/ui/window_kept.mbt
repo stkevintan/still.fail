@@ -651,6 +651,7 @@ fn window_kept_ui_9() -> Array[WindowKept] {
     kept_ref(view_point, fn() { None }),
     kept_ref(view_over_words, fn() { false }),
     kept_ref(view_point_seen, fn() { (-1, false, -1) }),
+    kept_ref(view_point_owed, fn() { false }),
     kept_map(tree_said_ids),
     kept_by_node(tree_said_of),
     kept_ref(tree_said_next, fn() { -2_000_000_000 }),

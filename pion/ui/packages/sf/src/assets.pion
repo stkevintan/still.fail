@@ -1,0 +1,327 @@
+// Asset registration and math outline decoding for `sf`.
+// Host profiles (`sf_assets_native`, `sf_assets_web`) register providers at startup
+// or lazily on arrival without coupling `sf` to any platform or app.
+
+import "pixels"
+import "signals"
+import "zip"
+
+struct AssetState {
+  mut code_face_provider : () -> Bytes
+  mut math_glyphs_provider : () -> Bytes
+  mut math_glyphs_drop : () -> Unit
+  mut math_outlines : Option[Bytes]
+  mut icons : Map[String, String]
+  mut light_palette : Palette
+  mut dark_palette : Palette
+  redraw_listeners : Array[() -> Unit]
+}
+
+fn empty_bytes() -> Bytes {
+  "".to_bytes()
+}
+
+fn noop_unit() -> Unit {
+  ()
+}
+
+let asset_state : signals::Ref[AssetState] = signals::ref_new(
+  AssetState::{
+    code_face_provider: empty_bytes,
+    math_glyphs_provider: empty_bytes,
+    math_glyphs_drop: noop_unit,
+    math_outlines: None,
+    icons: Map::new(),
+    light_palette: empty_palette(),
+    dark_palette: empty_palette(),
+    redraw_listeners: [],
+  },
+)
+
+/// Register the code font face provider (TTF bytes).
+pub fn register_faces(code_face_provider : () -> Bytes) -> Unit {
+  asset_state.v.code_face_provider = code_face_provider
+  notify_assets_changed()
+}
+
+/// Return the registered code font face bytes (empty if not yet available).
+pub fn code_face() -> Bytes {
+  let provider = asset_state.v.code_face_provider
+  provider()
+}
+
+/// Register the gzipped math glyph outline provider and post-decompress release hook.
+pub fn register_math_glyphs(
+  provider : () -> Bytes,
+  drop : () -> Unit,
+) -> Unit {
+  asset_state.v.math_glyphs_provider = provider
+  asset_state.v.math_glyphs_drop = drop
+  asset_state.v.math_outlines = None
+  notify_assets_changed()
+}
+
+/// Register icon path stroke data.
+pub fn register_icons(icons : Map[String, String]) -> Unit {
+  asset_state.v.icons = icons
+  notify_assets_changed()
+}
+
+/// Lookup an icon's 24-grid stroke data by name ("" if absent).
+pub fn icon_path(name : String) -> String {
+  match asset_state.v.icons.get(name) {
+    Some(s) => s
+    None => ""
+  }
+}
+
+/// Number of registered icons.
+pub fn icon_count() -> Int {
+  asset_state.v.icons.length()
+}
+
+/// Register light and dark theme palettes.
+pub fn register_palettes(light : Palette, dark : Palette) -> Unit {
+  asset_state.v.light_palette = light
+  asset_state.v.dark_palette = dark
+  notify_assets_changed()
+}
+
+pub fn palette_light() -> Palette {
+  asset_state.v.light_palette
+}
+
+pub fn palette_dark() -> Palette {
+  asset_state.v.dark_palette
+}
+
+/// Subscribe to asset availability changes (e.g. Web lazy arrival triggering redraw).
+pub fn on_assets_changed(cb : () -> Unit) -> Unit {
+  asset_state.v.redraw_listeners.push(cb)
+}
+
+/// Notify all asset-change listeners.
+pub fn notify_assets_changed() -> Unit {
+  let listeners = asset_state.v.redraw_listeners
+  for i in 0..<listeners.length() {
+    let cb = listeners[i]
+    cb()
+  }
+}
+
+/// Reset all registered asset providers, caches, and listeners (for test isolation).
+pub fn reset_assets() -> Unit {
+  asset_state.v = AssetState::{
+    code_face_provider: empty_bytes,
+    math_glyphs_provider: empty_bytes,
+    math_glyphs_drop: noop_unit,
+    math_outlines: None,
+    icons: Map::new(),
+    light_palette: empty_palette(),
+    dark_palette: empty_palette(),
+    redraw_listeners: [],
+  }
+}
+
+/// Validate decoded packed math glyph table binary layout before caching or indexing.
+pub fn valid_math_glyph_table(t : Bytes) -> Bool {
+  let len = t.length()
+  if len < 16 {
+    return false
+  }
+  let n = math_u32(t, 0).reinterpret_as_int()
+  if n <= 0 || n > (len - 8) / 8 {
+    return false
+  }
+  // 1. Verify n glyph IDs at [4 .. 4 + 4*n) are strictly increasing
+  let mut prev_id = math_u32(t, 4)
+  for i in 1..<n {
+    let cur_id = math_u32(t, 4 + 4 * i)
+    if cur_id <= prev_id {
+      return false
+    }
+    prev_id = cur_id
+  }
+  // 2. Verify n+1 offsets at [4 + 4*n .. 8 + 8*n) start at 0, are non-decreasing,
+  //    and end at len - (8 + 8*n)
+  let off_base = 4 + 4 * n
+  let data_len = (len - (8 + 8 * n)).reinterpret_as_uint()
+  let mut prev_off = math_u32(t, off_base)
+  if prev_off != 0U {
+    return false
+  }
+  for i in 1..<(n + 1) {
+    let cur_off = math_u32(t, off_base + 4 * i)
+    if cur_off < prev_off || cur_off > data_len {
+      return false
+    }
+    prev_off = cur_off
+  }
+  prev_off == data_len
+}
+
+/// Unzip the packed math glyph table once, validating format before caching or releasing via `drop`.
+pub fn math_glyph_table() -> Option[Bytes] {
+  match asset_state.v.math_outlines {
+    Some(t) => Some(t)
+    None => {
+      let provider = asset_state.v.math_glyphs_provider
+      let gz = provider()
+      if gz.length() == 0 {
+        return None
+      }
+      match zip::gunzip(gz) {
+        Some(t) => {
+          if !valid_math_glyph_table(t) {
+            return None
+          }
+          asset_state.v.math_outlines = Some(t)
+          let drop = asset_state.v.math_glyphs_drop
+          drop()
+          Some(t)
+        }
+        None => None
+      }
+    }
+  }
+}
+
+fn math_u32(t : Bytes, at : Int) -> UInt {
+  let b0 = t[at].to_int() & 0xFF
+  let b1 = t[at + 1].to_int() & 0xFF
+  let b2 = t[at + 2].to_int() & 0xFF
+  let b3 = t[at + 3].to_int() & 0xFF
+  (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)).reinterpret_as_uint()
+}
+
+fn math_glyph_id(s : String) -> Option[UInt] {
+  let n = s.length()
+  if n == 0 || n > 8 {
+    return None
+  }
+  let mut v : UInt = 0U
+  for i in 0..<n {
+    let c = s.code_unit_at(i)
+    let d = if c >= 48 && c <= 57 {
+      c - 48
+    } else if c >= 97 && c <= 102 {
+      c - 97 + 10
+    } else {
+      return None
+    }
+    v = (v << 4) | d.reinterpret_as_uint()
+  }
+  Some(v)
+}
+
+/// Decode glyph `id`'s outline from the packed table (identical to `libs/ui/src/controls/math.mbt`).
+pub fn math_outline(
+  t : Bytes,
+  id : String,
+  scale : Double,
+) -> Option[Array[(Array[Double], Bool)]] {
+  if !valid_math_glyph_table(t) {
+    return None
+  }
+  let want = match math_glyph_id(id) {
+    Some(w) => w
+    None => return None
+  }
+  let n = math_u32(t, 0).reinterpret_as_int()
+  let mut lo = 0
+  let mut hi = n
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if math_u32(t, 4 + 4 * mid) < want {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+  if lo >= n || math_u32(t, 4 + 4 * lo) != want {
+    return None
+  }
+  let data = 8 + 8 * n
+  let mut i = data + math_u32(t, 4 + 4 * n + 4 * lo).reinterpret_as_int()
+  let end = data + math_u32(t, 4 + 4 * n + 4 * (lo + 1)).reinterpret_as_int()
+  let mut px = 0
+  let mut py = 0
+  let mut odd = false
+  let coord = fn() -> Double {
+    let mut v = 0
+    let mut shift = 0
+    while true {
+      let b = t[i].to_int() & 0xFF
+      i = i + 1
+      v = v | ((b & 0x7F) << shift)
+      if b < 0x80 {
+        break
+      }
+      shift = shift + 7
+    }
+    let d = (v >> 1) ^ -(v & 1)
+    odd = !odd
+    if odd {
+      px = px + d
+      px.to_double()
+    } else {
+      py = py + d
+      py.to_double()
+    }
+  }
+  let subs : Array[(Array[Double], Bool)] = []
+  let mut cur : Array[Double] = []
+  let mut x = 0.0
+  let mut y = 0.0
+  let mut sx = 0.0
+  let mut sy = 0.0
+  while i < end {
+    let op = t[i].to_int() & 0xFF
+    i = i + 1
+    match op {
+      0 => {
+        if cur.length() > 0 {
+          subs.push((cur, false))
+        }
+        x = coord()
+        y = coord()
+        sx = x
+        sy = y
+        cur = [x, y]
+      }
+      1 => {
+        x = coord()
+        y = coord()
+        cur.push(x)
+        cur.push(y)
+      }
+      2 => {
+        let c1x = coord()
+        let c1y = coord()
+        let c2x = coord()
+        let c2y = coord()
+        let ex = coord()
+        let ey = coord()
+        if cur.length() == 0 {
+          cur = [x, y]
+        }
+        pixels::cubic_points(cur, x, y, c1x, c1y, c2x, c2y, ex, ey, scale)
+        x = ex
+        y = ey
+      }
+      3 => {
+        if cur.length() > 0 {
+          subs.push((cur, true))
+          cur = []
+        }
+        x = sx
+        y = sy
+      }
+      _ => return None
+    }
+  }
+  if cur.length() > 0 {
+    subs.push((cur, false))
+  }
+  Some(subs)
+}

@@ -209,6 +209,8 @@ pub let said_paths : Map[String, Array[String]] = {
     "asks.*.text",
     "stateText",
     "stateRest",
+    "moving.to",
+    "moving.text",
     "cacheCold.status",
     "cacheCold.detail",
     "xshare.text",

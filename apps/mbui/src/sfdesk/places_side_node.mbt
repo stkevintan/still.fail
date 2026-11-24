@@ -152,7 +152,34 @@ priv struct PlaceLine {
 /// across its foot, the same way for every account of a provider); then each station's own logins not made profiles
 /// yet.
 fn profiles_side_node(s : @view.View, src : Source, tips : @sf.TipLayer, at : () -> SideAt) -> Unit {
-  place_side_node(s, src, tips, at, "profiles", fn(q, core, w, here, list_at) {
+  // (the accounts' 多选: begun at the band's end beside 添加, its bar at the sidebar's foot; over as the workspace in
+  // view changes)
+  let batch = @sfpages.ProfilesBatch::new()
+  let listed_of = fn(w : Workspace) { src.topic("profiles", { "scope": Json::string(w.id) }).get().value }
+  let rows_of = fn(w : Workspace) { items(listed_of(w), "items") }
+  let offered = fn(w : Workspace) { @sfpages.profiles_batch_offered(fn() { flag(listed_of(w), "manages") }, fn() { rows_of(w) }) }
+  let band_end = fn(b : @view.View, _ : @settings.Core, w : Workspace, _ : () -> @settings.Here) {
+    // (it stays while 多选 is on, lit, pressed again to end it: the band never changes as it begins)
+    b.show(fn() { offered(w) }, fn(k) {
+      @sf.icon_button_node(k, "check-circle", fn() { @sf.t("web-pages.profiles.batch.select") }, fn() { batch.toggle() }, tips~, on=fn() {
+        batch.on.get()
+      })
+      |> ignore
+    })
+  }
+  let band_end_shown = fn(_ : @settings.Core, w : Workspace, _ : () -> @settings.Here) { offered(w) }
+  let foot = fn(f : @view.View, core : @settings.Core, w : Workspace, here : () -> @settings.Here) {
+    let stations = fn() {
+      match @settings.stations_of(core, here()).value {
+        Some(Array(a)) => a
+        _ => []
+      }
+    }
+    @sfpages.profiles_batch_foot_node(f, core, batch, fn() { rows_of(w) }, stations, side=@sf.theme().chat_list.band_in)
+  }
+  // (a workspace come into view: no 多选 begun in another)
+  s.reacts(fn() { @sfbase.workspace_in_view(src).0.map(fn(w) { w.id }) }, fn(_) { batch.stop() }, at_start=false)
+  place_side_node(s, src, tips, at, "profiles", band_end=(band_end, band_end_shown), foot~, fn(q, core, w, here, list_at) {
     let topic = fn() { src.topic("profiles", { "scope": Json::string(w.id) }).get().value }
     let list = fn() { items(topic(), "items") }
     // each station's own logins, not profiles yet (under the profiles: each station up that offers one)
@@ -308,7 +335,14 @@ fn profiles_side_node(s : @view.View, src : Source, tips : @sf.TipLayer, at : ()
           list_at,
         )
       } else if made_as == 3 {
-        profile_side_row_node(line, src, w, tips, list_at, data, more, lit, widest, quota_room_w)
+        // (while 多选 is on, its box to tick in its place: pressed, picked, never its page)
+        line.pick(fn() { batch.on.get() }, fn(x, picking) {
+          if picking {
+            @sfpages.profiles_batch_side_row_node(x, list_at, batch, data, more)
+          } else {
+            profile_side_row_node(x, src, w, tips, list_at, data, more, lit, widest, quota_room_w)
+          }
+        })
       } else {
         machine_side_row_node(line, src, core, here, tips, list_at, data, more, widest, quota_room_w)
       }
@@ -602,6 +636,11 @@ fn place_side_node(
   at : () -> SideAt,
   place : String,
   rows : (@view.View, @settings.Core, Workspace, () -> @settings.Here, @sf.ListAt) -> Unit,
+  band_end? : (
+    (@view.View, @settings.Core, Workspace, () -> @settings.Here) -> Unit,
+    (@settings.Core, Workspace, () -> @settings.Here) -> Bool,
+  ),
+  foot? : (@view.View, @settings.Core, Workspace, () -> @settings.Here) -> Unit,
 ) -> Unit {
   let workspace = fn() { @sfbase.workspace_in_view(src).0 }
   let list_at = side_list_at(@signals.untracked(at))
@@ -628,13 +667,23 @@ fn place_side_node(
     side_top_node(q, fn() { at().brand })
     // the band (NavAction): 添加 where the viewer may add one, the update at its end where one is offered; none where
     // neither is
-    q.show(fn() { action() is Some(_) || update_shown() }, fn(band) {
+    let band_end_shown = fn() {
+      match band_end {
+        Some((_, shown)) => shown(core, w, here)
+        None => false
+      }
+    }
+    q.show(fn() { action() is Some(_) || update_shown() || band_end_shown() }, fn(band) {
       // (on the tape, as the settings' band: in the panel's top corner, its row kept off that corner by the update's
       // room, which the update's round key, where one is offered, is concentric with)
       let tape = list_at is Tape
       @sf.style_node(band, fn() { if tape { band_new_tape(at=band_at()) } else { update_band(at=band_at()) } })
       band.box(fn(main) {
         @sf.style_node(main, fn() { side_full }, in_row=true)
+        // (what the band ends with beside 添加, at its end on the same line: the profiles' 多选)
+        if band_end is Some(_) {
+          main.row(Is(true)).lines_up(Is(Some(Middle))) |> ignore
+        }
         if tape {
           main.margin(By(fn() { (0.0, 0.0, if update_shown() { 0.0 } else { update_key_side }, 0.0) })) |> ignore
         }
@@ -651,6 +700,10 @@ fn place_side_node(
             @sf.nav_words_node(b, label)
           })
         })
+        match band_end {
+          Some((make, _)) => make(main, core, w, here)
+          None => ()
+        }
       })
       |> ignore
       band.show(update_shown, fn(u) {
@@ -686,6 +739,10 @@ fn place_side_node(
       |> ignore
     })
     |> ignore
+    match foot {
+      Some(f) => f(q, core, w, here)
+      None => ()
+    }
   })
 }
 

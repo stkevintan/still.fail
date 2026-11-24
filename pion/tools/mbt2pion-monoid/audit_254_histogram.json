@@ -1,0 +1,419 @@
+{
+  "schema_version": 3,
+  "reproduce_command": "MBT2PION_BIN=<path> MBT_COMPAT_DIR=<dir> sh pion/tools/mbt2pion-monoid/run_audit_histogram.sh",
+  "source_dir": "libs/ui/src/controls",
+  "production_files_total": 255,
+  "native_target_excluded_js_only": 2,
+  "native_target_prod_files_emitted": 253,
+  "generated_files_total": 254,
+  "has_00_init_order": true,
+  "invar_rev": "339c271e0bd4ea9e2680f13adcec8075d6da9cf3",
+  "mbt2pion_commit": "6d22ff1f90bd19012a5997f7fdfdc56ee3012408",
+  "mbt_compat_commit": "6d22ff1f90bd19012a5997f7fdfdc56ee3012408",
+  "mbt2pion_elapsed_ms": 5363,
+  "mbt2pion_stage": {
+    "total_diagnostics": 2502,
+    "blockers": 4983,
+    "probe_rounds": 1,
+    "probes_instrumented": 1947,
+    "probes_resolved": 0,
+    "stage_b_iterations": 5,
+    "by_code": {
+      "MBT2PION_UNDISPOSED_PROBE_SITE": 1955,
+      "MBT2PION_UNDISPOSED_DIV_MOD": 526,
+      "MBT2PION_PROBE_RESIDUAL": 18,
+      "MBT2PION_UNKNOWN_DERIVE": 2,
+      "MBT2PION_PROBE_MISMATCH": 1
+    },
+    "top_10_reasons": [
+      {
+        "reason": "MBT2PION_UNDISPOSED_PROBE_SITE: undisposed `<id>` field access remained after Stage A.5",
+        "count": 945,
+        "samples": [
+          "00_init_order.pion:1217:49 (undisposed `.val` field access remained after Stage A.5)",
+          "00_init_order.pion:1217:87 (undisposed `.val` field access remained after Stage A.5)",
+          "00_init_order.pion:1332:24 (undisposed `.val` field access remained after Stage A.5)"
+        ]
+      },
+      {
+        "reason": "MBT2PION_UNDISPOSED_PROBE_SITE: undisposed `<id>` call remained after Stage A.5",
+        "count": 538,
+        "samples": [
+          "accent_pick.pion:103:69 (undisposed `.to_string()` call remained after Stage A.5)",
+          "accent_pick.pion:110:30 (undisposed `.to_string()` call remained after Stage A.5)",
+          "accent_pick.pion:125:20 (undisposed `.length()` call remained after Stage A.5)"
+        ]
+      },
+      {
+        "reason": "MBT2PION_UNDISPOSED_DIV_MOD: undisposed `<id>` operator remained after Stage A.5 (round cap reached or unrecognized operand boundary)",
+        "count": 526,
+        "samples": [
+          "00_init_order.pion:1452:49 (undisposed `/` operator remained after Stage A.5 (round cap reached or unrecognized operand boundary))",
+          "00_init_order.pion:1452:70 (undisposed `/` operator remained after Stage A.5 (round cap reached or unrecognized operand boundary))",
+          "00_init_order.pion:1452:90 (undisposed `/` operator remained after Stage A.5 (round cap reached or unrecognized operand boundary))"
+        ]
+      },
+      {
+        "reason": "MBT2PION_UNDISPOSED_PROBE_SITE: undisposed `<id>` index expression remained after Stage A.5",
+        "count": 472,
+        "samples": [
+          "action_sheet_node.pion:86:25 (undisposed `[...]` index expression remained after Stage A.5)",
+          "avatar.pion:20:16 (undisposed `[...]` index expression remained after Stage A.5)",
+          "avatar_stack_node.pion:51:20 (undisposed `[...]` index expression remained after Stage A.5)"
+        ]
+      },
+      {
+        "reason": "MBT2PION_UNKNOWN_DERIVE: unrecognized `<id>` on `<id>` (not in strict allowlist or recipes)",
+        "count": 2,
+        "samples": [
+          "page_node.mbt:341:6 (unrecognized `#derive(Hash)` on `PageItem` (not in strict allowlist or recipes))",
+          "page_wide_node.mbt:12:6 (unrecognized `#derive(Hash)` on `WideItem` (not in strict allowlist or recipes))"
+        ]
+      },
+      {
+        "reason": "MBT2PION_PROBE_MISMATCH: Stage A.5 coverage guard failed in round 1: probes_instrumented=1947 != probe_diagnostics_received=1363",
+        "count": 1,
+        "samples": [
+          "<stage_a5>:1:1 (Stage A.5 coverage guard failed in round 1: probes_instrumented=1947 != probe_diagnostics_received=1363)"
+        ]
+      },
+      {
+        "reason": "MBT2PION_PROBE_RESIDUAL: Stage A.5 residual probe identifier found in final output of avatar_stack_node.pion",
+        "count": 1,
+        "samples": [
+          "avatar_stack_node.pion:1:1 (Stage A.5 residual probe identifier found in final output of avatar_stack_node.pion)"
+        ]
+      },
+      {
+        "reason": "MBT2PION_PROBE_RESIDUAL: Stage A.5 residual probe identifier found in final output of icons.pion",
+        "count": 1,
+        "samples": [
+          "icons.pion:1:1 (Stage A.5 residual probe identifier found in final output of icons.pion)"
+        ]
+      },
+      {
+        "reason": "MBT2PION_PROBE_RESIDUAL: Stage A.5 residual probe identifier found in final output of md_core.pion",
+        "count": 1,
+        "samples": [
+          "md_core.pion:1:1 (Stage A.5 residual probe identifier found in final output of md_core.pion)"
+        ]
+      },
+      {
+        "reason": "MBT2PION_PROBE_RESIDUAL: Stage A.5 residual probe identifier found in final output of meter_chips_brief_node.pion",
+        "count": 1,
+        "samples": [
+          "meter_chips_brief_node.pion:1:1 (Stage A.5 residual probe identifier found in final output of meter_chips_brief_node.pion)"
+        ]
+      }
+    ]
+  },
+  "pionc_check_stage": {
+    "ok": false,
+    "total_diagnostics": 36516,
+    "files_with_diagnostics": 232,
+    "files_clean": 21,
+    "init_order_diagnostics": 1898,
+    "diagnostics_in_asset_bypass_files": 0,
+    "by_code": {
+      "E_TYPE_MISMATCH": 21850,
+      "E_PARSE": 14258,
+      "E_NON_EXHAUSTIVE": 171,
+      "E_TRAIT_NOT_IMPLEMENTED": 41,
+      "E_TRAIT_METHOD_MISSING": 38,
+      "E_HABIT_ARROW_FN": 33,
+      "E_MISSING_TYPE": 33,
+      "E_UNKNOWN_TRAIT": 27,
+      "E_UNKNOWN_VARIANT": 27,
+      "E_UNKNOWN_PACKAGE": 25,
+      "E_DUP_DEF": 10,
+      "E_PRIVATE_SYMBOL": 3
+    },
+    "by_category": {
+      "mbt2pion_engine": 35875,
+      "invar_layer2_blocker": 641
+    },
+    "layer2_blocker_hits_count": 641,
+    "layer2_blocker_distinct_symbols": 75,
+    "layer2_blocker_top_symbols": [
+      {
+        "symbol": "ui::css",
+        "count": 420
+      },
+      {
+        "symbol": "ui::span",
+        "count": 25
+      },
+      {
+        "symbol": "ui::CornerOf",
+        "count": 24
+      },
+      {
+        "symbol": "ui::long_press_ms",
+        "count": 14
+      },
+      {
+        "symbol": "ui::style_words",
+        "count": 14
+      },
+      {
+        "symbol": "ui::CornerRoots",
+        "count": 12
+      },
+      {
+        "symbol": "ui::sp_at",
+        "count": 10
+      },
+      {
+        "symbol": "lg::in_liquid_pill",
+        "count": 8
+      },
+      {
+        "symbol": "ui::shape_of",
+        "count": 6
+      },
+      {
+        "symbol": "ui::window_keys_own",
+        "count": 6
+      },
+      {
+        "symbol": "lg::liquid_pill_hover_ink",
+        "count": 5
+      },
+      {
+        "symbol": "ui::text_advance",
+        "count": 5
+      },
+      {
+        "symbol": "ui::words_shaped",
+        "count": 5
+      },
+      {
+        "symbol": "ui::has_image",
+        "count": 4
+      },
+      {
+        "symbol": "ui::field_edit_now",
+        "count": 4
+      },
+      {
+        "symbol": "ui::window_keys_left_now",
+        "count": 4
+      },
+      {
+        "symbol": "ui::window_keys_own_now",
+        "count": 4
+      },
+      {
+        "symbol": "ui::field_backdrop",
+        "count": 3
+      },
+      {
+        "symbol": "ui::row_gone_at",
+        "count": 3
+      },
+      {
+        "symbol": "ui::full_screen",
+        "count": 3
+      }
+    ],
+    "top_15_engine_mechanical_buckets": [
+      {
+        "bucket": "E_TYPE_MISMATCH: undefined identifier (parse cascade / missing local/import)",
+        "count": 10120,
+        "samples": [
+          "00_init_order.pion:84:59 (undefined identifier `Ui`)",
+          "00_init_order.pion:84:71 (undefined identifier `L6`)",
+          "00_init_order.pion:84:96 (undefined identifier `Fg`)"
+        ]
+      },
+      {
+        "bucket": "E_TYPE_MISMATCH: cannot call undefined function",
+        "count": 6913,
+        "samples": [
+          "00_init_order.pion:418:84 (cannot call undefined function `A`)",
+          "00_init_order.pion:421:89 (cannot call undefined function `A`)",
+          "00_init_order.pion:427:87 (cannot call undefined function `A`)"
+        ]
+      },
+      {
+        "bucket": "E_PARSE: unexpected `:` where expression expected",
+        "count": 2813,
+        "samples": [
+          "accent_pick.pion:69:67 (expected expression, found `:`)",
+          "accent_pick.pion:139:27 (expected expression, found `:`)",
+          "accent_pick.pion:139:45 (expected expression, found `:`)"
+        ]
+      },
+      {
+        "bucket": "E_PARSE: Pion keyword `val` used as field/ident (`r.val` unlowered when Stage A.5 aborts)",
+        "count": 2268,
+        "samples": [
+          "00_init_order.pion:1236:49 (expected field or method name, found `val`)",
+          "00_init_order.pion:1236:49 (expected expression, found `val`)",
+          "00_init_order.pion:1236:87 (expected field or method name, found `val`)"
+        ]
+      },
+      {
+        "bucket": "E_PARSE: unexpected `,` where expression expected",
+        "count": 2174,
+        "samples": [
+          "accent_pick.pion:69:60 (expected expression, found `,`)",
+          "accent_pick.pion:119:6 (expected expression, found `,`)",
+          "accent_pick.pion:139:39 (expected expression, found `,`)"
+        ]
+      },
+      {
+        "bucket": "E_PARSE: unexpected `->` where expression expected",
+        "count": 1363,
+        "samples": [
+          "accent_pick.pion:69:72 (expected expression, found `->`)",
+          "accent_pick.pion:139:50 (expected expression, found `->`)",
+          "accent_pick.pion:139:69 (expected expression, found `->`)"
+        ]
+      },
+      {
+        "bucket": "E_PARSE: expected `<tok>`, found `<tok>` (found `(`)",
+        "count": 1064,
+        "samples": [
+          "accent_pick.pion:139:19 (expected `)`, found `(`)",
+          "accent_pick.pion:139:19 (expected `{`, found `(`)",
+          "accent_pick.pion:186:14 (expected `)`, found `(`)"
+        ]
+      },
+      {
+        "bucket": "E_TYPE_MISMATCH: struct `<sym>` has no field `<sym>`",
+        "count": 1001,
+        "samples": [
+          "00_init_order.pion:1236:48 (struct `signals::Ref` has no field `<error>`)",
+          "00_init_order.pion:1236:86 (struct `signals::Ref` has no field `<error>`)",
+          "00_init_order.pion:1353:27 (struct `signals::Ref` has no field `<error>`)"
+        ]
+      },
+      {
+        "bucket": "E_PARSE: unexpected `)` where expression expected",
+        "count": 969,
+        "samples": [
+          "00_init_order.pion:7237:48 (expected expression, found `)`)",
+          "00_init_order.pion:7237:69 (expected expression, found `)`)",
+          "about_mark_node.pion:35:71 (expected expression, found `)`)"
+        ]
+      },
+      {
+        "bucket": "E_PARSE: expected `<tok>`, found `<tok>` (found `:`)",
+        "count": 582,
+        "samples": [
+          "accent_pick.pion:139:27 (expected `)`, found `:`)",
+          "accent_pick.pion:186:17 (expected `)`, found `:`)",
+          "accent_pick.pion:235:15 (expected `)`, found `:`)"
+        ]
+      },
+      {
+        "bucket": "E_PARSE: unexpected `pub` where expression expected",
+        "count": 540,
+        "samples": [
+          "00_init_order.pion:7244:1 (expected expression, found `pub`)",
+          "00_init_order.pion:7253:1 (expected expression, found `pub`)",
+          "00_init_order.pion:7259:1 (expected expression, found `pub`)"
+        ]
+      },
+      {
+        "bucket": "E_TYPE_MISMATCH: type mismatch in assignment",
+        "count": 382,
+        "samples": [
+          "00_init_order.pion:1236:49 (type mismatch in assignment)",
+          "00_init_order.pion:1236:87 (type mismatch in assignment)",
+          "00_init_order.pion:1351:24 (type mismatch in assignment)"
+        ]
+      },
+      {
+        "bucket": "E_TYPE_MISMATCH: unknown named argument `<sym>` in call to `<sym>`",
+        "count": 336,
+        "samples": [
+          "00_init_order.pion:155:83 (unknown named argument `w` in call to `text_style`)",
+          "00_init_order.pion:158:93 (unknown named argument `w` in call to `text_style`)",
+          "00_init_order.pion:301:86 (unknown named argument `w` in call to `text_style`)"
+        ]
+      },
+      {
+        "bucket": "E_TYPE_MISMATCH: missing/unmapped Invar symbol in `view::*`",
+        "count": 326,
+        "samples": [
+          "accent_pick.pion:139:29 (unknown path `view::View`)",
+          "bar_pill_group_node.pion:121:33 (unknown path `view::View`)",
+          "bar_pill_group_node.pion:121:194 (unknown path `view::View`)"
+        ]
+      },
+      {
+        "bucket": "E_PARSE: expected `<tok>`, found `<tok>` (found `::`)",
+        "count": 295,
+        "samples": [
+          "align.pion:70:13 (expected `(`, found `::`)",
+          "align.pion:70:13 (expected `)`, found `::`)",
+          "align.pion:70:13 (expected `{`, found `::`)"
+        ]
+      }
+    ],
+    "top_15_files_by_diagnostics": [
+      {
+        "file": "page_node.pion",
+        "count": 3210
+      },
+      {
+        "file": "presenters.pion",
+        "count": 2270
+      },
+      {
+        "file": "00_init_order.pion",
+        "count": 1898
+      },
+      {
+        "file": "player_node.pion",
+        "count": 1609
+      },
+      {
+        "file": "markdown_node.pion",
+        "count": 1514
+      },
+      {
+        "file": "reader_node.pion",
+        "count": 1323
+      },
+      {
+        "file": "tokens.pion",
+        "count": 1110
+      },
+      {
+        "file": "reader.pion",
+        "count": 934
+      },
+      {
+        "file": "style_node.pion",
+        "count": 928
+      },
+      {
+        "file": "md_core.pion",
+        "count": 903
+      },
+      {
+        "file": "sheet_node.pion",
+        "count": 811
+      },
+      {
+        "file": "menu_node.pion",
+        "count": 754
+      },
+      {
+        "file": "hover_card_node.pion",
+        "count": 699
+      },
+      {
+        "file": "parts.pion",
+        "count": 666
+      },
+      {
+        "file": "tip_node.pion",
+        "count": 600
+      }
+    ]
+  }
+}

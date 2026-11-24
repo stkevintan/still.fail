@@ -5,7 +5,7 @@ import type { Topic } from "../protocol.ts";
 import { OWN_SURFACES } from "../titles.ts";
 import { isObject } from "../util.ts";
 import type { KeptValues, ListRow } from "./kept.ts";
-import { CHAT_COLUMNS, CHAT_MADE } from "./schema.ts";
+import { CHAT_COLUMNS, CHAT_MADE, CHAT_MADE_ALT } from "./schema.ts";
 
 // deno-lint-ignore no-explicit-any
 export type J = any;
@@ -285,9 +285,19 @@ export type ChatFound = { station: string; archived: boolean; id: string; cols: 
 export const foundOf = (rows: readonly SqlRow[]): ChatFound[] => rows.map((r) => ({ station: String(r[0]), archived: r[1] === 1, id: String(r[2]), cols: r.slice(3), record: undefined }));
 
 /// The statement that puts a chat's record: the columns every core writes, `state` and `made` this core's, and those
-/// SQLite makes of its JSON (schema.ts CHAT_COLUMNS), of the JSON given last.
-export const PUT_CHAT = `INSERT OR REPLACE INTO chat (station, id, archived, ord, thread, session, client_key, last_active, pinned_at, unread, mine, running, tone, asks, state, watched, made, json, ${CHAT_COLUMNS.map(([c]) => c).join(", ")})
-  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CHAT_MADE}, r.json, ${CHAT_COLUMNS.map(([, of]) => of("r.json")).join(", ")} FROM (SELECT ? AS json) AS r`;
+/// SQLite makes of its JSON (schema.ts CHAT_COLUMNS), of the JSON given last. Uses `ON CONFLICT DO UPDATE` rather than
+/// `INSERT OR REPLACE` so updating an existing chat keeps its `rowid` and skips rewriting unchanged secondary indexes
+/// (`chat_ord`, `chat_thread`, `chat_session`, `chat_client`, `chat_marks`, `chat_made`, `chat_agent`).
+export const PUT_CHAT = `INSERT INTO chat (station, id, archived, ord, thread, session, client_key, last_active, pinned_at, unread, mine, running, tone, asks, state, watched, made, json, ${CHAT_COLUMNS.map(([c]) => c).join(", ")})
+  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CHAT_MADE}, r.json, ${CHAT_COLUMNS.map(([, of]) => of("r.json")).join(", ")} FROM (SELECT ? AS json) AS r WHERE true
+  ON CONFLICT (station, archived, id) DO UPDATE SET
+    ord = excluded.ord, thread = excluded.thread, session = excluded.session, client_key = excluded.client_key,
+    last_active = excluded.last_active, pinned_at = excluded.pinned_at, unread = excluded.unread,
+    mine = excluded.mine, running = excluded.running, tone = excluded.tone, asks = excluded.asks,
+    state = excluded.state, watched = excluded.watched,
+    made = CASE WHEN chat.made = ${CHAT_MADE} THEN ${CHAT_MADE_ALT} ELSE ${CHAT_MADE} END,
+    json = excluded.json,
+    ${CHAT_COLUMNS.map(([c]) => `${c} = excluded.${c}`).join(", ")}`;
 
 /// A chat row as a station's list was last written (`setChats`): the row as it was given (null: only read), and its
 /// place.

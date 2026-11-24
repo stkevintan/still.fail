@@ -456,7 +456,7 @@ pub fn stations_of(core : Core, here : Here) -> Read {
 ///|
 /// Whether the viewer is one of the workspace's owners or admins; None until the workspace is read (Settings.kt
 /// managerOf).
-fn manager_of(core : Core, here : Here) -> Bool? {
+pub fn manager_of(core : Core, here : Here) -> Bool? {
   let w = workspace_view(core, here)
   match w.value {
     Some(_) => {

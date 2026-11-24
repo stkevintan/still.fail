@@ -123,17 +123,13 @@ pub fn tab_lens_surface_decorate(
 }
 
 ///|
-/// The shadow under the bottom bar's lens in Light mode (blur sigma 8, 4 down, black at ~9.4%).
-pub let tab_lens_raised : Raised = { sigma: 8.0, dy: 4.0, color: 0x00000018L }
+/// The shadow under the bottom bar's pressed lens: zeroed (`shadow_none`) for shadow-free lifted droplets.
+pub let tab_lens_raised : Raised = { sigma: 0.0, dy: 0.0, color: 0x00000000L }
 
 ///|
-/// Theme-aware outer shadow under the bottom bar's pressed lens: Light `(8, 4, 0x18)` / Dark `(10, 4, 0x3C)`.
-pub fn tab_lens_raised_for(dark : Bool) -> Raised {
-  if dark {
-    { sigma: 10.0, dy: 4.0, color: 0x0000003CL }
-  } else {
-    tab_lens_raised
-  }
+/// Theme-aware outer shadow under the bottom bar's pressed lens: zeroed (`shadow_none`).
+pub fn tab_lens_raised_for(_dark : Bool) -> Raised {
+  tab_lens_raised
 }
 
 ///|

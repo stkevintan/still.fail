@@ -22,6 +22,7 @@ export const STATION_SHAPES: Record<string, Shape> = {
     ["logins", vec("PendingLogin")],
     ["machineLogins", vec("MachineLogin"), { default: true, doc: "This machine's own logins (none from a station older than them)." }],
     ["sharing", "bool", { default: true, doc: "It can share profiles and skills with the workspace's other stations." }],
+    ["shareAllowAuto", "bool", { default: true, doc: "A profile it shares can follow the workspace's whitelist (`profile.share` `allowAuto`); false from a station older\nthan it, which then is not offered." }],
     ["consoleSignIn", "bool", { default: true, doc: "An OpenCode Go profile can be signed in to the OpenCode Console rather than given a key (false from a station\nolder than it: not offered)." }],
     // (not `apiProviders`, the providers a key can be added for: the core's own forms read it, no client; a third of
     // each station the `stations` list sent, 2026-11-08)
@@ -51,6 +52,7 @@ export const STATION_SHAPES: Record<string, Shape> = {
     ["counts", "Counts"],
     ["machineLogins", vec("MachineLogin"), { default: true, doc: "As Overview's." }],
     ["sharing", "bool", { default: true, doc: "As Overview's." }],
+    ["shareAllowAuto", "bool", { default: true, doc: "As Overview's." }],
     ["updates", vec("SoftwareVersion"), { default: true, doc: "As Overview's." }],
     ["processesText", "String", { doc: "Its agents' processes, in a line." }],
     ["agentEnv", vec("EnvVar"), { default: true, doc: "As Overview's." }],

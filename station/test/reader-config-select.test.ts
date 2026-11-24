@@ -2,6 +2,7 @@
 // permissive `config.json` `readers` validation, live in-memory config snapshots, hot-reload on next spawn,
 // real SQLite builder wiring, RequestedBuilder error boundary, rig Remote wiring, and per-station PackedProgram isolation.
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,7 +31,12 @@ import { measureRoom } from "../src/sessions/footprint.ts";
 import { PackedProgram, runPackedOnce } from "../src/sessions/packed-mb.ts";
 import { MemoryProgram } from "../src/share/memory-mb.ts";
 import { Store } from "../src/store/store.ts";
+import { buildLegacyEntryLookups } from "../src/store/legacy-said-builder.ts";
+import { installPageLetterIndex } from "../src/store/page-letter-index.ts";
+import { buildWorkspaceActivity } from "../src/sessions/workspace-activity-builder.ts";
 import { retireAfterPrevious } from "../src/usage/module.ts";
+import { UseIndex } from "../src/vault/use-index.ts";
+import { DatabaseSync } from "node:sqlite";
 
 const tempDirs: string[] = [];
 after(() => {
@@ -689,5 +695,206 @@ test("default mb does zero pionBinary() probe and explicit binary override alway
     });
     assert.equal(pionRes.engine, "pion");
     assert.equal(pionRes.primaryBinary, deferredPion);
+  });
+});
+
+test("vault-uses UseIndex (file-backed DB) and session-backfill builders resolve ReaderConfig lazily and fall back to mb while pionImplemented is false", { skip: skipPosixStubs }, async () => {
+  resetReaderSelectionStateForTest();
+  const dir = freshDir("w5-di-");
+  const spawnLog = join(dir, "spawns.log");
+  const vaultStub = makeStubBinary(
+    dir,
+    "stub-mb-vault",
+    `
+import { appendFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+appendFileSync(${JSON.stringify(spawnLog)}, process.argv.slice(2).join(" ") + "\\n");
+const rl = createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  if (!line) return;
+  const ask = JSON.parse(line);
+  if (ask.op === "ready" && ask.q) {
+    process.stdout.write(JSON.stringify({ answered: { id: ask.q.id, bodies: [] } }) + "\\n");
+  } else if (ask.op === "uses" || ask.op === "rebox") {
+    process.stdout.write(JSON.stringify({ done: true }) + "\\n");
+  } else {
+    process.stdout.write(JSON.stringify({ done: true }) + "\\n");
+  }
+});
+`,
+  );
+  const pionStub = makeStubBinary(dir, "stub-pion-w5", versionAndTagStubBody("stillfail-pion 0.1.0", "pion"));
+
+  const logs: Line[] = [];
+  hearLines((l) => logs.push(l));
+  try {
+    await withEnv({
+      STILLFAIL_MB_READER: vaultStub,
+      STILLFAIL_PION_READER: pionStub,
+      STILLFAIL_READER_ENGINE: undefined,
+      STILLFAIL_READER_VAULT_USES: undefined,
+      STILLFAIL_READER_SESSION_BACKFILL: undefined,
+    }, async () => {
+      // 1. vault-uses: real file-backed DB triggers UseIndex.#start() -> resolveReaderSelection("vault-uses")
+      const dbPath = join(dir, "vault.db");
+      const db = new DatabaseSync(dbPath);
+      db.exec(`
+        CREATE TABLE vault_requests (ws TEXT NOT NULL, id TEXT NOT NULL, status TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (ws, id));
+        CREATE TABLE vault_devices (ws TEXT NOT NULL, device TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (ws, device));
+      `);
+      let vaultConfigReads = 0;
+      const uses = new UseIndex(db, {
+        readers: () => {
+          vaultConfigReads++;
+          return { readers: { "vault-uses": "pion" } };
+        },
+      });
+      try {
+        const bodies = await uses.read("ws1", "v1", null, 10);
+        assert.deepEqual(bodies, []);
+        assert.equal(vaultConfigReads, 1, "UseIndex.#start() must read readers() lazily on spawn");
+      } finally {
+        await uses.close();
+        db.close();
+      }
+
+      // 2. session-backfill: buildWorkspaceActivity & buildLegacyEntryLookups resolve ReaderConfig lazily
+      const storePath = join(dir, "station.db");
+      const store = Store.open(storePath, join(dir, "archive"));
+      // Mark workspace_activity_meta incomplete so buildWorkspaceActivity sees work and spawns the worker.
+      store.db.exec("UPDATE workspace_activity_meta SET complete = 0");
+      let activityConfigReads = 0;
+      const activity = buildWorkspaceActivity(store, Promise.resolve(), undefined, () => {
+        activityConfigReads++;
+        return { readers: { "session-backfill": "pion" } };
+      });
+      try {
+        assert.equal(await activity.ready, true);
+        assert.ok(activityConfigReads >= 1, "buildWorkspaceActivity must read readers() on spawn");
+      } finally {
+        await activity.close();
+      }
+
+      let legacyConfigReads = 0;
+      const legacyBins: string[] = [];
+      // Install page-letter index and seed a garbage row so buildLegacyEntryLookups genuinely spawns startWorker.
+      installPageLetterIndex(store.db);
+      store.db.exec("INSERT OR REPLACE INTO page_letter_garbage VALUES (1, 'stale-tok')");
+      const legacySpawned = Promise.withResolvers<void>();
+      const legacy = buildLegacyEntryLookups(
+        store,
+        Promise.resolve(),
+        undefined,
+        (bin) => {
+          legacyBins.push(bin);
+          legacySpawned.resolve();
+          return new (class FakeWorker extends EventEmitter {
+            readonly threadId = 1;
+            postMessage() { setImmediate(() => this.emit("message", { done: true })); }
+            unref() {}
+            async terminate() { setImmediate(() => this.emit("exit", 0)); return 0; }
+          })() as never;
+        },
+        () => {
+          legacyConfigReads++;
+          return { readers: { "session-backfill": "pion" } };
+        },
+      );
+      await legacySpawned.promise;
+      await legacy.close();
+      store.close();
+
+      assert.ok(legacyConfigReads >= 1, "buildLegacyEntryLookups must read readers() lazily on spawn");
+      assert.deepEqual(legacyBins, [vaultStub], "buildLegacyEntryLookups must select vaultStub via resolveReaderSelection");
+
+      // Verify both modes fell back to mbStub (pionImplemented is false) and spawned real processes.
+      const spawns = readFileSync(spawnLog, "utf8").trim().split("\n").filter(Boolean);
+      assert.ok(spawns.some((l) => l.includes("--builder vault-uses")), `expected vault-uses spawn, got ${JSON.stringify(spawns)}`);
+      assert.ok(spawns.some((l) => l.includes("--builder session-backfill")), `expected session-backfill spawn, got ${JSON.stringify(spawns)}`);
+      // Direct resolveReaderSelection check confirms unimplemented fallback reason.
+      const vSel = resolveReaderSelection("vault-uses", { config: { readers: { "vault-uses": "pion" } }, env: {} });
+      assert.equal(vSel.engine, "mb");
+      assert.equal(vSel.selection.reason, "pion-mode-unimplemented");
+      const sSel = resolveReaderSelection("session-backfill", { config: { readers: { "session-backfill": "pion" } }, env: {} });
+      assert.equal(sSel.engine, "mb");
+      assert.equal(sSel.selection.reason, "pion-mode-unimplemented");
+    });
+  } finally {
+    hearLines(null);
+  }
+});
+
+test("file-backed UseIndex preserves #known across idle release and binary switch without rescanning uses/rebox", { skip: skipPosixStubs }, async () => {
+  resetReaderSelectionStateForTest();
+  const dir = freshDir("use-index-idle-known-");
+  const opsLogA = join(dir, "ops-a.log");
+  const opsLogB = join(dir, "ops-b.log");
+  const makeVaultRecorderStub = (name: string, tag: string, logPath: string) =>
+    makeStubBinary(
+      dir,
+      name,
+      `
+import { appendFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+const rl = createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  if (!line) return;
+  const ask = JSON.parse(line);
+  appendFileSync(${JSON.stringify(logPath)}, ask.op + "\\n");
+  if (ask.op === "ready" && ask.q) {
+    process.stdout.write(JSON.stringify({ answered: { id: ask.q.id, bodies: [${JSON.stringify(tag)}] } }) + "\\n");
+  } else {
+    process.stdout.write(JSON.stringify({ done: true }) + "\\n");
+  }
+});
+`,
+    );
+
+  const stubA = makeVaultRecorderStub("vault-a", "from-a", opsLogA);
+  const stubB = makeVaultRecorderStub("vault-b", "from-b", opsLogB);
+  const dbPath = join(dir, "vault-idle.db");
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE vault_requests (ws TEXT NOT NULL, id TEXT NOT NULL, status TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (ws, id));
+    CREATE TABLE vault_devices (ws TEXT NOT NULL, device TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (ws, device));
+  `);
+
+  let fireIdle: (() => void) | null = null;
+  let idleArmed = Promise.withResolvers<void>();
+  const afterFn = (_ms: number, f: () => void) => {
+    fireIdle = f;
+    idleArmed.resolve();
+    return () => { fireIdle = null; };
+  };
+
+  await withEnv({
+    STILLFAIL_MB_READER: stubA,
+    STILLFAIL_READER_ENGINE: undefined,
+    STILLFAIL_READER_VAULT_USES: undefined,
+  }, async () => {
+    const uses = new UseIndex(db, { after: afterFn });
+    try {
+      // Round 1: stub A answers read and completes uses + rebox background, then arms idle timer.
+      assert.deepEqual(await uses.read("ws1", "v1", null, 10), ["from-a"]);
+      await idleArmed.promise;
+      assert.equal(uses.running, true);
+      // Trigger idle release -> preserves #known = { uses: true, rebox: true } and lets stub A go.
+      fireIdle!();
+      assert.equal(uses.running, false);
+
+      const opsA = readFileSync(opsLogA, "utf8").trim().split("\n").filter(Boolean);
+      assert.ok(opsA.includes("uses") && opsA.includes("rebox"), `stub A must run initial uses+rebox, got ${JSON.stringify(opsA)}`);
+
+      // Round 2: switch STILLFAIL_MB_READER to stub B and read again; stub B must NOT re-run uses or rebox.
+      process.env.STILLFAIL_MB_READER = stubB;
+      idleArmed = Promise.withResolvers<void>();
+      assert.deepEqual(await uses.read("ws1", "v1", null, 10), ["from-b"]);
+      await idleArmed.promise;
+      const opsB = readFileSync(opsLogB, "utf8").trim().split("\n").filter(Boolean);
+      assert.deepEqual(opsB, ["ready"], `stub B must skip already-settled uses/rebox and only run ready, got ${JSON.stringify(opsB)}`);
+    } finally {
+      await uses.close();
+      db.close();
+    }
   });
 });

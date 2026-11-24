@@ -90,7 +90,7 @@ test("a_chat_list_is_made_with_no_rows_menu_swipe_question_or_watch", async () =
   // (main: 8 menus, 8 swipes' questions, 1 watch: every row's, the list's)
   assert.deepEqual([made.rowMenus, made.swipeAsks, made.watches], [0, 0, 0]);
   // Nor what a row's whole row says besides: none of it goes out on the list.
-  for (const i of items(u.value)) for (const k of ["swipeAsk", "watch", "decision", "mayShare", "mayPublish", "slackUrl", "slackApp", "feishuUrl", "kept", "muted", "time", "xshare"]) assert.equal(i[k], undefined, `${i.id}.${k}`);
+  for (const i of items(u.value)) for (const k of ["swipeAsk", "watch", "decision", "mayShare", "mayPublish", "mayMove", "slackUrl", "slackApp", "feishuUrl", "kept", "muted", "time", "xshare"]) assert.equal(i[k], undefined, `${i.id}.${k}`);
 });
 
 test("a_lists_rows_are_made_again_by_what_they_draw_alone", async () => {

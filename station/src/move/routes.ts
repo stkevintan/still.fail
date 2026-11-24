@@ -121,6 +121,8 @@ export type MoveRoutesDeps = {
   rig: () => boolean;
   /// What the roster of `ws` calls station `id` (none: its id's start).
   name?: (ws: string, id: string) => string | null;
+  /// The chat session `key` goes with, as the chats' plan names it (handover.ts `chatOf`).
+  chatOf?: (key: string) => string;
   /// move/station.ts `refusal`: switched off here or there.
   refusal: (ws: string, station: string, lang: Request["lang"]) => Promise<string | null>;
 };
@@ -139,9 +141,12 @@ export function moveRoutes(d: MoveRoutesDeps): Route[] {
     if (at === null) return error(400, tr(r.lang, "station.move.noStation", { station: given }));
     if (at.id === d.here()) return error(400, tr(r.lang, "station.move.self"));
     if (at.tasks) return error(409, tr(r.lang, "station.move.notWhole", { station: given }));
+    const module = typeof b.module === "string" && b.module !== "" ? b.module : undefined;
+    const item = typeof b.item === "string" && b.item !== "" ? b.item : undefined;
     const sel: Selection = {
-      module: typeof b.module === "string" && b.module !== "" ? b.module : undefined,
-      item: typeof b.item === "string" && b.item !== "" ? b.item : undefined,
+      module,
+      // (a chat asked by any of its sessions (a chat's menu names its own): as the chats' plan lists it, by its first)
+      item: module === "chats" && item !== undefined && d.chatOf !== undefined ? d.chatOf(item) : item,
       all: b.all === true, withNeeds: !back && b.withNeeds === true,
       // (a move back brings an item stopped where what it needs stays there by itself)
       arriveStopped: !back && b.arriveStopped === true,

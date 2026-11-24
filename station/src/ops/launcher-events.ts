@@ -18,7 +18,7 @@ export type LauncherEventLevel = "error" | "warn";
 export type LauncherEventEmit = (level: LauncherEventLevel, message: string, fields: Record<string, unknown>) => void;
 
 /// The fields said of an event: the launcher's numbers and words of its own (no path, nothing a person wrote).
-const FIELDS = ["kind", "at", "pid", "version", "how", "uptimeMs", "taken", "failures", "heartbeatTimeoutMs", "misses", "probeMs", "retries", "reason", "exitTimeoutMs", "healthAgeMs", "rssBytes", "openFds", "heldMaxMs", "front", "presenceOnline", "relayConflict"];
+const FIELDS = ["kind", "at", "pid", "version", "how", "uptimeMs", "taken", "failures", "heartbeatTimeoutMs", "misses", "probeMs", "retries", "reason", "exitTimeoutMs", "healthAgeMs", "rssBytes", "openFds", "heldMaxMs", "front", "presenceOnline", "relayConflict", "procState", "wchan", "pcpu", "threads", "kernelStack", "mainStack"];
 const ERRORS = new Set(["node_hung_killed", "node_crashed", "front_hung_killed"]);
 
 /// One line of the file: its level, kind and fields; null for one that is not an event.

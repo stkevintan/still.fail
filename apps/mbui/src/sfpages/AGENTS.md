@@ -19,6 +19,6 @@
 
 ## Farview client (`apps/mbui/src/sfpages/farview_tab.mbt`)
 
-- Draw chat Farview tabs using `fvclient` from the private `AFK-surf/farview` repository. Never copy its source into this repository.
+- Draw chat Farview tabs using `fvclient` from the private `AFK-surf/farview-legacy` repository. Never copy its source into this repository.
 - Pin the commit in `apps/mbui/farview.pin`, reference it in `apps/mbui/moon.work`, and fetch it into `deps/farview` via `apps/mbui/scripts/farview.sh` and `apps/mbui/scripts/env.sh` (CI uses read-only `FARVIEW_DEPLOY_KEY`). Update the client by updating `farview.pin`.
-- In environments without access to `AFK-surf/farview` (such as forks), test locally with an uncommitted stand-in, note it in the PR, and open the PR ready for review (never draft) so upstream CI runs the full build.
+- In environments without access to `AFK-surf/farview-legacy` (such as forks), test locally with an uncommitted stand-in, note it in the PR, and open the PR ready for review (never draft) so upstream CI runs the full build.

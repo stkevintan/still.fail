@@ -260,18 +260,51 @@ pub fn state_pending_card(db : @sql.Db, args : Json) -> Json raise {
 }
 
 ///|
+/// Bottom-up iterative merge sort (O(N log N), stable).
 fn[T] stable_sort(xs : Array[T], cmp : (T, T) -> Int) -> Array[T] {
-  let out = xs.copy()
-  for i = 1; i < out.length(); i = i + 1 {
-    let x = out[i]
-    let mut j = i - 1
-    while j >= 0 && cmp(out[j], x) > 0 {
-      out[j + 1] = out[j]
-      j -= 1
-    }
-    out[j + 1] = x
+  let n = xs.length()
+  if n <= 1 {
+    return xs.copy()
   }
-  out
+  let buf = xs.copy()
+  let tmp = xs.copy()
+  let mut width = 1
+  while width < n {
+    let mut i = 0
+    while i < n {
+      let mid = @cmp.minimum(i + width, n)
+      let right = @cmp.minimum(i + 2 * width, n)
+      let mut l = i
+      let mut r = mid
+      let mut k = i
+      while l < mid && r < right {
+        if cmp(buf[l], buf[r]) <= 0 {
+          tmp[k] = buf[l]
+          l += 1
+        } else {
+          tmp[k] = buf[r]
+          r += 1
+        }
+        k += 1
+      }
+      while l < mid {
+        tmp[k] = buf[l]
+        l += 1
+        k += 1
+      }
+      while r < right {
+        tmp[k] = buf[r]
+        r += 1
+        k += 1
+      }
+      i += 2 * width
+    }
+    for j in 0..<n {
+      buf[j] = tmp[j]
+    }
+    width *= 2
+  }
+  buf
 }
 
 ///|

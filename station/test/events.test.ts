@@ -1292,3 +1292,80 @@ test("background overview changes coalesce into one trailing push and volatile t
 
   await stream.close();
 });
+
+test("large low-percent disk jitter and routine healthy copies ticks do not trigger overview pushes", async () => {
+  const time = testClock();
+  const { events } = setup(time.clock);
+  const GiB = 1024 ** 3;
+  const MiB = 1024 ** 2;
+  let state: Record<string, any> = {
+    counts: { running: 2 },
+    disk: { freeBytes: 94 * GiB, totalBytes: 1858 * GiB },
+    copies: {
+      mode: "auto",
+      to: 1000,
+      chats: 42,
+      formerly: [],
+      keepers: [
+        { id: "k1", name: "mini", at: 1_795_520_000_000, to: 1000, status: "ok", error: null },
+      ],
+      backup: {
+        s3: [{ id: "s3-1", at: 1_795_520_000_000, to: 1000, error: null }],
+      },
+    },
+  };
+  events.follow({ overview: async () => structuredClone(state) });
+  const stream = await opened(events);
+
+  events.overviewChanged();
+  await settle();
+  const base = stream.got.filter((e) => e.event === "overview").length;
+  assert.equal(base, 1);
+
+  // Small +/-200 MiB fluctuations on a 1858 GiB drive with 94 GiB free (5.1%) stay in the same 1% bucket.
+  state.disk.freeBytes -= 200 * MiB;
+  events.overviewChanged();
+  await settle();
+  state.disk.freeBytes += 200 * MiB;
+  events.overviewChanged();
+  await settle();
+  assert.equal(stream.got.filter((e) => e.event === "overview").length, base, "small jitter on large <10% drive suppressed");
+
+  // Healthy backup copy progress ticks (`to`, `chats`, `at`) do not trigger pushes.
+  state.copies.to = 1001;
+  state.copies.chats = 43;
+  state.copies.keepers[0].to = 1001;
+  state.copies.keepers[0].at = 1_795_520_030_000;
+  state.copies.backup.s3[0].to = 1001;
+  state.copies.backup.s3[0].at = 1_795_520_030_000;
+  events.overviewChanged();
+  await settle();
+  assert.equal(stream.got.filter((e) => e.event === "overview").length, base, "healthy routine copies progress suppressed");
+
+  // Crossing into <= 10 GiB still emits.
+  state.disk.freeBytes = 8 * GiB;
+  events.overviewChanged();
+  await settle();
+  assert.equal(stream.got.filter((e) => e.event === "overview").length, base + 1, "crossing <= 10 GiB emits");
+
+  // A keeper error still emits.
+  state.copies.keepers[0].error = "disk full";
+  events.overviewChanged();
+  await settle();
+  assert.equal(stream.got.filter((e) => e.event === "overview").length, base + 2, "keeper error emits");
+
+  // Clearing the error and falling behind (keeper.to < copies.to) still emits.
+  state.copies.keepers[0].error = null;
+  state.copies.keepers[0].to = 900;
+  events.overviewChanged();
+  await settle();
+  assert.equal(stream.got.filter((e) => e.event === "overview").length, base + 3, "keeper synced->behind emits");
+
+  // `copies.formerly` change still emits.
+  state.copies.formerly = ["ws/old"];
+  events.overviewChanged();
+  await settle();
+  assert.equal(stream.got.filter((e) => e.event === "overview").length, base + 4, "copies.formerly change emits");
+
+  await stream.close();
+});

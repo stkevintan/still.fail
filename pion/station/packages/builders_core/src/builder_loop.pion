@@ -5,11 +5,13 @@ import "base_codec"
 import "host_shim"
 import "sql_db"
 
-/// Distinguishes SQLite errors (eligible for `sql_db::is_busy` retry) from application errors
-/// (always surfaced as `{"done":false,"error":...}` and never retried as busy).
+/// Distinguishes SQLite errors (eligible for `sql_db::is_busy` retry), application errors
+/// (always surfaced as `{"done":false,"error":...}` and never retried as busy), and
+/// `Fallback` (`{"fallback":true}`, used by `legacy-edits` when the writer must repair first).
 pub enum StepError {
   Sql(sql_db::SqlError)
   App(String)
+  Fallback
 }
 
 // ── Unbounded `\n`-only line accumulator + WHATWG lossy UTF-8 + slot-clearing FIFO queue ──
@@ -263,6 +265,7 @@ pub fn format_step_response(
       ("done", base_codec::json_bool(false)),
       ("error", base_codec::json_str("invalid " + name + " preparation request")),
     ])
+    Err(StepError::Fallback) => base_codec::json_obj([("fallback", base_codec::json_bool(true))])
     Err(StepError::Sql(e)) => {
       if sql_db::is_busy(e) {
         base_codec::json_obj([("done", base_codec::json_bool(false))])
@@ -280,6 +283,194 @@ pub fn format_step_response(
     ])
   }
   escape_line_separators(base_codec::json_stringify(answer))
+}
+
+// ── Shared Permit state machine with deferred FIFO queue (matches MB `Permit`) ──
+
+/// Whether a parsed JSON object has key `key` (existence only, regardless of value).
+pub fn json_has_key(j : base_codec::Json, key : String) -> Bool {
+  match json_get_last(j, key) {
+    Some(_) => true
+    None => false
+  }
+}
+
+pub struct Permit {
+  queue : LineQueue
+  is_mode_request : (base_codec::Json) -> Bool
+  mut holding : Bool
+  mut deferred : Array[String]
+  mut deferred_head : Int
+  mut eof : Bool
+}
+
+pub fn Permit::new(queue : LineQueue, is_mode_request : (base_codec::Json) -> Bool) -> Permit {
+  Permit::{
+    queue: queue,
+    is_mode_request: is_mode_request,
+    holding: false,
+    deferred: [],
+    deferred_head: 0,
+    eof: false,
+  }
+}
+
+pub fn Permit::is_holding(self : Permit) -> Bool {
+  self.holding
+}
+
+pub fn Permit::is_eof(self : Permit) -> Bool {
+  self.eof
+}
+
+pub fn Permit::release_implicit(self : Permit) -> Unit {
+  self.holding = false
+}
+
+fn Permit::pop_deferred(self : Permit) -> Option[String] {
+  if self.deferred_head >= self.deferred.length() {
+    return None
+  }
+  let line = self.deferred[self.deferred_head]
+  self.deferred[self.deferred_head] = ""
+  self.deferred_head = self.deferred_head + 1
+  if self.deferred_head == self.deferred.length() {
+    self.deferred = []
+    self.deferred_head = 0
+  } else if self.deferred_head >= 64 && self.deferred_head * 2 >= self.deferred.length() {
+    let compacted : Array[String] = []
+    for i in self.deferred_head..<self.deferred.length() {
+      compacted.push(self.deferred[i])
+    }
+    self.deferred = compacted
+    self.deferred_head = 0
+  }
+  Some(line)
+}
+
+fn read_stdin_line_from_host(queue : LineQueue) -> Option[String] {
+  while true {
+    match queue.pop_line() {
+      Some(line) => return Some(line)
+      None => ()
+    }
+    if queue.stdin_eof {
+      return None
+    }
+    match host_shim::wait((-1).to_int64()) {
+      None => ()
+      Some(host_shim::HostEvent::StdinData(chunk)) => queue.enqueue_chunk(chunk)
+      Some(host_shim::HostEvent::StdinEof) => queue.stdin_eof = true
+      Some(_) => ()
+    }
+  }
+  None
+}
+
+/// Testable next-line reader: drains `deferred` FIFO first, then reads via `read_line` until EOF.
+pub fn Permit::next_line_with(self : Permit, read_line : () -> Option[String]) -> Option[String] {
+  match self.pop_deferred() {
+    Some(line) => return Some(line)
+    None => ()
+  }
+  if self.eof {
+    return None
+  }
+  match read_line() {
+    Some(line) => Some(line)
+    None => {
+      self.eof = true
+      None
+    }
+  }
+}
+
+/// Testable permit acquisition:
+/// 1. JSON object with `"permit"` key (parsed via `sql_db::parse_json`, without lone-surrogate rejection):
+///    only literal `true` grants; any other value rejects immediately.
+/// 2. JSON object matching `is_mode_request(obj)`: deferred into FIFO queue while continuing to wait.
+/// 3. Any other line (empty `""`, unparseable JSON, non-object JSON, or object lacking `"permit"` and
+///    mode keys): consumed once and immediately rejected without hanging or replaying.
+/// 4. EOF: sets `eof = true` and rejects without dropping already-deferred complete requests.
+pub fn Permit::take_with(
+  self : Permit,
+  read_line : () -> Option[String],
+  write_line : (String) -> Bool,
+) -> Bool {
+  if self.holding {
+    return true
+  }
+  if self.eof {
+    return false
+  }
+  let _ = write_line("{\"take\":true}")
+  while true {
+    match read_line() {
+      None => {
+        self.eof = true
+        self.holding = false
+        return false
+      }
+      Some(line) => {
+        if line.length() == 0 {
+          self.holding = false
+          return false
+        }
+        let reply = parse_ask_line(line)
+        match reply {
+          base_codec::Json::Obj(_) => {
+            match json_get_last(reply, "permit") {
+              Some(base_codec::Json::Bool(true)) => {
+                self.holding = true
+                return true
+              }
+              Some(_) => {
+                self.holding = false
+                return false
+              }
+              None => {
+                if (self.is_mode_request)(reply) {
+                  self.deferred.push(line)
+                } else {
+                  self.holding = false
+                  return false
+                }
+              }
+            }
+          }
+          _ => {
+            self.holding = false
+            return false
+          }
+        }
+      }
+    }
+  }
+  false
+}
+
+pub fn Permit::give_with(self : Permit, write_line : (String) -> Bool) -> Unit {
+  if self.holding {
+    let _ = write_line("{\"give\":true}")
+    self.holding = false
+  }
+}
+
+pub fn Permit::next_line(self : Permit) -> Option[String] {
+  let q = self.queue
+  self.next_line_with(fn() -> Option[String] { read_stdin_line_from_host(q) })
+}
+
+pub fn Permit::take(self : Permit) -> Bool {
+  let q = self.queue
+  self.take_with(
+    fn() -> Option[String] { read_stdin_line_from_host(q) },
+    fn(line : String) -> Bool { host_shim::write_stdout_line(line) },
+  )
+}
+
+pub fn Permit::give(self : Permit) -> Unit {
+  self.give_with(fn(line : String) -> Bool { host_shim::write_stdout_line(line) })
 }
 
 /// Run a SQLite builder loop (`--builder <name> --db <db_path>`).
@@ -329,12 +520,12 @@ pub fn builder_loop(
           }
           let res = step(db, ask)
           // Transaction leak guard: never emit a response or proceed to the next line with a held lock.
-          if !db.autocommit() {
-            let _ = db.exec("ROLLBACK")
-            if !db.autocommit() {
+          match db.rollback_if_in_tx() {
+            Ok(_) => ()
+            Err(e) => {
               db.close()
               let _ = host_shim::write_stderr_line(
-                "builder " + name + ": transaction remained open after ROLLBACK",
+                "builder " + name + ": transaction remained open after ROLLBACK: " + e.message,
               )
               host_shim::stop()
               return 1

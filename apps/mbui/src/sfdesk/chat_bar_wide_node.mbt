@@ -575,11 +575,18 @@ fn wide_station_status_node(
   parent : @view.View,
   is_offline : () -> Bool,
   is_updating : () -> Bool,
+  moving? : () -> String = fn() { "" },
 ) -> Unit {
-  parent.show(fn() { is_updating() || is_offline() }, at_once=true, fn(st) {
+  parent.show(fn() { moving() != "" || is_updating() || is_offline() }, at_once=true, fn(st) {
     st.row(Is(true)).lines_up(Is(Some(Middle))).gap(Is(@ui.Space::S1.px())).shrink(Is(0.0)) |> ignore
-    st.pick(at_once=true, is_updating, fn(x, updating) {
-      if updating {
+    // (its chat going to another station: that, turning, before what its station is (the chat is on it till then))
+    st.pick(at_once=true, fn() { if moving() != "" { 2 } else if is_updating() { 1 } else { 0 } }, fn(x, what) {
+      if what == 2 {
+        x.row(Is(true)).lines_up(Is(Some(Middle))).gap(Is(@ui.Space::S1.px())).shrink(Is(0.0)) |> ignore
+        @sf.updating_mark_node(x, 12.0, fn() { @sf.theme().p.muted })
+        @sf.words_node(x, fn() { @sf.t("web-main.chat.movingTo", args=[("station", moving())]) }, fn() { wide_station_status_muted })
+        |> ignore
+      } else if what == 1 {
         x.row(Is(true)).lines_up(Is(Some(Middle))).gap(Is(@ui.Space::S1.px())).shrink(Is(0.0)) |> ignore
         @sf.updating_mark_node(x, 12.0, fn() { @sf.theme().p.muted })
         @sf.words_node(x, fn() { @sf.t("web-main.stationUpdate.updating") }, fn() { wide_station_status_muted })
@@ -613,6 +620,7 @@ fn wide_station_tag(
   offline_note : () -> String,
   tips : @sf.TipLayer,
   stint : () -> Int,
+  moving? : () -> String = fn() { "" },
 ) -> Unit {
   m.box(fn(k) {
     let hot = fn() { @sf.lit_within_node(k) }
@@ -637,7 +645,7 @@ fn wide_station_tag(
       |> ignore
     })
     |> ignore
-    wide_station_status_node(k, is_offline, is_updating)
+    wide_station_status_node(k, is_offline, is_updating, moving~)
   })
   |> ignore
 }
@@ -705,6 +713,7 @@ fn wide_station_group_tile(
   offline_note : () -> String,
   tips : @sf.TipLayer,
   stint : () -> Int,
+  moving? : () -> String = fn() { "" },
 ) -> Unit {
   let n = group.agents.length()
   guard n > 0 else { return }
@@ -761,7 +770,7 @@ fn wide_station_group_tile(
           .gap(Is(6.0))
           .lines_up(Is(Some(Middle)))
           |> ignore
-          wide_station_inline(sp, station_now, via, is_offline, is_updating, stint)
+          wide_station_inline(sp, station_now, via, is_offline, is_updating, stint, moving~)
         })
         |> ignore
         // (within the one button: gone while it is lit)
@@ -809,22 +818,26 @@ fn wide_station_group_tile(
         sp.says(By(fn() { station_now().map(fn(s) { @view.said(Group, label=s.name) }) })) |> ignore
         segs.made(0, sp)
         if touch_multi {
-          wide_station_inline(sp, station_now, via, is_offline, is_updating, stint)
+          wide_station_inline(sp, station_now, via, is_offline, is_updating, stint, moving~)
         } else {
           let hot = fn() { @sf.lit_within_node(sp) }
           @sf.hover_ground_node(sp, lit=Some(hot))
-          @sf.hover_card_node(
-            tips,
-            sp,
-            fn(c) { @settings.station_peek_card_node(c, r.station, stint, offline_note~) },
-            tile=true,
-            padded=false,
-            side=Top,
-            press=fn() { @settings.open_station_peek(r.station, from=Node(sp), offline_note~) },
-            tapped=fn() { @settings.open_station_peek(r.station, from=Node(sp), offline_note~) },
+          // (a click or Enter holds the card the pointer brought, never a second panel over it: one card, held till a
+          // press outside or Escape; a finger's tap, which brings no card, opens the station's own)
+          let station_hand : Ref[@sf.HoverHand?] = Ref(None)
+          station_hand.val = Some(
+            @sf.hover_card_node(
+              tips,
+              sp,
+              fn(c) { @settings.station_peek_card_node(c, r.station, stint, offline_note~) },
+              tile=true,
+              padded=false,
+              side=Top,
+              press=fn() { if station_hand.val is Some(h) { (h.hold)() } },
+              tapped=fn() { @settings.open_station_peek(r.station, from=Node(sp), offline_note~) },
+            ),
           )
-          |> ignore
-          wide_station_inline(sp, station_now, via, is_offline, is_updating, stint)
+          wide_station_inline(sp, station_now, via, is_offline, is_updating, stint, moving~)
         }
       })
       |> ignore
@@ -968,6 +981,7 @@ fn wide_station_inline(
   is_offline : () -> Bool,
   is_updating : () -> Bool,
   stint : () -> Int,
+  moving? : () -> String = fn() { "" },
 ) -> Unit {
   @sfpages.station_via_mark_node(
     p,
@@ -988,7 +1002,7 @@ fn wide_station_inline(
   .allow_ellipsis(Is(true))
   .fit_whole(Is(true))
   |> ignore
-  wide_station_status_node(p, is_offline, is_updating)
+  wide_station_status_node(p, is_offline, is_updating, moving~)
 }
 
 ///|
@@ -1152,6 +1166,13 @@ fn wide_composer_bar_node(
       None => false
     }
   }
+  // (going to another station: where, "" none)
+  let moving = fn() {
+    match view() {
+      Some({ moving: Some((to, _)), .. }) => to
+      _ => ""
+    }
+  }
   let offline_note = fn() {
     match view() {
       Some(v) => v.offline_note.unwrap_or("")
@@ -1236,7 +1257,7 @@ fn wide_composer_bar_node(
       match group_opt {
         None =>
           match @signals.untracked(station) {
-            Some(s) => wide_station_tag(k, r.station, s, via_now, is_offline, is_updating, offline_note, tips, stint)
+            Some(s) => wide_station_tag(k, r.station, s, via_now, is_offline, is_updating, offline_note, tips, stint, moving~)
             None => ()
           }
         Some(group) => {
@@ -1257,7 +1278,7 @@ fn wide_composer_bar_node(
               agents().length() > 1 && front == key
             }
           }
-          wide_station_group_tile(k, src, r, group, badge_of, marked_of, station, via_now, is_offline, is_updating, offline_note, tips, stint)
+          wide_station_group_tile(k, src, r, group, badge_of, marked_of, station, via_now, is_offline, is_updating, offline_note, tips, stint, moving~)
         }
       }
     },

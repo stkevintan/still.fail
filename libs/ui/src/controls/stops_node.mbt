@@ -63,8 +63,13 @@ pub fn stops_node(
   let init_v = dmax(0.0, @signals.untracked(fn() { shown.get() }).to_double())
   let dd = @glass.DampedDrag::new(init_v, lo=0.0, hi=last, held_scale=@glass.slider_thumb_held_scale)
   parent.box(made_for=loc, fn(wrap) {
-    style_node(wrap, fn() { stops_track.then(@ui.style(h=Fixed(button_height()))) }, in_row=true)
-    wrap.ground(Is(0L)).lines_up(Is(Some(Middle))) |> ignore
+    // (room in its own box over and under the thumb for it held at its tallest, past its own padding: what holds it, a
+    // sheet that scrolls, cuts what is drawn past its box; in its box, not a margin, so its gaps to what is over and
+    // under it stay the spacing scale's)
+    let reach = dmax(0.0, @glass.slider_held_reach(thumb_h) - pad)
+    let high_held = fn() { button_height() + 2.0 * reach }
+    style_node(wrap, fn() { stops_track.then(@ui.style(h=Fixed(high_held()))) }, in_row=true)
+    wrap.ground(Is(0L)).lines_up(Is(Some(Middle))).padding(Is((pad, pad + reach, pad, pad + reach))) |> ignore
     wrap.reacts(at_start=false, fn() { (chosen(), state.resets.get()) }, fn(k) { told(k.0) })
     let sl = @glass.liquid_slider_node(
       wrap,
@@ -87,6 +92,7 @@ pub fn stops_node(
           labels().get(v.round().to_int()).unwrap_or("")
         }
       },
+      stop_labels=labels,
       drag=dd,
       loc~,
     )

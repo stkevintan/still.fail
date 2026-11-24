@@ -13,7 +13,7 @@ import { TestClock } from "effect/testing";
 import WebSocket, { WebSocketServer } from "ws";
 import { Cloud } from "../src/cloud/state.ts";
 import { Forwards, IDLE_MS, type JobState, pipeTcp, reachLocal } from "../src/mesh/peer-forward.ts";
-import { PEER_HTTP_ALPN, PeerHttp, peerNamed, serveHttp } from "../src/mesh/peer-http.ts";
+import { type HereLocal, PEER_HTTP_ALPN, PeerHttp, peerNamed, rigAllowed, serveHttp } from "../src/mesh/peer-http.ts";
 import { PEER_ALPN } from "../src/mesh/peer.ts";
 import type { Endpoint, Stream } from "../src/mesh/native.ts";
 import { ownPorts } from "../src/ops/own.ts";
@@ -136,8 +136,9 @@ function fakeJobs() {
 
 /// This station and another (and one from before forwards, and one gone), the way to them, and this one's forwards on a
 /// test clock. `ports`: the other station's ports as its services here listen on them (a forward to a port free here
-/// would otherwise reach itself, both stations being on this machine); `forwardedThere`: the other's own forwards.
-async function stations(ports: Map<number, number> = new Map(), forwardedThere: Set<number> = new Set()) {
+/// would otherwise reach itself, both stations being on this machine); `forwardedThere`: the other's own forwards;
+/// `allowed`: whom the other lets reach its services (a rig's grants, rig/main.ts and mesh.ts).
+async function stations(ports: Map<number, number> = new Map(), forwardedThere: Set<number> = new Set(), allowed?: HereLocal["allowed"]) {
   const mesh = memoryMesh({ window: 64 * 1024 });
   const bind = (alpns: Buffer[]) => mesh.bind({ secretKey: randomBytes(32), alpns, relayUrls: [], discovery: false, bindAddr: "127.0.0.1:0" });
   const [here, there, old, gone] = await Promise.all([bind([PEER_HTTP_ALPN, PEER_ALPN]), bind([PEER_HTTP_ALPN, PEER_ALPN]), bind([PEER_ALPN]), bind([PEER_HTTP_ALPN])]);
@@ -150,7 +151,7 @@ async function stations(ports: Map<number, number> = new Map(), forwardedThere: 
   ];
   const hereCloud = cloudOf(here.id(), "Here", roster);
   const thereCloud = cloudOf(there.id(), "Studio", [...roster]);
-  const local = { reach: (port: number) => reachLocal(ports.get(port) ?? port), forwarded: (port: number) => forwardedThere.has(port) };
+  const local: HereLocal = { reach: (port: number) => reachLocal(ports.get(port) ?? port), forwarded: (port: number) => forwardedThere.has(port), allowed };
   const accept = (endpoint: Endpoint, cloud: any) =>
     void (async () => {
       for (;;) {
@@ -432,6 +433,49 @@ test("refused as /peer is: the station's own ports and forwards, an old or unkno
   } finally {
     ownPorts.delete(own);
     await s.close();
+  }
+});
+
+test("a rig's services: a station a grant or 免批准 lets through reaches them, alone or beside whole workspaces; others are refused", async () => {
+  const service = createServer((socket) => (socket.on("error", () => {}), socket.end("hello")));
+  const port = await listen(service);
+  // The rig as rig/module.ts answers for a station (rig/grants.ts `stationRefusal`): null lets it through.
+  const granted = new Set<string>();
+  const rig = { stationRefusal: (peer: string, _workspace: string) => (granted.has(peer) ? null : "no chat of that station has a grant of this one") };
+  const side: { current: typeof rig | null } = { current: null };
+  const rigIn = new Set(["ws"]);
+  const reached = async (s: Awaited<ReturnType<typeof stations>>) => {
+    const opened = await s.forwards.open("chat-1", "Studio", port);
+    return attempt(Number(opened.local.split(":")[1]));
+  };
+  try {
+    // A rig alone (rig/main.ts), and a station that is a rig in this workspace beside whole ones (mesh.ts).
+    for (const allowed of [rigAllowed(side), rigAllowed(side, (workspace) => rigIn.has(workspace))]) {
+      side.current = null;
+      granted.clear();
+      const s = await stations(new Map(), new Set(), allowed);
+      try {
+        await assert.rejects(s.forwards.open("chat-1", "Studio", port), /that machine refused: the rig is starting/);
+        side.current = rig;
+        await assert.rejects(s.forwards.open("chat-1", "Studio", port), /that machine refused: no chat of that station has a grant of this one/);
+        // A chat of this station granted the rig (or 免批准 on): its forward opens and its connections reach the service.
+        granted.add(s.here.id());
+        assert.deepEqual(await reached(s), { heard: "hello", reset: false });
+      } finally {
+        await s.close();
+      }
+    }
+    // A whole workspace of a machine that is a rig in another refuses none of its stations, its rig started or not.
+    side.current = null;
+    rigIn.clear();
+    const s = await stations(new Map(), new Set(), rigAllowed(side, (workspace) => rigIn.has(workspace)));
+    try {
+      assert.deepEqual(await reached(s), { heard: "hello", reset: false });
+    } finally {
+      await s.close();
+    }
+  } finally {
+    service.close();
   }
 });
 

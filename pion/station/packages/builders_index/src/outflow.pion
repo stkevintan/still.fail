@@ -1,0 +1,273 @@
+// Outflow chat order index SQLite builder (`--builder outflow-chats`), 1:1 aligned with
+// `station/mb/src/outflow/outflow.mbt` and `station/mb/src/reader/main.mbt:1074-1081`.
+// All write transactions go exclusively through `db.tx_err(...)` (never raw transaction SQL).
+
+import "base_codec"
+import "builders_core"
+import "sql_db"
+
+fn outflow_scope_expr(ws : String) -> String {
+  "(CASE WHEN " + ws + " IS NULL THEN 'H' ELSE 'W' || " + ws + " END)"
+}
+
+fn outflow_mark(threads : String) -> String {
+  let sc = outflow_scope_expr("s.ws")
+  "UPDATE outflow_chat_order SET dirty = 1 WHERE dirty = 0 AND thread IN (" +
+  threads +
+  "); INSERT INTO outflow_chat_order (thread, scope, at, dirty) SELECT DISTINCT m.thread, " +
+  sc +
+  ", 0, 1 FROM thread_sessions m JOIN sessions s ON s.key = m.session WHERE m.thread IN (" +
+  threads +
+  ") AND NOT EXISTS (SELECT 1 FROM outflow_chat_order o WHERE o.scope = " +
+  sc +
+  " AND o.thread = m.thread);"
+}
+
+fn outflow_session_threads(session : String) -> String {
+  "SELECT thread FROM thread_sessions WHERE session = " + session
+}
+
+let OUTFLOW_CONFLICTING_THREADS : String = "SELECT thread FROM thread_sessions WHERE session IN (SELECT key FROM sessions WHERE key = NEW.key OR token = NEW.token)"
+
+let OUTFLOW_CONFLICTING_CHAT : String = "SELECT id FROM threads WHERE id = NEW.id OR (surface = NEW.surface AND channel = NEW.channel AND thread_ts = NEW.thread_ts)"
+
+let OUTFLOW_LAST_AT : String = "MAX(t.created_at, COALESCE((SELECT e.at FROM thread_state st JOIN entries e ON e.thread = st.thread AND e.n = st.said_n AND e.kind = 'message' WHERE st.thread = t.id), 0))"
+
+/// What `installOutflowChatIndex` makes: the order, its progress, and the triggers that mark what writers change.
+pub fn outflow_schema() -> String {
+  let thread_changed = "OLD.id IS NOT NEW.id OR OLD.surface IS NOT NEW.surface OR OLD.channel IS NOT NEW.channel OR OLD.thread_ts IS NOT NEW.thread_ts OR OLD.created_at IS NOT NEW.created_at"
+  let session_changed = "OLD.key IS NOT NEW.key OR OLD.ws IS NOT NEW.ws OR OLD.token IS NOT NEW.token"
+  let stmts = [
+    "CREATE TABLE outflow_chat_order (thread INTEGER NOT NULL, scope TEXT NOT NULL, at INTEGER NOT NULL, dirty INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (thread, scope)) WITHOUT ROWID;",
+    "CREATE INDEX outflow_chat_scope_order ON outflow_chat_order (scope, dirty, at DESC, thread DESC);",
+    "CREATE TABLE outflow_chat_progress (id INTEGER PRIMARY KEY CHECK (id = 1), cursor INTEGER, last INTEGER, done INTEGER NOT NULL);",
+    "INSERT INTO outflow_chat_progress SELECT 1, NULL, MAX(id), MAX(id) IS NULL FROM threads;",
+    "CREATE TRIGGER outflow_thread_before_add BEFORE INSERT ON threads BEGIN " + outflow_mark(OUTFLOW_CONFLICTING_CHAT) + " END;",
+    "CREATE TRIGGER outflow_thread_add AFTER INSERT ON threads BEGIN " + outflow_mark("SELECT NEW.id") + " END;",
+    "CREATE TRIGGER outflow_thread_before BEFORE UPDATE OF id, surface, channel, thread_ts, created_at ON threads WHEN " + thread_changed + " BEGIN " + outflow_mark("SELECT OLD.id") + " " + outflow_mark(OUTFLOW_CONFLICTING_CHAT) + " END;",
+    "CREATE TRIGGER outflow_thread_after AFTER UPDATE OF id, surface, channel, thread_ts, created_at ON threads WHEN " + thread_changed + " BEGIN " + outflow_mark("SELECT NEW.id") + " END;",
+    "CREATE TRIGGER outflow_thread_drop BEFORE DELETE ON threads BEGIN " + outflow_mark("SELECT OLD.id") + " END;",
+    "CREATE TRIGGER outflow_member_add AFTER INSERT ON thread_sessions BEGIN " + outflow_mark("SELECT NEW.thread") + " END;",
+    "CREATE TRIGGER outflow_member_before BEFORE UPDATE OF thread, session ON thread_sessions WHEN OLD.thread IS NOT NEW.thread OR OLD.session IS NOT NEW.session BEGIN " + outflow_mark("SELECT OLD.thread") + " END;",
+    "CREATE TRIGGER outflow_member_after AFTER UPDATE OF thread, session ON thread_sessions WHEN OLD.thread IS NOT NEW.thread OR OLD.session IS NOT NEW.session BEGIN " + outflow_mark("SELECT NEW.thread") + " END;",
+    "CREATE TRIGGER outflow_member_drop BEFORE DELETE ON thread_sessions BEGIN " + outflow_mark("SELECT OLD.thread") + " END;",
+    "CREATE TRIGGER outflow_session_before_add BEFORE INSERT ON sessions BEGIN " + outflow_mark(OUTFLOW_CONFLICTING_THREADS) + " END;",
+    "CREATE TRIGGER outflow_session_add AFTER INSERT ON sessions BEGIN " + outflow_mark(outflow_session_threads("NEW.key")) + " END;",
+    "CREATE TRIGGER outflow_session_before BEFORE UPDATE OF key, ws, token ON sessions WHEN " + session_changed + " BEGIN " + outflow_mark(outflow_session_threads("OLD.key")) + " " + outflow_mark(OUTFLOW_CONFLICTING_THREADS) + " END;",
+    "CREATE TRIGGER outflow_session_after AFTER UPDATE OF key, ws, token ON sessions WHEN " + session_changed + " BEGIN " + outflow_mark(outflow_session_threads("NEW.key")) + " END;",
+    "CREATE TRIGGER outflow_session_drop BEFORE DELETE ON sessions BEGIN " + outflow_mark(outflow_session_threads("OLD.key")) + " END;",
+    "CREATE TRIGGER outflow_said_add AFTER INSERT ON thread_state BEGIN " + outflow_mark("SELECT NEW.thread") + " END;",
+    "CREATE TRIGGER outflow_said_change AFTER UPDATE OF thread, said_n ON thread_state WHEN OLD.thread IS NOT NEW.thread OR OLD.said_n IS NOT NEW.said_n BEGIN " + outflow_mark("SELECT OLD.thread") + " " + outflow_mark("SELECT NEW.thread") + " END;",
+    "CREATE TRIGGER outflow_said_drop BEFORE DELETE ON thread_state BEGIN " + outflow_mark("SELECT OLD.thread") + " END;",
+    "CREATE TRIGGER outflow_entry_before_add BEFORE INSERT ON entries WHEN EXISTS ( SELECT 1 FROM thread_state st WHERE st.thread = NEW.thread AND (st.said_n = NEW.n OR (NEW.ts IS NOT NULL AND EXISTS (SELECT 1 FROM entries e WHERE e.thread = st.thread AND e.n = st.said_n AND e.ts = NEW.ts))) ) BEGIN " + outflow_mark("SELECT NEW.thread") + " END;",
+    "CREATE TRIGGER outflow_entry_change AFTER UPDATE OF thread, n, at, kind ON entries BEGIN " + outflow_mark("SELECT OLD.thread") + " " + outflow_mark("SELECT NEW.thread") + " END;",
+    "CREATE TRIGGER outflow_entry_drop AFTER DELETE ON entries BEGIN " + outflow_mark("SELECT OLD.thread") + " END;",
+  ]
+  let sb = StringBuilder::new()
+  for i in 0..<stmts.length() {
+    if i > 0 {
+      sb.write_string("\n")
+    }
+    sb.write_string(stmts[i])
+  }
+  sb.to_string()
+}
+
+fn outflow_installed(db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+  match db.all("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outflow_chat_progress'", []) {
+    Ok(rows) => Ok(rows.length() > 0)
+    Err(e) => Err(builders_core::StepError::Sql(e))
+  }
+}
+
+/// The index made, once (`installOutflowChatIndex`).
+pub fn outflow_install(db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+  match outflow_installed(db) {
+    Ok(true) => return Ok(())
+    Ok(false) => ()
+    Err(e) => return Err(e)
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Unit, builders_core::StepError] {
+      match outflow_installed(tx_db) {
+        Ok(true) => Ok(())
+        Ok(false) => {
+          match tx_db.exec(outflow_schema()) {
+            Ok(_) => Ok(())
+            Err(e) => Err(builders_core::StepError::Sql(e))
+          }
+        }
+        Err(e) => Err(e)
+      }
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+fn outflow_refresh(db : sql_db::Db, thread : base_codec::Json) -> Result[Unit, builders_core::StepError] {
+  let sc = outflow_scope_expr("s.ws")
+  let _ = match db.run(
+    "DELETE FROM outflow_chat_order WHERE thread = ?1 AND (NOT EXISTS (SELECT 1 FROM threads t WHERE t.id = ?1) OR NOT EXISTS (SELECT 1 FROM thread_sessions m JOIN sessions s ON s.key = m.session WHERE m.thread = ?1 AND " +
+    sc +
+    " = outflow_chat_order.scope))",
+    [thread],
+  ) {
+    Ok(n) => n
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let _ = match db.run(
+    "UPDATE outflow_chat_order SET at = (SELECT " +
+    OUTFLOW_LAST_AT +
+    " FROM threads t WHERE t.id = ?1), dirty = 0 WHERE thread = ?1 AND (dirty <> 0 OR at IS NOT (SELECT " +
+    OUTFLOW_LAST_AT +
+    " FROM threads t WHERE t.id = ?1))",
+    [thread],
+  ) {
+    Ok(n) => n
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  let _ = match db.run(
+    "INSERT INTO outflow_chat_order (thread, scope, at) SELECT DISTINCT m.thread, " +
+    sc +
+    ", " +
+    OUTFLOW_LAST_AT +
+    " FROM thread_sessions m JOIN sessions s ON s.key = m.session JOIN threads t ON t.id = m.thread WHERE m.thread = ?1 AND NOT EXISTS (SELECT 1 FROM outflow_chat_order o WHERE o.thread = m.thread AND o.scope = " +
+    sc +
+    ")",
+    [thread],
+  ) {
+    Ok(n) => n
+    Err(e) => return Err(builders_core::StepError::Sql(e))
+  }
+  Ok(())
+}
+
+/// One batch of at most `limit` old chats, or of `requested`'s changed ones once the old are across.
+pub fn outflow_step(
+  db : sql_db::Db,
+  requested : String,
+  limit : Int = 64,
+) -> Result[Bool, builders_core::StepError] {
+  if limit < 1 {
+    return Err(builders_core::StepError::App("outflow index batch must be positive"))
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Bool, builders_core::StepError] {
+      let prog_rows = match tx_db.all("SELECT cursor, last, done FROM outflow_chat_progress WHERE id = 1", []) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      if prog_rows.length() == 0 {
+        return Err(builders_core::StepError::App("outflow chat index progress is missing"))
+      }
+      let state = prog_rows[0]
+      let lim = base_codec::json_int(limit)
+      let is_not_done = match state.get("done") {
+        Some(base_codec::Json::Num(n, _)) => n == 0.0
+        _ => false
+      }
+      if is_not_done {
+        let cursor = sql_db::row_val(state, "cursor")
+        let last = sql_db::row_val(state, "last")
+        let rows = match cursor {
+          base_codec::Json::Null => {
+            match tx_db.all(
+              "SELECT id AS thread FROM threads WHERE id <= ?1 ORDER BY id LIMIT ?2",
+              [last, lim],
+            ) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+          _ => {
+            match tx_db.all(
+              "SELECT id AS thread FROM threads WHERE id > ?3 AND id <= ?1 ORDER BY id LIMIT ?2",
+              [last, lim, cursor],
+            ) {
+              Ok(r) => r
+              Err(e) => return Err(builders_core::StepError::Sql(e))
+            }
+          }
+        }
+        for i in 0..<rows.length() {
+          match outflow_refresh(tx_db, sql_db::row_val(rows[i], "thread")) {
+            Ok(_) => ()
+            Err(e) => return Err(e)
+          }
+        }
+        let reached = if rows.length() > 0 {
+          sql_db::row_val(rows[rows.length() - 1], "thread")
+        } else {
+          cursor
+        }
+        let _ = match tx_db.run(
+          "UPDATE outflow_chat_progress SET cursor = ?1, done = ?2 WHERE id = 1",
+          [reached, base_codec::json_int(if rows.length() < limit { 1 } else { 0 })],
+        ) {
+          Ok(n) => n
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+      } else {
+        let rows = match tx_db.all(
+          "SELECT thread FROM outflow_chat_order INDEXED BY outflow_chat_scope_order WHERE scope = ?1 AND dirty = 1 ORDER BY at DESC, thread DESC LIMIT ?2",
+          [base_codec::json_str(requested), lim],
+        ) {
+          Ok(r) => r
+          Err(e) => return Err(builders_core::StepError::Sql(e))
+        }
+        for i in 0..<rows.length() {
+          match outflow_refresh(tx_db, sql_db::row_val(rows[i], "thread")) {
+            Ok(_) => ()
+            Err(e) => return Err(e)
+          }
+        }
+      }
+
+      let after_rows = match tx_db.all("SELECT done FROM outflow_chat_progress WHERE id = 1", []) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      let across = after_rows.length() > 0 &&
+      match after_rows[0].get("done") {
+        Some(base_codec::Json::Num(n, _)) => n == 1.0
+        _ => false
+      }
+      if !across {
+        return Ok(false)
+      }
+      let dirty_rows = match tx_db.all(
+        "SELECT 1 FROM outflow_chat_order INDEXED BY outflow_chat_scope_order WHERE scope = ? AND dirty = 1 LIMIT 1",
+        [base_codec::json_str(requested)],
+      ) {
+        Ok(r) => r
+        Err(e) => return Err(builders_core::StepError::Sql(e))
+      }
+      Ok(dirty_rows.length() == 0)
+    },
+    fn(e : sql_db::SqlError) -> builders_core::StepError { builders_core::StepError::Sql(e) },
+  )
+}
+
+/// Request dispatcher for `--builder outflow-chats` (matches `main.mbt:1074-1081`).
+pub fn outflow_chats_dispatch(
+  db : sql_db::Db,
+  ask : base_codec::Json,
+) -> Result[Option[Bool], builders_core::StepError] {
+  match builders_core::json_get_last(ask, "scope") {
+    Some(base_codec::Json::Str(req_scope)) => {
+      match outflow_install(db) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+      match outflow_step(db, req_scope, limit=64) {
+        Ok(done) => Ok(Some(done))
+        Err(e) => Err(e)
+      }
+    }
+    _ => Ok(None)
+  }
+}
+
+pub fn run_outflow_chats(db_path : String) -> Int {
+  builders_core::builder_loop(db_path, "outflow chat index", outflow_chats_dispatch)
+}

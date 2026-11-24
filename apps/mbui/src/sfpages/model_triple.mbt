@@ -3479,7 +3479,7 @@ let triple_room : @ui.Style = @ui.css("w=Full gap=SPx")
 ///|
 /// How hard it thinks in a sheet, under the models: its name before its stops on one line across the sheet.
 // kept across runs: a value (no field of it changes)
-let triple_effort_block : @ui.Style = @ui.css("row w=Full pl=S2_5 pt=S1_5 gap=S3 align=ACenter")
+let triple_effort_block : @ui.Style = @ui.css("row w=Full pl=S2_5 gap=S3 align=ACenter")
 
 ///|
 /// The accounts' sub-panel width on 中屏/大屏, wide enough for multi-window quota summaries on one line.

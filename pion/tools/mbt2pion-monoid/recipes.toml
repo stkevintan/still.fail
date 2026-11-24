@@ -1,0 +1,62 @@
+# Declarative Monoid / Invar migration recipes for `mbt2pion`
+# Schema aligned 1:1 with `AFK-surf/pion/tools/mbt2pion/src/symbols.pion` (`parse_recipes_toml`).
+# All key/value entries are single-line so `mbt2pion` parses with 0 `MBT2PION_RECIPE_PARSE`.
+
+[meta]
+schema_version = 1
+project = "monoid-sf"
+target_framework = "invar"
+
+# 1. Ref[T] binding (Stage A.5 type-probed Ref values -> signals::Ref / signals::ref_new / .v, Wave P0-1A unified contract)
+[ref]
+enabled = true
+ctor_call = "signals::ref_new"
+field_name = "v"
+type_name = "signals::Ref"
+
+# 2. Structural equality & Signal[Option[X]] / custom-same lowering -> signals::signal_by
+[eq]
+wrapper_call = "signals::signal_by"
+helper_prefix = "__mbt_eq_"
+
+# 3. Strict #derive(...) allowlist (Debug ignored declaratively; unknown derives still hard-fail)
+[derives]
+allow = ["Eq"]
+ignore = ["Debug"]
+
+# 4. Trait impl synthesis for #derive(Eq) signal payload types
+[[trait_impl]]
+derive = "Eq"
+target_trait = "signals::Eq"
+method = "eq"
+kind = "eq"
+
+# 5. OrderedMap <-> invar Map boundary conversion (locked mbt_compat names)
+[ordered_map_boundary]
+compat_type = "mbt_compat::OrderedMap"
+invar_type = "Map"
+to_invar_fn = "mbt_compat::ordered_map_to_map"
+from_invar_fn = "mbt_compat::ordered_map_from_map"
+trigger_flag = "map_boundary"
+
+# 6. String offset / length unit boundary conversion (locked mbt_compat names)
+[string_unit_boundary]
+source_default_unit = "utf16"
+target_default_unit = "utf8"
+utf16_to_utf8_fn = "mbt_compat::utf16_to_utf8_off"
+utf8_to_utf16_fn = "mbt_compat::utf8_to_utf16_off"
+utf16_to_scalar_fn = "mbt_compat::utf16_to_scalar_off"
+scalar_to_utf16_fn = "mbt_compat::scalar_to_utf16_off"
+hard_fail_on_untagged_offset = true
+
+# 7. SourceLoc repo-relative injection (matches `view::source_place` `ui/src/controls/<file>.mbt:<line>`)
+[source_loc]
+strip_callsite_attr = true
+param_rewrite = "loc~ : String = \"\""
+repo_relative_prefix = "ui/src/controls/"
+format = "{prefix}{file}:{line}:{col}"
+
+# 8. Physical-equality (9 sites in controls) handled via explicit declaration-granularity overlay
+[physical_equal]
+mode = "explicit_overlay_phys_id"
+forbid_pointer_hack = true

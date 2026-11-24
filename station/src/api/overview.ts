@@ -214,6 +214,8 @@ export async function overview(d: OverviewDeps, viewer: Viewer, lang: Lang): Pro
     consoleSignIn: d.accounts !== undefined,
     // It shares profiles and skills with its workspaces' other stations (share/index.ts).
     sharing: d.accounts !== undefined,
+    // A profile's stations can follow the workspace's whitelist (share/index.ts `allowAuto`).
+    shareAllowAuto: d.accounts !== undefined,
     updates: d.updates?.get(lang) ?? [],
     // The folders pinned in its drive (drive/drive.ts), each with whether it can be browsed now; a member who may write
     // browses every folder from the home (`anywhere`).

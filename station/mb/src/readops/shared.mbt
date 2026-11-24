@@ -100,24 +100,110 @@ priv struct Listed {
 }
 
 ///|
+/// UTF-8 / SQLite BINARY order comparison (Unicode code point order equals UTF-8 byte order).
+fn utf8_less(a : String, b : String) -> Bool {
+  let ca = a.iter().collect()
+  let cb = b.iter().collect()
+  let n = @cmp.minimum(ca.length(), cb.length())
+  for i in 0..<n {
+    if ca[i] != cb[i] {
+      return ca[i].to_int() < cb[i].to_int()
+    }
+  }
+  ca.length() < cb.length()
+}
+
+///|
 fn listed_threads(db : @sql.Db, of : Array[Json]?) -> Array[Listed] raise {
+  if of is Some([]) {
+    return []
+  }
+  db.exec("SAVEPOINT listed_threads_read")
+  defer (db.exec("RELEASE listed_threads_read") catch { _ => () })
   let base = "SELECT t.*, COALESCE(r.n, 0) AS read_n FROM threads t LEFT JOIN reads r ON r.thread = t.id AND r.viewer = ?1"
-  let rows = match of {
+  let (rows, ids_param) = match of {
     // (every thread: the archive's whole list, for a device from before)
-    None => db.all(base, [Json::string("")])
-    Some([]) => return []
+    None => (db.all(base, [Json::string("")]), None)
     Some(ids) => {
-      let marks = ids.mapi((i, _) => "?\{i + 2}")
-      db.all("\{base} WHERE t.id IN (\{marks.join(", ")})", [Json::string("")] + ids)
+      let param = ids_json(ids)
+      (db.all("\{base} WHERE t.id IN (SELECT value FROM json_each(?2))", [Json::string(""), param]), Some(param))
+    }
+  }
+  if rows.length() == 0 {
+    return []
+  }
+  let sessions_rows = match ids_param {
+    None => db.all("SELECT * FROM thread_sessions ORDER BY thread, joined_at, rowid", [])
+    Some(p) => db.all("SELECT * FROM thread_sessions WHERE thread IN (SELECT value FROM json_each(?1)) ORDER BY thread, joined_at, rowid", [p])
+  }
+  let sessions_by : Map[String, Array[Map[String, Json]]] = Map([])
+  for m in sessions_rows {
+    let k = field(m, "thread").stringify()
+    match sessions_by.get(k) {
+      Some(arr) => arr.push(m)
+      None => sessions_by[k] = [m]
+    }
+  }
+  let people_rows = match ids_param {
+    None => db.all("SELECT thread, author FROM thread_people ORDER BY thread, first_n", [])
+    Some(p) => db.all("SELECT thread, author FROM thread_people WHERE thread IN (SELECT value FROM json_each(?1)) ORDER BY thread, first_n", [p])
+  }
+  let people_by : Map[String, Array[Json]] = Map([])
+  for p in people_rows {
+    let k = field(p, "thread").stringify()
+    let author = field(p, "author")
+    match people_by.get(k) {
+      Some(arr) => arr.push(author)
+      None => people_by[k] = [author]
+    }
+  }
+  let merged_ready = @legacy.merged_read_ready(db)
+  let last_said_by : Map[String, Json] = Map([])
+  let first_text_by : Map[String, Json] = Map([])
+  if merged_ready {
+    let last_rows = match ids_param {
+      None => db.all(listed_last_said_all_sql, [])
+      Some(p) => db.all(listed_last_said_of_sql, [p])
+    }
+    for r in last_rows {
+      last_said_by[field(r, "thread").stringify()] = to_message(r)
+    }
+    let first_rows = match ids_param {
+      None => db.all(listed_first_text_all_sql, [])
+      Some(p) => db.all(listed_first_text_of_sql, [p])
+    }
+    for r in first_rows {
+      first_text_by[field(r, "thread").stringify()] = field(r, "t")
     }
   }
   let out : Array[Listed] = []
   for r in rows {
     let id = field(r, "id")
-    let sessions = db.all("SELECT * FROM thread_sessions WHERE thread = ? ORDER BY joined_at, rowid", [id])
-    let last_message = last_said(db, id)
-    let people = thread_people(db, id, field(r, "surface"))
-    let first_text = first_text(db, id)
+    let id_key = id.stringify()
+    let sessions = sessions_by.get(id_key).unwrap_or([])
+    let authors = people_by.get(id_key).unwrap_or([])
+    let people = if field(r, "surface") == Json::string("chat") {
+      Json::array(authors)
+    } else {
+      let mut min_c : String? = None
+      for m in sessions {
+        if field(m, "connect") is String(c) {
+          match min_c {
+            None => min_c = Some(c)
+            Some(cur) => if utf8_less(c, cur) { min_c = Some(c) }
+          }
+        }
+      }
+      match min_c {
+        Some(c) => Json::array(authors.map(a => Json::string("slack:\{c}:\{js_text(a)}")))
+        None => Json::array([])
+      }
+    }
+    let (last_message, first_text) = if merged_ready {
+      (last_said_by.get(id_key).unwrap_or(Json::null()), first_text_by.get(id_key).unwrap_or(Json::null()))
+    } else {
+      (last_said(db, id), first_text(db, id))
+    }
     let last_at = match last_message.value("createdAt") {
       Some(Number(n, ..)) => n
       _ => 0.0
@@ -125,10 +211,18 @@ fn listed_threads(db : @sql.Db, of : Array[Json]?) -> Array[Listed] raise {
     out.push({ thread: r, sessions, last_message, people, first_text, last_at })
   }
   stable_sort(out, (a, b) => {
-    for pair in [(a.last_at, b.last_at), (num(field(a.thread, "created_at")), num(field(b.thread, "created_at"))), (num(field(a.thread, "id")), num(field(b.thread, "id")))] {
-      if pair.0 != pair.1 {
-        return if pair.1 > pair.0 { 1 } else { -1 }
-      }
+    if a.last_at != b.last_at {
+      return if b.last_at > a.last_at { 1 } else { -1 }
+    }
+    let ca = num(field(a.thread, "created_at"))
+    let cb = num(field(b.thread, "created_at"))
+    if ca != cb {
+      return if cb > ca { 1 } else { -1 }
+    }
+    let ia = num(field(a.thread, "id"))
+    let ib = num(field(b.thread, "id"))
+    if ia != ib {
+      return if ib > ia { 1 } else { -1 }
     }
     0
   })
@@ -343,11 +437,45 @@ fn shared_rows(db : @sql.Db, known : Known, scope : Scope?, archived? : Bool = f
       .map(r => field(r, "thread")))
   }
   let threads = listed_threads(db, of).filter(t => t.sessions.iter().any(m => all.contains(js_text(field(m, "session")))))
-  let stat_keys = unique_keys([
-    match scope { Some(sc) => sc.sessions; None => shown.keys().collect() },
-    threads.map(t => t.sessions.map(m => js_text(field(m, "session")))).fold(init=[], (a, b) => a + b),
-  ])
-  let stats = if of is None { session_activity_all(db) } else { session_activity(db, stat_keys) }
+  let stats = if of is None {
+    session_activity_all(db)
+  } else {
+    let thread_sessions_keys : Array[String] = []
+    for t in threads {
+      for m in t.sessions {
+        thread_sessions_keys.push(js_text(field(m, "session")))
+      }
+    }
+    let stat_keys = unique_keys([
+      match scope { Some(sc) => sc.sessions; None => shown.keys().collect() },
+      thread_sessions_keys,
+    ])
+    session_activity(db, stat_keys)
+  }
+  let waiting_jobs : Set[String] = Set::new()
+  let waiting_led : Set[String] = Set::new()
+  match scope {
+    None => {
+      for r in db.all(waiting_jobs_all_sql, []) {
+        waiting_jobs.add(js_text(field(r, "session_key")))
+      }
+      for r in db.all(waiting_led_all_sql, []) {
+        waiting_led.add(js_text(field(r, "parent")))
+      }
+    }
+    Some(_) => {
+      let all_keys = all.keys().collect()
+      if all_keys.length() > 0 {
+        let param = [ids_json(all_keys.map(Json::string))]
+        for r in db.all(waiting_jobs_of_sql, param) {
+          waiting_jobs.add(js_text(field(r, "session_key")))
+        }
+        for r in db.all(waiting_led_of_sql, param) {
+          waiting_led.add(js_text(field(r, "parent")))
+        }
+      }
+    }
+  }
   let agent = (key : String) => {
     let x = all.get(key).unwrap()
     let process = known.processes.get(key).unwrap_or("cold")
@@ -367,7 +495,7 @@ fn shared_rows(db : @sql.Db, known : Known, scope : Scope?, archived? : Bool = f
       v["watch"] = w
     }
     // (it waits on work it started that is not a watch: client/core-ts chat-stage.ts keeps such a chat at work)
-    if one(db, waits_on_job_sql, [Json::string(key)]) is Some(_) || one(db, waits_on_led_sql, [Json::string(key)]) is Some(_) {
+    if waiting_jobs.contains(key) || waiting_led.contains(key) {
       v["waitingAsync"] = true
     }
     Json::object(v)
@@ -412,24 +540,56 @@ fn shared_rows(db : @sql.Db, known : Known, scope : Scope?, archived? : Bool = f
   let legacy = has_legacy_said(db)
   let said_by : Map[String, Json] = Map([])
   let need_said : Array[Json] = []
-  for t in item_threads {
-    let id = field(t.thread, "id")
-    let said = try { Some(said_of(db, legacy, id)) } catch {
-      Refused(503, m) if m.has_prefix(said_pending) => {
-        let more : Json = @json.parse(m.view(start_offset=said_pending.length()).to_owned()) catch { _ => Json::array([]) }
-        if more is Array(xs) {
-          need_said.append(xs)
-        }
-        None
-      }
-      e => raise e
+  if !legacy && item_threads.length() > 0 {
+    let (batch_said, batch_need) = said_of_batch(db, item_threads.map(t => field(t.thread, "id")))
+    for k, v in batch_said {
+      said_by[k] = v
     }
-    if said is Some(s) {
-      said_by[id.stringify()] = s
+    need_said.append(batch_need)
+  } else {
+    for t in item_threads {
+      let id = field(t.thread, "id")
+      let said = try { Some(said_of(db, legacy, id)) } catch {
+        Refused(503, m) if m.has_prefix(said_pending) => {
+          let more : Json = @json.parse(m.view(start_offset=said_pending.length()).to_owned()) catch { _ => Json::array([]) }
+          if more is Array(xs) {
+            need_said.append(xs)
+          }
+          None
+        }
+        e => raise e
+      }
+      if said is Some(s) {
+        said_by[id.stringify()] = s
+      }
     }
   }
   if need_said.length() > 0 {
     raise Refused(503, said_pending + Json::array(unique_ids([need_said])).stringify())
+  }
+  let missing_runtime_authors : Array[String] = []
+  let seen_missing_authors : Set[String] = Set::new()
+  for t in item_threads {
+    if t.last_message is Object(_) && t.last_message.value("authorKind") == Some(Json::string("agent")) {
+      let has_said_runtime = match t.last_message.value("agentIdentity") {
+        Some(Object(_) as id_obj) => id_obj.value("runtime") is Some(String(_))
+        _ => false
+      }
+      if !has_said_runtime {
+        if t.last_message.value("author") is Some(String(author)) {
+          let has_session_original = match all.get(author) {
+            Some(s) => s.get("original_runtime") is Some(r) && !(r is Null)
+            None => false
+          }
+          if !has_session_original {
+            push_new(missing_runtime_authors, seen_missing_authors, author)
+          }
+        }
+      }
+    }
+  }
+  if missing_runtime_authors.length() > 1 {
+    known.prefetch_original_runtimes(db, missing_runtime_authors)
   }
   let answered : Map[String, Array[Json]] = Map([])
   for a in answers_since(db, Json::number(known.now - answered_within), carded) {
@@ -451,7 +611,7 @@ fn shared_rows(db : @sql.Db, known : Known, scope : Scope?, archived? : Bool = f
     let origin = match from { Some(f) => known.origin(f.thread, f.sessions); None => Json::null() }
     let creator = known.creator(field(t.thread, "created_by"))
     let people = known.people(t.people)
-    let names = known.author_names(db, id)
+    let names = known.author_names_preloaded(db, field(t.thread, "surface"), t.sessions, all)
     let last_view = if t.last_message is Null { Json::null() } else { message_view(db, t.last_message, names) }
     let starters = agents.map(a => known.creator(match all.get(js_text(a.value("key").unwrap())) { Some(x) => field(x, "created_by"); None => Json::null() })) catch {
       e => raise e

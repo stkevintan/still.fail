@@ -1649,6 +1649,37 @@ export function ensureBoxKey(inner: Inner): Effect.Effect<string, CoreError> {
   }));
 }
 
+/// The box key the system says can no longer be opened (`key_invalidated`: Android, the screen lock taken off since it
+/// was kept), as the person read it (`dead`, the public half kept then): made anew, so nothing is sealed to the dead one
+/// again (a vault made or given here after would open nowhere, 删库重建仍立刻失败: FB-51). Its public half goes first: where
+/// the new one cannot be kept (no screen lock yet), none is kept, and this device is no longer set up anywhere
+/// (`setUpHere`) rather than said to hold keys it cannot open. Each workspace's certificate is then published anew by
+/// itself (`autoBox`, as for a device just let in: nobody asked), so the vaults show no key here and offer the way back
+/// (申请授权, the recovery words), which seals them to the new box key. Made once though several reads fail at once.
+function renewBoxKey(inner: Inner, dead: string | null): Effect.Effect<string, CoreError> {
+  const m = mem(inner);
+  return m.boxInit.withPermits(1)(Effect.gen(function* () {
+    const had = yield* Effect.orElseSucceed(inner.host.storageGet(BOX_PUB), () => null);
+    const now = had ? new TextDecoder().decode(had) : null;
+    if (now !== null && now !== dead) return (m.box = now);
+    yield* Effect.ignore(inner.host.storageDelete(BOX_PUB));
+    m.box = null;
+    // (what the pages say of this device, its setting up and its keys, is read by the box key kept: said again)
+    lockSeen(inner).touch("self");
+    inner.views?.vaultChanged(null);
+    const priv = new Uint8Array(32);
+    inner.host.randomBytes(priv);
+    const pub = boxPublic(priv);
+    yield* Effect.mapError(inner.host.secureSet!(BOX_KEY, priv, { user: true }), (e) => CoreError.refused(e, "vault_refused"));
+    priv.fill(0);
+    yield* Effect.mapError(inner.host.storageSet(BOX_PUB, utf8(pub)), asCoreError);
+    m.box = pub;
+    lockSeen(inner).touch("self");
+    inner.views?.vaultChanged(null);
+    return pub;
+  }));
+}
+
 export type HandedVault = { ws: string; cert: BoxCert; vault?: Vault };
 
 function handoverWorkspaces(inner: Inner, subs: readonly string[], workspaces: readonly string[]): string[] {
@@ -2122,7 +2153,8 @@ export function vaultsView(inner: Inner, ws: string): J {
         items: all.length, devices: v.keys.length, open: unlocked(inner, v),
         // Whether this device has a key to it; members' devices set up since that have none yet (its owner's device gives
         // them the key as it next has it in hand, or as asked: addDevice).
-        keyed: self !== null && mine !== undefined && keyed.get(self.device) === mine.box,
+        // (by the box key kept here too: a certificate naming one made anew since is not this device's key, FB-51)
+        keyed: self !== null && mine !== undefined && mine.box === m.box && keyed.get(self.device) === mine.box,
         missing: pendingDevices.length,
         recoverable: v.recovery !== undefined, lasts: v.lasts ?? "chat",
         authorizedDevices,
@@ -2529,12 +2561,37 @@ class Vaults {
   }
 
   /// This device's box key, read from the secure storage (the person asked, saying `reason`).
+  /// One the system can no longer open (`key_invalidated`) is made anew (`renewBoxKey`), and the person told the way back.
   #boxKey(reason: string): Effect.Effect<Uint8Array, CoreError> {
     const inner = this.#inner;
     return Effect.gen(function* () {
-      const priv = yield* Effect.mapError(inner.host.secureGet!(BOX_KEY, { user: true, reason }), (e) => CoreError.refused(e, "vault_refused"));
+      const kept = yield* Effect.orElseSucceed(inner.host.storageGet(BOX_PUB), () => null);
+      const got = yield* Effect.result(inner.host.secureGet!(BOX_KEY, { user: true, reason }));
+      if (got._tag === "Failure") {
+        if (got.failure.message !== "key_invalidated") return yield* Effect.fail(CoreError.refused(got.failure, "vault_refused"));
+        yield* renewBoxKey(inner, kept ? new TextDecoder().decode(kept) : null);
+        if (inner.workspaces) for (const [ws] of inner.workspaces.owned()) autoBox(inner, ws);
+        return yield* fail("key_invalidated", t("core-misc.vault.keyRenewed"));
+      }
+      const priv = got.success;
       if (priv === null || priv.length !== 32) return yield* fail("vault_not_set_up", t("core-misc.vault.notSetUp"));
       return priv;
+    });
+  }
+
+  /// This device's certificate, its box key the one kept here: published anew where the one held names another (the
+  /// box key made anew since, `renewBoxKey`, its certificate not published yet), so nothing is sealed to a key this
+  /// device no longer has. None where it is not set up.
+  #current(lock: Checked, signer: Signer, who: { device: string; sub: string }): Effect.Effect<Vouched | undefined, CoreError> {
+    const self = this;
+    return Effect.gen(function* () {
+      const inner = self.#inner;
+      const here = certs(inner, self.ws, lock).find((c) => c.device === who.device);
+      if (here === undefined) return undefined;
+      const pub = yield* ensureBoxKey(inner);
+      if (here.box === pub) return here;
+      yield* self.#certify(lock, signer, who);
+      return certs(inner, self.ws, lock).find((c) => c.device === who.device && c.box === pub);
     });
   }
 
@@ -3118,9 +3175,9 @@ class Vaults {
       const inner = self.#inner;
       if (name.trim() === "") return yield* Effect.fail(CoreError.invalid("name"));
       const { lock, signer, self: who } = yield* self.#ready();
+      const here = yield* self.#current(lock, signer, who);
+      if (!here || here.sub !== who.sub) return yield* fail("vault_not_set_up", t("core-misc.vault.notSetUp"));
       const allCerts = certs(inner, self.ws, lock);
-      const here = allCerts.find((c) => c.sub === who.sub && c.device === who.device);
-      if (!here) return yield* fail("vault_not_set_up", t("core-misc.vault.notSetUp"));
       const h = held(inner, self.ws);
       const isWs = opts?.scope === "workspace";
       let memberSubs: string[];
@@ -3457,7 +3514,7 @@ class Vaults {
       const inner = self.#inner;
       const entropy = yield* Effect.try({ try: () => fromWords(words), catch: asCoreError });
       const { lock, signer, self: who } = yield* self.#ready();
-      const here = certs(inner, self.ws, lock).find((c) => c.device === who.device);
+      const here = yield* self.#current(lock, signer, who);
       if (!here) return yield* fail("vault_not_set_up", t("core-misc.vault.notSetUp"));
       const { priv } = recoveryPair(entropy);
       let recovered = 0;

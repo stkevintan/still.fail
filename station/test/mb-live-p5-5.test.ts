@@ -705,7 +705,7 @@ test("the parts that download follow a 302 as Node's fetch does (Slack's url_pri
   assert.deepEqual(await via("farview", "/moved"), { body: "final" });
   assert.equal(await via("farview", "/gone"), null);
   // (a gh: source with no gh on the PATH: none from there, as fetchBytes says it)
-  assert.equal(await via("farview", "gh:AFK-surf/farview@builds/none.tgz"), null);
+  assert.equal(await via("farview", "gh:AFK-surf/farview-legacy@builds/none.tgz"), null);
   assert.deepEqual(await via("oauth", "/moved"), { status: 200, body: "final" });
   hits.length = 0;
   assert.deepEqual(await via("oauth", "/moved", true), { status: 302, body: "" });

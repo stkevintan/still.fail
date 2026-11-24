@@ -259,6 +259,7 @@ fn given_into(src : Source, station : String, w : Writing, no_files : Bool, g : 
       }
     Marked(name, bytes, quotes, kind) =>
       if !no_files {
+        @signals.start_batch()
         if kind != "page" {
           writing_add(src, w, station, name, bytes)
         }
@@ -275,6 +276,7 @@ fn given_into(src : Source, station : String, w : Writing, no_files : Bool, g : 
             writing_quote(src, w, quote)
           }
         }
+        @signals.end_batch()
       }
     Dropped(d) =>
       if !no_files {

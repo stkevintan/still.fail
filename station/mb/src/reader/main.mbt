@@ -234,7 +234,60 @@ fn message(e : Error) -> String {
 /// answering (an answer gives it back as well).
 struct Permit {
   host : @host.Host
+  is_mode_request : (Map[String, Json]) -> Bool
   mut holding : Bool
+  deferred : Array[String]
+  mut deferred_head : Int
+  mut eof : Bool
+}
+
+///|
+fn Permit::new(host : @host.Host, is_mode_request : (Map[String, Json]) -> Bool) -> Permit {
+  { host, is_mode_request, holding: false, deferred: [], deferred_head: 0, eof: false }
+}
+
+///|
+fn Permit::pop_deferred(self : Permit) -> String? {
+  if self.deferred_head >= self.deferred.length() {
+    return None
+  }
+  let line = self.deferred[self.deferred_head]
+  self.deferred[self.deferred_head] = ""
+  self.deferred_head += 1
+  if self.deferred_head == self.deferred.length() {
+    self.deferred.clear()
+    self.deferred_head = 0
+  } else if self.deferred_head >= 64 && self.deferred_head * 2 >= self.deferred.length() {
+    let rest : Array[String] = []
+    for i = self.deferred_head; i < self.deferred.length(); i = i + 1 {
+      rest.push(self.deferred[i])
+    }
+    self.deferred.clear()
+    for item in rest {
+      self.deferred.push(item)
+    }
+    self.deferred_head = 0
+  }
+  Some(line)
+}
+
+///|
+/// The next line for the builder's main loop: drains any non-permit lines deferred while waiting for a permit reply
+/// before reading stdin, and keeps draining them even after EOF.
+async fn Permit::next_line(self : Permit) -> String? {
+  if self.pop_deferred() is Some(line) {
+    return Some(line)
+  }
+  if self.eof {
+    return None
+  }
+  match self.host.line() {
+    Some(line) => Some(line)
+    None => {
+      self.eof = true
+      None
+    }
+  }
 }
 
 ///|
@@ -242,12 +295,40 @@ async fn Permit::take(self : Permit) -> Bool {
   if self.holding {
     return true
   }
+  if self.eof {
+    return false
+  }
   let ask : Json = { "take": true }
   self.host.say(ask.stringify())
-  guard self.host.line() is Some(line) else { return false }
-  let reply : Json = @json.parse(line) catch { _ => Json::null() }
-  self.holding = reply is { "permit": True, .. }
-  self.holding
+  while true {
+    guard self.host.line() is Some(line) else {
+      self.eof = true
+      self.holding = false
+      return false
+    }
+    if line == "" {
+      self.holding = false
+      return false
+    }
+    let reply : Json = @json.parse(line) catch { _ => Json::null() }
+    match reply {
+      Object(map) =>
+        if map.get("permit") is Some(v) {
+          self.holding = v is True
+          return self.holding
+        } else if (self.is_mode_request)(map) {
+          self.deferred.push(line)
+        } else {
+          self.holding = false
+          return false
+        }
+      _ => {
+        self.holding = false
+        return false
+      }
+    }
+  }
+  false
 }
 
 ///|
@@ -265,14 +346,14 @@ fn Permit::give(self : Permit) -> Unit {
 async fn turn_builder(host : @host.Host, db_path : String) -> Unit {
   let db = @sql.Db::attach(host, db_path, wait=250)
   db.exec("PRAGMA synchronous = NORMAL")
-  let permit = { host, holding: false }
+  let permit = Permit::new(host, map => map.contains("session") || map.contains("cancel"))
   let counts : Map[String, @turns.Scan] = Map([])
   let tokens = Ref(0)
   let token = () => {
     tokens.val += 1
     "\{@host.now()}-\{tokens.val}-\{@host.pid()}"
   }
-  while host.line() is Some(line) {
+  while permit.next_line() is Some(line) {
     if line == "" {
       continue
     }
@@ -321,14 +402,14 @@ async fn turn_builder(host : @host.Host, db_path : String) -> Unit {
 async fn said_builder(host : @host.Host, db_path : String) -> Unit {
   let db = @sql.Db::attach(host, db_path, wait=250)
   db.exec("PRAGMA synchronous = NORMAL")
-  let permit = { host, holding: false }
+  let permit = Permit::new(host, map => map.contains("thread") || map.contains("cancel"))
   let scans : Map[Int64, @said.Scan] = Map([])
   let tokens = Ref(0)
   let token = () => {
     tokens.val += 1
     "\{@host.now()}-\{tokens.val}-\{@host.pid()}"
   }
-  while host.line() is Some(line) {
+  while permit.next_line() is Some(line) {
     if line == "" {
       continue
     }

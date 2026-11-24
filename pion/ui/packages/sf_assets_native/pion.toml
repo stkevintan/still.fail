@@ -1,0 +1,9 @@
+[package]
+name = "sf_assets_native"
+version = "0.1.0"
+
+[dependencies]
+base64 = { workspace = true }
+sf = { workspace = true }
+zip = { workspace = true }
+pixels = { workspace = true }

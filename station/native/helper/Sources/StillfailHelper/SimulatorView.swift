@@ -25,6 +25,8 @@ final class SimulatorView: ScreenView {
   let injector = HIDInjector()
   /// A foldable's: what follows its panels, the panel shown, its hinge as far as is known (the cover's until told).
   var panels: Process?
+  /// What reads the boot's log for the panel in use (`followPanels`): ended with the view, as `panels` is.
+  var bootLog: Process?
   var followed: AsyncStream<Bool>.Continuation?
   var coverShown: Bool?
   var hinge = 0.0
@@ -55,6 +57,12 @@ final class SimulatorView: ScreenView {
   var source: CVPixelBuffer?
   /// The device's screen as captured, in its pixels.
   var screen = (0, 0)
+  /// What runs on behind the view (a panel's or a turn's look, the boot's log waited on, the ops): called off as it stops, or
+  /// each would go on asking CoreSimulator (`simctl io … enumerate`) for a view that is gone, beside the next one's.
+  let tasking = NSLock()
+  var tasks: [Int: Task<Void, Never>] = [:]
+  var nextTask = 0
+  var stopped = false
 
   init(channel: Channel, options: [String: Any], udid: String) {
     self.udid = udid
@@ -124,13 +132,40 @@ final class SimulatorView: ScreenView {
     started.wait()
     let (stream, continuation) = AsyncStream<[String: Any]>.makeStream()
     ops = continuation
-    Task {
-      for await op in stream { await perform(op) }
+    background { [weak self] in
+      for await op in stream { await self?.perform(op) }
     }
   }
 
+  /// `work` on behind the view until it ends or the view stops (nothing started once it has).
+  func background(_ work: @escaping () async -> Void) {
+    tasking.lock()
+    defer { tasking.unlock() }
+    guard !stopped else { return }
+    let id = nextTask
+    nextTask += 1
+    // (its end waits for the lock held here: it is in `tasks` before it can be taken out)
+    tasks[id] = Task { [weak self] in
+      await work()
+      self?.ended(id)
+    }
+  }
+
+  private func ended(_ id: Int) {
+    tasking.lock()
+    defer { tasking.unlock() }
+    tasks[id] = nil
+  }
+
   override func stop() {
+    tasking.lock()
+    stopped = true
+    let running = Array(tasks.values)
+    tasks = [:]
+    tasking.unlock()
+    running.forEach { $0.cancel() }
     panels?.terminate()
+    if bootLog?.isRunning == true { bootLog?.terminate() }
     followed?.finish()
     if let rotation { VTPixelRotationSessionInvalidate(rotation) }
     ops?.finish()
@@ -303,10 +338,10 @@ final class SimulatorView: ScreenView {
       guard await injector.sendOrientation(orientation: orientation) else { return }
       KnownTurns.shared[udid] = turned
       let cover = coverShown
-      Task {
-        await settleTurn(cover: cover)
+      background { [weak self] in
+        await self?.settleTurn(cover: cover)
         // (a device under load is seconds behind the turn it was told of)
-        await lookTurn(cover: cover, waits: Array(repeating: 1, count: 12))
+        await self?.lookTurn(cover: cover, waits: Array(repeating: 1, count: 12))
       }
     case "paste":
       guard let text = op["text"] as? String, !text.isEmpty else { return }
@@ -356,7 +391,7 @@ final class SimulatorView: ScreenView {
     // left at the size of the panel not in use (its picture stretched to that).
     let (changes, change) = AsyncStream<Bool>.makeStream()
     followed = change
-    Task { [weak self] in
+    background { [weak self] in
       for await cover in changes { await self?.showPanel(cover: cover) }
     }
     let boot = BootPanel()
@@ -367,7 +402,7 @@ final class SimulatorView: ScreenView {
     }
     // Only the last the boot's log says is what shows now (every fold since the boot, one by one, was the picture going back and
     // forth as the view opened): before the first picture where it is read in time, unless one has come since.
-    _ = run(["show", "--last", "boot"], { boot.read() }) { text in
+    bootLog = run(["show", "--last", "boot"], { boot.read() }) { text in
       if let cover = said(text) { boot.said(cover) }
     }
     // The panel an earlier view here left it on, at once: the boot's log is read whole, longer the longer the device has been up,
@@ -375,9 +410,9 @@ final class SimulatorView: ScreenView {
     // still says, as it comes, a fold made with no view following it.
     if let cover = KnownPanels.shared[udid] {
       await showPanel(cover: cover, opening: true)
-      Task {
-        while !boot.done { try? await Task.sleep(for: .milliseconds(100)) }
-        if let cover = boot.taken() { change.yield(cover) }
+      background {
+        while !boot.done, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(100)) }
+        if !Task.isCancelled, let cover = boot.taken() { change.yield(cover) }
       }
       return
     }
@@ -387,9 +422,9 @@ final class SimulatorView: ScreenView {
     if boot.done {
       if let cover = boot.taken() { await showPanel(cover: cover, opening: true) }
     } else {
-      Task {
-        while !boot.done { try? await Task.sleep(for: .milliseconds(100)) }
-        if let cover = boot.taken() { change.yield(cover) }
+      background {
+        while !boot.done, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(100)) }
+        if !Task.isCancelled, let cover = boot.taken() { change.yield(cover) }
       }
     }
   }
@@ -409,7 +444,7 @@ final class SimulatorView: ScreenView {
       }
     }
     // (not waited for: the next press would wait for all of it, seconds, behind it)
-    Task { await lookTurn(cover: cover) }
+    background { [weak self] in await self?.lookTurn(cover: cover) }
   }
 
   /// A device told to turn draws its UI going round inside its framebuffer, a turned picture of which would go round inside the
@@ -419,15 +454,19 @@ final class SimulatorView: ScreenView {
     let panel = cover == false ? "primary-1" : "primary"
     let was = turnNow()
     setHeld(true)
+    // (let go of however it ends: a view stopped meanwhile too)
+    defer { setHeld(false) }
     var now = was
     for _ in 0..<15 where now == was {
       try? await Task.sleep(for: .milliseconds(100))
+      if Task.isCancelled { return }
       if let said = await enumerated() { now = Self.turnOf(said, panel: panel) }
     }
     if now != was {
       // until it has drawn nothing new for a moment
       for _ in 0..<15 {
         try? await Task.sleep(for: .milliseconds(100))
+        if Task.isCancelled { return }
         if ContinuousClock.now - heldLast() > .milliseconds(150) { break }
       }
       _ = setTurn(now)
@@ -470,6 +509,7 @@ final class SimulatorView: ScreenView {
   func lookTurn(cover: Bool?, waits: [Int] = [0, 1, 2]) async {
     for wait in waits {
       try? await Task.sleep(for: .seconds(wait))
+      if Task.isCancelled { return }
       guard coverShown == cover, let said = await enumerated() else { continue }
       let now = Self.turnOf(said, panel: cover == false ? "primary-1" : "primary")
       if setTurn(now) {
@@ -517,20 +557,58 @@ final class SimulatorView: ScreenView {
     return 0
   }
 
+  /// What `simctl io … enumerate` says of the device's panels; nil when it said nothing in time. Asked as the view opens:
+  /// a CoreSimulator that never answers held the view's opening for ever (side run 138442438327).
   func enumerated() async -> String? {
-    await withCheckedContinuation { done in
-      let process = Process()
-      process.executableURL = URL(fileURLWithPath: "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/bin/simctl")
-      process.arguments = ["io", udid, "enumerate"]
-      let out = Pipe()
-      process.standardOutput = out
-      process.standardError = FileHandle.nullDevice
-      guard (try? process.run()) != nil else { return done.resume(returning: nil) }
-      DispatchQueue.global().async {
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        done.resume(returning: String(decoding: data, as: UTF8.self))
+    guard !Task.isCancelled else { return nil }
+    return await Self.runOutput("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/bin/simctl", ["io", udid, "enumerate"])
+  }
+
+  /// What `file` writes to its stdout until it closes it; nil when it cannot be run or has not closed it within `timeout`
+  /// seconds, then ended (a child it left holding the stdout keeps no one waiting either: nothing more is read of it).
+  static func runOutput(_ file: String, _ arguments: [String], timeout: TimeInterval = 8) async -> String? {
+    guard !Task.isCancelled else { return nil }
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: file)
+    process.arguments = arguments
+    let out = Pipe()
+    process.standardOutput = out
+    process.standardError = FileHandle.nullDevice
+    let reading = out.fileHandleForReading
+    let waited = Waited()
+    // Given up on (its time is up, or the task asking was cancelled: a view stopped): nil, and the process ended.
+    let giveUp = {
+      guard waited.finish(nil) else { return }
+      // (not closed here: a read under way would find it closed; the pipe closes as it is let go of)
+      reading.readabilityHandler = nil
+      guard process.isRunning else { return }
+      process.terminate()
+      DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
       }
+    }
+    let timer = DispatchWorkItem(block: giveUp)
+    var data = Data()
+    reading.readabilityHandler = { handle in
+      let chunk = handle.availableData
+      guard chunk.isEmpty else { return data.append(chunk) }
+      handle.readabilityHandler = nil
+      // (its process and pipe not held on to until the timer's time)
+      timer.cancel()
+      _ = waited.finish(String(decoding: data, as: UTF8.self))
+    }
+    do {
+      try process.run()
+    } catch {
+      reading.readabilityHandler = nil
+      return nil
+    }
+    DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
+    return await withTaskCancellationHandler {
+      await withCheckedContinuation { waited.attach($0) }
+    } onCancel: {
+      timer.cancel()
+      giveUp()
     }
   }
 
@@ -568,6 +646,53 @@ final class SimulatorView: ScreenView {
         done.resume(returning: false)
       }
     }
+  }
+}
+
+/// What `runOutput` returns, said once by whichever comes first (its output, its time up, its task cancelled), before or after
+/// it is waited on.
+private final class Waited: @unchecked Sendable {
+  private let lock = NSLock()
+  private var waiting: CheckedContinuation<String?, Never>?
+  private var said: String??
+
+  func attach(_ continuation: CheckedContinuation<String?, Never>) {
+    lock.lock()
+    guard let said else {
+      waiting = continuation
+      return lock.unlock()
+    }
+    lock.unlock()
+    continuation.resume(returning: said)
+  }
+
+  /// Whether this was the first.
+  func finish(_ value: String?) -> Bool {
+    lock.lock()
+    guard said == nil else {
+      lock.unlock()
+      return false
+    }
+    said = .some(value)
+    let continuation = waiting
+    waiting = nil
+    lock.unlock()
+    continuation?.resume(returning: value)
+    return true
+  }
+}
+
+/// Whether something is yet to be done: true once, for the first to ask.
+final class Once: @unchecked Sendable {
+  private let lock = NSLock()
+  private var taken = false
+
+  func take() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !taken else { return false }
+    taken = true
+    return true
   }
 }
 

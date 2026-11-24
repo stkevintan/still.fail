@@ -506,7 +506,7 @@ export async function movedOnce(): Promise<{ chats: number; put: number; placed:
     const run = db.run.bind(db);
     const all = db.all.bind(db);
     db.run = (q: string, params?: unknown[]) => {
-      if (/^INSERT OR REPLACE INTO chat \(/.test(q)) put++;
+      if (/^INSERT (OR REPLACE )?INTO chat \(/.test(q)) put++;
       if (/^UPDATE chat SET ord = /.test(q)) placed++;
       return run(q, params);
     };
@@ -563,7 +563,7 @@ export async function coldDeltaOnce(): Promise<{
     const run = db.run.bind(db);
     const all = db.all.bind(db);
     db.run = (q: string, params?: unknown[]) => {
-      if (/^INSERT OR REPLACE INTO chat \(/.test(q)) put++;
+      if (/^INSERT (OR REPLACE )?INTO chat \(/.test(q)) put++;
       return run(q, params);
     };
     db.all = (q: string, params?: unknown[]) => {

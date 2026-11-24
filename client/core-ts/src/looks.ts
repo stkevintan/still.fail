@@ -325,6 +325,22 @@ export function offlineNote(link: J, name: string): string {
   return name === "" ? t(key, { name: "station" }) : t(key, { name });
 }
 
+/// A chat going to another station now, as its station's overview says (`move.chats`: each its sessions, where it goes,
+/// whether it is held yet) and the chat's sessions are `keys`: where it goes and what its composer says in its place;
+/// none where it goes nowhere. `named`: what the workspace calls a station by its id (the overview's name where it has
+/// none, its id's start where neither has one).
+export function movingOf(chats: J, keys: string[], named: (id: string) => string): J {
+  const mine = keys.filter((k) => k !== "");
+  const going = (arrU(chats) ?? []).find((c) => (arrU(getU(c, "sessions")) ?? []).some((k) => mine.includes(k as string)));
+  if (going === undefined) return null;
+  const id = typeof getU(going, "to") === "string" ? (getU(going, "to") as string) : "";
+  const given = typeof getU(going, "toName") === "string" ? (getU(going, "toName") as string) : "";
+  const listed = named(id);
+  const to = listed !== "" && listed !== id ? listed : given !== "" ? given : id.slice(0, 12);
+  const held = getU(going, "held") === true;
+  return { to, text: t("core-logic.looks.moving", { station: to }), held };
+}
+
 /// Kept overview progress survives a handover's disconnected interval. No update is inferred from a disconnect.
 /// `name` is the station's as its workspace has it, so people can tell which one it is.
 export function stationUpdate(overview: J, chat: J, dismissed: string | null, open: boolean, manager: boolean, name = ""): J {

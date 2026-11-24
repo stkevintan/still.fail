@@ -789,9 +789,20 @@ fn narrow_page_node(
             let left_extra : @signals.Signal[Double] = @signals.signal(0.0)
             let balance_owner : Ref[Int] = Ref(0)
             row.box(fn(left) {
-              left.row(Is(true)).lies_along(Is(Start)).lines_up(Is(Some(Middle))) |> ignore
+              // (the room mirroring the trailing pill gives way first where the bar is short of room, so the title goes off
+              // its centre before the trailing actions are cut: pg_balance_yields)
+              left
+              .row(Is(true))
+              .lies_along(Is(Start))
+              .lines_up(Is(Some(Middle)))
+              .shrink(Is(pg_balance_yields))
+              .min_width(Is(Some(pg_back_pill_h)))
+              |> ignore
               nav_back_circle_node(left, fn() { frame().back.unwrap_or("") }, on_back)
-              left.box(fn(bal) { bal.width(By(fn() { Some(left_extra.get()) })) |> ignore }) |> ignore
+              left.box(fn(bal) {
+                bal.width(By(fn() { Some(left_extra.get()) })).shrink(Is(1.0)).min_width(Is(Some(0.0))) |> ignore
+              })
+              |> ignore
             })
             |> ignore
             row.box(fn(mid) {
@@ -921,6 +932,12 @@ let pg_back_foot : Double = 6.0
 
 ///|
 let pg_title_x : Double = 24.0
+
+///|
+/// How much sooner than the title and the trailing pill the back bar's leading side gives way where the bar is short of
+/// room (its back circle kept whole): the room it keeps to mirror the trailing pill (`back_bar_balance`) goes first, so a
+/// title goes off its centre before an action is cut (three of them beside a title in a 320 pt window).
+let pg_balance_yields : Double = 1000.0
 
 ///|
 /// The title's line's room at its end, where what it does stands (分享, a choice of days) as it was.

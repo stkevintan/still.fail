@@ -1511,6 +1511,9 @@ fn profile_station_rows_node(
   let user = fn() { text(share(), "role") == "user" }
   let shared = fn() { share() is Some(Object(_)) }
   let sharing = fn() { is_doing(core, ["profile.share"], on) }
+  // (its station lets who may use it follow the workspace's whitelist: Overview `shareAllowAuto`; and it does)
+  let auto_ok = fn() { flag(o(), "shareAllowAuto") }
+  let follows = fn() { flag(share(), "allowAuto") }
   let moving = fn() { is_doing(core, ["profile.move"], on) }
   let busy_put = fn() { is_doing(core, ["profile.put"], on) }
   let sid = fn() { text(s(), "id") }
@@ -1659,6 +1662,7 @@ fn profile_station_rows_node(
             initial=true,
             subscription=sub,
             claude~,
+            auto_ok=@signals.untracked(auto_ok),
           )
         } else {
           @settings.act(
@@ -1680,10 +1684,22 @@ fn profile_station_rows_node(
         r,
         fn() { @sf.t("web-pages.profiles.share.stations") },
         fn() {
-          pick_stations(core, address, id, @signals.untracked(stations), @signals.untracked(sid), @signals.untracked(allowed))
+          pick_stations(
+            core,
+            address,
+            id,
+            @signals.untracked(stations),
+            @signals.untracked(sid),
+            @signals.untracked(allowed),
+            follow=@signals.untracked(follows),
+            auto_ok=@signals.untracked(auto_ok),
+          )
         },
         note=fn() { @sf.t("web-pages.profiles.share.stationsNote") },
         value=fn() {
+          if follows() {
+            return @sf.t("web-pages.profiles.share.followAuto")
+          }
           match allowed() {
             None => @sf.t("web-pages.profiles.share.everyStation")
             Some(a) =>
@@ -1764,183 +1780,6 @@ fn move_dialog(core : Core, s : Json?, p : Json?, targets : Array[Json]) -> Unit
           })
         })
       })
-      |> ignore
-    },
-  )
-}
-
-///|
-/// Which stations may use a share (PickStations), ticked in a panel: every one (those to come too), or those ticked;
-/// the one that has it always. On first share (`initial = true`), every other station starts off and `among` is omitted
-/// so a fresh share does not inherit stations from other workspaces; when editing an existing share (`initial = false`),
-/// those listed are said as `among` so only this workspace's stations change (share/index.ts shareProfile).
-fn pick_stations(
-  core : Core,
-  address : String,
-  id : String,
-  stations : Array[Json],
-  own : String,
-  allowed : Array[String]?,
-  initial? : Bool = false,
-  subscription? : Bool = false,
-  claude? : Bool = false,
-) -> Unit {
-  let ticked : @sf.LiveMap[String, Bool] = @sf.LiveMap::new()
-  for x in stations {
-    let xid = text(Some(x), "id")
-    ticked.put(
-      xid,
-      if initial {
-        xid == own
-      } else {
-        match allowed {
-          None => true
-          Some(a) => a.contains(xid)
-        }
-      },
-    )
-  }
-  let future_all = @signals.signal(if initial { false } else { allowed is None })
-  let has_others = stations.iter().any(fn(x) { text(Some(x), "id") != own })
-  let all = fn() {
-    if has_others {
-      stations.iter().all(fn(x) {
-        let xid = text(Some(x), "id")
-        xid == own || ticked.get(xid).unwrap_or(false)
-      })
-    } else {
-      future_all.get()
-    }
-  }
-  let any_picked = fn() {
-    all() ||
-    stations.iter().any(fn(x) {
-      let xid = text(Some(x), "id")
-      xid != own && ticked.get(xid).unwrap_or(false)
-    })
-  }
-  let title = if initial {
-    if claude {
-      @sf.t("web-pages.profiles.share.confirmClaudeTitle")
-    } else {
-      @sf.t("web-pages.profiles.share.confirmTitle")
-    }
-  } else {
-    @sf.t("web-pages.profiles.share.stations")
-  }
-  let description = if initial {
-    if claude {
-      @sf.t("web-pages.profiles.share.confirmClaudeBody")
-    } else if subscription {
-      @sf.t("web-pages.profiles.share.confirmSubscriptionBody")
-    } else {
-      @sf.t("web-pages.profiles.share.confirmCopyBody")
-    }
-  } else {
-    ""
-  }
-  open_dialog_nodes(
-    title,
-    description~,
-    fn(v, _) {
-      if initial && claude {
-        @sf.page_note_node(v, fn() { @sf.t("web-pages.profiles.share.confirmClaudeWarning") }, bad=fn() { true })
-      }
-      @sf.group_node(v, fn(g) {
-        @sf.switch_row_node(
-          g,
-          fn() { @sf.t("web-pages.profiles.share.allStations") },
-          all,
-          fn(now) {
-            future_all.set(now)
-            for x in stations {
-              let xid = text(Some(x), "id")
-              if xid != own {
-                ticked.set(xid, now)
-              }
-            }
-          },
-          note=fn() {
-            if all() {
-              @sf.t("web-pages.profiles.share.futureIn")
-            } else {
-              @sf.t("web-pages.profiles.share.futureOut")
-            }
-          },
-        )
-      })
-      @sf.group_node(v, fn(g) {
-        g.each(fn() { stations.mapi(fn(i, x) { (i, x) }) }, fn(x) { x.0 }, fn(row, x) {
-          let xv = Some(x.untracked().1)
-          let xid = text(xv, "id")
-          let self = xid == own
-          @sf.switch_row_node(
-            row,
-            fn() { text(xv, "name") },
-            fn() { self || ticked.get(xid).unwrap_or(false) },
-            fn(now) { if !self { ticked.set(xid, now) } },
-            note=fn() {
-              if self {
-                @sf.t("web-pages.profiles.share.here")
-              } else if flag(xv, "online") {
-                ""
-              } else {
-                @sf.t("web-pages.stations.offline")
-              }
-            },
-            disabled=fn() { self },
-          )
-        })
-      })
-    },
-    fn(v, shut) {
-      if initial {
-        @sf.button_node(v, fn() { @sf.t("common.cancel") }, shut, tone=Ghost) |> ignore
-      }
-      @sf.button_node(
-        v,
-        fn() {
-          if initial {
-            if claude {
-              @sf.t("web-pages.profiles.share.confirmUnderstood")
-            } else {
-              @sf.t("web-pages.profiles.share.confirmAction")
-            }
-          } else {
-            @sf.t("web-pages.profiles.share.done")
-          }
-        },
-        fn() {
-          shut()
-          let params = [("station", str(address)), ("id", str(id)), ("on", Json::boolean(true))]
-          if !all() {
-            let allow : Array[Json] = [str(own)]
-            for x in stations {
-              let xid = text(Some(x), "id")
-              if xid != own && ticked.get(xid).unwrap_or(false) {
-                allow.push(str(xid))
-              }
-            }
-            params.push(("allow", Json::array(allow)))
-          }
-          if !initial {
-            params.push(("among", Json::array(stations.map(fn(x) { str(text(Some(x), "id")) }))))
-          }
-          if initial {
-            @settings.act(
-              core,
-              @sf.t("web-pages.profiles.share.switch"),
-              "profile.share",
-              obj(params),
-              done=@sf.t("web-pages.profiles.share.shared"),
-            )
-          } else {
-            @settings.act(core, @sf.t("web-pages.profiles.share.stations"), "profile.share", obj(params))
-          }
-        },
-        tone=Primary,
-        disabled=fn() { initial && !any_picked() },
-      )
       |> ignore
     },
   )

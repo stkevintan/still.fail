@@ -586,6 +586,16 @@ pub fn fixture_chat_topic(f : Fixture, name : String, params : Map[String, Json]
               }
               v => v
             }
+          } else if f.mode == "chat-moving" {
+            // going to another station now (looks.ts movingOf): its composer shut, saying where, till it is there
+            match rich_chat(f.older) {
+              Object(m) => {
+                let o = m.copy()
+                o["moving"] = { "to": "Cedar", "text": "正在迁移到「Cedar」，迁完前暂不能发送", "held": false }
+                Json::object(o)
+              }
+              v => v
+            }
           } else if f.mode == "chat-cold-offline" {
             with_flag(with_cache_cold(rich_chat(f.older)), "offline")
           } else if f.mode == "chat-actions-run" {

@@ -1169,3 +1169,49 @@ test "a page its frame names, its blocks told in place of what it showed waiting
     assert_true(first is Some(y) && y.abs() < 0.5, msg="\{w}: its first block at \{Repr(first)}")
   }
 }
+
+///|
+test "narrow page_node with back, short of room for three trailing actions beside its title, takes the title off its centre and cuts no action" {
+  for w in [320.0, 390.0] {
+    let t = @ui.Tester::new(fn(_c) {  }, w~, h=600.0, platform=2)
+    @ui.set_view_app(
+      fn(root) {
+        @ui.set_tree_theme(ui_theme_now)
+        root.box(fn(b) {
+          b.width(Is(Some(w))).height(Is(Some(600.0))) |> ignore
+          page_node(
+            b,
+            fn() { "Profile" },
+            fn() { ["b0"] },
+            fn(v, _) { v.box(fn(x) { x.height(Is(Some(60.0))).words(Is("body")) |> ignore }) |> ignore },
+            on_back=fn() {  },
+            frame=fn() { { back: Some("设置"), top: 32.0, foot: 0.0, named: false } },
+            actions=fn(a) {
+              bar_actions_pill_node(a, fn() { true }, count=fn() { 3 }, fn(g) {
+                icon_button_node(g, "share", fn() { "分享" }, fn() {  }) |> ignore
+                icon_button_node(g, "check-circle", fn() { "多选" }, fn() {  }) |> ignore
+                icon_button_node(g, "plus", fn() { "新建" }, fn() {  }) |> ignore
+              })
+            },
+          )
+        })
+        |> ignore
+      },
+      theme=ui_theme_now,
+    )
+    t.run_for(@ui.move_most_ms)
+    // (the trailing pill whole: three keys, their gaps and its pads)
+    let right = t.drawn_glass().filter(fn(g) { g.4 == 6 && g.0 > w / 2.0 })
+    let whole = 3.0 * pg_bar_pill_key + 2.0 * pg_bar_pill_gap + 2.0 * pg_bar_pill_pad
+    assert_eq(right.length(), 1, msg="\{w}: \{Repr(right)}")
+    assert_true((right[0].2 - whole).abs() < 0.5, msg="\{w}: trailing pill whole: \{Repr(right[0])}")
+    assert_eq(t.squeeze_faults(), [], msg="\{w}")
+    assert_eq(t.audit(), [], msg="\{w}")
+    let titles = @ui.view_tree().unwrap().drawn().filter(fn(d) { d.words == "Profile" })
+    assert_eq(titles.length(), 1, msg="\{w}: title drawn")
+    // (where there is room, still dead-centred)
+    if w == 390.0 {
+      assert_true((titles[0].x + titles[0].w / 2.0 - w / 2.0).abs() <= 1.0, msg="title centred at 390")
+    }
+  }
+}

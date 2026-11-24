@@ -113,6 +113,8 @@ pub(all) struct ChatItem {
   /// feishuUrl): shared with the viewer's other workspaces, a picture of it, it in Slack or Feishu ("" none)
   may_share : Bool
   may_publish : Bool
+  /// its menu's 迁移到其他 station (the core's mayMove): the viewer one of the workspace's owners and admins
+  may_move : Bool
   slack_url : String
   slack_app : String
   feishu_url : String
@@ -405,6 +407,7 @@ pub fn chat_item(v : Json) -> ChatItem {
     opener: opener_of(s),
     may_share: flag(s, "mayShare"),
     may_publish: flag(s, "mayPublish"),
+    may_move: flag(s, "mayMove"),
     slack_url: text(s, "slackUrl"),
     slack_app: text(s, "slackApp"),
     feishu_url: text(s, "feishuUrl"),

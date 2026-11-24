@@ -52,6 +52,7 @@ fn reader_layout_nodes(root : @view.View, loc~ : SourceLoc) -> Unit {
     along: Start,
     offset: panel_offset,
     match_panel: 0,
+    scrolls_under: false,
     on_back: None,
     nodes: {
       body: fn(col, _) {

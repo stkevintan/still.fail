@@ -501,3 +501,59 @@ test "in English the modules and what they need are said in English, from the ta
   assert_true(t.find("Needs accounts, connects, the repository cache, the vault") is Some(_), msg=move_all_words(t))
   assert_true(t.words().iter().all(fn(x) { !x.0.contains("依赖") && x.0 != "聊天" && x.0 != "账号" }), msg=move_all_words(t))
 }
+
+///|
+test "a chat's menu: 迁移到另一台 station to the workspace's owners and admins alone; its stations picked among, the one picked asked of its station (the chat by its session, with what it needs)" {
+  // (one who may not move it: no such item)
+  let calls : Array[Made] = []
+  let t = wide_tester(calls)
+  t.draw()
+  let (x, y) = t.find("整理发布清单").unwrap()
+  t.right_click(x, y)
+  t.run_for(@ui.move_most_ms)
+  assert_true(t.find("重命名") is Some(_), msg=move_all_words(t))
+  assert_true(!move_said(t, "迁移到另一台 station"), msg=move_all_words(t))
+  // an owner
+  let calls : Array[Made] = []
+  let t = wide_tester(calls, mode="home-move")
+  t.draw()
+  let (x, y) = t.find("整理发布清单").unwrap()
+  t.right_click(x, y)
+  t.run_for(@ui.move_most_ms)
+  move_pick(t, "迁移到另一台 station")
+  move_audit(t, "picked among")
+  // (each with its room; one it may not go to faint, why under it)
+  assert_true(move_said(t, "Cedar") && move_said(t, "Maple") && move_said(t, "Birch"), msg=move_all_words(t))
+  assert_true(move_said(t, "离线：它上线后可选"), msg=move_all_words(t))
+  assert_eq(move_calls(calls, "move.start").length(), 0)
+  move_press(t, "Cedar")
+  let asked = move_calls(calls, "move.start")
+  assert_eq(asked.length(), 1)
+  let p = Some(asked[0])
+  assert_eq(
+    (text(p, "station"), text(p, "to"), text(p, "module"), text(p, "item"), flag(p, "withNeeds")),
+    ("ws1/st1", "st3", "chats", "s-c1", true),
+  )
+}
+
+///|
+test "a chat going to another station: its bar says where, its composer shut saying so; what is typed and sent goes nowhere" {
+  for w in [1280.0, 390.0] {
+    let calls : Array[Made] = []
+    let t = wide_tester(calls, mode="chat-moving", w~, h=844.0, platform=if w < 600.0 { 2 } else { 0 })
+    t.draw()
+    t.run_for(@ui.move_most_ms)
+    let at = "\{w}"
+    assert_true(t.find("正在迁移到「Cedar」，迁完前暂不能发送") is Some(_), msg=at + ": " + move_all_words(t))
+    assert_true(t.find("迁移到 Cedar") is Some(_), msg=at + ": " + move_all_words(t))
+    let (x, y) = t.find("正在迁移到「Cedar」，迁完前暂不能发送").unwrap()
+    t.tap(x, y)
+    t.type_text("发不出去的话")
+    // (send pressed where there is one to press: out of reach, nothing)
+    t.click(Button, label=@sf.t("web-main.composer.send")) catch {
+      _ => ()
+    }
+    t.run_for(@ui.move_most_ms)
+    assert_eq(move_calls(calls, "chat.send").length(), 0, msg=at)
+  }
+}

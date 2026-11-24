@@ -546,3 +546,34 @@ test("a plan with no station named (the station page's own row) asks nothing of 
   assert.deepEqual(asked, [], "nothing asked of anyone");
   assert.deepEqual(plan.items.filter((x) => x.again === true).map((x) => x.id), [], "nothing said not answered");
 });
+
+test("a chat asked to move by any of its sessions (a chat's menu names its own) goes whole; while it goes, what moves says it with each of its sessions, where to and whether it is held yet (the overview's move.chats, a device's composer shut), and nothing once it is there", async () => {
+  const w = world();
+  const a = w.get(A);
+  const b = w.get(B);
+  const first = message({ text: "<@UBOT> one" });
+  await a.connects.receive("cl", { type: "message", message: first });
+  await a.connects.receive("gpt", { type: "message", message: first });
+  const cl = sessionKey("cl", first.channel, first.threadTs);
+  const gpt = sessionKey("gpt", first.channel, first.threadTs);
+  await endTurn(a, cl);
+  await endTurn(a, gpt, "codex");
+  const both = [cl, gpt].sort();
+  assert.deepEqual(a.moves.handover.moving(), [], "nothing moves yet");
+  // (what moves, as each step of it is held: the first pass's files, then the hold)
+  const seen: Json[] = [];
+  const hold = a.rig.hub.holdChat.bind(a.rig.hub);
+  a.rig.hub.holdChat = ((k: string, why: string, n?: () => string) => (seen.push(a.moves.handover.moving()), hold(k, why, n))) as typeof a.rig.hub.holdChat;
+  // (asked by the one of its sessions the plan does not list it by)
+  const asked = both[1]!;
+  const started = await a.ask("POST", "/move", { to: B, module: "chats", item: asked });
+  assert.deepEqual(started, { status: 202, body: { started: true } });
+  await a.moves.scheduler.settle();
+  await w.quiet();
+  assert.equal(a.rig.store.handedTo(cl)?.station, B);
+  assert.equal(a.rig.store.handedTo(gpt)?.station, B);
+  assert.ok(b.rig.store.getSession(asked) !== null, "there");
+  assert.ok(seen.length > 0, "held on its way");
+  assert.deepEqual(seen[0], [{ sessions: both, ws: WS, to: B, toName: "B", held: false }], "said as it is held: its sessions, where it goes");
+  assert.deepEqual(a.moves.handover.moving(), [], "nothing once it is there");
+});
