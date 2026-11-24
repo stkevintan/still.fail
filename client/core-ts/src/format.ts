@@ -490,10 +490,10 @@ export function efforts(runtime: string): string[] {
 }
 
 /// The runtimes a chat can run on, in the order they are offered.
-export const RUNTIMES = ["claude", "codex", "dsh", "grok", "cursor", "devin", "hermes", "agy", "pi"];
+export const RUNTIMES = ["claude", "codex", "dsh", "grok", "cursor", "devin", "hermes", "agy", "pi", "copilot"];
 
 /// The runtimes by name, the same in every language.
-const RUNTIME_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", dsh: "DeepSeek Harness", grok: "Grok Build", cursor: "Cursor", devin: "Devin", hermes: "Hermes Agent", agy: "Antigravity CLI", pi: "Pi" };
+const RUNTIME_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", dsh: "DeepSeek Harness", grok: "Grok Build", cursor: "Cursor", devin: "Devin", hermes: "Hermes Agent", agy: "Antigravity CLI", pi: "Pi", copilot: "GitHub Copilot" };
 
 export function runtimeLabel(runtime: string): string {
   return RUNTIME_NAMES[runtime] ?? "Claude Code";
@@ -502,7 +502,7 @@ export function runtimeLabel(runtime: string): string {
 /// The runtimes by their short names (the app's accounts page's tags): said where how a model runs follows its name in
 /// a model control's panel, and only there; everywhere else, its control and its menu among them, the full name, where
 /// the short one is learned from (the user, 2026-11-10: 「agent runtime 可以用缩写，比如 CC，DSH」).
-const RUNTIME_SHORT: Record<string, string> = { claude: "CC", codex: "Codex", dsh: "DSH", grok: "GROK", cursor: "Cursor", devin: "Devin", hermes: "Hermes", agy: "AGY", pi: "Pi" };
+const RUNTIME_SHORT: Record<string, string> = { claude: "CC", codex: "Codex", dsh: "DSH", grok: "GROK", cursor: "Cursor", devin: "Devin", hermes: "Hermes", agy: "AGY", pi: "Pi", copilot: "Copilot" };
 
 export function runtimeShort(runtime: string): string {
   return RUNTIME_SHORT[runtime] ?? "CC";

@@ -1,7 +1,7 @@
 
 
 /** The agent runtimes a mark is drawn for (still.fail's RuntimeKind). */
-type RuntimeMarkKind = "claude" | "codex" | "dsh" | "grok" | "cursor" | "devin" | "hermes" | "agy" | "pi";
+type RuntimeMarkKind = "claude" | "codex" | "dsh" | "grok" | "cursor" | "devin" | "hermes" | "agy" | "pi" | "copilot";
 /** A mark stands on its own: no baseline room under it, never squeezed in a row. */
 const BLOCK = { display: "block", flex: "none" } as const;
 
@@ -37,6 +37,11 @@ export function FeishuLogo({ size = 16 }: { size?: number; strokeWidth?: number 
  * lowercase π of our own (apps/mbui's maker_pi.xml) in the text colour.
  */
 export function RuntimeLogo({ runtime, size = 16, className }: { runtime: RuntimeMarkKind; size?: number; className?: string }) {
+  if (runtime === "copilot") return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style={BLOCK} className={className}>
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+    </svg>
+  );
   if (runtime === "hermes") return <svg width={size} height={size} viewBox="0 0 24 24" role="img" aria-label="Hermes Agent"><path fill="none" stroke="currentColor" strokeWidth="2" d="M6 4v16M18 4v16M6 12h12" /></svg>;
   if (runtime === "pi") return (
     <svg width={size} height={size} viewBox="0 0 24 24" aria-label="Pi" role="img" style={BLOCK} className={className}><path fill="currentColor" d="M20.5 4.5H8.2C6.3 4.5 4.9 5.2 3.8 6.6L3 7.7l1.6 1.1.7-.9C6 7.4 6.9 7 8.2 7h12.3zM8.5 6c0 6-.9 9.8-3.3 13.2l2.1 1.4C9.9 16.8 11 12.6 11 6zM15 6v10.3c0 2.6 1.2 4 3.4 4 1 0 1.8-.3 2.5-.9l-.9-1.8c-.4.3-.9.4-1.3.4-.8 0-1.2-.6-1.2-1.9V6z" /></svg>

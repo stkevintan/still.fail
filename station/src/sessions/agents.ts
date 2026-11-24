@@ -24,6 +24,7 @@ import { PiDriver } from "../agents/pi.ts";
 import { AGY_TOOL_BUDGET, AgyDriver, agyRenew } from "../agents/agy.ts";
 import { type RuntimeKind, runtimeKind } from "../agents/runtime.ts";
 import { DevinDriver } from "../agents/devin.ts";
+import { CopilotDriver } from "../agents/copilot.ts";
 import { Jobs, notifyEndpoint, screenEndpoint } from "../jobs/jobs.ts";
 import { liveMemory } from "../jobs/memory.ts";
 import { WorkspaceWatch, workspaceWorking, type WorkspaceReading } from "../jobs/workspace-size.ts";
@@ -331,6 +332,7 @@ export const AgentsLive = (control: Control) =>
           new GrokDriver({ data }),
           new CursorDriver({ data }),
           new DevinDriver({ data }),
+          new CopilotDriver({ data }),
           hermes,
           agy,
           new PiDriver({ data }),
