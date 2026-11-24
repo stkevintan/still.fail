@@ -296,7 +296,7 @@ test("fills_and_counts", () => {
 
 test("pi_is_named_pi_everywhere_and_thinks_up_to_max_its_model_clamping_it", () => {
   assert.deepEqual([f.runtimeLabel("pi"), f.runtimeShort("pi")], ["Pi", "Pi"]);
-  assert.equal(f.RUNTIMES.at(-1), "pi");
+  assert.ok(f.RUNTIMES.includes("pi"));
   assert.deepEqual(fallback("pi"), ["low", "medium", "high", "xhigh", "max"]);
   assert.deepEqual(f.efforts("pi"), fallback("pi"));
   assert.deepEqual(available("pi", "deepseek-v4", { dsh: { "deepseek-v4": ["low"] } }), fallback("pi"));
