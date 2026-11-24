@@ -172,6 +172,7 @@ fn maker_of(maker : String, runtime : String) -> String {
       "hermes" => "hermes"
       "agy" => "agy"
       "pi" => "pi"
+      "copilot" => "github"
       _ => "anthropic"
     }
   }

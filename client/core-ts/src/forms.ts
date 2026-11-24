@@ -876,7 +876,7 @@ const usesTextOf = present.usesText;
 const runtimeName = format.runtimeLabel;
 
 /// The runtimes a station runs only where its overview's `updates` lists them.
-const LISTED = ["dsh", "grok", "cursor", "devin", "hermes", "agy", "pi"];
+const LISTED = ["dsh", "grok", "cursor", "devin", "hermes", "agy", "pi", "copilot"];
 
 /// The runtimes a station can run: Claude Code and Codex on any; DeepSeek Harness, Grok Build, Cursor, Devin, Hermes Agent,
 /// the Antigravity CLI and Pi each on one that lists its version (a station from before it does not, and is not offered it).

@@ -71,7 +71,7 @@ pub fn drawable_vector(name : String) -> @pixels.Vector? {
 let mono_makers : Array[String] = [
   "anthropic", "openai", "kimi", "xai", "mistral", "xiaomi", "ant-ling", "openrouter", "command-code", "open-design",
   "vercel", "cloudflare", "azure", "groq", "together", "fireworks", "cerebras", "huggingface",
-  "nvidia", "baseten", "dsh", "cursor", "devin", "hermes", "pi", "meta", "stepfun", "tencent",
+  "nvidia", "baseten", "dsh", "cursor", "devin", "hermes", "pi", "copilot", "meta", "stepfun", "tencent",
   "meituan",
 ]
 
