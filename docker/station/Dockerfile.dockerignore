@@ -1,0 +1,5 @@
+*
+!vendor
+!station/tools/load
+!station/dist
+!docker/station

@@ -55,3 +55,23 @@ pnpm --filter @stillfail/station build
 
 Add a profile with `runtime: "copilot"` and a Copilot token, then open a chat on it. The session's runtime is
 `copilot`; its transcript is kept under `<profile home>/copilot/sessions`.
+
+## Docker, for a local try
+
+The image runs a **disposable station** with a local test workspace (`station-load setup`), one Copilot profile, and a
+small chat page; it is not enrolled in a still.fail cloud workspace, so it does not appear in the app.
+
+```sh
+# The station's native parts are not in git: take them from an installed still.fail app, or build them.
+mkdir -p docker/station/native
+cp /path/to/stillfail/app/station/mesh.node docker/station/native/
+cp /path/to/stillfail/app/station/stillfail-runner docker/station/native/
+
+docker build -f docker/station/Dockerfile -t stillfail-station-copilot .
+docker run --rm -p 18080:8080 -e COPILOT_GITHUB_TOKEN="$(gh auth token)" stillfail-station-copilot
+# open http://127.0.0.1:18080
+```
+
+The station's log (`docker logs`) should say `runtime=copilot profile=copilot model=gpt-6.2-sol`. The chat page talks to
+the station over its own loopback mesh port through `station-load`; the station's SQLite entries are the transcript.
+`COPILOT_GITHUB_TOKEN` must be a `gho_`, `ghu_` or `github_pat_` token: the image has no `gh` login of its own.

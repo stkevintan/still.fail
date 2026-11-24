@@ -32,3 +32,5 @@ cloud/worker-configuration.d.ts
 
 # still.fail's app built for the browser (apps/mbui/scripts/web-app.sh): mbui's host and the app
 /web/public/mbui/
+
+docker/station/native/
