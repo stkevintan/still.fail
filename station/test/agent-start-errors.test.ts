@@ -217,6 +217,19 @@ test("after a non-update restart, the turn it cut off is ended as aborted and aw
   await r.close();
 });
 
+test("after a non-update restart, an interrupted chat is listed under the title its agent gave it", async () => {
+  const { r, key } = await cutOff();
+  const thread = r.store.latestThread(key)!.thread.id;
+  r.store.setAutoTitle(thread, "字体设置细化方案设计", false);
+  r.hub = r.newHub({ chats: (id) => (id === "cl" ? r.chat : undefined), drivers: [new FakeDriver("claude"), new FakeDriver("codex")], internal: false });
+  await r.hub.takeUp();
+  r.hub.recover();
+  await settle();
+  const interrupted = r.hub.interruptedIn({ workspace: "", home: true });
+  assert.deepEqual(interrupted.items.map((i) => i.title), ["字体设置细化方案设计"]);
+  await r.close();
+});
+
 test("after a non-update restart, single-chat retryFailed resumes with RESUME_AFTER_RESTART and clears interrupted list", async () => {
   const { r, key } = await cutOff();
   const claude = new FakeDriver("claude");

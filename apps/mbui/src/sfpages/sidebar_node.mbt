@@ -596,7 +596,9 @@ fn chats_pane_node(
     // (what comes, goes or goes ahead of others as the list changes while it is watched makes its way, the list's own:
     // RowsMotion says which)
     comes=fn(k) { motion.comes(k) },
-    goes=fn(k) { motion.goes(k) },
+    // (and a part at its top a person's act took away (a restart's card let go of, in a transition): closing its room
+    // as it goes, the rows under it not jumping up into it; one the data took away goes at once, outside a transition)
+    goes=fn(k) { motion.goes(k) || k.has_prefix("part/") },
     reorders=fn(k) { motion.moves(k) },
     // scrolled to within a screen of its foot while the core has more of its rows: its window a step more, the rows
     // added coming into the list it holds. A screen, not a screen and a half: its first window is what its room shows
@@ -921,7 +923,8 @@ fn day_keys(days : Array[ChatDay]) -> Array[String] {
 
 ///|
 /// Whether line `key` is one of its days' (a heading or a row): what comes, goes or moves by data; the rest of the
-/// list's lines (its room, the search, what the frame puts in it, its states) there and gone at once, as they were.
+/// list's lines (its room, the search, what the frame puts in it, its states) there and gone at once, as they were,
+/// but for a part the frame puts in it going by a person's act (the list's `goes`).
 fn day_line(key : String) -> Bool {
   key.has_prefix("r/") || key.has_prefix("h/")
 }

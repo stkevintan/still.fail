@@ -233,7 +233,9 @@ fn restart_interrupted_card_node(
     let shown = shown_chats().length()
     if cur.count > shown { cur.count - shown } else { 0 }
   }
-  parent.show(at_once=true, fn() { !@sfbase.restart_interrupted_gone.contains(station) }, fn(room) {
+  // (taken away by its part's key leaving the list (restart_interrupted_parts), drawn as it goes: emptied here at
+  // once, its key would go with nothing left to draw and the rows under it jump up)
+  parent.box(fn(room) {
     @sf.style_node(room, fn() { restart_card_room.then(@ui.style(px=@sf.room_of(@sf.theme().chat_list.band_in))) })
     room.box(fn(k) {
       @sf.style_node(k, fn() { restart_card_surface })
@@ -334,7 +336,8 @@ fn restart_interrupted_card_node(
         })
         foot.wraps(By(fn() { Some(@sf.ask_foot_lines()) }), reverse=true) |> ignore
         @sf.button_node(foot, fn() { @sf.t("web-main.restartInterrupted.resumeAll") }, fn() {
-          @sfbase.restart_interrupted_gone[station] = true
+          // (a person's act: the card leaves by its way, the rows under it closing up after it)
+          @view.transition(fn() { @sfbase.restart_interrupted_gone[station] = true })
           @sfbase.act(
             src,
             @sf.t("web-main.restartInterrupted.resumeAll"),
@@ -346,7 +349,7 @@ fn restart_interrupted_card_node(
         }, tone=Primary)
         |> ignore
         @sf.button_node(foot, fn() { @sf.t("web-main.restartInterrupted.dismiss") }, fn() {
-          @sfbase.restart_interrupted_gone[station] = true
+          @view.transition(fn() { @sfbase.restart_interrupted_gone[station] = true })
           @sfbase.act(
             src,
             @sf.t("web-main.restartInterrupted.dismiss"),
@@ -362,6 +365,7 @@ fn restart_interrupted_card_node(
     })
     |> ignore
   })
+  |> ignore
 }
 
 ///|

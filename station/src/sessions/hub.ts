@@ -35,6 +35,7 @@ import { type UpkeepState, readUpkeepState as defaultReadUpkeepState } from "../
 import { tr, stationLang } from "../ops/i18n.ts";
 import { iso, sessionPlaces } from "../read/transcript.ts";
 import type { ReaderSelectConfig } from "../read/reader-select.ts";
+import * as titles from "../../../client/core-ts/src/titles.ts";
 import { transcriptSourcesSoon } from "../read/transcript-soon.ts";
 import { type ArchivedWorkspace, type Attachment, MANUAL, type SessionRow, type Store, STILLFAIL_SURFACE, feishuSurface, commaSurface, groupSurface, slackSurface, type MessageRow, type ThreadRow, type ThreadSummary } from "../store/store.ts";
 import type { DeliveryCardState, InWorkspace, PendingMessage } from "../store/rows.ts";
@@ -1244,8 +1245,11 @@ export class Hub {
     return {
       count: rows.length,
       items: rows.slice(0, 20).map((row) => {
-        const latest = this.store.latestThread(row.key);
-        return { key: row.key, thread: latest?.thread.id ?? null, title: row.title || latest?.thread.title || "" };
+        // Named by the chat list's rule (client/core-ts/src/titles.ts chatTitle: a chat its agent named has only
+        // `auto_title`), with no words of the station's: "" where it has no name, said by the device in its own language.
+        const chat = this.store.sessionChat(row.key);
+        const title = (chat ? titles.chatTitle(chat.thread, chat.firstText, null, { untitled: "", directMessage: "" }) : "") || (row.title ?? "");
+        return { key: row.key, thread: chat?.thread.id ?? null, title };
       }),
     };
   }
