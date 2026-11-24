@@ -1,0 +1,161 @@
+# A downloadable Linux station bundle for the Copilot runtime. It is a test artifact, not a release: the native parts
+# and the source build are put together here so a person can download it from the run.
+name: copilot artifact
+on:
+  workflow_dispatch:
+  push:
+    branches: ["copilot-runtime"]
+    paths:
+      - "station/**"
+      - "docker/station/**"
+      - "client/**"
+      - "web/**"
+      - "apps/mbui/**"
+      - ".github/workflows/copilot-artifact.yml"
+permissions:
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: corepack enable && corepack prepare pnpm@10.33.0 --activate
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install the station's dependencies
+        working-directory: station
+        run: pnpm install --frozen-lockfile
+      - name: Build the station
+        working-directory: station
+        run: pnpm build
+      - name: Build the mesh addon
+        working-directory: station/native/mesh
+        run: cargo build --release --locked
+      - name: Fetch the runner
+        run: printf 'RUNNER=%s\n' "$(node scripts/native.ts file runner | tail -1)" >> "$GITHUB_ENV"
+      - name: Build station-load
+        working-directory: station/tools/load
+        run: cargo build --release --locked
+      - name: Put the bundle together
+        run: |
+          set -eu
+          out=artifact/stillfail-copilot
+          mkdir -p "$out/app" "$out/bin"
+          cp -R station/dist "$out/app/station"
+          cp station/native/mesh/target/release/libstillfail_mesh.so "$out/app/station/mesh.node"
+          cp "$RUNNER" "$out/app/station/stillfail-runner"
+          cp -a station/node_modules "$out/app/station/node_modules"
+          cp docker/station/run.sh "$out/run.sh"
+          cp docker/station/init.mjs "$out/init.mjs"
+          cp docker/station/gateway.mjs "$out/gateway.mjs"
+          cp station/tools/load/target/release/station-load "$out/bin/station-load"
+          chmod +x "$out/run.sh" "$out/bin/station-load" "$out/app/station/mesh.node" "$out/app/station/stillfail-runner"
+          cat > "$out/README.md" <<'MD'
+          # still.fail · GitHub Copilot (test bundle)
+
+          ```sh
+          export COPILOT_GITHUB_TOKEN=$(gh auth token)
+          ./run.sh            # station on 8899, chat on http://127.0.0.1:8080
+          ```
+
+          This is a disposable local test workspace (`station-load setup`), not a workspace-enrolled station.
+          `COPILOT_GITHUB_TOKEN` must be a `gho_`, `ghu_` or `github_pat_` token.
+          MD
+          tar -czf artifact/stillfail-copilot-linux-x64.tar.gz -C artifact stillfail-copilot
+          git diff origin/main...HEAD > artifact/copilot-runtime.patch || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stillfail-copilot-linux-x64
+          path: |
+            artifact/stillfail-copilot-linux-x64.tar.gz
+            artifact/copilot-runtime.patch
+          if-no-files-found: error
+          retention-days: 14
+
+
+  core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: corepack enable && corepack prepare pnpm@10.33.0 --activate
+      - name: Install the client core
+        working-directory: client/core-ts
+        run: pnpm install --frozen-lockfile
+      - name: Build the Hermes bytecode
+        working-directory: apps/mbui
+        run: scripts/core.sh hermes
+      - uses: actions/upload-artifact@v4
+        with:
+          name: copilot-core-hbc
+          path: apps/mbui/out/core/core.hbc
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    needs: core
+    runs-on: windows-2022
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: corepack enable && corepack prepare pnpm@10.33.0 --activate
+      - uses: ./.github/actions/msvc
+      - name: Install MoonBit
+        shell: pwsh
+        run: |
+          $env:MOON_HOME = "C:\moon"
+          irm https://cli.moonbitlang.com/install/powershell.ps1 | iex
+          "C:\moon\bin" | Out-File -Append $env:GITHUB_PATH
+          "MOON_HOME=C:\moon" | Out-File -Append $env:GITHUB_ENV
+      - run: moon version --all
+      - name: Fetch the Windows shell and engine
+        run: |
+          node scripts/native.ts fetch shell win32-x64
+          node scripts/native.ts fetch engine win32-x64
+      - name: Install the client core
+        working-directory: client/core-ts
+        run: pnpm install --frozen-lockfile --prefer-offline
+      - uses: actions/download-artifact@v4
+        with:
+          name: copilot-core-hbc
+          path: apps/mbui/out/core
+      - uses: actions/cache@v4
+        with:
+          path: |
+            apps/mbui/mbui/_build
+            apps/mbui/out
+            .ci/hbc
+            .ci/mbc-store
+          key: copilot-win-${{ hashFiles('apps/mbui/**', 'client/core-ts/**') }}
+          restore-keys: copilot-win-
+      - name: Rebuild mbc from the patched source
+        run: rm -rf apps/mbui/mbui/tools/_build
+      - name: Build the Windows app and its installer
+        working-directory: apps/mbui
+        env:
+          MBUI_FRESH: "1"
+          MBUI_WIN_CORE: "0"
+          MBC_SPLIT: "0"
+          MBC_STORE: ${{ github.workspace }}/.ci/mbc-store
+          HBC_CACHE: ${{ github.workspace }}/.ci/hbc
+        run: |
+          bash -x scripts/win.sh build 2>&1 | tee winbuild.log
+          scripts/win.sh setup
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stillfail-copilot-windows
+          path: apps/mbui/out/setup/*.exe
+          if-no-files-found: error
+          retention-days: 14
