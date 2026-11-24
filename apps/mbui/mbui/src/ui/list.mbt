@@ -181,7 +181,7 @@ pub fn Ctx::list_rest(self : Ctx, key : String) -> Double {
     Some(st) => {
       // (where its own motions have it at the frame's time, what that leaves to come: read so)
       self.list_step(st)
-      st.rest_at(self.clock, self.frame_no)
+      Moving::rest_at(st, self.clock, self.frame_no)
     }
     None => -1.0
   }
@@ -544,7 +544,7 @@ pub fn Ctx::list(
   // is its layout's to work out: Ctx::place_list)
   let back = st.built >= 0 && st.built < self.frame_no - 1
   st.built = self.frame_no
-  if back && st.rest_at(self.clock, self.frame_no) > self.clock {
+  if back && Moving::rest_at(st, self.clock, self.frame_no) > self.clock {
     self.moving(st.ease_mover, st as &Moving, what="a list's wheel ease, glide and scroll bar")
   }
   // with `glide_on_growth`, rows come at the end while it is at its end: it glides after them from where it was
@@ -671,7 +671,7 @@ fn Ctx::place_list(
   // so that what is laid out again as they go is its layout, nothing built for them (frame_watch.mbt's layout watch)
   st.hand_said.get() |> ignore
   self.list_step(st)
-  self.shows_motion(st.ease_mover, st.rest_at(self.clock, self.frame_no) > self.clock)
+  self.shows_motion(st.ease_mover, Moving::rest_at(st, self.clock, self.frame_no) > self.clock)
   self.shows_motion(st.sizes_mover, st.sizes_rest() > self.clock)
   // laid out again in the same frame (built again from what its layout read: readback.mbt), from where it stood as
   // the frame's first layout of it began, unless something moved it since its last: a row laid there for the first

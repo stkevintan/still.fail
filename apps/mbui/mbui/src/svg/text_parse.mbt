@@ -30,10 +30,10 @@ priv struct SFont {
 fn SFont::key(self : SFont) -> String {
   let sb = StringBuilder::new()
   for f in self.families {
-    sb.write_string(f.to_string())
+    sb.write_string(Show::to_string(f))
     sb.write_char('|')
   }
-  sb.write_string(self.style.to_string())
+  sb.write_string(Show::to_string(self.style))
   sb.write_string("|" + self.stretch.to_string() + "|" + self.weight.to_string())
   for v in self.variations {
     sb.write_string("|" + v.0 + "=" + v.1.to_string())

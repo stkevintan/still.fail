@@ -183,7 +183,7 @@ test "the answer coming in does not end its own motion: float, spit and return e
     t.frame()
     match em.current {
       Some(turn) => {
-        let k = turn.pose.to_string()
+        let k = Show::to_string(turn.pose)
         frames[k] = frames.get(k).unwrap_or(0) + 1
         // the flying copy is drawn in every pose after the fold (emit_flyer)
         if turn.pose != Fold {

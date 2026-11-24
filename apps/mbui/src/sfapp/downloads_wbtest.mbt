@@ -306,7 +306,7 @@ test "downloads: on a phone a picture or a film is kept in the photo album, said
     t.frame()
     t.frame()
     t.frame()
-    assert_eq(t.kept_ways().map(fn(k) { (k.0, k.1.to_string()) }), [(name, way)])
+    assert_eq(t.kept_ways().map(fn(k) { (k.0, Show::to_string(k.1)) }), [(name, way)])
     assert_true(t.find(said) is Some(_), msg="\{case}: \{t.words().map(fn(w) { w.0 }).join("|")}")
   }
 }

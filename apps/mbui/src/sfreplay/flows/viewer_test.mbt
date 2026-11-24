@@ -57,7 +57,7 @@ test "96-viewer" {
     let kept = f.t.kept().filter(fn(k) { k.0.has_prefix("e2e-photo-标注-") && k.0.has_suffix(".png") })
     f.check(kept.length() == 1, "kept: \{f.t.kept().map(fn(k) { k.0 })}")
     f.check(
-      f.t.kept_ways().iter().any(fn(k) { k.0.has_prefix("e2e-photo-标注-") && k.1.to_string() == "Photos" }),
+      f.t.kept_ways().iter().any(fn(k) { k.0.has_prefix("e2e-photo-标注-") && Show::to_string(k.1) == "Photos" }),
       "kept: \{f.t.kept_ways()}",
     )
     f.check(f.t.marks_drawn().length() >= 1, "no marks drawn onto the picture")

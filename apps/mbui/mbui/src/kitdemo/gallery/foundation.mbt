@@ -30,7 +30,7 @@ fn foundation(c : @ui.Ctx) -> Unit {
   section(c, "Button", fn() {
     line(c, fn() {
       for v in [@kit.Solid, Soft, Outline, Ghost, Danger] {
-        @kit.button(c, v.to_string(), variant=v) |> ignore
+        @kit.button(c, Show::to_string(v), variant=v) |> ignore
       }
     })
     line(c, fn() {
@@ -58,7 +58,7 @@ fn foundation(c : @ui.Ctx) -> Unit {
     for d in [@ui.Ltr, Rtl] {
       c.with_direction(d, fn() {
         c.box(dir=Row, gap=6.0, pl=12.0, bg=t.faint, radius=8.0, pady=6.0, fn() {
-          c.text(d.to_string(), size=t.font_sm, weight=600, wrap=false) |> ignore
+          c.text(Show::to_string(d), size=t.font_sm, weight=600, wrap=false) |> ignore
           for k in ["one", "two", "three"] {
             c.box(padx=8.0, pady=2.0, bg=t.surface, radius=6.0, fn() {
               c.text(k, size=t.font_sm, wrap=false) |> ignore

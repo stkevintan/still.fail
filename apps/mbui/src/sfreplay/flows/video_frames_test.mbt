@@ -47,7 +47,7 @@ test "97-video-frames" {
     let kept = f.t.kept().filter(fn(k) { k.0.has_prefix("e2e-clip-") && k.0.has_suffix(".png") })
     f.check(kept.length() == 1, "kept: \{f.t.kept().map(fn(k) { k.0 })}")
     f.check(
-      f.t.kept_ways().iter().any(fn(k) { k.0.has_prefix("e2e-clip-") && k.1.to_string() == "Photos" }),
+      f.t.kept_ways().iter().any(fn(k) { k.0.has_prefix("e2e-clip-") && Show::to_string(k.1) == "Photos" }),
       "kept: \{f.t.kept_ways()}",
     )
     if kept.length() == 1 {

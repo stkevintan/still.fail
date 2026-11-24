@@ -543,7 +543,7 @@ pub fn Ctx::semantics_dump(self : Ctx) -> String {
 /// A node in a line: its role, its label quoted, its state.
 pub fn SemNode::describe(self : SemNode) -> String {
   let sb = StringBuilder()
-  sb.write_string(self.role.to_string())
+  sb.write_string(Show::to_string(self.role))
   if self.label != "" {
     sb.write_string(" \{self.label.escape()}")
   }

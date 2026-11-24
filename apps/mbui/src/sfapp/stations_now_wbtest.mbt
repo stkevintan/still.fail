@@ -163,7 +163,7 @@ test "the card to share on a phone: the picture as wide as its sheet lets it, no
   assert_true(t.query(Button, label="复制图片") is None)
   t.click(Button, label="保存到相册")
   t.run_for(@kit.presence_in_ms)
-  assert_eq(t.kept_ways().map(fn(k) { (k.0, k.1.to_string()) }), [("still.fail.png", "Photos")])
+  assert_eq(t.kept_ways().map(fn(k) { (k.0, Show::to_string(k.1)) }), [("still.fail.png", "Photos")])
   match png_size(t.kept()[0].2) {
     Some((pw, ph)) => assert_true(pw == 1080 && ph > 900, msg="\{(pw, ph)}")
     None => fail("not a PNG")

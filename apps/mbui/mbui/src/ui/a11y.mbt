@@ -62,7 +62,7 @@ pub fn Ctx::a11y_lines(self : Ctx) -> String {
       n.to_string(),
       parent.to_string(),
       s.id.to_string(),
-      s.role.to_string(),
+      Show::to_string(s.role),
       a11y_flags(s),
       a11y_length(x * z),
       a11y_length(y * z),
