@@ -311,7 +311,7 @@ export class Updates {
   private nodeVersion: Promise<string> | null = null;
   /// The asks of `stillfail-station channel` answered one after another (two SIGHUPs never interleave).
   private answering: Promise<void> = Promise.resolve();
-  private items: Record<Kind, Item> = { station: empty(), claude: empty(), codex: empty(), dsh: empty(), grok: empty(), cursor: empty(), devin: empty(), hermes: empty(), agy: empty(), pi: empty(), copilot: empty() };
+  private items: Record<Kind, Item> = { station: empty(), claude: empty(), codex: empty(), dsh: empty(), grok: empty(), cursor: empty(), devin: empty(), hermes: empty(), agy: empty(), pi: empty(), copilot: { ...empty(), installed: true } };
   private checkedAt: number | null = null;
   private checking: Promise<void> | null = null;
   /// The reading asked for while one went on, after it (`check`).
