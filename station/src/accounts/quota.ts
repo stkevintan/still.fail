@@ -366,7 +366,10 @@ async function copilotQuota(profile: Profile, lang: Lang): Promise<ProfileQuota>
   if (left === null) return quota("unsupported", [], null);
   const date = typeof body.quota_reset_date === "string" ? Date.parse(`${body.quota_reset_date}T23:59:59Z`) : NaN;
   const q = quota("ok", [{ label: tr(lang, "station.quota.copilotPremium"), usedPercent: 100 - left, resetsAt: Number.isFinite(date) ? date : null }], null);
-  if (typeof body.copilot_plan === "string" && body.copilot_plan !== "") q.plan = body.copilot_plan;
+  if (typeof body.copilot_plan === "string" && body.copilot_plan !== "") {
+    const names: Record<string, string> = { individual_max: "Copilot Max", individual_pro: "Copilot Pro", business: "Copilot Business", enterprise: "Copilot Enterprise" };
+    q.plan = names[body.copilot_plan] ?? body.copilot_plan;
+  }
   const remaining = typeof snap.quota_remaining === "number" ? snap.quota_remaining : typeof snap.remaining === "number" ? snap.remaining : null;
   const entitlement = typeof snap.entitlement === "number" ? snap.entitlement : typeof snap.overage_entitlement === "number" ? snap.overage_entitlement : null;
   if (remaining !== null) q.credits = { hasCredits: true, unlimited: snap.unlimited === true, balance: entitlement !== null ? `${remaining} / ${entitlement}` : String(remaining) };
