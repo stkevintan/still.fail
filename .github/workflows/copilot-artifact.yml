@@ -152,6 +152,9 @@ jobs:
           HBC_CACHE: ${{ github.workspace }}/.ci/hbc
         run: |
           bash -x scripts/win.sh build 2>&1 | tee winbuild.log
+          core=$(find apps/mbui/out libs/ui/out -name core.hbc 2>/dev/null | head -1)
+          dest=$(find libs/ui/out/win/app -type d -path '*/stillfail/stillfail' 2>/dev/null | head -1)
+          [ -n "$core" ] && [ -n "$dest" ] && cp "$core" "$dest/core.hbc"
           scripts/win.sh setup
       - uses: actions/upload-artifact@v4
         with:
