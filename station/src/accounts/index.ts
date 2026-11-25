@@ -149,6 +149,8 @@ export type AccountsDeps = {
   hermes?: () => { models(profile: Profile): Promise<string[]> } | undefined;
   /// The Antigravity CLI says whether it is signed in, and the models it offers, in ACP session/new (no model turn).
   agy?: () => { models(profile: Profile): Promise<string[]>; catalog?(profile: Profile): Promise<AgyCatalog> } | undefined;
+  /// Copilot's SDK lists every model its GitHub account may use (agents/copilot.ts).
+  copilot?: () => { models(profile: Profile): Promise<string[]> } | undefined;
   /// Whether someone follows the events or a turn runs (allowances are asked again on a round only then).
   following?: () => boolean;
   /// The station's environment (where the machine's logins are, and the CLIs found); process.env by default.
@@ -958,6 +960,7 @@ export class Accounts {
     if (kind === "opencode-go") return this.logins.startConsole({ id, home: profile.home }, lang);
     if (kimi) return this.logins.startKimi({ id, home: profile.home }, lang);
     if (profile.runtime === "cursor") return this.logins.startCursor({ id, home: profile.home }, lang);
+    if (profile.runtime === "copilot") return this.logins.startCopilot({ id, home: profile.home }, lang);
     let email: string | null = null;
     // A company's Google account signs in again the way it did (as it was made, or as its sign-in's file says).
     if (profile.runtime === "agy") {
@@ -1008,7 +1011,7 @@ export class Accounts {
     if (!runtime) throw new Refusal(400, `unknown runtime ${text(input.runtime)}`);
     this.pending.set(id, { runtime, home, by: viewer, created: null, error: null });
     log.info("accounts", "sign-in for a new profile started", { login: id, runtime, by: viewer.email });
-    const job = runtime === "cursor" ? await this.logins.startCursor({ id, home }, lang) : await this.logins.start({ id, runtime, home }, lang);
+    const job = runtime === "cursor" ? await this.logins.startCursor({ id, home }, lang) : runtime === "copilot" ? await this.logins.startCopilot({ id, home }, lang) : await this.logins.start({ id, runtime, home }, lang);
     return { id, job };
   }
 
@@ -1583,6 +1586,18 @@ export class Accounts {
     }
     // (One signed out of its Google account is said so by its check: no session asked; a subscription whose keychain
     // sign-in was revoked or removed is found signed out here, while an already-failed key check keeps its refusal.)
+    if (profile.runtime === "copilot" && this.deps.copilot?.()) {
+      try {
+        check.models = await this.deps.copilot()!.models(profile);
+        check.state = check.models.length > 0 ? "ok" : "login";
+        check.detail = check.models.length > 0 ? tr(lang, "station.profile.works", { n: check.models.length }) : tr(lang, "station.profile.signedOut");
+      } catch (e) {
+        check.models = this.checks.get(id)?.models ?? null;
+        check.state = "login";
+        check.detail = tr(lang, "station.profile.signedOut");
+        log.warn("accounts", "could not list Copilot models", { profile: id, error: (e as Error).message });
+      }
+    }
     if (profile.runtime === "agy" && (check.state === "ok" || check.state === "unknown") && this.deps.agy?.()) {
       try {
         const agy = this.deps.agy()!;

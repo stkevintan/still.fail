@@ -39,13 +39,13 @@ function account(p: J): string | null {
 /// The kinds of account the list is grouped by, in their order: a vendor's subscription (Claude's, ChatGPT's, SuperGrok's,
 /// Kimi Code's, OpenCode Go's, Cursor's, Devin's, a Google account's), then keys and service accounts. A profile signed in to an account rather than
 /// given a key (`access.login`: Kimi Code's, OpenCode Go's) is its vendor's subscription.
-export const GROUPS = ["claude", "chatgpt", "grok", "kimi", "opencode", "cursor", "devin", "agy", "key", "service"] as const;
+export const GROUPS = ["claude", "chatgpt", "grok", "kimi", "opencode", "cursor", "devin", "copilot", "agy", "key", "service"] as const;
 
 export function group(p: J): (typeof GROUPS)[number] {
   if (p.access?.kind === "service") return (p.access?.service ?? p.service) === "colab" ? "agy" : "service";
   if (p.access?.login === true) return p.access?.provider === "kimi-code" ? "kimi" : "opencode";
   if (p.access?.kind !== "subscription") return "key";
-  return p.runtime === "codex" ? "chatgpt" : p.runtime === "grok" ? "grok" : p.runtime === "cursor" ? "cursor" : p.runtime === "devin" ? "devin" : p.runtime === "agy" ? "agy" : "claude";
+  return p.runtime === "codex" ? "chatgpt" : p.runtime === "grok" ? "grok" : p.runtime === "cursor" ? "cursor" : p.runtime === "devin" ? "devin" : p.runtime === "copilot" ? "copilot" : p.runtime === "agy" ? "agy" : "claude";
 }
 
 /// A kind of account in words: Claude 订阅.

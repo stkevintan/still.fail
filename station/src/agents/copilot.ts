@@ -12,7 +12,9 @@
 //
 // The bridge is a separate file because the SDK's runtime is a child process of its own and its package is not bundled
 // into main.js; the station's build copies copilot-bridge.mjs beside main.js. See docs/copilot.md.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { peerHttpBase } from "../tools/http.ts";
@@ -20,6 +22,8 @@ import { AcpDriver, AcpSession, KeptTranscript, type AcpStart } from "./acp.ts";
 import type { Events } from "./own-process.ts";
 import { expandRoute, profileEnv, profileModel } from "./profiles.ts";
 import { cleanEnv, failureOf, uuid, type FailureReason, type OpenOptions } from "./runtime.ts";
+
+const run = promisify(execFile);
 
 type Json = any;
 
@@ -53,6 +57,11 @@ export function copilotToken(profile: OpenOptions["profile"]): string | undefine
   if (key !== "" && key !== "none" && /^(gho_|ghu_|github_pat_)/.test(key)) return key;
   const env = (profile.env as Record<string, unknown> | undefined)?.COPILOT_GITHUB_TOKEN;
   if (typeof env === "string" && env.trim() !== "") return env.trim();
+  // The token a sign-in kept (accounts/copilot.ts): a gho_/ghu_ token from GitHub's device grant.
+  try {
+    const kept = readFileSync(join(copilotHome(profile.home), "github-token"), "utf8").trim();
+    if (kept !== "") return kept;
+  } catch {}
   return undefined;
 }
 
@@ -66,6 +75,21 @@ export class CopilotDriver extends AcpDriver<CopilotSession> {
 
   runtime(): "copilot" {
     return "copilot";
+  }
+
+  /// Every model this GitHub account may use, as the SDK lists them (`copilot-bridge.mjs --models`): the profile's
+  /// check offers these, and a chat may pick any of them.
+  async models(profile: OpenOptions["profile"]): Promise<string[]> {
+    const home = copilotHome(profile.home);
+    mkdirSync(home, { recursive: true });
+    const env: Record<string, string> = { ...cleanEnv(SCRUBBED), COPILOT_HOME: home };
+    const token = copilotToken(profile);
+    if (token !== undefined) env.COPILOT_GITHUB_TOKEN = token;
+    const { stdout } = await run(process.execPath, [BRIDGE, "--models"], { env, maxBuffer: 4 * 1024 * 1024 });
+    const line = stdout.split("\n").map((l) => l.trim()).find((l) => l.startsWith("["));
+    if (line === undefined) return [];
+    const models = JSON.parse(line) as unknown;
+    return Array.isArray(models) ? models.filter((m): m is string => typeof m === "string" && m !== "") : [];
   }
 
   protected session(options: OpenOptions, events: Events): CopilotSession {

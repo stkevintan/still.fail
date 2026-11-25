@@ -38,7 +38,10 @@
   "core-views.admin.feedback.new": "New",
   "core-views.admin.feedback.replied": "Awaiting you",
   "core-views.admin.feedback.replies": "Replies",
-  "core-views.admin.feedback.reply_count": {"one": "1 reply", "other": "{n} replies"},
+  "core-views.admin.feedback.reply_count": {
+    "one": "1 reply",
+    "other": "{n} replies"
+  },
   "core-views.admin.feedback.reply_hint": "Your reply shows in the chat this report came from, to its people. It is never sent to the station or its agents.",
   "core-views.admin.feedback.reporter_side": "Reporter",
   "core-views.admin.feedback.team": "Team",
@@ -113,7 +116,10 @@
     "other": "{n} new reports"
   },
   "core-views.admin.todo.fresh_hint": "Unread bug reports",
-  "core-views.admin.todo.replied": {"one": "1 report awaits you", "other": "{n} reports await you"},
+  "core-views.admin.todo.replied": {
+    "one": "1 report awaits you",
+    "other": "{n} reports await you"
+  },
   "core-views.admin.todo.replied_hint": "The reporter answered: your turn",
   "core-views.admin.todo.outdated": {
     "one": "1 station out of date",
@@ -987,7 +993,10 @@
   "core-views.copies.retire.sent": "{done} of {total}",
   "core-views.copies.retire.waiting": "Waiting for confirmation",
   "core-views.copies.retire.resumed": "{why}; the chats are working again",
-  "core-views.copies.retire.left": {"one": "1 account wasn't moved", "other": "{n} accounts weren't moved"},
+  "core-views.copies.retire.left": {
+    "one": "1 account wasn't moved",
+    "other": "{n} accounts weren't moved"
+  },
   "core-views.copies.retire.leftNote": "{names}: add them again on {name}",
   "core-views.copies.taking.coming": "Receiving the chats",
   "core-views.copies.taking.placing": "Putting the chats in",
@@ -1026,14 +1035,31 @@
   "core-views.move.why.stable": "Stable release: turn on Beta under its Software",
   "core-views.move.why.off": "Moving is off in its config.json (move: false): remove that first",
   "core-views.move.all.title": "Move everything to {name}",
-  "core-views.move.all.text": {"one": "1 item", "other": "{n} items"},
-  "core-views.move.all.cannot": {"one": "1 can't move", "other": "{n} can't move"},
+  "core-views.move.all.text": {
+    "one": "1 item",
+    "other": "{n} items"
+  },
+  "core-views.move.all.cannot": {
+    "one": "1 can't move",
+    "other": "{n} can't move"
+  },
   "core-views.move.back.title": "Move everything back from {name}",
-  "core-views.move.back.text": {"one": "1 item", "other": "{n} items"},
+  "core-views.move.back.text": {
+    "one": "1 item",
+    "other": "{n} items"
+  },
   "core-views.move.summary.title": "Moving",
   "core-views.move.summary.to": "Moving to {name}",
   "core-views.move.summary.moving": "Moving · {module} “{label}”",
-  "core-views.move.summary.stopped": {"one": "1 stopped", "other": "{n} stopped"},
-  "core-views.move.summary.failed": {"one": "1 failed", "other": "{n} failed"},
-  "core-views.group": "Group"
+  "core-views.move.summary.stopped": {
+    "one": "1 stopped",
+    "other": "{n} stopped"
+  },
+  "core-views.move.summary.failed": {
+    "one": "1 failed",
+    "other": "{n} failed"
+  },
+  "core-views.group": "Group",
+  "core-views.flow.plan_hint.copilot": "GitHub Copilot subscription. Sign in once with a device code.",
+  "core-views.profiles.group.copilot": "GitHub Copilot"
 }

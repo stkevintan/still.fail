@@ -886,5 +886,8 @@
   "station.group.longName": "A member's name is {most} characters at most",
   "station.speed.invalid": "Choose Standard, Fast or Ultrafast on a runtime that supports speed settings.",
   "station.speed.ultrafast_unavailable": "To use Ultrafast, choose a supported Codex model and an eligible ChatGPT subscription, or choose Standard or Fast.",
-  "station.updates.overrideAutoRefused": "Auto-update cannot be enabled while running a local override; set wait conditions or restore the official release first"
+  "station.updates.overrideAutoRefused": "Auto-update cannot be enabled while running a local override; set wait conditions or restore the official release first",
+  "station.login.copilotFailed": "Couldn't sign in to GitHub Copilot: {error}",
+  "station.login.copilotExpired": "The code has expired; sign in again",
+  "station.login.copilotDenied": "Authorization was denied"
 }

@@ -14,9 +14,24 @@ import { readFileSync } from 'node:fs'
 import { CopilotClient, RuntimeConnection, approveAll } from '@microsoft/copilot-sdk'
 
 const HOME = process.env.COPILOT_HOME ?? join(homedir(), '.copilot-stillfail-demo')
-const token = process.env.COPILOT_GITHUB_TOKEN || execFileSync('gh', ['auth', 'token'], { encoding: 'utf8' }).trim()
+const token = process.env.COPILOT_GITHUB_TOKEN || (() => { try { return execFileSync('gh', ['auth', 'token'], { encoding: 'utf8' }).trim() } catch { return '' } })()
 const instructionsFile = process.env.COPILOT_INSTRUCTIONS
 const instructions = instructionsFile === undefined ? '' : readFileSync(instructionsFile, 'utf8')
+
+if (process.argv.includes('--models')) {
+  // The station's check asks for every model this account may use; no session, no tools.
+  const client = new CopilotClient({
+    mode: 'empty',
+    runtime: RuntimeConnection.forSpawnedStdio({ baseDirectory: HOME }),
+    github: { useLoggedInUser: false, token },
+    clientInfo: { applicationName: 'stillfail-copilot', applicationVersion: '0.1.0' },
+  })
+  await client.start()
+  const models = await client.listModels()
+  process.stdout.write(`${JSON.stringify(models.map((m) => m.id))}\n`)
+  await client.stop()
+  process.exit(0)
+}
 
 let client = null
 let session = null

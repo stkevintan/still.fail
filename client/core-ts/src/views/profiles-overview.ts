@@ -408,7 +408,7 @@ function poolSpecs(items: J[], now: number): PoolRows[] {
     const [long, short] = geminiOf(i);
     return slot(i, h(i), now, "gemini", long, short);
   }) });
-  for (const [group, title] of [["grok", "SuperGrok"], ["kimi", "Kimi Code"], ["opencode", "OpenCode Go"], ["cursor", "Cursor"], ["devin", "Devin"]] as const) {
+  for (const [group, title] of [["grok", "SuperGrok"], ["kimi", "Kimi Code"], ["opencode", "OpenCode Go"], ["cursor", "Cursor"], ["devin", "Devin"], ["copilot", "GitHub Copilot"]] as const) {
     const mine = items.filter((i) => groupOf(i) === group);
     specs.push({ title, items: mine, slots: (h) => mine.map((i) => {
       const [long, short] = main(i);

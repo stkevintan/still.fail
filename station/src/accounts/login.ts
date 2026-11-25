@@ -40,6 +40,7 @@ import { fileCredentialsSoon } from "../agents/no-keychain.ts";
 import { CONSOLE, type ConsoleLogin, type Device, type DeviceAnswer, deviceToken, startDevice, type Token, whoIs, writeConsole } from "./console.ts";
 import { KIMI_AUTH, kimiDeviceToken, newDeviceId, readKimi, startKimiDevice, writeKimi } from "./kimi.ts";
 import { CURSOR, type CursorUrls, cursorHandshake, mintCursorKey, pollCursor, writeCursor } from "./cursor.ts";
+import { copilotDeviceToken, startCopilotDevice, writeCopilotToken } from "./copilot.ts";
 import { cleanEnv } from "../agents/runtime.ts";
 import { devinData } from "../agents/devin.ts";
 import { AGY_FILE_TOKENS, agyToken, agyTokenIn, agyTokenReady, noteAgyEmail } from "../agents/agy.ts";
@@ -63,7 +64,7 @@ export type LoginJob = {
   service?: string;
   /// Signing in to OpenCode (an OpenCode Go profile) or Kimi (a Kimi Code profile) rather than the runtime's
   /// subscription (absent: the runtime's).
-  provider?: "opencode" | "kimi";
+  provider?: "opencode" | "kimi" | "copilot";
   state: LoginState;
   url: string | null;
   userCode: string | null;
@@ -466,6 +467,16 @@ export class LoginManager {
 
   /// Starts signing a Kimi Code profile in to the person's Kimi account the same way (kimi.ts), for a device of its own:
   /// the one it signed in on before where it has one (Kimi renews a token only for the device it was given to).
+  /// Starts signing a Copilot profile in to GitHub (the Copilot CLI's OAuth app): a code for
+  /// github.com/login/device, then the token the profile keeps for its SDK sessions.
+  startCopilot(profile: { id: string; home: string }, lang: Lang = stationLang()): Promise<LoginJob> {
+    return this.deviceSignIn(profile, "copilot", lang, {
+      start: () => startCopilotDevice(),
+      ask: (code) => copilotDeviceToken(code),
+      keep: async (token) => () => writeCopilotToken(profile.home, token.access),
+    });
+  }
+
   async startKimi(profile: { id: string; home: string }, lang: Lang = stationLang()): Promise<LoginJob> {
     const deviceId = (await readKimi(profile.home))?.deviceId ?? newDeviceId();
     return this.deviceSignIn(profile, "kimi", lang, {
@@ -479,14 +490,16 @@ export class LoginManager {
   /// until it is approved, refused or runs out; then what `keep` makes of the tokens written to the profile's home.
   private async deviceSignIn(
     profile: { id: string; home: string },
-    provider: "opencode" | "kimi",
+    provider: "opencode" | "kimi" | "copilot",
     lang: Lang,
     steps: { start: () => Promise<Device>; ask: (deviceCode: string) => Promise<DeviceAnswer>; keep: (token: Token) => Promise<() => void | Promise<void>> },
   ): Promise<LoginJob> {
     const [failed, expired, denied, unreachable] =
       provider === "kimi"
         ? ["station.login.kimiFailed", "station.login.kimiExpired", "station.login.kimiDenied", "could not ask Kimi about a sign-in"]
-        : ["station.login.consoleFailed", "station.login.consoleExpired", "station.login.consoleDenied", "could not ask the OpenCode Console about a sign-in"];
+        : provider === "copilot"
+          ? ["station.login.copilotFailed", "station.login.copilotExpired", "station.login.copilotDenied", "could not ask GitHub about a sign-in"]
+          : ["station.login.consoleFailed", "station.login.consoleExpired", "station.login.consoleDenied", "could not ask the OpenCode Console about a sign-in"];
     this.cancel(profile.id);
     this.finished.delete(profile.id);
     const id = profile.id;

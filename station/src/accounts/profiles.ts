@@ -175,6 +175,7 @@ export const loginCommand = (runtime: Runtime | undefined, home: string, machine
   : runtime === "grok" ? `GROK_HOME=${join(home, "grok")} grok login --device-auth`
   : runtime === "devin" ? `XDG_DATA_HOME=${devinData(home)} devin auth login --force-manual-token-flow`
   : runtime === "agy" ? `SSH_CLIENT='${AGY_FILE_TOKENS.SSH_CLIENT}' HOME=${agyHome(home)} agy`
+  : runtime === "copilot" ? ""
   : "";
 
 /// What a check is given: the account and where it lives.

@@ -38,7 +38,9 @@
   "core-views.admin.feedback.new": "新反馈",
   "core-views.admin.feedback.replied": "待跟进",
   "core-views.admin.feedback.replies": "回复",
-  "core-views.admin.feedback.reply_count": {"other": "{n} 条回复"},
+  "core-views.admin.feedback.reply_count": {
+    "other": "{n} 条回复"
+  },
   "core-views.admin.feedback.reply_hint": "回复会显示在发起这条反馈的对话里，给对话里的人看，不会发给 station 或 agent。",
   "core-views.admin.feedback.reporter_side": "反馈方",
   "core-views.admin.feedback.team": "团队",
@@ -98,7 +100,9 @@
   "core-views.admin.todo.expiring_hint": "尚未使用",
   "core-views.admin.todo.fresh": "{n} 个新反馈",
   "core-views.admin.todo.fresh_hint": "未读的 bug 报告",
-  "core-views.admin.todo.replied": {"other": "{n} 个反馈待跟进"},
+  "core-views.admin.todo.replied": {
+    "other": "{n} 个反馈待跟进"
+  },
   "core-views.admin.todo.replied_hint": "反馈方回复了，等你答复",
   "core-views.admin.todo.outdated": "{n} 台 station 不是最新版",
   "core-views.admin.todo.outdated_hint": "最新版本为 {version}",
@@ -728,7 +732,7 @@
   "core-views.admin.relay.range.week": "7 天",
   "core-views.admin.relay.how.own": "云自带的中继，不能删除",
   "core-views.admin.relay.how.config": "从部署配置导入",
-  "core-views.admin.relay.how.api": "\u7528 ADMIN_TOKEN \u6dfb\u52a0",
+  "core-views.admin.relay.how.api": "用 ADMIN_TOKEN 添加",
   "core-views.admin.relay.how.token": "用令牌接入",
   "core-views.admin.relay.how.by": "{email} 添加",
   "core-views.admin.relay.how.byAddress": "负载按来源 IP 认定",
@@ -933,5 +937,7 @@
   "core-views.move.summary.moving": "迁移中 · {module}「{label}」",
   "core-views.move.summary.stopped": "{n} 项已停",
   "core-views.move.summary.failed": "{n} 项失败",
-  "core-views.group": "Group"
+  "core-views.group": "Group",
+  "core-views.flow.plan_hint.copilot": "GitHub Copilot 订阅。用设备码登录一次。",
+  "core-views.profiles.group.copilot": "GitHub Copilot"
 }

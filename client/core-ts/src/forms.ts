@@ -892,6 +892,7 @@ const PLANS: Record<string, { plan: string; provider: string }> = {
   grok: { plan: "SuperGrok", provider: "Grok" },
   cursor: { plan: "Cursor", provider: "Cursor" },
   devin: { plan: "Devin", provider: "Devin" },
+  copilot: { plan: "GitHub Copilot", provider: "GitHub" },
   agy: { plan: "Google AI", provider: "Google" },
 };
 const planOf = (runtime: string) => PLANS[runtime] ?? PLANS.claude!;
@@ -946,7 +947,7 @@ function tileOf(source: providers.Source, hasKey: boolean, hasPlan: boolean, run
 }
 
 /// The runtimes whose account is their plan, and the only way they run (they take no provider's key): last of the makers.
-const PLAN_ALONE = ["cursor", "devin"];
+const PLAN_ALONE = ["cursor", "devin", "copilot"];
 
 /// Such a runtime's tile (Cursor's, Devin's), named and marked as the runtime.
 function planTile(runtime: string): J {
