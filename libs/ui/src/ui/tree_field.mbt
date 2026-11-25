@@ -16,7 +16,7 @@ priv struct TreeField {
   st : EditorState
   /// its words' size, as said (followed: its paint and its measure read it)
   font_size : () -> Double
-  line : Double
+  line : () -> Double
   /// how many lines it shows at most, as it is now (followed: its layout reads it; `max_lines_by`)
   max_lines : () -> Int
   /// what it says it is while empty, as it is now (followed: its paint and what it says read it)
@@ -160,6 +160,7 @@ pub fn field(
   paste_limit_by? : () -> Int,
   files? : (Array[(String, Bytes)]) -> Unit,
   size_by? : () -> Double,
+  line_by? : () -> Double,
   colors_by? : () -> (Int64, Int64, Int64),
   placeholder_by? : () -> String,
   label? : String = "",
@@ -169,6 +170,10 @@ pub fn field(
   let size = match size_by {
     Some(f) => f
     None => fn() { font_size }
+  }
+  let line_fn = match line_by {
+    Some(f) => f
+    None => fn() { line }
   }
   // (what it says it is while empty as said once, or followed as it changes (`placeholder_by`: in the words as they
   // are now), its node and its editor kept
@@ -261,7 +266,7 @@ pub fn field(
     let entry = {
       st,
       font_size: size,
-      line,
+      line: line_fn,
       max_lines: most,
       hint,
       shorter,
@@ -304,7 +309,7 @@ pub fn field(
     // where only its look's colours change, drawn again all the same: View::measured)
     .measured(
       By(fn() {
-        let laid = field.laid(font_size=size(), line~, min_lines~, max_lines=most(), trim~)
+        let laid = field.laid(font_size=size(), line=line_fn(), min_lines~, max_lines=most(), trim~)
         // (its words as written followed as well as with what is composed: what is composed put in as written shows
         // the same, its look's not, EditorState::look_shown)
         field.text() |> ignore
@@ -1413,7 +1418,7 @@ fn Ctx::tree_field_box(
   w : Double,
   h : Double,
 ) -> FieldBox {
-  let z = self.editor_sizing((tf.font_size)(), tf.line, (tf.max_lines)(), true, tree_theme().text_line)
+  let z = self.editor_sizing((tf.font_size)(), (tf.line)(), (tf.max_lines)(), true, tree_theme().text_line)
   {
     id: tree_said_id(id),
     x,
@@ -1564,7 +1569,7 @@ pub fn Tester::drawn_words_found(self : Tester) -> Array[(@view.Drawn, Int, Bool
   .map(fn(e) {
     let (d, holder, presses) = e
     let size = match tree_fields.get(d.id) {
-      Some(tf) => c.editor_sizing((tf.font_size)(), tf.line, (tf.max_lines)(), true, tree_theme().text_line).font_size
+      Some(tf) => c.editor_sizing((tf.font_size)(), (tf.line)(), (tf.max_lines)(), true, tree_theme().text_line).font_size
       None => d.words_look.size
     }
     (d, holder, presses, view_words_found(d), size)

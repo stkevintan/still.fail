@@ -251,14 +251,18 @@ async function handle(text) {
   } else if (/(^|\s)rigtask:/.test(text)) {
     const [rig, command] = line("rigtask:").split("|");
     const key = `e2e-${Date.now().toString(36)}`;
-    // (a rig whose mode was just switched hands its process over: a prepare its old process dropped is asked again,
-    // station/src/mesh/peer.ts PeerStopped; a refusal is not)
-    let prepared = await tool("station_task", { station: rig, action: "prepare", key, name: key, command, small: true });
-    for (let tries = 0; tries < 5 && /stopped or handed over as it was asked/.test(prepared); tries++) {
-      await new Promise((r) => setTimeout(r, 300));
-      prepared = await tool("station_task", { station: rig, action: "prepare", key, name: key, command, small: true });
-    }
-    const started = await tool("station_task", { station: rig, action: "start", key });
+    // (a rig whose mode was just switched hands its process over: a prepare or start its old process dropped is asked
+    // again with the same key, station/src/mesh/peer.ts PeerStopped; a refusal is not)
+    const askRig = async (args) => {
+      let out = await tool("station_task", args);
+      for (let tries = 0; tries < 5 && /stopped or handed over as it was asked/.test(out); tries++) {
+        await new Promise((r) => setTimeout(r, 300));
+        out = await tool("station_task", args);
+      }
+      return out;
+    };
+    const prepared = await askRig({ station: rig, action: "prepare", key, name: key, command, small: true });
+    const started = await askRig({ station: rig, action: "start", key });
     record("assistant", [{ type: "text", text: `${prepared}\n${started}` }]);
     said = await post(to, { text: `rigtask ${key}: ${prepared} // ${started}`, kind: "all_done", done: "ran the task on the rig, or was refused" });
   } else if (text.includes("serve:")) {

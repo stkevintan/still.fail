@@ -280,7 +280,7 @@ pub let viz_css : String =
   #|}
   #|.nav-link:hover { color: var(--foreground); text-decoration: none; }
   #|.nav-link:is(.active, .is-selected, [aria-selected="true"]) { color: var(--foreground); font-weight: 500; }
-  #|.nav-pills .nav-link:is(.active, .is-selected, [aria-selected="true"]) { background: var(--lifted); box-shadow: 0 0 2px var(--shadow), 0 0 0 .5px var(--border); }
+  #|.nav-pills .nav-link:is(.active, .is-selected, [aria-selected="true"]) { background: var(--lifted); }
   #|.nav-link:disabled { opacity: .4; cursor: default; }
   #|
   #|/* ── Tables: as a message's Markdown tables, framed as a card (a line round it, a faint ground, its head tinted), the

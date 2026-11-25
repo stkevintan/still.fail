@@ -117,7 +117,7 @@ public final class MBTextTest extends Instrumentation {
                     for (int phase = 0; phase < MBText.SUB_COUNT; phase++) {
                         float dx = MBText.subDx(phase);
                         MBText.Drawn got = MBText.draw(e, scale, dx, MBText.paint(size * scale, 700, 1),
-                            MBText.faces, scratch);
+                            MBText.faces, MBText.faceGen[(e.style >>> 8) & 31], scratch);
                         MBTextBefore.Drawn want = MBTextBefore.draw(old, scale, dx,
                             MBTextBefore.paint(size * scale, 700, 1), MBTextBefore.faces, before);
                         String where = text + " at " + size + " x " + scale + ", phase " + phase;
@@ -132,6 +132,24 @@ public final class MBTextTest extends Instrumentation {
                     }
                 }
             }
+        }
+        // Verify same Entry across a preview slotGen change invalidates cached GlyphBounds.
+        {
+            android.graphics.Paint narrow = new android.graphics.Paint(MBText.paint(20f, 400, 0));
+            narrow.setTextScaleX(0.5f);
+            android.graphics.Paint wide = new android.graphics.Paint(MBText.paint(20f, 400, 0));
+            wide.setTextScaleX(2.0f);
+            MBText.Entry reused = new MBText.Entry("W", 20f, 400, 0);
+            MBText.Entry fresh = new MBText.Entry("W", 20f, 400, 0);
+            MBText.Drawn d1 = MBText.draw(reused, 1f, 0f, narrow, MBText.faces, 1, scratch);
+            d1.release();
+            MBText.Drawn got = MBText.draw(reused, 1f, 0f, wide, MBText.faces, 2, scratch);
+            MBText.Drawn want = MBText.draw(fresh, 1f, 0f, wide, MBText.faces, 2, scratch);
+            check(got.w == want.w && got.h == want.h && got.x0 == want.x0 && got.y0 == want.y0,
+                "slotGen bounds invalidation geometry mismatch");
+            check(Arrays.equals(got.bytes, want.bytes), "slotGen bounds invalidation pixels mismatch");
+            got.release();
+            want.release();
         }
         System.out.println("Raster: exact pixels, offsets and dimensions across all four phases");
     }
@@ -235,16 +253,23 @@ public final class MBTextTest extends Instrumentation {
         MBText.reset();
         check(MBText.heldBytes == null && placed.bytes == null && MBText.placed.isEmpty(), "reset releases pixels");
         MBText.Entry e = MBText.entries.get(key);
-        e.drawn[0] = MBText.draw(e, 1f, 0f, MBText.paint(e.size, e.weight, e.style), MBText.faces, MBText.mine);
+        int sg = MBText.faceGen[(e.style >>> 8) & 31];
+        MBText.Drawn drawn = MBText.draw(e, 1f, 0f, MBText.paint(e.size, e.weight, e.style), MBText.faces, sg, MBText.mine);
+        e.drawn[0] = drawn;
         e.have = 1;
-        MBText.aheadCount = 1;
-        MBText.Drawn drawn = e.drawn[0];
+        e.askScale = 1f;
+        e.askFaces = MBText.faces;
+        e.askSlotGen = sg;
+        MBText.ahead.aheadCount = 1;
         MBText.glyph(key, out);
         check(MBText.heldBytes == drawn.bytes && e.drawn[0] == null, "take an ahead glyph");
-        e.drawn[0] = MBText.draw(e, 1f, 0f, MBText.paint(e.size, e.weight, e.style), MBText.faces, MBText.mine);
+        drawn = MBText.draw(e, 1f, 0f, MBText.paint(e.size, e.weight, e.style), MBText.faces, sg, MBText.mine);
+        e.drawn[0] = drawn;
         e.have = 1;
-        MBText.aheadCount = 1;
-        drawn = e.drawn[0];
+        e.askScale = 1f;
+        e.askFaces = MBText.faces;
+        e.askSlotGen = sg;
+        MBText.ahead.aheadCount = 1;
         MBText.keysStale = true;
         MBText.keysSweep();
         check(MBText.heldBytes == null && drawn.bytes == null && MBText.entries.isEmpty(), "sweep releases pixels");

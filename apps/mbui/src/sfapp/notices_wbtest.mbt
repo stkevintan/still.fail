@@ -608,6 +608,99 @@ test "settings: usage statistics and error reports switched off on this device, 
 }
 
 ///|
+/// The home fixture with its core's prefs saying what `said` adds (`counted`, `traced`: what the real core says of
+/// itself, prefs.ts `shown`), its `reports` as `prefs.set` last put it; every call kept in `calls`.
+fn reports_core(calls : Array[Made], said : Map[String, Json]) -> @ui.Tester {
+  new_run()
+  let base = fixture("home")
+  let reports : @signals.Signal[String] = @signals.signal("")
+  let src : Source = {
+    ..base,
+    topic_read: fn(name, params) {
+      let got = base.topic(name, params).get().snapshot()
+      match (name, got.value) {
+        ("prefs", Some(Object(m))) => {
+          let m = m.copy()
+          for k, v in said {
+            m[k] = v
+          }
+          if reports.get() != "" {
+            m["reports"] = Json::string(reports.get())
+          }
+          { ..got, value: Some(Json::object(m)), version: got.version + reports.get().length() }
+        }
+        _ => got
+      }
+    },
+    call: fn(name, params, done) {
+      calls.push({ name, params, bytes: None, done })
+      match (name, params) {
+        ("prefs.set", Object(p)) if p.get("reports") is Some(String(r)) => {
+          reports.set(r)
+          done(Ok({}))
+        }
+        _ => (base.call)(name, params, done)
+      }
+    },
+  }
+  @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=390.0, h=844.0, platform=2)
+}
+
+///|
+test "settings: a core that sends traces is told the switch and shows its row on any cloud; counts and pages told only where it counts, none under a Tester" {
+  reporting_host.set(None)
+  let last_on = fn(calls : Array[Made]) -> Bool? {
+    match named(calls, "client.reports").last() {
+      Some(m) =>
+        match m.params {
+          Object(p) if p.get("on") is Some(True) => Some(true)
+          Object(p) if p.get("on") is Some(False) => Some(false)
+          _ => None
+        }
+      None => None
+    }
+  }
+  let row_shown = fn(t : @ui.Tester) -> Bool {
+    open_setting("about")
+    t.draw()
+    t.run_for(@ui.move_most_ms)
+    // (关于's foot, the wheel turned down past it)
+    t.wheel(195.0, 400.0, 2000.0)
+    t.run_for(@ui.move_most_ms)
+    t.find("发送使用统计和错误报告") is Some(_)
+  }
+  // monoid's cloud (app.monoid.build: its core sends traces, never counts): told on, no page's kind; its row shown,
+  // and turned off there, the core told off
+  let calls : Array[Made] = []
+  let t = reports_core(calls, { "traced": true })
+  t.run_for(@ui.move_most_ms)
+  assert_eq(last_on(calls), Some(true))
+  assert_eq(named(calls, "client.shown").length(), 0, msg="no counts on monoid's cloud")
+  assert_true(row_shown(t), msg="the switch where only traces go")
+  t.click(Switch, label="发送使用统计和错误报告")
+  t.run_for(@ui.move_most_ms)
+  assert_true(
+    named(calls, "prefs.set").iter().any(fn(m) { m.params.stringify().contains("\"reports\":\"off\"") }),
+    msg="kept in the prefs where the host keeps no switch",
+  )
+  assert_eq(last_on(calls), Some(false), msg="the core told off: its traces stop")
+  // still.fail's own cloud (counts and traces): told on, and what it shows by its kind
+  let calls : Array[Made] = []
+  let t = reports_core(calls, { "counted": true, "traced": true })
+  t.run_for(@ui.move_most_ms)
+  assert_eq(last_on(calls), Some(true))
+  assert_true(named(calls, "client.shown").length() > 0, msg="its pages' kinds counted")
+  assert_true(row_shown(t))
+  // a Tester's or a replay's core, which says neither: nothing told, no row (a recorded trace's calls as they were)
+  let calls : Array[Made] = []
+  let t = reports_core(calls, {})
+  t.run_for(@ui.move_most_ms)
+  assert_eq(named(calls, "client.reports").length(), 0)
+  assert_eq(named(calls, "client.shown").length(), 0)
+  assert_true(!row_shown(t))
+}
+
+///|
 test "pushes: a token come after the start registered then, a new one again; the same one not twice" {
   let calls : Array[Made] = []
   let sys = fake_system()

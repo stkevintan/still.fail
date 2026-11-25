@@ -18,7 +18,8 @@ import { Clock, Effect, Fiber, Queue } from "effect";
 import { liveClock } from "../ops/fibers.ts";
 import { log } from "../ops/log.ts";
 import { allTranscriptHints, takeTranscriptHints } from "../read/transcript.ts";
-import { mbReaderBinary } from "../read/mb-reader.ts";
+import { mbReaderBinary, pionBinary } from "../read/mb-reader.ts";
+import { type ReaderSelectConfig, resolveReaderEngine } from "../read/reader-select.ts";
 import { MbCounterStopped, MbUsageCounter } from "./counter-mb.ts";
 import type { Store } from "../store/store.ts";
 
@@ -46,6 +47,8 @@ export type UsageCounterOptions = {
   /// (`dbPath`).
   mb?: string | null;
   dbPath?: string | null;
+  /// Live `config.json` `readers` snapshot or getter for `usage-counter` engine selection.
+  readers?: ReaderSelectConfig | (() => ReaderSelectConfig);
   /// The program's idle timer (a test's own; else the wall's).
   after?: (ms: number, f: () => void) => () => void;
 };
@@ -71,6 +74,8 @@ export class UsageCounter {
   #fiber: Fiber.Fiber<void> | null = null;
   #unsubscribe: (() => void) | null = null;
   #clock: Clock.Clock;
+  /// Explicit binary override if provided (`null` explicitly disables; `undefined` uses `resolveReaderSelection`).
+  readonly #explicit: string | null | undefined;
   /// The program that reads.
   readonly #mb: MbUsageCounter;
 
@@ -82,11 +87,19 @@ export class UsageCounter {
     this.#settleMs = options.settleMs ?? SETTLE_MS;
     this.#safetyMs = options.safetyMs ?? SAFETY_MS;
     this.#clock = options.clock ?? liveClock;
+    this.#explicit = options.mb;
     const location = options.dbPath !== undefined ? options.dbPath : (this.#store.db.location() ?? null);
-    const binary = options.mb !== undefined ? options.mb : mbReaderBinary();
     if (location === null || location === "" || location === ":memory:") throw new Error("the usage counter reads into a store in a file (its program writes there), not one in memory");
-    if (binary === null) throw new Error("the usage counter needs the MoonBit reader (station/mb/build.sh), which this station was not built with");
-    this.#mb = new MbUsageCounter(binary, location, { after: options.after });
+    if (this.#explicit === null) throw new Error("the usage counter needs the MoonBit reader (station/mb/build.sh), which this station was not built with");
+    if (this.#explicit === undefined) {
+      const cfg = typeof options.readers === "function" ? options.readers() : options.readers;
+      const intent = resolveReaderEngine("usage-counter", { config: cfg, hasPionBinary: true });
+      const hasPion = intent.engine === "pion" && pionBinary() !== null;
+      if (!hasPion && mbReaderBinary() === null) {
+        throw new Error("the usage counter needs the MoonBit reader (station/mb/build.sh), which this station was not built with");
+      }
+    }
+    this.#mb = new MbUsageCounter(this.#explicit, location, { after: options.after, readers: options.readers });
   }
 
   /// The program let go if nothing is asked of it (read/pool.ts `onTrim`): 1, else 0.

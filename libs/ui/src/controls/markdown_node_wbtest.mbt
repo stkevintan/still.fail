@@ -566,3 +566,131 @@ test "Markdown emphasis (*…*) adapts to enclosing block ink: primary text insi
   }
   set_dark(None)
 }
+
+///|
+test "md_task_node: 1x/1.3x baseline alignment, radius md_task_side/3, light/dark stroke tick, read-only and zero Tab stops" {
+  let s = fn(x : String) { Json::string(x) }
+  let li = fn(kids : Array[Json], a : Json) { Json::array([s("li"), Json::array(kids), a]) }
+  let task_tree = Json::array([
+    Json::array([
+      s("list"),
+      Json::array([
+        li([s("已完成任务")], Json::object({ "checked": Json::boolean(true) })),
+        li([s("未完成任务")], Json::object({ "checked": Json::boolean(false) })),
+      ]),
+      Json::object({}),
+    ]),
+  ])
+  let t = @ui.Tester::new(fn(c) { begin(c) |> ignore }, w=420.0, h=300.0, platform=0)
+  t.check_looks(false)
+  @ui.set_view_app(
+    fn(root) {
+      @ui.set_tree_theme(ui_theme_now)
+      root.padding(Is((16.0, 16.0, 16.0, 16.0))).gap(Is(8.0)) |> ignore
+      button_node(root, fn() { "前按钮" }, fn() {  }) |> ignore
+      markdown_node(root, fn() { "- [x] 已完成任务\n- [ ] 未完成任务" }, tree=fn() { Some(task_tree) }) |> ignore
+      button_node(root, fn() { "后按钮" }, fn() {  }) |> ignore
+    },
+    theme=ui_theme_now,
+  )
+  // 1x and 1.3x font scale baseline alignment & radius check.
+  for scale in [1.0, 1.3] {
+    t.set_font_scale(scale)
+    t.draw()
+    let boxes = @ui.view_tree().unwrap().drawn().filter(fn(d) {
+      d.w == md_task_side && d.h == md_task_side && (d.radius - md_task_side / 3.0).abs() <= 0.01
+    })
+    assert_eq(boxes.length(), 2, msg="scale=\{scale}: expected 2 task boxes with radius md_task_side/3")
+    let done_word = t.rect_of("已完成任务").unwrap()
+    let todo_word = t.rect_of("未完成任务").unwrap()
+    let done_mid = boxes[0].y + boxes[0].h / 2.0
+    let done_word_mid = done_word.1 + done_word.3 / 2.0
+    assert_true((done_mid - done_word_mid).abs() <= 3.0, msg="scale=\{scale}: done box mid \{done_mid} vs word mid \{done_word_mid}")
+    let todo_mid = boxes[1].y + boxes[1].h / 2.0
+    let todo_word_mid = todo_word.1 + todo_word.3 / 2.0
+    assert_true((todo_mid - todo_word_mid).abs() <= 3.0, msg="scale=\{scale}: todo box mid \{todo_mid} vs word mid \{todo_word_mid}")
+  }
+  t.set_font_scale(1.0)
+  // Light and dark mode stroke tick (upto=1.0, zero animation) with WCAG >= 3.0 contrast.
+  let srgb_lin = fn(c : Double) -> Double {
+    if c <= 0.04045 { c / 12.92 } else { @dmath.pow((c + 0.055) / 1.055, 2.4) }
+  }
+  let luminance = fn(argb : Int64) -> Double {
+    let r = ((argb >> 24) & 0xFFL).to_double() / 255.0
+    let g = ((argb >> 16) & 0xFFL).to_double() / 255.0
+    let b = ((argb >> 8) & 0xFFL).to_double() / 255.0
+    0.2126 * srgb_lin(r) + 0.7152 * srgb_lin(g) + 0.0722 * srgb_lin(b)
+  }
+  let contrast_ratio = fn(a : Int64, b : Int64) -> Double {
+    let la = luminance(a)
+    let lb = luminance(b)
+    let hi = dmax(la, lb)
+    let lo = dmin(la, lb)
+    (hi + 0.05) / (lo + 0.05)
+  }
+  for dark in [false, true] {
+    set_dark(Some(dark))
+    t.draw()
+    let tick_nodes = @ui.view_tree().unwrap().drawn().filter(fn(d) {
+      d.w == md_task_side && d.h == md_task_side && d.lines.length() > 0
+    })
+    assert_eq(tick_nodes.length(), 1, msg="dark=\{dark}: only the checked task draws a stroke tick")
+    let line = tick_nodes[0].lines[0]
+    assert_eq(line.upto, 1.0, msg="dark=\{dark}: static stroke tick upto=1.0")
+    assert_eq(line.points.length(), check_tick_points.length(), msg="dark=\{dark}: tick uses check_tick_points")
+    let done_boxes = @ui.view_tree().unwrap().drawn().filter(fn(d) {
+      d.w == md_task_side && d.h == md_task_side && (d.radius - md_task_side / 3.0).abs() <= 0.01 && d.edge.0 == 0.0
+    })
+    assert_eq(done_boxes.length(), 1, msg="dark=\{dark}: expected 1 filled done task box")
+    let bg_fill = over(theme().p.canvas, done_boxes[0].ground)
+    let fg_tick = over(bg_fill, line.color)
+    let ratio = contrast_ratio(fg_tick, bg_fill)
+    assert_true(ratio >= 3.0, msg="dark=\{dark}: tick contrast \{ratio} < 3.0 (fg=\{fg_tick}, bg=\{bg_fill})")
+  }
+  set_dark(None)
+  t.draw()
+  // Zero added Tab stops: Tab moves directly from 前按钮 to 后按钮.
+  t.act(Button, Focus, label="前按钮")
+  t.tab()
+  assert_eq(t.focused().map(fn(s) { s.label }), Some("后按钮"), msg="Tab skips read-only markdown task checkboxes")
+}
+
+///|
+test "markdown_node MdTypography prose_scale scales heading, paragraph, code block, and table uniformly" {
+  let s = fn(x : String) { Json::string(x) }
+  let el = fn(name : String, kids : Array[Json]) { Json::array([s(name), Json::array(kids)]) }
+  let row = fn(words : Array[String]) { el("tr", words.map(fn(w) { el("td", [s(w)]) })) }
+  let doc = Json::array([
+    Json::array([s("h"), Json::array([s("HeadingScale")]), Json::object({ "depth": Json::number(2.0) })]),
+    el("p", [s("ParagraphScale")]),
+    Json::array([s("pre"), Json::array([]), Json::object({ "code": s("CodeScaleSample"), "lang": s("sh"), "ink": s("") })]),
+    el("table", [row(["TableHead"]), row(["TableCell"])]),
+  ])
+  let typo = @signals.signal(MdTypography::default())
+  let t = @ui.Tester::new(fn(c) { begin(c) |> ignore }, w=480.0, h=600.0, platform=0)
+  t.check_looks(false)
+  @ui.set_view_app(
+    fn(root) {
+      @ui.set_tree_theme(ui_theme_now)
+      root.padding(Is((16.0, 16.0, 16.0, 16.0))) |> ignore
+      markdown_node(root, fn() { "scale-doc" }, tree=fn() { Some(doc) }, typography=fn() { typo.get() }, copy=false)
+      |> ignore
+    },
+    theme=ui_theme_now,
+  )
+  t.draw()
+  let (_, _, _, h1) = t.rect_of("HeadingScale").unwrap()
+  let (_, _, _, p1) = t.rect_of("ParagraphScale").unwrap()
+  let (_, _, _, c1) = t.rect_of("CodeScaleSample").unwrap()
+  let (_, _, _, tb1) = t.rect_of("TableCell").unwrap()
+  typo.set({ ..MdTypography::default(), prose_scale: 1.30 })
+  t.draw()
+  let (_, _, _, h2) = t.rect_of("HeadingScale").unwrap()
+  let (_, _, _, p2) = t.rect_of("ParagraphScale").unwrap()
+  let (_, _, _, c2) = t.rect_of("CodeScaleSample").unwrap()
+  let (_, _, _, tb2) = t.rect_of("TableCell").unwrap()
+  assert_true(h2 > h1 * 1.20 && h2 < h1 * 1.40, msg="heading height \{h1} -> \{h2}")
+  assert_true(p2 > p1 * 1.20 && p2 < p1 * 1.40, msg="paragraph height \{p1} -> \{p2}")
+  assert_true(c2 > c1 * 1.20 && c2 < c1 * 1.40, msg="code height \{c1} -> \{c2}")
+  assert_true(tb2 > tb1 * 1.20 && tb2 < tb1 * 1.40, msg="table height \{tb1} -> \{tb2}")
+}

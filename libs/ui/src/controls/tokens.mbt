@@ -2277,10 +2277,6 @@ pub let name_max : @ui.Len = Fixed(240.0)
 pub let small_button : @ui.Len = Fixed(22.0)
 
 ///|
-/// The pill offering to quote what is picked.
-pub let quote_pop_h : @ui.Len = Fixed(26.0)
-
-///|
 /// The widest a page is laid out as the web's narrow app lays its pages out (max-width 640, where its narrow app takes
 /// over): wider, as its desktop pages are. A page's own width, not the tier ( Pages).
 pub let page_narrow_most : Double = 640.0

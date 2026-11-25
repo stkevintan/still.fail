@@ -69,6 +69,9 @@ extern "js" fn js_face_add_bytes(face : Int, data : Bytes, weight : Int) -> Bool
 extern "js" fn js_face_clear(face : Int) -> Unit =
   #|(f) => { if (globalThis.__mbhost.faceClear) globalThis.__mbhost.faceClear(f) }
 
+extern "js" fn js_face_set_ligatures(face : Int, on : Bool) -> Unit =
+  #|(f, on) => { if (globalThis.__mbhost.faceSetLigatures) globalThis.__mbhost.faceSetLigatures(f, on) }
+
 extern "js" fn js_present(
   buf : FixedArray[Double],
   count : Int,
@@ -331,6 +334,21 @@ fn face_add_family(face : Int, family : String) -> Bool {
 
 ///|
 fn local_font_families() -> String {
+  ""
+}
+
+///|
+fn face_set_ligatures(face : Int, on : Bool) -> Unit {
+  js_face_set_ligatures(face, on)
+}
+
+///|
+fn set_host_autospace(on : Bool) -> Unit {
+  ignore(on)
+}
+
+///|
+fn local_font_info() -> String {
   ""
 }
 

@@ -70,7 +70,7 @@ static jclass autofills_cls;
 static jmethodID m_af_able, m_af_ask, m_af_take, m_af_end;
 static jclass passkeys_cls;
 static jmethodID m_wa_able, m_wa_get, m_wa_out, m_wa_end;
-static jmethodID m_face_add, m_face_add_bytes, m_face_clear, m_ahead, m_flush;
+static jmethodID m_face_add, m_face_add_bytes, m_face_clear, m_face_set_ligatures, m_ahead, m_flush;
 static jmethodID m_cs_known, m_cs_decode;
 static jmethodID m_v_text, m_v_still, m_v_lost;
 static jmethodID m_ga_access, m_ga_ask, m_ga_answers, m_ga_read, m_ga_state, m_ga_rows, m_ga_end, m_pk_photo;
@@ -153,6 +153,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *v, void *reserved) {
   m_face_add = (*env)->GetStaticMethodID(env, text_cls, "faceAdd", "(ILjava/lang/String;I)Z");
   m_face_add_bytes = (*env)->GetStaticMethodID(env, text_cls, "faceAddBytes", "(I[BI)Z");
   m_face_clear = (*env)->GetStaticMethodID(env, text_cls, "faceClear", "(I)V");
+  m_face_set_ligatures = (*env)->GetStaticMethodID(env, text_cls, "faceSetLigatures", "(IZ)V");
   m_ahead = (*env)->GetStaticMethodID(env, text_cls, "ahead", "([II)V");
   m_flush = (*env)->GetStaticMethodID(env, text_cls, "flush", "()V");
   m_ref_begin = (*env)->GetStaticMethodID(env, text_cls, "refBegin", "(DDDI)V");
@@ -1193,6 +1194,11 @@ void mb_host_face_clear(int32_t face) {
   (*env)->CallStaticVoidMethod(env, text_cls, m_face_clear, face);
 }
 
+void mb_host_face_set_ligatures(int32_t face, int32_t on) {
+  JNIEnv *env = env_();
+  (*env)->CallStaticVoidMethod(env, text_cls, m_face_set_ligatures, face, on ? JNI_TRUE : JNI_FALSE);
+}
+
 void mb_host_glyph(int32_t key, double *out) {
   JNIEnv *env = env_();
   (*env)->CallStaticVoidMethod(env, text_cls, m_glyph, key, small_buf);
@@ -1559,21 +1565,48 @@ int32_t mb_host_reveal_file(moonbit_string_t s, int32_t go) { (void)s; (void)go;
 double mb_host_perf_size(void) { return 0; }
 moonbit_bytes_t mb_host_perf_read(void) { return moonbit_make_bytes(0, 0); }
 
-// The GL thread's time drawing the frame it drew last (MBView.drawOnGl: the commands given, not the GPU's own time;
-// -1 before any), in µs, and how many frames the app handed over were never drawn, each's place taken by a newer one
-// as it waited (FrameMail.takeDropped), since the run began: written by the GL thread, read by the app's.
+// The GL thread's work duration for the frame it drew last (in µs, -1 before any): for non-paced frames, full
+// draw + eglSwapBuffers wall time (preserving real GPU backpressure); for paced frames, GL thread CPU time (or
+// draw-end wall fallback) so intentional 20 Hz pacing sleep does not falsely trigger over_24ms/gpu_only hangs.
+// `gl_drawn_mu` serializes multi-view GL writers and `mb_host_gpu_timing` snapshots (flags: bit 0 = paced,
+// bit 1 = swap_measured), while `gl_drawn_us` stays atomic for lock-free hot-path reads in `mb_host_gpu_ms()`.
+// `gl_dropped` counts frames handed over that were replaced before being drawn (FrameMail.takeDropped).
+static pthread_mutex_t gl_drawn_mu = PTHREAD_MUTEX_INITIALIZER;
 static int64_t gl_drawn_us = -1;
+static int64_t gl_drawn_raw_wall_us = -1;
+static int32_t gl_drawn_flags = 0;
 static int32_t gl_dropped;
 
-JNIEXPORT void JNICALL Java_dev_mbui_MBView_glDrawn(JNIEnv *env, jclass c, jdouble ms, jint dropped) {
+JNIEXPORT void JNICALL Java_dev_mbui_MBView_glDrawn(
+    JNIEnv *env, jclass c, jdouble ms, jdouble raw_wall_ms, jboolean paced, jboolean swap_measured, jint dropped) {
   (void)env, (void)c;
-  __atomic_store_n(&gl_drawn_us, (int64_t)(ms * 1000.0), __ATOMIC_RELAXED);
+  int64_t work_us = (int64_t)(ms * 1000.0);
+  int64_t raw_us = (int64_t)(raw_wall_ms * 1000.0);
+  int32_t flags = (paced ? 1 : 0) | (swap_measured ? 2 : 0);
+  pthread_mutex_lock(&gl_drawn_mu);
+  __atomic_store_n(&gl_drawn_us, work_us, __ATOMIC_RELAXED);
+  gl_drawn_raw_wall_us = raw_us;
+  gl_drawn_flags = flags;
+  pthread_mutex_unlock(&gl_drawn_mu);
   if (dropped > 0) __atomic_add_fetch(&gl_dropped, (int32_t)dropped, __ATOMIC_RELAXED);
 }
 
 double mb_host_gpu_ms(void) {
   int64_t us = __atomic_load_n(&gl_drawn_us, __ATOMIC_RELAXED);
   return us < 0 ? -1 : (double)us / 1000.0;
+}
+
+// Coherent snapshot of the last drawn GL frame's (work_ms, raw_wall_ms, flags); returns 1 if valid, 0 before first frame.
+int32_t mb_host_gpu_timing(double *work_ms, double *raw_wall_ms, int32_t *flags) {
+  pthread_mutex_lock(&gl_drawn_mu);
+  int64_t work_us = __atomic_load_n(&gl_drawn_us, __ATOMIC_RELAXED);
+  int64_t raw_us = gl_drawn_raw_wall_us;
+  int32_t f = gl_drawn_flags;
+  pthread_mutex_unlock(&gl_drawn_mu);
+  if (work_ms) *work_ms = work_us < 0 ? -1.0 : (double)work_us / 1000.0;
+  if (raw_wall_ms) *raw_wall_ms = raw_us < 0 ? -1.0 : (double)raw_us / 1000.0;
+  if (flags) *flags = f;
+  return work_us >= 0 ? 1 : 0;
 }
 
 int32_t mb_host_frames_dropped(void) { return __atomic_load_n(&gl_dropped, __ATOMIC_RELAXED); }
@@ -2375,6 +2408,8 @@ void mb_host_hotkey_clear(moonbit_string_t id) { (void)id; }
 // (the phone's faces are the files given: no family of the machine's, no list of them)
 int32_t mb_host_face_add_family(int32_t face, moonbit_string_t family) { (void)face; (void)family; return 0; }
 moonbit_string_t mb_host_local_font_families(void) { return moonbit_make_string_raw(0); }
+void mb_host_set_host_autospace(int32_t on) { (void)on; }
+moonbit_string_t mb_host_local_font_info(void) { return moonbit_make_string_raw(0); }
 // The keys held now (@hostapi.mods_held): none read here.
 int32_t mb_host_mods_held(void) { return 0; }
 // The pointer held by the window and game controllers (@hostapi.set_pointer_lock, gamepads): none here.
@@ -2681,6 +2716,7 @@ static mb_route routes[MB_ROUTES];
 static uint64_t routes_used;
 static pthread_mutex_t routes_lock = PTHREAD_MUTEX_INITIALIZER;
 static int (*route_ack)(double route, double ts);
+static int (*route_ack_wait)(double route, double ts, uint32_t wait_us);
 
 // (under routes_lock) route's entry; made where `make` (in a free one, else one routing nothing used least lately)
 static mb_route *route_at(uint64_t route, int make) {
@@ -2714,6 +2750,7 @@ static void unroute(int32_t sid, int what) {
 }
 
 void mb_stream_route_acks(int (*ack)(double route, double ts)) { route_ack = ack; }
+void mb_stream_route_acks_wait(int (*ack)(double route, double ts, uint32_t wait_us)) { route_ack_wait = ack; }
 
 // (Streams' decoder thread) whether route's frames still go to stream sid, and frame ts of route acknowledged
 JNIEXPORT jboolean JNICALL Java_dev_mbui_Streams_routed(JNIEnv *env, jclass c, jlong route, jint sid) {
@@ -2725,7 +2762,14 @@ JNIEXPORT jboolean JNICALL Java_dev_mbui_Streams_routed(JNIEnv *env, jclass c, j
 }
 
 JNIEXPORT void JNICALL Java_dev_mbui_Streams_routeAck(JNIEnv *env, jclass c, jlong route, jdouble ts) {
-  if (route_ack) route_ack((double)route, ts);
+  if (route_ack_wait) route_ack_wait((double)route, ts, 0);
+  else if (route_ack) route_ack((double)route, ts);
+}
+
+JNIEXPORT void JNICALL Java_dev_mbui_Streams_routeAckWait(JNIEnv *env, jclass c, jlong route, jdouble ts, jint wait_us) {
+  uint32_t w = wait_us > 0 ? (uint32_t)wait_us : 0;
+  if (route_ack_wait) route_ack_wait((double)route, ts, w);
+  else if (route_ack) route_ack((double)route, ts);
 }
 
 // An engine's thread this attached to the VM is detached as it ends (a thread that ends attached aborts the process).

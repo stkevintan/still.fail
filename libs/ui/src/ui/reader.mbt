@@ -80,8 +80,7 @@ pub struct Pages {
   style : PageStyle
   blocks : Array[Block]
   pages : Array[Page]
-  /// the offset each block starts at, and the chapter's length
-  priv base : Array[Int]
+  /// the chapter's length
   length : Int
 }
 
@@ -215,7 +214,7 @@ pub fn paginate(
   if items.length() > 0 || pages.length() == 0 {
     pages.push({ start, end: off, items })
   }
-  { width, height, style: st, blocks, pages, base, length: off }
+  { width, height, style: st, blocks, pages, length: off }
 }
 
 ///|

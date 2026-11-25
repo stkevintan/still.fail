@@ -224,9 +224,15 @@ test "the clock read as the view is built: each frame built whole, said where it
 priv struct Endless {}
 
 ///|
-impl Moving for Endless with rest_at(self, now, frame) {
+fn Endless::rest_at(self : Endless, now : Double, frame : Int) -> Double {
   ignore((self, now, frame))
   @double.infinity
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn Endless::as_moving(self : Endless) -> Moving {
+  Moving::new(fn(now, frame) { self.rest_at(now, frame) })
 }
 
 ///|
@@ -254,7 +260,7 @@ test "a frame built again for a motion going names the motion and the place that
     |> ignore
   })
   // (said to go, as an Anim says it: Ctx::moving with where to, then who it is for the record)
-  t.ctx().moving(who, Endless::{  }, what="Anim \"slide\" to 1")
+  t.ctx().moving(who, Endless::{  }.as_moving(), what="Anim \"slide\" to 1")
   let at = place_here()
   who.told_as("Anim \"slide\"", at)
   t.clock_frame()

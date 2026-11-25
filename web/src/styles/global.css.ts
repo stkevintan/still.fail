@@ -53,9 +53,8 @@ globalStyle(":root", {
     // What floats over the canvas (the composer): a grey ground of its own, a step darker than the canvas in light and
     // a step lighter in dark, where a shadow does not show.
     "--raised": color(PALETTE.light.raised, "light"),
-    // What is lifted out of a tinted track (a segmented choice's thumb), drawn over the track: white, a shadow lifting
-    // it; in dark, where a shadow does not show, the ink at 12% over the track (the ink at 6%), a step lighter than it on
-    // whatever ground it lies on (the canvas was darker than a track on the page, 1.07:1).
+    // What is lifted out of a tinted track (a segmented choice's thumb), drawn over the track with zero border/shadow
+    // (matching native iOS 27.0): pure white in light, opaque #68686E in dark.
     "--lifted": color(PALETTE.light.lifted, "light"),
     "--sidebar": color(PALETTE.light.sidebar, "light"),
     "--list": color(PALETTE.light.list, "light"),

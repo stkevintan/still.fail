@@ -48,10 +48,6 @@ pub fn window_zoom_keys(c : @ui.Ctx, src : Source) -> Unit {
     guard @settings.binding_of(code, mods) is Some(binding) else { return false }
     for action in ["zoom.in", "zoom.out", "zoom.reset"] {
       if @settings.keys_of(prefs, action).contains(binding) {
-        // (a Farview tab's page with the focus: the page shown bigger or smaller, not the window: farview_tab.mbt)
-        if @ui.view_action("farview." + action) {
-          return true
-        }
         zoom_do(src, action)
         return true
       }

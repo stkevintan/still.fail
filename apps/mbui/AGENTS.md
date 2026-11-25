@@ -5,7 +5,7 @@ still.fail's single app on every platform (`apps/mbui/README.md`), in MoonBit on
 Narrower rules:
 
 - `apps/mbui/src/sfbase/AGENTS.md`: data readiness, SWR, open gates, kept roots, workspace switch < 300 ms, ahead reads, `press_wait`, beside-chat tabs, topics, feature registry
-- `apps/mbui/src/sfpages/AGENTS.md`: card block granularity, keyed chat page, block reuse, chat page and composer, width bindings, Farview client
+- `apps/mbui/src/sfpages/AGENTS.md`: card block granularity, keyed chat page, block reuse, chat page and composer, width bindings
 - `apps/mbui/src/sfapp/AGENTS.md`: screen sweeps, `fixed_outgrown`, `shown_known`, real-size budgets, replay topic bytes and trace switches, offscreen stills/video, latency
 
 ## The terms (术语)
@@ -44,7 +44,7 @@ Use these four terms in PR descriptions and user-facing text (never 电脑版, �
 - Build new and rewritten UI as tree nodes (`@sf.page_node`, `@sf.panel_nodes`, `View::each`, `View::scrolls_window`, `*_node.mbt`), acting in handlers (`on_press`, `on_pick`, `on_change`). Never wrap a node part back into `Ctx`.
 - To migrate or fix UI, read the logic, state, subscriptions, and git history first, then write it as nodes. Never diff `drawn_rects()`, pixel-fit the old view, or guess from screenshots.
 - Legacy detlint counts (`old-island`, `old-list`, `old-panel`, `click-read`, `key-read`, `submitted-read`, `build-motion`, `layout-read-back`, `ui-current`) only fall: migrate touched code.
-- See `apps/mbui/src/sfpages/AGENTS.md` for keyed chat nodes, block reuse, the chat page and composer, width bindings, and Farview.
+- See `apps/mbui/src/sfpages/AGENTS.md` for keyed chat nodes, block reuse, the chat page and composer, and width bindings.
 
 ## Motion
 

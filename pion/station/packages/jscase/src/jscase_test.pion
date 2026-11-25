@@ -1,0 +1,105 @@
+fn expect(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+test "lower matches V8 String.prototype.toLowerCase" {
+  let cases : Array[(String, String)] = [
+    ("ΑΣ", "ας"),
+    ("ΑΣ.", "ας."),
+    ("Σ", "σ"),
+    ("ΑΣΑ", "ασα"),
+    ("A.Σ", "a.ς"),
+    ("İstanbul", "i\u{0307}stanbul"),
+    ("ẞ", "ß"),
+    ("ǅ", "ǆ"),
+    ("ΌΣΟΣ ΣΟΦΌΣ", "όσος σοφός"),
+    ("Ⅻ", "ⅻ"),
+    ("𐐀𐐁", "𐐨𐐩"),
+    ("Kelvin\u{212a}", "kelvink"),
+    ("ΑΣ\u{0301}", "ας\u{0301}"),
+    ("Hello World", "hello world"),
+    ("ÀÉÎ", "àéî"),
+    ("ΑΣ 1", "ας 1"),
+    ("plain ascii 123", "plain ascii 123"),
+    ("Σ.", "σ."),
+    ("Α'Σ'Β", "α'σ'β"),
+    ("Α'Σ'", "α'ς'"),
+  ]
+  for i in 0..<cases.length() {
+    let (src, want) = cases[i]
+    let got = lower(src)
+    expect(got == want, "lower(" + src + "): got=" + got + " want=" + want)
+  }
+}
+
+test "has_word matches RegExp /[^\\p{L}\\p{N}]+/u" {
+  let cases : Array[(String, String, Bool)] = [
+    ("api error: 401 invalid", "401", true),
+    ("api error:401", "401", true),
+    ("x4010", "401", false),
+    ("4401", "401", false),
+    ("状态401", "401", false),
+    ("状态 401", "401", true),
+    ("a_401", "401", true),
+    ("é401", "401", false),
+    ("401\u{0301}", "401", true),
+    ("𐐨401", "401", false),
+    ("٤401", "401", false),
+    ("401", "401", true),
+    ("", "401", false),
+  ]
+  for i in 0..<cases.length() {
+    let (s, w, want) = cases[i]
+    expect(has_word(s, w) == want, "has_word(" + s + ", " + w + ")")
+  }
+}
+
+test "trim, trim_white, split_by, has_cases, and in_ranges boundaries" {
+  // U+FEFF is JS \s but not Unicode White_Space; U+0085 is Unicode White_Space but not JS \s
+  expect(trim(" \t\u{feff}abc \n\u{3000}") == "abc", "trim JS space")
+  expect(trim_start(" \t\u{feff}abc \n") == "abc \n", "trim_start")
+  expect(trim_end(" \t\u{feff}abc \n\u{3000}") == " \t\u{feff}abc", "trim_end")
+  expect(trim_start("\u{0085}abc") == "\u{0085}abc", "U+0085 not JS space")
+  expect(trim_white("\u{0085} abc \n") == "abc", "trim_white")
+  expect(trim_start_white("\u{0085} abc ") == "abc ", "trim_start_white")
+  expect(trim_end_white(" abc\u{0085}\n") == " abc", "trim_end_white")
+  expect(trim_start_white("\u{feff}abc") == "\u{feff}abc", "U+FEFF not White_Space")
+  expect(trim_end_white("abc\u{feff}") == "abc\u{feff}", "U+FEFF end not White_Space")
+  expect(trim_start("   ") == "", "all spaces start")
+  expect(trim_end("   ") == "", "all spaces end")
+  expect(is_space(0x2028) && is_space(0x2029) && is_space(0xFEFF) && !is_space(0x85), "is_space")
+  expect(is_white_space(0x85) && is_white_space(0x2028) && !is_white_space(0xFEFF), "is_white_space")
+
+  let parts = split_by("  a\u{3000}\tb  ", is_space)
+  expect(parts.length() == 4, "split_by len 4")
+  expect(parts[0] == "" && parts[1] == "a" && parts[2] == "b" && parts[3] == "", "split_by parts")
+
+  // split_by advances strictly one UTF-16 code unit at a time (1:1 with jscase.mbt:225):
+  // - non-BMP scalar predicate never matches -> 1 part
+  // - matching only high surrogate 0xD83D splits and retains low surrogate 0xDE00 + 'b' in part 1
+  // - matching only low surrogate 0xDE00 splits and retains 'a' + high surrogate 0xD83D in part 0
+  let emoji_scalar = split_by("a\u{1f600}b", fn(c : Int) -> Bool { c == 0x1F600 })
+  expect(emoji_scalar.length() == 1 && emoji_scalar[0] == "a\u{1f600}b", "split_by scalar non-BMP")
+  let emoji_hi = split_by("a\u{1f600}b", fn(c : Int) -> Bool { c == 0xD83D })
+  expect(emoji_hi.length() == 2, "split_by hi len 2")
+  let hi0 = to_utf16_units(emoji_hi[0])
+  let hi1 = to_utf16_units(emoji_hi[1])
+  expect(hi0.length() == 1 && hi0[0] == 0x61, "split_by hi part 0 == [0x61]")
+  expect(hi1.length() == 2 && hi1[0] == 0xDE00 && hi1[1] == 0x62, "split_by hi part 1 == [0xDE00, 0x62]")
+  let emoji_lo = split_by("a\u{1f600}b", fn(c : Int) -> Bool { c == 0xDE00 })
+  expect(emoji_lo.length() == 2, "split_by lo len 2")
+  let lo0 = to_utf16_units(emoji_lo[0])
+  let lo1 = to_utf16_units(emoji_lo[1])
+  expect(lo0.length() == 2 && lo0[0] == 0x61 && lo0[1] == 0xD83D, "split_by lo part 0 == [0x61, 0xD83D]")
+  expect(lo1.length() == 1 && lo1[0] == 0x62, "split_by lo part 1 == [0x62]")
+
+  expect(has_cases("abc"), "ascii letters have cases")
+  expect(has_cases("123Σ"), "greek sigma has cases")
+  expect(!has_cases("12345 中文 _-"), "digits/cjk/punct no cases")
+  expect(in_ranges([0x41, 0x5A, 0x61, 0x7A], 0x41), "range lower bound")
+  expect(in_ranges([0x41, 0x5A, 0x61, 0x7A], 0x5A), "range upper bound")
+  expect(!in_ranges([0x41, 0x5A, 0x61, 0x7A], 0x5B), "range gap")
+  expect(!in_ranges([], 0x41), "empty range")
+}

@@ -89,6 +89,15 @@ extern "C" fn ffi_face_add_family(face : Int, family : String) -> Int = "mb_host
 ///|
 extern "C" fn ffi_local_font_families() -> String = "mb_host_local_font_families"
 
+///|
+extern "C" fn ffi_face_set_ligatures(face : Int, on : Int) -> Unit = "mb_host_face_set_ligatures"
+
+///|
+extern "C" fn ffi_set_host_autospace(on : Int) -> Unit = "mb_host_set_host_autospace"
+
+///|
+extern "C" fn ffi_local_font_info() -> String = "mb_host_local_font_info"
+
 extern "C" fn ffi_atlas_generation() -> Int = "mb_host_atlas_generation"
 
 #borrow(buf)
@@ -751,6 +760,21 @@ fn face_add_family(face : Int, family : String) -> Bool {
 ///|
 fn local_font_families() -> String {
   ffi_local_font_families()
+}
+
+///|
+fn face_set_ligatures(face : Int, on : Bool) -> Unit {
+  ffi_face_set_ligatures(face, if on { 1 } else { 0 })
+}
+
+///|
+fn set_host_autospace(on : Bool) -> Unit {
+  ffi_set_host_autospace(if on { 1 } else { 0 })
+}
+
+///|
+fn local_font_info() -> String {
+  ffi_local_font_info()
 }
 
 ///|

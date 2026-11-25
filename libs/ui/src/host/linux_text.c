@@ -11,6 +11,7 @@
 #include <math.h>
 #include <pango/pangocairo.h>
 #include <pango/pangofc-fontmap.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +30,7 @@ typedef struct {
   double size;
   int weight;
   int style;  // 1 italic, 2 the code face, … (style.mbt)
+  int fg;     // per-slot face generation (for preview slots >= MB_FACE_TRY)
   double w, h, ox, oy;
   int color;
 } glyph_entry;
@@ -126,24 +128,26 @@ static void utf8_free(utf8_text *t) {
 
 // ---- faces given (mb_host_face_add, style.mbt): fontconfig's application fonts, by the family their files make ----
 
-#define MB_FACES 16
+#define MB_FACES 32
 static struct {
   char family[128];
   int has;
+  int no_lig;
 } faces[MB_FACES];
 
 static int face_id(int style) {
-  int f = (style >> 8) & 15;
+  int f = (style >> 8) & 31;
   if (f > 0) return faces[f].has ? f : 0;
   if (style & 2) return faces[3].has ? 3 : 0;
-  if ((style & 16) && faces[2].has) return 2;
   if (style & 4) return 0;
+  if ((style & 16) && faces[2].has) return 2;
   return faces[1].has ? 1 : 0;
 }
 
+#define MB_FACE_TRY 7
+static int face_gen[MB_FACES];
 static int keys_stale;  // the keys made before forgotten as the next frame starts (keys_sweep)
-static void faces_changed(void) {
-  keys_stale = 1;
+static void face_changed(int f) {
   pango_fc_font_map_config_changed(PANGO_FC_FONT_MAP(fontmap));
   g_object_unref(ctx);
   ctx = NULL;
@@ -151,6 +155,11 @@ static void faces_changed(void) {
   fontmap = NULL;
   init();
   g_object_unref(fm);
+  if (f >= MB_FACE_TRY && f < MB_FACES) {
+    face_gen[f]++;
+    return;
+  }
+  keys_stale = 1;
   generation++;
 }
 
@@ -168,7 +177,7 @@ static int face_take(int f, const char *path) {
     faces[f].has = 1;
   }
   if (p) FcPatternDestroy(p);
-  if (ok) faces_changed();
+  if (ok) face_changed(f);
   return ok;
 }
 
@@ -222,10 +231,22 @@ int32_t mb_host_face_add_bytes(int32_t f, moonbit_bytes_t data, int32_t weight) 
 }
 
 void mb_host_face_clear(int32_t f) {
-  if (f <= 0 || f >= MB_FACES || !faces[f].has) return;
+  if (f <= 0 || f >= MB_FACES) return;
+  faces[f].no_lig = 0;
+  if (!faces[f].has) return;
   faces[f].has = 0;
-  faces_changed();
+  face_changed(f);
 }
+
+void mb_host_face_set_ligatures(int32_t f, int32_t on) {
+  if (f <= 0 || f >= MB_FACES) return;
+  int no_lig = on ? 0 : 1;
+  if (faces[f].no_lig == no_lig) return;
+  faces[f].no_lig = no_lig;
+  face_changed(f);
+}
+
+void mb_host_set_host_autospace(int32_t on) { (void)on; }
 
 static int family_installed(const char *name) {
   init();
@@ -243,7 +264,7 @@ int32_t mb_host_face_add_family(int32_t f, moonbit_string_t family) {
   if (ok) {
     strcpy(faces[f].family, name);
     faces[f].has = 1;
-    faces_changed();
+    face_changed(f);
   }
   free(name);
   return ok;
@@ -251,31 +272,164 @@ int32_t mb_host_face_add_family(int32_t f, moonbit_string_t family) {
 
 static int name_order(const void *a, const void *b) { return g_utf8_collate(*(char *const *)a, *(char *const *)b); }
 
-// The families installed here as a JSON array of their names, in the order of the user's language.
+static char *local_families_cache;
+
+// The families installed here as a JSON array of their names, in the order of the user's language (cached once).
 moonbit_string_t mb_host_local_font_families(void) {
   init();
-  PangoFontFamily **fams = NULL;
-  int n = 0;
-  pango_font_map_list_families(fontmap, &fams, &n);
-  const char **names = calloc((size_t)(n ? n : 1), sizeof(char *));
-  for (int i = 0; i < n; i++) names[i] = pango_font_family_get_name(fams[i]);
-  qsort(names, (size_t)n, sizeof(char *), name_order);
-  GString *out = g_string_new("[");
-  for (int i = 0; i < n; i++) {
-    if (i) g_string_append_c(out, ',');
-    g_string_append_c(out, '"');
-    for (const char *c = names[i]; *c; c++) {
-      if (*c == '"' || *c == '\\') g_string_append_c(out, '\\');
-      g_string_append_c(out, (unsigned char)*c < 0x20 ? ' ' : *c);
+  if (!local_families_cache) {
+    PangoFontFamily **fams = NULL;
+    int n = 0;
+    pango_font_map_list_families(fontmap, &fams, &n);
+    const char **names = calloc((size_t)(n ? n : 1), sizeof(char *));
+    for (int i = 0; i < n; i++) names[i] = pango_font_family_get_name(fams[i]);
+    qsort(names, (size_t)n, sizeof(char *), name_order);
+    GString *out = g_string_new("[");
+    for (int i = 0; i < n; i++) {
+      if (i) g_string_append_c(out, ',');
+      g_string_append_c(out, '"');
+      for (const char *c = names[i]; *c; c++) {
+        if (*c == '"' || *c == '\\') g_string_append_c(out, '\\');
+        g_string_append_c(out, (unsigned char)*c < 0x20 ? ' ' : *c);
+      }
+      g_string_append_c(out, '"');
     }
-    g_string_append_c(out, '"');
+    g_string_append_c(out, ']');
+    free(names);
+    g_free(fams);
+    local_families_cache = g_string_free(out, FALSE);
+  }
+  glong len = 0;
+  gunichar2 *u = g_utf8_to_utf16(local_families_cache, -1, NULL, &len, NULL);
+  moonbit_string_t s = moonbit_make_string_raw((int32_t)len);
+  if (len) memcpy(s, u, (size_t)len * 2);
+  g_free(u);
+  return s;
+}
+
+extern void mb_host_request_frame(void);
+
+static char *local_font_info_cache;
+static int local_font_info_started;
+
+static void json_append_escaped(GString *out, const char *str) {
+  g_string_append_c(out, '"');
+  for (const char *c = str; *c; c++) {
+    if (*c == '"' || *c == '\\') g_string_append_c(out, '\\');
+    g_string_append_c(out, (unsigned char)*c < 0x20 ? ' ' : *c);
+  }
+  g_string_append_c(out, '"');
+}
+
+static gboolean local_font_info_wake(gpointer data) {
+  (void)data;
+  mb_host_request_frame();
+  return G_SOURCE_REMOVE;
+}
+
+typedef struct {
+  int mono;
+  int serif;
+  int cjk;
+} LinuxFontMeta;
+
+static gint ptr_str_order(gconstpointer a, gconstpointer b) {
+  const char *sa = *(const char *const *)a;
+  const char *sb = *(const char *const *)b;
+  int c = g_ascii_strcasecmp(sa, sb);
+  return c != 0 ? c : strcmp(sa, sb);
+}
+
+static void *local_font_info_worker(void *arg) {
+  (void)arg;
+  FcConfig *cfg = FcInitLoadConfigAndFonts();
+  FcPattern *pat = FcPatternCreate();
+  FcObjectSet *os = FcObjectSetBuild(FC_FAMILY, FC_LANG, FC_SPACING, NULL);
+  FcFontSet *fs = cfg ? FcFontList(cfg, pat, os) : NULL;
+  GHashTable *seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+  GPtrArray *order = g_ptr_array_new();
+  if (fs) {
+    for (int i = 0; i < fs->nfont; i++) {
+      FcChar8 *fam = NULL;
+      if (FcPatternGetString(fs->fonts[i], FC_FAMILY, 0, &fam) != FcResultMatch || !fam || !*fam) continue;
+      const char *name = (const char *)fam;
+      LinuxFontMeta *meta = (LinuxFontMeta *)g_hash_table_lookup(seen, name);
+      if (!meta) {
+        meta = g_new0(LinuxFontMeta, 1);
+        meta->serif = (strstr(name, "Serif") || strstr(name, "serif") || strstr(name, "Song") ||
+                       strstr(name, "Ming") || strstr(name, "Mincho") || strstr(name, "Georgia") ||
+                       strstr(name, "Times"))
+                          ? 1
+                          : 0;
+        char *key = g_strdup(name);
+        g_hash_table_insert(seen, key, meta);
+        g_ptr_array_add(order, key);
+      }
+      int spacing = 0;
+      if (FcPatternGetInteger(fs->fonts[i], FC_SPACING, 0, &spacing) == FcResultMatch &&
+          (spacing == FC_MONO || spacing == FC_DUAL)) {
+        meta->mono = 1;
+      }
+      if (!meta->cjk) {
+        FcLangSet *ls = NULL;
+        if (FcPatternGetLangSet(fs->fonts[i], FC_LANG, 0, &ls) == FcResultMatch && ls) {
+          if (FcLangSetHasLang(ls, (const FcChar8 *)"zh-cn") != FcLangDifferentLang ||
+              FcLangSetHasLang(ls, (const FcChar8 *)"zh-tw") != FcLangDifferentLang ||
+              FcLangSetHasLang(ls, (const FcChar8 *)"ja") != FcLangDifferentLang ||
+              FcLangSetHasLang(ls, (const FcChar8 *)"ko") != FcLangDifferentLang) {
+            meta->cjk = 1;
+          }
+        }
+      }
+    }
+    FcFontSetDestroy(fs);
+  }
+  FcObjectSetDestroy(os);
+  FcPatternDestroy(pat);
+  if (cfg) FcConfigDestroy(cfg);
+  g_ptr_array_sort(order, ptr_str_order);
+  GString *out = g_string_new("[");
+  for (guint i = 0; i < order->len; i++) {
+    const char *name = (const char *)g_ptr_array_index(order, i);
+    LinuxFontMeta *meta = (LinuxFontMeta *)g_hash_table_lookup(seen, name);
+    if (out->len > 1) g_string_append_c(out, ',');
+    g_string_append(out, "{\"name\":");
+    json_append_escaped(out, name);
+    g_string_append(out, ",\"localized\":");
+    json_append_escaped(out, name);
+    g_string_append_printf(out, ",\"mono\":%s,\"serif\":%s,\"cjk\":%s}",
+                           meta->mono ? "true" : "false", meta->serif ? "true" : "false",
+                           meta->cjk ? "true" : "false");
   }
   g_string_append_c(out, ']');
-  free(names);
-  g_free(fams);
+  g_ptr_array_free(order, TRUE);
+  g_hash_table_destroy(seen);
+  char *json = g_string_free(out, FALSE);
+  __atomic_store_n(&local_font_info_cache, json, __ATOMIC_RELEASE);
+  g_idle_add(local_font_info_wake, NULL);
+  return NULL;
+}
+
+// Asynchronous cached metadata for locally installed font families (name, localized, mono, serif, cjk).
+// Returns "" immediately on first call while a detached pthread performs a single FcFontList scan.
+moonbit_string_t mb_host_local_font_info(void) {
+  char *cached = __atomic_load_n(&local_font_info_cache, __ATOMIC_ACQUIRE);
+  if (!cached) {
+    if (__atomic_exchange_n(&local_font_info_started, 1, __ATOMIC_ACQ_REL) == 0) {
+      pthread_t tid;
+      if (pthread_create(&tid, NULL, local_font_info_worker, NULL) == 0) {
+        pthread_detach(tid);
+      } else {
+        char *empty = g_strdup("[]");
+        __atomic_store_n(&local_font_info_cache, empty, __ATOMIC_RELEASE);
+        g_idle_add(local_font_info_wake, NULL);
+        cached = empty;
+      }
+    }
+    if (!cached) return moonbit_make_string_raw(0);
+  }
   glong len = 0;
-  gunichar2 *u = g_utf8_to_utf16(out->str, -1, NULL, &len, NULL);
-  g_string_free(out, TRUE);
+  gunichar2 *u = g_utf8_to_utf16(cached, -1, NULL, &len, NULL);
   moonbit_string_t s = moonbit_make_string_raw((int32_t)len);
   if (len) memcpy(s, u, (size_t)len * 2);
   g_free(u);
@@ -302,10 +456,13 @@ static PangoLayout *make_layout(const char *s, int n, double size, int weight, i
   PangoFontDescription *d = desc_for(size, weight, style);
   pango_layout_set_font_description(l, d);
   pango_font_description_free(d);
-  if (style & (8 | 32 | 64)) {
+  int face = face_id(style);
+  int no_lig = face > 0 && faces[face].no_lig;
+  if ((style & (8 | 32 | 64)) || no_lig) {
     PangoAttrList *a = pango_attr_list_new();
-    char f[48] = "";
-    if (style & 8) strcat(f, "liga=0,clig=0,");
+    char f[64] = "";
+    if (no_lig) strcat(f, "calt=0,liga=0,clig=0,");
+    else if (style & 8) strcat(f, "liga=0,clig=0,");
     if (style & 32) strcat(f, "tnum=1,");
     if (style & 64) strcat(f, "pwid=1,");
     f[strlen(f) - 1] = 0;
@@ -344,31 +501,33 @@ void mb_host_font_metrics(double size, int32_t weight, int32_t style, double *ou
 
 // ---- the clusters' keys ----
 
-static uint32_t hash(const uint16_t *s, int len, double size, int weight, int style) {
+static uint32_t hash(const uint16_t *s, int len, double size, int weight, int style, int fg) {
   uint32_t h = 2166136261u;
   for (int i = 0; i < len; i++) h = (h ^ s[i]) * 16777619u;
   h = (h ^ (uint32_t)(size * 64)) * 16777619u;
   h = (h ^ (uint32_t)style) * 16777619u;
+  h = (h ^ (uint32_t)fg) * 16777619u;
   return (h ^ (uint32_t)weight) * 16777619u;
 }
 
-static int same(const glyph_entry *e, const uint16_t *s, int len, double size, int weight, int style) {
-  return e->len == len && e->size == size && e->weight == weight && e->style == style &&
+static int same(const glyph_entry *e, const uint16_t *s, int len, double size, int weight, int style, int fg) {
+  return e->len == len && e->size == size && e->weight == weight && e->style == style && e->fg == fg &&
          memcmp(pool + e->off, s, (size_t)len * sizeof(uint16_t)) == 0;
 }
 
 static void table_put(int id) {
   glyph_entry *e = &entries[id];
-  size_t i = hash(pool + e->off, e->len, e->size, e->weight, e->style) & (table_cap - 1);
+  size_t i = hash(pool + e->off, e->len, e->size, e->weight, e->style, e->fg) & (table_cap - 1);
   while (table[i]) i = (i + 1) & (table_cap - 1);
   table[i] = id + 1;
 }
 
 static int intern(const uint16_t *s, int len, double size, int weight, int style) {
+  int fg = face_gen[face_id(style)];
   if (table_cap) {
-    size_t i = hash(s, len, size, weight, style) & (table_cap - 1);
+    size_t i = hash(s, len, size, weight, style, fg) & (table_cap - 1);
     for (; table[i]; i = (i + 1) & (table_cap - 1))
-      if (same(&entries[table[i] - 1], s, len, size, weight, style)) return table[i] - 1;
+      if (same(&entries[table[i] - 1], s, len, size, weight, style, fg)) return table[i] - 1;
   }
   if (n_entries == cap_entries) {
     cap_entries = cap_entries ? cap_entries * 2 : 1024;
@@ -380,7 +539,7 @@ static int intern(const uint16_t *s, int len, double size, int weight, int style
   }
   memcpy(pool + pool_len, s, (size_t)len * sizeof(uint16_t));
   int id = n_entries++;
-  entries[id] = (glyph_entry){(int)pool_len, len, size, weight, style, 0, 0, 0, 0, 0};
+  entries[id] = (glyph_entry){(int)pool_len, len, size, weight, style, fg, 0, 0, 0, 0, 0};
   pool_len += len;
   if ((size_t)n_entries * 2 > table_cap) {
     free(table);

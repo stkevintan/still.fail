@@ -27,8 +27,8 @@ pub fn pick_bar_node(
 ) -> @view.View {
   let bar = @glass.liquid_pill_group_node(
     parent,
-    height=40.0,
-    pad=4.0,
+    height=pick_bar_h,
+    pad=pick_bar_pad,
     gap=0.0,
     solid=panel_ground,
     fn(bar) {
@@ -110,6 +110,115 @@ fn pick_bar_button(
 }
 
 ///|
+/// One action in a desktop selection bar (`pick_bar_desk_node`): its reactive label (shown and read out,
+/// staying live across language/word-table switches), optional 15pt icon (`""` for none), and activation callback
+/// receiving the button's window rectangle `(x, y, w, h)` synchronously at activation time.
+pub struct PickBarAction {
+  label : () -> String
+  icon : String
+  press_at : ((Double, Double, Double, Double)) -> Unit
+}
+
+///|
+/// Builds a `PickBarAction` for `pick_bar_desk_node`.
+pub fn pick_bar_action(
+  label : () -> String,
+  icon? : String = "",
+  press_at : ((Double, Double, Double, Double)) -> Unit,
+) -> PickBarAction {
+  { label, icon, press_at }
+}
+
+///|
+/// Desktop selection pill bar in `parent` with `actions` separated by hairline `pick_bar_rule`
+/// dividers (none when there is only one action). Matches mobile `pick_bar_node` proportions and optics
+/// (`40pt` tall, `pad=4pt`, `floating=false` → `liquid_bar_pill_glass` instead of oversized `liquid_floating_glass`,
+/// `32pt` round buttons, `panel_ground` + `control_edge_w` in `MBUI_GLASS=solid`, `glass_control_shadow`)
+/// and registers via `floating_host_lend`. Returns the outer capsule node.
+#callsite(autofill(loc))
+pub fn pick_bar_desk_node(
+  parent : @view.View,
+  actions : Array[PickBarAction],
+  loc~ : SourceLoc,
+) -> @view.View {
+  let bar = @glass.liquid_pill_group_node(
+    parent,
+    height=pick_bar_h,
+    pad=pick_bar_pad,
+    gap=0.0,
+    floating=false,
+    solid=panel_ground,
+    shadow=glass_control_shadow,
+    solid_edge=fn() { (control_edge_w, theme().p.line) },
+    fn(bar) {
+      for i, act in actions {
+        if i > 0 {
+          bar.box(fn(sep) { style_node(sep, fn() { pick_bar_rule }) }) |> ignore
+        }
+        pick_bar_desk_button(bar, act, loc~) |> ignore
+      }
+    },
+    loc~,
+  )
+  floating_host_lend(bar)
+  bar
+}
+
+///|
+/// A button of the desktop selection bar (`pick_bar_desk_node`): matches mobile `pick_bar_button`
+/// (`32pt` high, `15pt` icon, `Ui` words, `16pt` round) with hover ground, inset focus ring,
+/// touch-only ripple, mouse drag-past-slop click tolerance, and synchronous `placed_window_now()` delivery.
+#callsite(autofill(loc))
+fn pick_bar_desk_button(
+  parent : @view.View,
+  act : PickBarAction,
+  loc~ : SourceLoc,
+) -> @view.View {
+  @headless.button(
+    made_for=loc,
+    parent,
+    act.label,
+    fn(v) { (act.press_at)(v.placed_window_now()) },
+    fn(v, b) {
+      style_node(v, fn() { pick_bar_button_look })
+      hover_ground_node(v)
+      focus_ring_node(v)
+      if act.icon != "" {
+        icon_node(v, act.icon, pick_bar_icon, By(fn() { theme().p.text })) |> ignore
+      }
+      words_node(v, act.label, fn() { pick_bar_words }) |> ignore
+      @glass.bind_pill_press(v)
+      let rippled = press_look(loc~, v, Is(pick_bar_round), fn() { false }, pointer=false)
+      v.gesture(
+        @ui.touch_slop(),
+        press=fn(d) {
+          if !b.disabled() && @ui.pointing() is Finger {
+            (rippled.down)(d)
+          }
+        },
+        tap=fn(d) {
+          if !b.disabled() {
+            if @ui.pointing() is Finger {
+              (rippled.tapped)(d)
+            }
+            if v.finger_target(d.wx, d.wy) {
+              b.press()
+            }
+          }
+        },
+        drag=fn(d) {
+          // (a mouse's moved on it past the slop: still a press as it is let go on it, as a click is)
+          if d.kind == Up && @ui.pointing() is Mouse && v.finger_target(d.wx, d.wy) {
+            b.press()
+          }
+        },
+      )
+      |> ignore
+    },
+  )
+}
+
+///|
 /// A button (pick_button's): 32 high, 12 in, its icon 5 before its words, round.
 // kept across runs: a value (no field of it changes)
 let pick_bar_button_look : @ui.Style = @ui.css("row min_h=S8 px=S3 gap=S1_25 radius=Full align=ACenter")
@@ -132,6 +241,12 @@ let pick_bar_rule : @ui.Style = rule_down.then(@ui.css("h=S4 mx=S1"))
 ///|
 // kept across runs: a value (no field of it changes)
 let pick_bar_words : @ui.TextStyle = @ui.text_style(size=Ui, color=Fg, wrap=false)
+
+///|
+let pick_bar_h : Double = 40.0
+
+///|
+let pick_bar_pad : Double = 4.0
 
 ///|
 let pick_bar_icon : Double = 15.0

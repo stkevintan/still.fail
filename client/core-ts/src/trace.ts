@@ -24,21 +24,26 @@ type Anchor = { wallMs: number; monoMs: number };
 export class SpanContext {
   readonly trace: Uint8Array;
   readonly span: Uint8Array;
+  /// Whether its spans are recorded here.
   readonly sampled: boolean;
   readonly anchor: Anchor;
   /// How many spans were started under its trace's root, the trace over (a quiet root asked nothing when none).
   readonly under: { spans: number };
-  constructor(trace: Uint8Array, span: Uint8Array, sampled: boolean, anchor: Anchor, under: { spans: number } = { spans: 0 }) {
+  /// Whether the requests made under it ask those they reach to record them too (`traceparent`'s `01`): not while
+  /// this device has not been told it may send traces (`Tracer.setOn`), though its own spans are kept meanwhile.
+  readonly told: boolean;
+  constructor(trace: Uint8Array, span: Uint8Array, sampled: boolean, anchor: Anchor, under: { spans: number } = { spans: 0 }, told = sampled) {
     this.trace = trace;
     this.span = span;
     this.sampled = sampled;
     this.anchor = anchor;
     this.under = under;
+    this.told = told;
   }
 
   /// The W3C `traceparent` header for requests made under this span.
   traceparent(): string {
-    return `00-${hex(this.trace)}-${hex(this.span)}-${this.sampled ? "01" : "00"}`;
+    return `00-${hex(this.trace)}-${hex(this.span)}-${this.sampled && this.told ? "01" : "00"}`;
   }
 }
 
@@ -73,9 +78,16 @@ export class Tracer {
   /// The app's build, once its UI has said it (`client.device`): the traces' `service.version`, which tells what an
   /// update changed from what older builds still running do.
   #version = "";
+  /// Whether this device sends its traces (the settings' 发送使用统计和错误报告, `client.reports`). Off, no trace is
+  /// recorded here, a request's `traceparent` says so, and what was waiting is dropped. Not yet told (null: a core just
+  /// started, before its app has read its settings), traces are recorded but kept here, and requests say they are not
+  /// recorded: told on, what was kept goes; told off, it is dropped.
+  #on: boolean | null;
 
-  constructor(host: BaseHost, runner: Runner, sample: number, names: TraceNames = { scope: "", own: "" }) {
+  /// `on`: whether it sends from its start, or (null) waits to be told (`setOn`).
+  constructor(host: BaseHost, runner: Runner, sample: number, names: TraceNames = { scope: "", own: "" }, on: boolean | null = true) {
     this.names = names;
+    this.#on = on;
     this.#host = host;
     this.#runner = runner;
     this.#sample = sample;
@@ -83,6 +95,18 @@ export class Tracer {
 
   setExport(e: Export): void {
     this.#export = e;
+  }
+
+  /// As the settings say (`client.reports`).
+  setOn(on: boolean): void {
+    this.#on = on;
+    if (!on) this.#buffer = [];
+    else if (this.#buffer.length > 0) this.#schedule();
+  }
+
+  /// Whether this device has been told it may send its traces (null: not yet told).
+  get on(): boolean | null {
+    return this.#on;
   }
 
   setVersion(version: string): void {
@@ -120,10 +144,10 @@ export class Tracer {
     return this.#start(name, kind, null);
   }
 
-  /// The root of a new trace that is always recorded.
+  /// The root of a new trace that is always recorded (unless this device sends no traces).
   always(name: string, kind: Kind): Span {
     const span = this.#start(name, kind, null);
-    span.context = new SpanContext(span.context.trace, span.context.span, true, span.context.anchor, span.context.under);
+    span.context = new SpanContext(span.context.trace, span.context.span, this.#on !== false, span.context.anchor, span.context.under, this.#on === true);
     return span;
   }
 
@@ -133,7 +157,7 @@ export class Tracer {
     let context: SpanContext;
     if (parent) {
       parent.under.spans++;
-      context = new SpanContext(parent.trace, span, parent.sampled, parent.anchor, parent.under);
+      context = new SpanContext(parent.trace, span, parent.sampled, parent.anchor, parent.under, parent.told);
     }
     else {
       const trace = new Uint8Array(16);
@@ -141,16 +165,16 @@ export class Tracer {
       const roll = new Uint8Array(4);
       this.#host.randomBytes(roll);
       const r = new DataView(roll.buffer).getUint32(0, true);
-      const sampled = r < this.#sample * 2 ** 32;
-      context = new SpanContext(trace, span, sampled, { wallMs: this.#host.nowMs(), monoMs: this.#host.monotonicMs() });
+      const sampled = this.#on !== false && r < this.#sample * 2 ** 32;
+      context = new SpanContext(trace, span, sampled, { wallMs: this.#host.nowMs(), monoMs: this.#host.monotonicMs() }, { spans: 0 }, this.#on === true);
     }
     return new Span(this, this.#host, context, parent ? parent.span : null, name, kind, this.#host.monotonicMs());
   }
 
   record(span: unknown): void {
-    if (this.#buffer.length >= MAX_BUFFER) return;
+    if (this.#on === false || this.#buffer.length >= MAX_BUFFER) return;
     this.#buffer.push(span);
-    this.#schedule();
+    if (this.#on) this.#schedule();
   }
 
   #schedule(): void {
@@ -164,16 +188,19 @@ export class Tracer {
   /// went every few minutes had 40% of its failed reconnects never reach the traces, nor anything else that ended as they
   /// did: each was sent as the network was down, and let go.
   #unsent(spans: unknown[]): void {
+    // (turned off while it was on its way: never sent again)
+    if (this.#on === false) return;
     this.#failed++;
     this.#buffer = spans.concat(this.#buffer).slice(0, MAX_BUFFER);
     this.#schedule();
   }
 
-  /// Sends what waits now, if there is somewhere to send it.
+  /// Sends what waits now, if there is somewhere to send it and this device has been told it may (kept till then).
   flush(): void {
     this.#scheduled = false;
+    if (this.#on === false) this.#buffer = [];
     const e = this.#export;
-    if (!e) return;
+    if (!e || this.#on !== true) return;
     const spans = this.#buffer;
     this.#buffer = [];
     if (spans.length === 0) return;

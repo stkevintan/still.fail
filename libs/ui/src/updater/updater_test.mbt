@@ -210,37 +210,22 @@ priv struct FakeUpdateHost {
 }
 
 ///|
-impl @hostapi.Host for FakeUpdateHost with app_version(self) {
-  self.ver
-}
-
-///|
-impl @hostapi.Host for FakeUpdateHost with update_state(self) {
-  self.state_json
-}
-
-///|
-impl @hostapi.Host for FakeUpdateHost with update_fetch(
-  self,
-  url,
-  sha256,
-  size,
-  name,
-  now,
-  delta,
-) {
-  self.fetch_calls += 1
-  self.last_url = url
-  self.last_sha = sha256
-  self.last_size = size
-  self.last_name = name
-  self.last_now = now
-  self.last_delta = delta
-}
-
-///|
-impl @hostapi.Host for FakeUpdateHost with update_apply(self, note) {
-  self.applied_note = note
+fn FakeUpdateHost::as_host(self : FakeUpdateHost) -> @hostapi.Host {
+  {
+    ..@hostapi.Host::noop(),
+    app_version: fn() { self.ver },
+    update_state: fn() { self.state_json },
+    update_fetch: fn(url, sha256, size, name, now, delta) {
+      self.fetch_calls += 1
+      self.last_url = url
+      self.last_sha = sha256
+      self.last_size = size
+      self.last_name = name
+      self.last_now = now
+      self.last_delta = delta
+    },
+    update_apply: fn(note) { self.applied_note = note },
+  }
 }
 
 ///|
@@ -258,7 +243,7 @@ test "check_and_fetch host integration and signature gating" {
     last_delta: "",
     applied_note: "",
   }
-  @hostapi.set_host(fake)
+  @hostapi.set_host(fake.as_host())
 
   assert_true(@updater.status().phase == Ready)
   @updater.apply(note="updated")
@@ -375,7 +360,7 @@ test "signed feed produced by release tool verifies and selects signed raw delta
     last_delta: "",
     applied_note: "",
   }
-  @hostapi.set_host(fake)
+  @hostapi.set_host(fake.as_host())
   match @updater.check_and_fetch(
     signed_feed_json,
     "https://releases.example.com/mac",

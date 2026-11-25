@@ -14,8 +14,9 @@ permissions:
   contents: read
   actions: read
 env:
-  # Farview's client, which the app draws a chat's Farview tab with (apps/mbui/scripts/farview.sh: a private repository,
-  # read by its deploy key)
+  # Farview's client, for a release whose apps/mbui still pulls it (apps/mbui/scripts/farview.sh in its checkout: a
+  # private repository, read by its deploy key). Stable runs this file from main against an older release's checkout;
+  # remove once no release before #8534 is published.
   FARVIEW_DEPLOY_KEY: ${{ secrets.FARVIEW_DEPLOY_KEY }}
 jobs:
   plan:
@@ -46,6 +47,9 @@ jobs:
     runs-on: [self-hosted, macos-ci]
     environment: production
     timeout-minutes: 10
+    outputs:
+      hand: ${{ steps.hand.outputs.key }}
+      monoid: ${{ steps.monoid-upload.outcome == 'success' && '1' || '' }}
     env:
       GH_TOKEN: ${{ github.token }} # read-only API fallback if the public release download fails
     steps:
@@ -55,33 +59,93 @@ jobs:
         with: { ref: '${{ needs.plan.outputs.sha }}', fetch-depth: 0 }
       - uses: ./.github/actions/setup-mac
       - uses: ./.github/actions/natives
-      - name: Publish stable Android (mbui's) with its original signing key
+      - name: Build and sign stable Android (mbui's) with its original signing key
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ANDROID_DEBUG_KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
           POSTHOG_JSON: ${{ secrets.POSTHOG_JSON }}
+          RELEASE_DIR: ${{ runner.temp }}/release
         run: sh .github/release.sh --stable android
+      # Stage the APK and symbols from Mini1 directly via Cloudflare's API (~15-20 s instead of computing and uploading
+      # ~75 MB of deltas over Mini1's home uplink for ~5-6 minutes, 45502063213). Staging keeps any existing APK of the
+      # same version untouched until android-feeds publishes APK, deltas, and android/latest.json together on ubuntu-24.04.
+      - name: Stage its files and hand the feed to android-feeds
+        id: hand
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -o pipefail
+          git cat-file -e "$GITHUB_SHA:scripts/release-put.sh" 2>/dev/null || git fetch --depth=1 --filter=blob:none origin "$GITHUB_SHA"
+          git show "$GITHUB_SHA:scripts/release-put.sh" > "$RUNNER_TEMP/release-put.sh"
+          STILLFAIL_RELEASE_TOOLS_ROOT="$GITHUB_WORKSPACE" sh "$RUNNER_TEMP/release-put.sh" --stage "$RUNNER_TEMP/release"
+          STILLFAIL_RELEASE_TOOLS_ROOT="$GITHUB_WORKSPACE" sh "$RUNNER_TEMP/release-put.sh" --hand "$RUNNER_TEMP/release" | tee "$RUNNER_TEMP/hand.out"
+          echo "key=$(tail -1 "$RUNNER_TEMP/hand.out")" >> "$GITHUB_OUTPUT"
       # monoid's (build.monoid.android, the same key): from the same build, in the same warm cache (only the package is
       # made again: its id, name and links are in its manifest and resources); put by monoid-android. Not a reason to hold
-      # still.fail's release back: monoid-android, apart from done, fails where this did. Ended before the job is: run
-      # beside the pipeline's android on the same Mac it ran on to the job's 10 minutes, and the job cut skipped web,
-      # station, site and done after it (44770813931, 2026-11-20).
+      # still.fail's release back: skipped without failing monoid-android when time is short or upload fails (45498745060).
+      # Leave 165 s before JOB_END for monoid-upload (timeout-minutes: 2; 37 MB took 84 s in 45502063213) and cleanup so
+      # optional monoid work cannot cancel android and skip web/station/site/done (44770813931, 45502063213).
       - name: Build and sign monoid's stable Android app from the same build
+        id: monoid-build
         continue-on-error: true
         env:
           ANDROID_DEBUG_KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
           POSTHOG_JSON: ${{ secrets.POSTHOG_JSON }}
           RELEASE_DIR: ${{ runner.temp }}/monoid
         run: |
-          left=$(( JOB_END - $(date +%s) - 25 ))
+          left=$(( JOB_END - $(date +%s) - 165 ))
           if [ "$left" -lt 30 ]; then
-            echo "::warning::skipping monoid's stable Android build: only ${left} s left before job end"
+            echo "::warning::skipping monoid's stable Android build: only ${left} s left before upload reserve"
             exit 1
           fi
-          bash scripts/with-timeout.sh "@$(( JOB_END - 25 ))" sh .github/release.sh --product monoid --stable android
-      - uses: actions/upload-artifact@v4
+          bash scripts/with-timeout.sh "@$(( JOB_END - 165 ))" sh .github/release.sh --product monoid --stable android
+          left_up=$(( JOB_END - $(date +%s) ))
+          if [ "$left_up" -ge 145 ]; then
+            echo "packed=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::skipping monoid's stable Android upload: only ${left_up} s left before job end"
+          fi
+      - if: steps.monoid-build.outcome == 'success' && steps.monoid-build.outputs.packed == '1'
+        id: monoid-upload
+        uses: actions/upload-artifact@v4
         continue-on-error: true
+        timeout-minutes: 2
         with: { name: "monoid-android-stable", path: "${{ runner.temp }}/monoid", if-no-files-found: error, retention-days: 1, compression-level: 0 }
+
+  # The stable Android app's deltas, APK, symbols, and feed (staged by android), on Linux where Java compiles the delta
+  # applier and uploads are fast, mirroring station-put/desktop-win-feeds and pipeline.yml's deltas-android.
+  android-feeds:
+    needs: [plan, android]
+    if: ${{ !cancelled() && needs.android.result == 'success' }}
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 5
+    env:
+      HANDED: ${{ needs.android.outputs.hand }}
+    steps:
+      - run: sudo -n sysctl -qw net.ipv4.tcp_syn_retries=3 || true
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            /scripts/
+            /shared/delta.ts
+            /.node-version
+            /.github/actions/node/
+            /libs/ui/android/app/src/main/java/dev/mbui/Delta.java
+            /libs/ui/android/jzlib/
+          sparse-checkout-cone-mode: false
+      - uses: ./.github/actions/node
+      - name: Its deltas, then its APK and feed
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          [ -n "$HANDED" ] || { echo "no handoff key from android" >&2; exit 1; }
+          # shellcheck disable=SC2086 # names, one word each
+          sh scripts/release-put.sh --unhand "$RUNNER_TEMP/release" $HANDED
+          sh scripts/release-put.sh --unstage "$RUNNER_TEMP/release"
+          node scripts/release-deltas.ts "$RUNNER_TEMP/release" --deadline 180
+          sh scripts/release-put.sh "$RUNNER_TEMP/release"
+          # shellcheck disable=SC2086 # names, one word each
+          sh scripts/release-put.sh --drop $HANDED
 
   # The Mac app is mbui's (apps/mbui, its `stable` variant: fail.still.desktop, signed by the same team, so an installed
   # Electron app's updater moves it over, its data and sign-in kept), as the beta's became on 2026-10-26. 10 minutes (it
@@ -138,6 +202,8 @@ jobs:
     runs-on: windows-2025
     environment: production
     timeout-minutes: 10
+    outputs:
+      monoid: ${{ steps.monoid-upload.outcome == 'success' && '1' || '' }}
     defaults:
       run:
         shell: bash
@@ -252,6 +318,7 @@ jobs:
       # monoid's (build.monoid.desktop): the same program, linked again with its own resources (its id, name and
       # environment: apps/mbui/scripts/win.sh), nothing compiled again; put by monoid-desktop-win.
       - name: Pack and sign monoid's stable Windows app from the same build
+        id: monoid-build
         continue-on-error: true
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
@@ -259,8 +326,11 @@ jobs:
         run: |
           . "$RUNNER_TEMP/win-compiler.sh"
           sh scripts/release.sh --product monoid desktop-win
-      - uses: actions/upload-artifact@v4
+      - if: steps.monoid-build.outcome == 'success'
+        id: monoid-upload
+        uses: actions/upload-artifact@v4
         continue-on-error: true
+        timeout-minutes: 1
         with: { name: "monoid-desktop-win-stable", path: "${{ runner.temp }}/monoid", if-no-files-found: error, retention-days: 1 }
 
   # The stable Windows app's feeds (desktop-win put its files), after the deltas to it from the stable builds before
@@ -290,7 +360,7 @@ jobs:
   # company's Cloudflare account. Apart from done: still.fail's stable is recorded whatever they do.
   monoid-android:
     needs: [plan, android]
-    if: ${{ !cancelled() && needs.android.result == 'success' }}
+    if: ${{ !cancelled() && needs.android.result == 'success' && needs.android.outputs.monoid == '1' }}
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 5
@@ -337,7 +407,7 @@ jobs:
 
   monoid-desktop-win:
     needs: [plan, desktop-win]
-    if: ${{ !cancelled() && needs.desktop-win.result == 'success' }}
+    if: ${{ !cancelled() && needs.desktop-win.result == 'success' && needs.desktop-win.outputs.monoid == '1' }}
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 5
@@ -491,7 +561,7 @@ jobs:
           echo "list=$missing" >> "$GITHUB_OUTPUT"
       - if: steps.missing.outputs.list != ''
         uses: ./.github/actions/mbui-moonbit
-        with: { tools: 'mbc', farview: 'false' }
+        with: { tools: 'mbc' }
       - name: Zig 0.16.0 (the reader's cc on GitHub's Linux)
         if: steps.missing.outputs.list != '' && runner.environment != 'self-hosted'
         run: |
@@ -561,7 +631,7 @@ jobs:
       - *station-natives-missing
       - if: steps.missing.outputs.list != ''
         uses: ./.github/actions/mbui-moonbit
-        with: { tools: 'mbc', farview: 'false' }
+        with: { tools: 'mbc' }
       - *station-natives-ensure
 
   # Offer compatible apps before making the station update available. Built and signed as the pipeline's station job
@@ -587,9 +657,9 @@ jobs:
       - uses: ./.github/actions/setup
       - uses: ./.github/actions/natives
       # (MoonBit for the station's reader, station/mb/build.sh, where one is not prebuilt after all: mbc alone of mbui's
-      # tools, no Farview client)
+      # tools)
       - uses: ./.github/actions/mbui-moonbit
-        with: { tools: 'mbc', farview: 'false' }
+        with: { tools: 'mbc' }
       # (the Node each platform's release names, kept by scripts/node-dist.sh: nodejs.org's tarballs and the packages
       # made of them)
       - uses: actions/cache@v4
@@ -739,8 +809,8 @@ jobs:
         run: sh .github/deploy.sh site
 
   done:
-    needs: [plan, android, desktop, desktop-win, desktop-win-feeds, web, station, station-put, site]
-    if: ${{ !cancelled() && needs.web.result == 'success' && needs.station.result == 'success' && needs.station-put.result == 'success' && needs.site.result == 'success' && needs.desktop-win-feeds.result == 'success' }}
+    needs: [plan, android, android-feeds, desktop, desktop-win, desktop-win-feeds, web, station, station-put, site]
+    if: ${{ !cancelled() && needs.web.result == 'success' && needs.station.result == 'success' && needs.station-put.result == 'success' && needs.site.result == 'success' && needs.android-feeds.result == 'success' && needs.desktop-win-feeds.result == 'success' }}
     runs-on: [self-hosted, macos-ci]
     timeout-minutes: 5
     permissions:

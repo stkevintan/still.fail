@@ -1,0 +1,8 @@
+[package]
+name = "station_conv"
+version = "0.1.0"
+
+[dependencies]
+base_codec = { workspace = true }
+js_json = { workspace = true }
+sql_db = { workspace = true }

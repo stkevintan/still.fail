@@ -1,7 +1,7 @@
 // An Antigravity CLI subscription's allowance (what `agy -p /usage --output-format json` reports: Gemini Models and
 // Claude and GPT models, 5-hour and weekly windows), asked of `agy` in the profile's own files
-// (ANTIGRAVITY_GEMINI_DIR=<home>/agy/.gemini; HOME=<home>/agy when its token is in a file, or the user's HOME when
-// kept in the macOS login keychain) without reading or embedding OAuth client credentials in the station.
+// (ANTIGRAVITY_GEMINI_DIR=<home>/agy/.gemini; HOME=<home>/agy with AGY_FILE_TOKENS so `agy` keeps its sign-in in the
+// profile's file rather than an OS keyring) without reading or embedding OAuth client credentials in the station.
 import { spawn } from "node:child_process";
 import { mkdir, readFile } from "node:fs/promises";
 import { devNull } from "node:os";
@@ -387,9 +387,9 @@ export async function agyQuota(home: string, sourceEnv: Env, urls: Urls, lang: L
     if (v !== undefined && !SCRUBBED.includes(k)) baseEnv[k] = v;
   }
   // HOME isolated to `<home>/agy` and the sign-in kept in the file alone (`AGY_FILE_TOKENS`), so `agy` reads only the
-  // profile's token file, never the login keychain's item, which is the machine's last account.
+  // profile's token file, never the OS keyring item, which is the machine's last account.
   baseEnv.HOME = agyHome(home);
-  if (platform.hasKeychain) Object.assign(baseEnv, AGY_FILE_TOKENS);
+  Object.assign(baseEnv, AGY_FILE_TOKENS);
   baseEnv.ANTIGRAVITY_GEMINI_DIR = geminiDir(home);
   baseEnv.AGY_CLI_DISABLE_AUTO_UPDATE = "1";
   if (urls.agyQuota) baseEnv.CLOUD_CODE_URL = urls.agyQuota;

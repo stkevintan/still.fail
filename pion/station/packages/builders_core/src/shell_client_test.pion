@@ -1,0 +1,197 @@
+import "base_codec"
+import "host_shim"
+
+fn expect_sc(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+fn cp_str(cp : Int) -> String {
+  let sb = StringBuilder::new()
+  write_cp_utf8(sb, cp)
+  sb.to_string()
+}
+
+test "parse_shell_sync_answer matches wire.mbt:115-123 all 4 branches" {
+  // 1. Non-JSON / empty string -> exact 1:1 MB ParseError::Show diagnostics (`wire.mbt:116`)
+  let err_cases : Array[(String, String)] = [
+    ("", "the shell's answer is not JSON: Unexpected end of file"),
+    ("{", "the shell's answer is not JSON: Unexpected end of file"),
+    ("not json", "the shell's answer is not JSON: Invalid character 'o' at line 1, column 1"),
+    ("truex", "the shell's answer is not JSON: Invalid character 'x' at line 1, column 4"),
+    ("{\"a\":1.}", "the shell's answer is not JSON: Invalid character '}' at line 1, column 7"),
+    ("é", "the shell's answer is not JSON: Invalid character 'é' at line 1, column 0"),
+    ("n" + cp_str(0x000C), "the shell's answer is not JSON: Invalid character '\\u{0c}' at line 1, column 1"),
+    ("[1, 2, " + cp_str(0x000C) + "]", "the shell's answer is not JSON: Invalid character '\\u{0c}' at line 1, column 7"),
+    (cp_str(0x0001), "the shell's answer is not JSON: Invalid character '\\u{01}' at line 1, column 0"),
+    (cp_str(0x0085), "the shell's answer is not JSON: Invalid character '\\u{85}' at line 1, column 0"),
+    (cp_str(0x2028), "the shell's answer is not JSON: Invalid character '\\u{2028}' at line 1, column 0"),
+    (cp_str(0xFEFF) + "{}", "the shell's answer is not JSON: Invalid character '\\u{feff}' at line 1, column 0"),
+    ("n" + cp_str(0x2064), "the shell's answer is not JSON: Invalid character '\\u{2064}' at line 1, column 1"),
+    ("n" + cp_str(0x2065), "the shell's answer is not JSON: Invalid character '" + cp_str(0x2065) + "' at line 1, column 1"),
+    ("n" + cp_str(0x2066), "the shell's answer is not JSON: Invalid character '\\u{2066}' at line 1, column 1"),
+    ("n" + cp_str(0xE001F), "the shell's answer is not JSON: Invalid character '" + cp_str(0xE001F) + "' at line 1, column 1"),
+    ("n" + cp_str(0xE0020), "the shell's answer is not JSON: Invalid character '\\u{0e0020}' at line 1, column 1"),
+    ("{\"value\":\"\\ud800\"}", "the shell's answer is not JSON: Invalid character '\\\\' at line 1, column 10"),
+    ("{\"value\":\"\\ude00\"}", "the shell's answer is not JSON: Invalid character '\\\\' at line 1, column 10"),
+    ("{\"value\":\"\\ud800\\u12z4\"}", "the shell's answer is not JSON: Invalid character 'z' at line 1, column 20"),
+    ("{\"value\":\"\\ud800\\u00\"}", "the shell's answer is not JSON: Invalid character '\"' at line 1, column 20"),
+    ("{\"value\":\"\\ud800\\u0041\"}", "the shell's answer is not JSON: Invalid character '\\\\' at line 1, column 10"),
+    ("{\"value\":\"\\ud800", "the shell's answer is not JSON: Unexpected end of file"),
+    ("{\"value\":\"\\ud800\\", "the shell's answer is not JSON: Unexpected end of file"),
+  ]
+  for i in 0..<err_cases.length() {
+    let (raw, want) = err_cases[i]
+    match parse_shell_sync_answer(raw) {
+      Err(e) => expect_sc(e.message == want, "parse_shell_sync_answer(" + raw + "): got=" + e.message + " want=" + want)
+      Ok(_) => panic("expected parse failure for: " + raw)
+    }
+  }
+  // Valid surrogate pair must decode cleanly to the supplementary codepoint
+  match parse_shell_sync_answer("{\"value\":\"\\ud83d\\ude00\"}") {
+    Ok(base_codec::Json::Str(s)) => expect_sc(s == "😀", "surrogate pair emoji: " + s)
+    Ok(_) => panic("expected Str(\"😀\")")
+    Err(e) => panic("unexpected err for valid surrogate pair: " + e.message)
+  }
+  // 2. error takes precedence over value and preserves message verbatim
+  match parse_shell_sync_answer("{\"value\":123,\"error\":\"no such file or directory: ENOENT\"}") {
+    Err(e) => expect_sc(e.message == "no such file or directory: ENOENT", "verbatim error: " + e.message)
+    Ok(_) => panic("error must win over value")
+  }
+  // 3. value field
+  match parse_shell_sync_answer("{\"value\":{\"size\":42}}") {
+    Ok(v) => {
+      match json_get_last(v, "size") {
+        Some(base_codec::Json::Num(n, _)) => expect_sc(n == 42.0, "size == 42")
+        _ => panic("expected size 42")
+      }
+    }
+    Err(e) => panic("unexpected err: " + e.message)
+  }
+  // 4. valid JSON missing both error and value -> Ok(Null)
+  match parse_shell_sync_answer("{\"other\":true}") {
+    Ok(base_codec::Json::Null) => ()
+    _ => panic("expected Ok(Null)")
+  }
+}
+
+test "ShellClient async shell_call_wait preserves interleaved stdin frames, ignores partial EOF, distinguishes None vs Some(empty)" {
+  let client = ShellClient::new()
+  let events : Array[host_shim::HostEvent] = [
+    // Stale mismatched ShellDone -> must be discarded
+    host_shim::HostEvent::ShellDone(host_shim::ShellDone::{
+      id: 99.to_int64(),
+      error: "stale",
+      json: "",
+      bytes: None,
+    }),
+    // Interleaved stdin chunk with 2 complete lines + partial trailing bytes
+    host_shim::HostEvent::StdinData("{\"id\":1}\n{\"id\":2}\npartial-no-nl".to_bytes()),
+    // Interleaved EOF
+    host_shim::HostEvent::StdinEof,
+    // Matching ShellDone with Some(empty bytes)
+    host_shim::HostEvent::ShellDone(host_shim::ShellDone::{
+      id: 1.to_int64(),
+      error: "",
+      json: "{\"ok\":true}",
+      bytes: Some(Bytes::new(0)),
+    }),
+  ]
+  let mut idx = 0
+  let wait_ev = fn() -> Option[host_shim::HostEvent] {
+    if idx < events.length() {
+      let ev = events[idx]
+      idx = idx + 1
+      Some(ev)
+    } else {
+      None
+    }
+  }
+  match client.shell_call_wait_with(1.to_int64(), wait_ev) {
+    Ok((Some(j), Some(b))) => {
+      expect_sc(b.length() == 0, "Some(empty) preserved with len 0")
+      match json_get_last(j, "ok") {
+        Some(base_codec::Json::Bool(true)) => ()
+        _ => panic("expected ok:true")
+      }
+    }
+    _ => panic("expected Ok((Some(j), Some(empty)))")
+  }
+  // Complete frames buffered in order, partial trailing line ignored on EOF
+  match client.next_line_with(wait_ev) {
+    Some(l1) => expect_sc(l1 == "{\"id\":1}", "line 1: " + l1)
+    None => panic("expected line 1")
+  }
+  match client.next_line_with(wait_ev) {
+    Some(l2) => expect_sc(l2 == "{\"id\":2}", "line 2: " + l2)
+    None => panic("expected line 2")
+  }
+  match client.next_line_with(wait_ev) {
+    None => ()
+    Some(extra) => panic("EOF must not synthesize trailing partial line: " + extra)
+  }
+
+  // Distinguish bytes=None from bytes=Some(empty)
+  let client2 = ShellClient::new()
+  let mut sent = false
+  match client2.shell_call_wait_with(2.to_int64(), fn() -> Option[host_shim::HostEvent] {
+    if !sent {
+      sent = true
+      Some(host_shim::HostEvent::ShellDone(host_shim::ShellDone::{
+        id: 2.to_int64(),
+        error: "",
+        json: "not-valid-json",
+        bytes: None,
+      }))
+    } else {
+      None
+    }
+  }) {
+    Ok((Some(base_codec::Json::Null), None)) => ()
+    _ => panic("expected invalid non-empty json -> Some(Null) and bytes -> None")
+  }
+  // Empty JSON text maps to Some(Json::Null) (1:1 with wire.mbt:107) with both bytes=None and bytes=Some(empty)
+  let client3 = ShellClient::new()
+  let mut sent3 = false
+  match client3.shell_call_wait_with(3.to_int64(), fn() -> Option[host_shim::HostEvent] {
+    if !sent3 {
+      sent3 = true
+      Some(host_shim::HostEvent::ShellDone(host_shim::ShellDone::{
+        id: 3.to_int64(),
+        error: "",
+        json: "",
+        bytes: None,
+      }))
+    } else {
+      None
+    }
+  }) {
+    Ok((Some(base_codec::Json::Null), None)) => ()
+    _ => panic("expected empty json -> Some(Null) and bytes -> None")
+  }
+  let mut sent4 = false
+  match client3.shell_call_wait_with(4.to_int64(), fn() -> Option[host_shim::HostEvent] {
+    if !sent4 {
+      sent4 = true
+      Some(host_shim::HostEvent::ShellDone(host_shim::ShellDone::{
+        id: 4.to_int64(),
+        error: "",
+        json: "",
+        bytes: Some(Bytes::new(0)),
+      }))
+    } else {
+      None
+    }
+  }) {
+    Ok((Some(base_codec::Json::Null), Some(b))) => expect_sc(b.length() == 0, "empty json + Some(empty) bytes")
+    _ => panic("expected empty json -> Some(Null) and bytes -> Some(empty)")
+  }
+  let tmp1 = client3.tmp_beside("/a/file.json", 4242)
+  let tmp2 = client3.tmp_beside("/a/file.json", 4242)
+  expect_sc(tmp1 == "/a/file.json.4242.1.tmp", "tmp_beside 1: " + tmp1)
+  expect_sc(tmp2 == "/a/file.json.4242.2.tmp", "tmp_beside 2: " + tmp2)
+  expect_sc(beside("/a/b", "shell") == "/a/shell", "beside posix")
+  expect_sc(beside("C:\\a\\b", "shell") == "C:\\a\\shell", "beside win")
+  expect_sc(beside("b", "shell") == "shell", "beside bare")
+}

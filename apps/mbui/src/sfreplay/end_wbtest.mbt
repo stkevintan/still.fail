@@ -6,13 +6,19 @@ struct AlmostAtRest {
 }
 
 ///|
-impl @ui.Moving for AlmostAtRest with rest_at(self, _now, _frame) {
+fn AlmostAtRest::rest_at(self : AlmostAtRest, _now : Double, _frame : Int) -> Double {
   self.rest
 }
 
 ///|
-impl @ui.Moving for AlmostAtRest with sample(self, now) {
+fn AlmostAtRest::sample(self : AlmostAtRest, now : Double) -> Unit {
   self.sampled.push(now)
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn AlmostAtRest::as_moving(self : AlmostAtRest) -> @ui.Moving {
+  @ui.Moving::new(fn(now, frame) { self.rest_at(now, frame) }, sample=fn(now) { self.sample(now) })
 }
 
 ///|
@@ -23,7 +29,7 @@ test "a flow ends when a motion's rest is a rounding hair past its frame" {
   t.frame_at(before)
   t.set_frame_period(1000.0 / 60.0)
   let way : AlmostAtRest = { rest, sampled: [], mover: @ui.Mover::new() }
-  t.ctx().set_out(way.mover, way as &@ui.Moving, what="almost at rest") |> ignore
+  t.ctx().set_out(way.mover, way.as_moving(), what="almost at rest") |> ignore
   assert_true(t.rest_of("") > t.time())
   assert_true(t.rest_of("") - t.time() < 1.0e-9)
   let f : Flow = {

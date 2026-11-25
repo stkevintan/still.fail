@@ -57,7 +57,7 @@ pub fn passkey_get(
 ///|
 /// How it ended, once it has; None until then. A frame is asked for as it ends, so a view can look each frame.
 pub fn PasskeyRun::done(self : PasskeyRun) -> PasskeyDone? {
-  (polled.val)()
+  call_polled()
   let s = wa_out(self.id)
   if s == "" {
     return None

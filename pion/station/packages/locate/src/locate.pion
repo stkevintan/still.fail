@@ -1,0 +1,529 @@
+// 1:1 port of `station/mb/src/locate/locate.mbt` and `main.mbt:913-920`:
+// Reentrant four-way bidirectional transcript locator state machine keyed by `id.stringify()`.
+// Pure synchronous `ShellClient::shell_sync_json` + `Db::deferred_tx_err` read snapshots (zero raw tx SQL).
+
+import "base_codec"
+import "builders_core"
+import "host_shim"
+import "nodepath"
+import "sql_db"
+import "transcript_io"
+
+let BATCH_SIZE : Int = 64
+
+let HISTORY_BATCH : Int = 128
+
+let SOURCES_SQL : String = "SELECT r.id, COALESCE(r.runtime, s.original_runtime, s.runtime) AS runtime, r.profile FROM sessions s CROSS JOIN runtime_sessions r ON r.session_key = s.key WHERE s.key = ? ORDER BY r.at, r.rowid"
+
+enum Waiting {
+  Hints
+  Accepted
+}
+
+struct Locating {
+  id : base_codec::Json
+  profiles : Array[(String, String)]
+  places : Array[String]
+  sources : Array[Option[Source]]
+  identity : base_codec::Json
+  runtime : String
+  mut at : Int
+  mut visited : Int
+  mut batch : Array[Source]
+  mut current : Bool
+  mut found : (Array[(String, String)], Bool)
+  mut waiting : Waiting
+}
+
+pub struct Locator {
+  client : builders_core::ShellClient
+  db : sql_db::Db
+  data : String
+  finder : Finder
+  running : Map[String, Locating]
+}
+
+pub fn Locator::new(
+  client : builders_core::ShellClient,
+  db : sql_db::Db,
+  data : String,
+  sep : String,
+) -> Locator {
+  Locator::{
+    client: client,
+    db: db,
+    data: data,
+    finder: Finder::new(client, sep),
+    running: Map::new(),
+  }
+}
+
+fn text_opt(v : Option[base_codec::Json]) -> Option[String] {
+  match v {
+    Some(base_codec::Json::Str(s)) => Some(s)
+    _ => None
+  }
+}
+
+fn map_val_or_null(r : Map[String, base_codec::Json], key : String) -> base_codec::Json {
+  match r.get(key) {
+    Some(v) => v
+    None => base_codec::json_null()
+  }
+}
+
+fn Locator::say(self : Locator, message : base_codec::Json) -> Unit {
+  let _ = self.client.say_line(sql_db::stringify_json(message))
+}
+
+fn id_key(id : base_codec::Json) -> String {
+  sql_db::stringify_json(id)
+}
+
+fn ordered_sources(
+  r : Map[String, base_codec::Json],
+  rows : Array[Map[String, base_codec::Json]],
+) -> Array[Option[Source]] {
+  let current_id = text_opt(r.get("runtime_session_id"))
+  let make_source = fn(s : Map[String, base_codec::Json]) -> Source {
+    let sid = match text_opt(s.get("id")) {
+      Some(v) => v
+      None => ""
+    }
+    let srt = match text_opt(s.get("runtime")) {
+      Some(v) => v
+      None => ""
+    }
+    Source::{ id: sid, runtime: srt, profile: text_opt(s.get("profile")) }
+  }
+  let sources : Array[Option[Source]] = []
+  match current_id {
+    None => {
+      for i in 0..<rows.length() {
+        sources.push(Some(make_source(rows[i])))
+      }
+    }
+    Some(cid) => {
+      let mut current : Option[Source] = None
+      let marked = rows.length() > HISTORY_BATCH
+      for i in 0..<rows.length() {
+        let s = make_source(rows[i])
+        if s.id == cid {
+          match current {
+            None => current = Some(s)
+            Some(_) => ()
+          }
+          if marked {
+            sources.push(None)
+          }
+        } else {
+          sources.push(Some(s))
+        }
+      }
+      let tail = match current {
+        Some(c) => c
+        None => {
+          let rrt = match text_opt(r.get("runtime")) {
+            Some(v) => v
+            None => ""
+          }
+          Source::{ id: cid, runtime: rrt, profile: text_opt(r.get("profile")) }
+        }
+      }
+      sources.push(Some(tail))
+    }
+  }
+  sources
+}
+
+/// A session's runtime sessions (`historyRuntimeSources`), empty when the session is absent.
+pub fn history_sources(
+  db : sql_db::Db,
+  key : base_codec::Json,
+) -> Result[Array[Option[Source]], sql_db::SqlError] {
+  let found = match db.all("SELECT * FROM sessions WHERE key = ?", [key]) {
+    Ok(rows) => rows
+    Err(e) => return Err(e)
+  }
+  if found.length() == 0 {
+    return Ok([])
+  }
+  let rows = match db.all(SOURCES_SQL, [key]) {
+    Ok(rs) => rs
+    Err(e) => return Err(e)
+  }
+  Ok(ordered_sources(found[0], rows))
+}
+
+fn Locator::ask_hints(self : Locator, l : Locating) -> Unit {
+  l.waiting = Waiting::Hints
+  let sources : Array[base_codec::Json] = []
+  for i in 0..<l.batch.length() {
+    let s = l.batch[i]
+    let prof = match s.profile {
+      Some(p) => base_codec::json_str(p)
+      None => base_codec::json_null()
+    }
+    sources.push(
+      base_codec::json_obj([
+        ("id", base_codec::json_str(s.id)),
+        ("runtime", base_codec::json_str(s.runtime)),
+        ("profile", prof),
+      ]),
+    )
+  }
+  self.say(
+    base_codec::json_obj([
+      ("type", base_codec::json_str("hints")),
+      ("id", l.id),
+      ("sources", base_codec::json_arr(sources)),
+    ]),
+  )
+}
+
+fn Locator::advance(self : Locator, l : Locating) -> Unit {
+  while l.at < l.sources.length() {
+    match l.sources[l.at] {
+      Some(s) => l.batch.push(s)
+      None => ()
+    }
+    l.at = l.at + 1
+    l.visited = l.visited + 1
+    if (l.visited % BATCH_SIZE) == 0 && l.batch.length() > 0 {
+      self.ask_hints(l)
+      return
+    }
+  }
+  if l.batch.length() > 0 {
+    self.ask_hints(l)
+    return
+  }
+  self.running.remove(id_key(l.id))
+  self.say(
+    base_codec::json_obj([
+      ("type", base_codec::json_str("done")),
+      ("id", l.id),
+      ("identity", l.identity),
+      ("runtime", base_codec::json_str(l.runtime)),
+      ("current", base_codec::json_bool(l.current)),
+    ]),
+  )
+}
+
+fn Locator::start(
+  self : Locator,
+  id : base_codec::Json,
+  message : base_codec::Json,
+) -> Result[Unit, String] {
+  let key = match builders_core::json_get_last(message, "key") {
+    Some(base_codec::Json::Str(k)) => k
+    _ => return Err("no key")
+  }
+  let profiles : Array[(String, String)] = []
+  match builders_core::json_get_last(message, "profiles") {
+    Some(base_codec::Json::Arr(ps)) => {
+      for i in 0..<ps.length() {
+        let p = ps[i]
+        match (builders_core::json_get_last(p, "id"), builders_core::json_get_last(p, "home")) {
+          (Some(base_codec::Json::Str(pid)), Some(base_codec::Json::Str(home))) => {
+            profiles.push((pid, home))
+          }
+          _ => ()
+        }
+      }
+    }
+    _ => ()
+  }
+  let db = self.db
+  let snap = db.deferred_tx_err(
+    fn(e : sql_db::SqlError) -> String { e.message },
+    fn() -> Result[(Option[Map[String, base_codec::Json]], Array[Map[String, base_codec::Json]]), String] {
+      let found = match db.all("SELECT * FROM sessions WHERE key = ?", [base_codec::json_str(key)]) {
+        Ok(rs) => rs
+        Err(e) => return Err(e.message)
+      }
+      let row = if found.length() > 0 { Some(found[0]) } else { None }
+      let rows : Array[Map[String, base_codec::Json]] = match row {
+        Some(r) => {
+          match text_opt(r.get("runtime")) {
+            Some(rt) => {
+              if runtime_kind(rt) {
+                match db.all(SOURCES_SQL, [base_codec::json_str(key)]) {
+                  Ok(rs) => rs
+                  Err(e) => return Err(e.message)
+                }
+              } else {
+                []
+              }
+            }
+            None => []
+          }
+        }
+        None => []
+      }
+      Ok((row, rows))
+    },
+  )
+  let (row, rows) = match snap {
+    Ok(pair) => pair
+    Err(e) => return Err(e)
+  }
+  let identity : base_codec::Json = match row {
+    Some(r) => {
+      match text_opt(r.get("token")) {
+        Some(token) =>
+        base_codec::json_obj([
+          ("runtime", map_val_or_null(r, "runtime")),
+          ("runtimeSessionId", map_val_or_null(r, "runtime_session_id")),
+          ("cwd", map_val_or_null(r, "cwd")),
+          ("workspace", map_val_or_null(r, "workspace")),
+          ("profile", map_val_or_null(r, "profile")),
+          ("ws", map_val_or_null(r, "ws")),
+          ("tokenHash", base_codec::json_str(transcript_io::sha256_utf8_hex(token))),
+        ])
+        None => base_codec::json_null()
+      }
+    }
+    None => base_codec::json_null()
+  }
+  let (r, runtime) = match row {
+    Some(rv) => {
+      match text_opt(rv.get("runtime")) {
+        Some(rt) => {
+          if runtime_kind(rt) {
+            (rv, rt)
+          } else {
+            self.say(
+              base_codec::json_obj([
+                ("type", base_codec::json_str("done")),
+                ("id", id),
+                ("identity", identity),
+                ("runtime", base_codec::json_null()),
+                ("current", base_codec::json_bool(false)),
+              ]),
+            )
+            return Ok(())
+          }
+        }
+        None => {
+          self.say(
+            base_codec::json_obj([
+              ("type", base_codec::json_str("done")),
+              ("id", id),
+              ("identity", identity),
+              ("runtime", base_codec::json_null()),
+              ("current", base_codec::json_bool(false)),
+            ]),
+          )
+          return Ok(())
+        }
+      }
+    }
+    None => {
+      self.say(
+        base_codec::json_obj([
+          ("type", base_codec::json_str("done")),
+          ("id", id),
+          ("identity", identity),
+          ("runtime", base_codec::json_null()),
+          ("current", base_codec::json_bool(false)),
+        ]),
+      )
+      return Ok(())
+    }
+  }
+  let sources = ordered_sources(r, rows)
+  let cwd = text_opt(r.get("cwd"))
+  let workspace = match text_opt(r.get("workspace")) {
+    Some(w) => w
+    None => ""
+  }
+  let places : Array[String] = match cwd {
+    Some(c) => if c != workspace { [c, workspace] } else { [workspace] }
+    None => [workspace]
+  }
+  let l = Locating::{
+    id: id,
+    profiles: profiles,
+    places: places,
+    sources: sources,
+    identity: identity,
+    runtime: runtime,
+    at: 0,
+    visited: 0,
+    batch: [],
+    current: false,
+    found: ([], false),
+    waiting: Waiting::Hints,
+  }
+  self.running.set(id_key(id), l)
+  self.advance(l)
+  Ok(())
+}
+
+/// Handle one JSON line from the station (`locate`, `cancel`, `hints`, `accepted`).
+pub fn Locator::heard(self : Locator, line : String) -> Unit {
+  if builders_core::has_lone_surrogate(line) {
+    return
+  }
+  let message = match sql_db::parse_json(line) {
+    base_codec::JsonParseResult::Ok(j) => j
+    base_codec::JsonParseResult::Err(_) => return
+  }
+  let kind = match builders_core::json_get_last(message, "type") {
+    Some(base_codec::Json::Str(k)) => k
+    _ => return
+  }
+  let id = match builders_core::json_get_last(message, "id") {
+    Some(v) => v
+    None => return
+  }
+  let key = id_key(id)
+  if kind == "locate" {
+    match self.running.get(key) {
+      Some(_) => return
+      None => ()
+    }
+    match self.start(id, message) {
+      Ok(_) => ()
+      Err(msg) => {
+        self.say(
+          base_codec::json_obj([
+            ("type", base_codec::json_str("error")),
+            ("id", id),
+            ("error", base_codec::json_str(msg)),
+          ]),
+        )
+      }
+    }
+    return
+  }
+  let l = match self.running.get(key) {
+    Some(v) => v
+    None => {
+      if kind == "cancel" {
+        self.say(
+          base_codec::json_obj([
+            ("type", base_codec::json_str("cancelled")),
+            ("id", id),
+          ]),
+        )
+      }
+      return
+    }
+  }
+  if kind == "cancel" {
+    self.running.remove(key)
+    self.say(
+      base_codec::json_obj([
+        ("type", base_codec::json_str("cancelled")),
+        ("id", id),
+      ]),
+    )
+    return
+  }
+  if kind == "hints" {
+    match (l.waiting, builders_core::json_get_last(message, "hints")) {
+      (Waiting::Hints, Some(hints)) => {
+        self.finder.use_hints(hints)
+        let (found_paths, found_current) = self.finder.sources(
+          self.data,
+          l.profiles,
+          l.batch,
+          l.places,
+          anywhere=false,
+        )
+        l.found = (found_paths, found_current)
+        let paths_json : Array[base_codec::Json] = []
+        for i in 0..<found_paths.length() {
+          let (p, rt) = found_paths[i]
+          paths_json.push(
+            base_codec::json_obj([
+              ("path", base_codec::json_str(p)),
+              ("runtime", base_codec::json_str(rt)),
+            ]),
+          )
+        }
+        l.waiting = Waiting::Accepted
+        self.say(
+          base_codec::json_obj([
+            ("type", base_codec::json_str("batch")),
+            ("id", id),
+            ("paths", base_codec::json_arr(paths_json)),
+            ("current", base_codec::json_bool(found_current)),
+            ("hints", self.finder.hints()),
+          ]),
+        )
+        return
+      }
+      _ => {
+        self.running.remove(key)
+        self.say(
+          base_codec::json_obj([
+            ("type", base_codec::json_str("error")),
+            ("id", id),
+            ("error", base_codec::json_str("expected transcript location acknowledgement")),
+          ]),
+        )
+        return
+      }
+    }
+  }
+  if kind == "accepted" {
+    match (l.waiting, builders_core::json_get_last(message, "accepted")) {
+      (Waiting::Accepted, Some(accepted)) => {
+        match accepted {
+          base_codec::Json::Bool(true) => {
+            let (_, found_cur) = l.found
+            l.current = found_cur
+            l.batch = []
+            self.advance(l)
+          }
+          _ => self.ask_hints(l)
+        }
+        return
+      }
+      _ => ()
+    }
+  }
+  self.running.remove(key)
+  self.say(
+    base_codec::json_obj([
+      ("type", base_codec::json_str("error")),
+      ("id", id),
+      ("error", base_codec::json_str("expected transcript location hints")),
+    ]),
+  )
+}
+
+/// Production `--builder live-locator --db <db> --data <data> [--sep <sep>]` entrypoint.
+pub fn run_live_locator(db_path : String, data : String, sep : String) -> Int {
+  let shell_dir = builders_core::beside(db_path, "shell")
+  if !host_shim::start(shell_dir, true) {
+    let _ = host_shim::write_stderr_line("the shell did not start")
+    return 1
+  }
+  let db = match sql_db::Db::attach(db_path, wait_ms=5000) {
+    Ok(d) => d
+    Err(e) => {
+      let _ = host_shim::write_stderr_line(e.message)
+      host_shim::stop()
+      return 1
+    }
+  }
+  let client = builders_core::ShellClient::new()
+  let locator = Locator::new(client, db, data, sep)
+  while true {
+    match client.next_line() {
+      None => break
+      Some(line) => {
+        if line.length() > 0 {
+          locator.heard(line)
+        }
+      }
+    }
+  }
+  db.close()
+  host_shim::stop()
+  0
+}

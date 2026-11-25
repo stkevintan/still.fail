@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { harness } from "./harness.ts";
+import { harness, NOW_MS } from "./harness.ts";
 
 // A cron at a minute that is only the every-minute one's (not the hourly models' at :07, not a probe's): the real
 // clock's minute made the hourly catalog's fetch of models.dev run in the test at :07 (2026-11-08, run 42469996303).
@@ -143,6 +143,69 @@ test("a branch pipeline hands an R2 chunk to its readers by a receipt", async ()
     assert.equal(got.status, 200);
     assert.equal(await got.text(), "part");
     assert.equal((await h.fetch("/releases/ci-natives/station.json")).status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test("the branch pipeline gets a short PUT link for a single immutable CI object", async () => {
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const jwk = { ...(await exportJWK(publicKey)), kid: "actions", alg: "RS256", use: "sig" };
+  const signer = { accessKeyId: "b".repeat(32), secretAccessKey: "c".repeat(64), sessionToken: "test-session-token" };
+  const fixture = (seconds: number) => harness({
+    origin: "https://app.monoid.build",
+    statusRepoId: "42",
+    upstream: () => ({ status: 404 }),
+    ciNativeSigner: { ...signer, expiresAt: NOW_MS / 1_000 + seconds },
+    push: () => ({ status: 200, body: JSON.stringify({ keys: [jwk] }) }),
+  });
+  const h = await fixture(3_600);
+  try {
+    const ref = "refs/heads/branch";
+    const sha = "d".repeat(40);
+    const claims = { repository: "o/r", repository_id: "42", ref, event_name: "push", sha, workflow_ref: `o/r/.github/workflows/pipeline.yml@${ref}` };
+    const ticket = async (length: unknown, extra = {}, target = h) => {
+      const token = await new SignJWT({ ...claims, ...extra }).setProtectedHeader({ alg: "RS256", kid: "actions" })
+        .setIssuer("https://token.actions.githubusercontent.com").setAudience(h.origin).setIssuedAt().setExpirationTime("10 years").sign(privateKey);
+      return target.fetch("/releases/ci-natives", { method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ length }) });
+    };
+    for (const wrong of [{ repository_id: "41" }, { event_name: "pull_request" },
+      { ref: "refs/heads/main", workflow_ref: "o/r/.github/workflows/pipeline.yml@refs/heads/main" },
+      { workflow_ref: `o/r/.github/workflows/other.yml@${ref}` }]) {
+      assert.equal((await ticket(4, wrong)).status, 401);
+    }
+    for (const invalid of [0, 32 * 1024 * 1024 + 1, 1.5, "4"]) {
+      assert.equal((await ticket(invalid)).status, 400);
+    }
+    const answer = await ticket(4);
+    assert.equal(answer.status, 201);
+    assert.equal(answer.headers.get("cache-control"), "no-store");
+    const { receipt, upload } = await answer.json() as { receipt: string; upload: string };
+    assert.match(receipt, new RegExp(`^\\d{10}-${sha}/[0-9a-f-]{36}$`));
+    const url = new URL(upload);
+    assert.equal(url.origin, `https://${"a".repeat(32)}.r2.cloudflarestorage.com`);
+    assert.equal(url.pathname, "/stillfail-releases/staged/ci-natives/" + receipt);
+    assert.equal(url.searchParams.get("X-Amz-Expires"), "120");
+    assert.equal(url.searchParams.get("X-Amz-Security-Token"), signer.sessionToken);
+    assert.equal(url.searchParams.get("X-Amz-SignedHeaders"), "content-length;host;if-none-match");
+    assert.match(url.searchParams.get("X-Amz-Signature") ?? "", /^[a-f0-9]{64}$/);
+    assert.equal((await h.fetch("/releases/ci-natives/" + receipt)).status, 404);
+
+    const bucket = await h.mf.getR2Bucket("RELEASES", "api") as unknown as Pick<R2Bucket, "put">;
+    await bucket.put("staged/ci-natives/" + receipt, "part");
+    const got = await h.fetch("/releases/ci-natives/" + receipt);
+    assert.equal(got.status, 200);
+    assert.equal(await got.text(), "part");
+
+    // The company endpoint signs uploads while shared releases use an upstream.
+    assert.equal((await h.fetch("/releases/ci-natives", { method: "PUT", body: "part" })).status, 404);
+    const expiring = await fixture(119);
+    try {
+      assert.equal((await ticket(4, {}, expiring)).status, 404);
+    } finally {
+      await expiring.close();
+    }
   } finally {
     await h.close();
   }

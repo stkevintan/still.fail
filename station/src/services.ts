@@ -21,6 +21,7 @@ import { type Mesh, loadMesh, withRelays } from "./mesh/native.ts";
 import { withFront } from "./mesh/front.ts";
 import { verifyWith } from "../../shared/lock.ts";
 import { Readers as ReaderPool } from "./read/pool.ts";
+import { warmPionProbeForConfig } from "./read/mb-reader.ts";
 import type { ReaderSelectConfig } from "./read/reader-select.ts";
 import { repairMergedEditLookup } from "./store/schema.ts";
 import { makeStore } from "./read/store.ts";
@@ -355,6 +356,11 @@ export function makeReaderConfigSnapshot(config: ConfigFile): { get: () => Reade
   return { get: () => snapshot, stop };
 }
 
+/// Extract the `ReaderSelectConfig` shape passed to cold `takeBackSoon` from `settings.raw()` (`main.ts:236`).
+export function restoreReaderConfig(raw: { readonly readers?: Readonly<Record<string, unknown>> | null } | null | undefined): ReaderSelectConfig {
+  return raw?.readers ? { readers: raw.readers } : undefined;
+}
+
 /// Live in-memory getter of `config.json`'s `readers` engine overrides for every reader/builder spawn.
 export class ReaderConfig extends Context.Service<ReaderConfig, () => ReaderSelectConfig>()("stillfail/ReaderConfig") {
   static readonly layer = Layer.effect(
@@ -365,6 +371,7 @@ export class ReaderConfig extends Context.Service<ReaderConfig, () => ReaderSele
         Effect.sync(() => makeReaderConfigSnapshot(config)),
         (s) => Effect.sync(() => s.stop()),
       );
+      yield* Effect.promise(() => warmPionProbeForConfig(snap.get()));
       return snap.get;
     }),
   );

@@ -1302,8 +1302,8 @@ fn station_sessions_open(pg : ScreenPage, from : @view.View) -> Unit {
 }
 
 ///|
-/// Bottom "new remote session" row(s) shared by control-center `switchSession` groups (`terminal_view_node.mbt`,
-/// `farview_tab.mbt`): when both terminal and browser are available, opens a submenu with 新建终端 / 新建浏览器 via
+/// Bottom "new remote session" row(s) for control-center `switchSession` groups (`terminal_view_node.mbt`): when both
+/// terminal and browser are available, opens a submenu with 新建终端 / 新建浏览器 via
 /// `@sf.panel_row_opens_node` (keeping the same icon column as sibling `panel_row_node` rows); otherwise shows the
 /// single available creation row directly.
 fn remote_new_session_rows_node(

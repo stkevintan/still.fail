@@ -9,7 +9,7 @@
 # (the other product's apps' push credentials), POSTHOG_JSON, APPLE_JSON (apple.json, Sign in with Apple), REVIEW_ACCOUNTS_JSON
 # (review-accounts.json, App Store review's password sign-in), FEEDBACK_TOKEN (feedback-token, the feedback monitor's: reads bug reports and marks their status), GUEST_GOOGLE_OAUTH_JSON, FORWARD_TO and
 # FORWARD_SECRET (one cloud answering as the other product too: cloud/src/guests.ts), MOVING (any value: accounts moving
-# between clouds, cloud/src/move.ts).
+# between clouds, cloud/src/move.ts). STILLFAIL_CI_NATIVE_R2=on lets monoid CI issue a temporary credential for the CI bucket.
 set -eu
 cd "$(dirname "$0")/.."
 pnpm install --frozen-lockfile --prefer-offline > /dev/null

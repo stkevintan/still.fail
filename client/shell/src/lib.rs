@@ -39,8 +39,8 @@ mod zstd_ops;
 mod tests;
 
 pub use ffi::{
-    Complete, Media, Say, sf_free, sf_shell_call, sf_shell_call_sync, sf_shell_screen_ack, sf_shell_screen_input, sf_shell_set_media, sf_shell_set_say, sf_shell_start, sf_shell_stats, sf_shell_stop,
-    sf_utc_offset_min,
+    Complete, Media, Say, sf_free, sf_shell_call, sf_shell_call_sync, sf_shell_screen_ack, sf_shell_screen_ack_wait, sf_shell_screen_input, sf_shell_set_media, sf_shell_set_say, sf_shell_start,
+    sf_shell_stats, sf_shell_stop, sf_utc_offset_min,
 };
 
 use ffi::Ctx;

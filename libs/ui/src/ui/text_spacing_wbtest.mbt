@@ -420,6 +420,7 @@ test "view_made glyph_x uses glyph_origin_x for words_halo, glyphs_by, inline dr
   }
 
   // 4. glyph_drawn_any_sub recognizes base keys already drawn at subpixel phases 1..3
+  // (used only for phase-less `shape` (`fresh`) prewarming, not for exact-phase `laid_ahead` deduplication)
   for k, _ in text_cache.glyphs {
     if (k >> 26) != 0 {
       assert_true(glyph_drawn_any_sub(k & 0x03FFFFFF))

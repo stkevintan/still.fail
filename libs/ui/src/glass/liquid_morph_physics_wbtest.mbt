@@ -55,14 +55,29 @@ test "LiquidMorphPhysics open/close springs, recoil pulse, and horizontal splash
   let diff_handoff = (lm_delayed_close_width(0.283) - lm_close_trigger_width(0.283)).abs()
   assert_true(diff_handoff < 1.0e-6, msg="delayed close width C0 at handoff: diff=\{diff_handoff}")
 
-  // 7. Three-anchor liquid_menu_morph_glass optical recipe invariants
+  // 7. Three-anchor liquid_menu_morph_glass optical recipe invariants (Light & Dark)
   let g0 = liquid_menu_morph_glass(0.0, dark=false)
   let g5 = liquid_menu_morph_glass(0.5, dark=false)
   let g1 = liquid_menu_morph_glass(1.0, dark=false)
   assert_eq(g0.tint & 0xFFL, 0x67L)
-  assert_eq(g5.tint & 0xFFL, 0x88L)
-  assert_true((g5.blur - 4.5).abs() < 1.0e-9)
-  assert_eq(g1.tint & 0xFFL, 0xBFL)
+  assert_true((g0.chroma - 0.06).abs() < 1.0e-9)
+  assert_eq(g5.tint & 0xFFL, 0x93L)
+  assert_true((g5.blur - 4.0).abs() < 1.0e-9)
+  assert_true((g5.refraction - 16.0).abs() < 1.0e-9)
+  assert_true((g5.chroma - 0.045).abs() < 1.0e-9)
+  assert_eq(g1.tint, 0xFDFCFDBFL)
+  assert_true((g1.blur - 6.0).abs() < 1.0e-9)
+  assert_true((g1.bezel - 20.0).abs() < 1.0e-9)
+  assert_true((g1.refraction - 26.0).abs() < 1.0e-9)
+  assert_true((g1.chroma - 0.03).abs() < 1.0e-9)
+  let gd0 = liquid_menu_morph_glass(0.0, dark=true)
+  let gd5 = liquid_menu_morph_glass(0.5, dark=true)
+  let gd1 = liquid_menu_morph_glass(1.0, dark=true)
+  assert_eq(gd0.tint, 0x20202067L)
+  assert_eq(gd5.tint, 0x20202088L)
+  assert_eq(gd1.tint, 0x202020A8L)
+  assert_true((gd1.blur - 6.0).abs() < 1.0e-9)
+  assert_true((gd1.chroma - 0.03).abs() < 1.0e-9)
 
   // 8. No NaN and close hugs top bar (my <= pill_h + 18pt) across 0..600ms sampling
   for i in 0..<=60 {

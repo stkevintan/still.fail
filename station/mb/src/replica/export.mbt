@@ -25,10 +25,16 @@ let default_transcript_pass_files : Int = 512
 let default_transcript_pass_bytes : Int = 33554432
 
 ///|
+let default_transcript_pass_deletes : Int = 2000
+
+///|
 pub let transcript_pass_files : Int = default_transcript_pass_files
 
 ///|
 pub let transcript_pass_bytes : Int = default_transcript_pass_bytes
+
+///|
+pub let transcript_pass_deletes : Int = default_transcript_pass_deletes
 
 ///|
 let default_chunk_gc_grace_ms : Double = 600000.0
@@ -92,6 +98,8 @@ priv struct Out {
   lines : Array[String]
   mut bytes : Int
   files : Array[(String, Double)]
+  /// Where each hash is in `files`.
+  file_at : Map[String, Int]
   mut gone : Bool
   mut messages : Double
 }
@@ -101,6 +109,51 @@ priv struct Out {
 priv struct Places {
   home : String?
   workspaces : Array[(String, JValue)]
+}
+
+///|
+/// Optional test-only fault injection hooks (zero overhead when `None` in production).
+pub struct TestFaults {
+  lstat_err : Set[String]
+  readdir_err : Set[String]
+  finder_readdir_err : Set[String]
+  forbid_readdir : Set[String]
+  read_short : Set[String]
+  read_short_after_first : Set[String]
+  other_kind : Set[String]
+  /// The most a pass's transcript finder may ask the shell (`Finder::asked`): more fails the pass.
+  finder_asked_most : Int?
+}
+
+///|
+pub fn TestFaults::from_jvalue(v : JValue) -> TestFaults? {
+  guard v is Obj(_) else { return None }
+  let set_of = (k : String) => {
+    let s : Set[String] = Set([])
+    for item in strings_of(get(v, k)) {
+      s.add(item)
+    }
+    s
+  }
+  Some({
+    lstat_err: set_of("lstat_err"),
+    readdir_err: set_of("readdir_err"),
+    finder_readdir_err: set_of("finder_readdir_err"),
+    forbid_readdir: set_of("forbid_readdir"),
+    read_short: set_of("read_short"),
+    read_short_after_first: set_of("read_short_after_first"),
+    other_kind: set_of("other_kind"),
+    finder_asked_most: match get(v, "finder_asked_most") {
+      Some(Num(n)) => Some(n.to_int())
+      _ => None
+    },
+  })
+}
+
+///|
+pub fn TestFaults::from_json(raw : String) -> TestFaults? {
+  let v = @jsjson.parse(raw) catch { _ => return None }
+  TestFaults::from_jvalue(v)
 }
 
 ///|
@@ -116,12 +169,33 @@ pub struct Exporter {
   priv chunk_bytes : Int
   priv transcript_pass_files : Int
   priv transcript_pass_bytes : Int
+  priv transcript_pass_deletes : Int
   priv chunk_gc_grace_ms : Double
   priv fold : Bool
+  priv compact_heads : Bool
   priv now : () -> Double
   priv mut places : Places
   priv mut known : Bool
   priv mut transcripts_pending : Bool
+  priv tf_cache : Map[String, Array[(String, JValue)]]
+  /// Where a transcript sweep cut short by the pass budget goes on, by workspace: the first path it did not get to.
+  /// The next pass starts there, not from the first path again: a session written all the time sorted early would
+  /// otherwise use the budget each pass and nothing after it would ever be exported.
+  priv transcript_cursor : Map[String, String]
+  /// Workspaces whose paths this sweep has gone through to the end; only their `tr_del`s may be left.
+  priv transcript_scan_done : Set[String]
+  /// Workspaces this sweep is done with, `tr_del`s too.
+  priv transcript_ws_done : Set[String]
+  /// A pass told of transcripts while a sweep was under way: what it told of may lie behind the cursor, so another
+  /// sweep follows this one.
+  priv mut transcript_resweep : Bool
+  /// Each generation's `head.json` as last read or written, by its directory, with the size and mtime it had on disk:
+  /// a head of many transcripts is megabytes of JSON, parsed again only when the file changed.
+  priv head_cache : Map[String, (Double, Double, JValue)]
+  priv manifest_cache : Map[String, (String, Array[String])]
+  priv mut manifest_live : Set[String]
+  priv manifest_superseded_at : Map[String, Double]
+  priv mut test_faults : TestFaults?
   /// This run of the exporter.
   run : String
   priv mut read : Int
@@ -140,8 +214,11 @@ pub fn Exporter::new(
   chunk_bytes? : Int = chunk_plain_bytes,
   transcript_pass_files? : Int = transcript_pass_files,
   transcript_pass_bytes? : Int = transcript_pass_bytes,
+  transcript_pass_deletes? : Int = transcript_pass_deletes,
   chunk_gc_grace_ms? : Double = chunk_gc_grace_ms,
   fold? : Bool = true,
+  compact_heads? : Bool = false,
+  test_faults? : TestFaults? = None,
 ) -> Exporter raise {
   let files = { host, sep }
   let reading = @sql.Db::attach(host, db, wait=5000)
@@ -161,12 +238,24 @@ pub fn Exporter::new(
     chunk_bytes: if chunk_bytes > 0 { chunk_bytes } else { chunk_plain_bytes },
     transcript_pass_files: if transcript_pass_files > 0 { transcript_pass_files } else { default_transcript_pass_files },
     transcript_pass_bytes: if transcript_pass_bytes > 0 { transcript_pass_bytes } else { default_transcript_pass_bytes },
+    transcript_pass_deletes: if transcript_pass_deletes > 0 { transcript_pass_deletes } else { default_transcript_pass_deletes },
     chunk_gc_grace_ms: if chunk_gc_grace_ms >= 0.0 { chunk_gc_grace_ms } else { default_chunk_gc_grace_ms },
     fold,
+    compact_heads,
     now,
     places: { home: None, workspaces: [] },
     known: false,
     transcripts_pending: false,
+    tf_cache: Map([]),
+    transcript_cursor: Map([]),
+    transcript_scan_done: Set([]),
+    transcript_ws_done: Set([]),
+    transcript_resweep: false,
+    head_cache: Map([]),
+    manifest_cache: Map([]),
+    manifest_live: Set([]),
+    manifest_superseded_at: Map([]),
+    test_faults,
     run: files.random(4),
     read: 0,
   }
@@ -177,6 +266,11 @@ pub fn Exporter::new(
     e.forget()
   }
   e
+}
+
+///|
+pub fn Exporter::set_test_faults(self : Exporter, faults : TestFaults?) -> Unit {
+  self.test_faults = faults
 }
 
 ///|
@@ -212,6 +306,32 @@ fn Exporter::forget(self : Exporter) -> Unit raise {
   self.state.exec("DELETE FROM meta WHERE k <> 'after'; DELETE FROM digests; DELETE FROM threads; DELETE FROM sent; DELETE FROM entering; DELETE FROM transcript_files; DELETE FROM transcript_chunk_gc;")
   self.known = false
   self.transcripts_pending = false
+  self.forget_sweep()
+  self.tf_cache.clear()
+  self.head_cache.clear()
+  self.manifest_cache.clear()
+  self.manifest_live = Set([])
+  self.manifest_superseded_at.clear()
+}
+
+///|
+/// The transcript sweep starts again from each workspace's first path.
+fn Exporter::forget_sweep(self : Exporter) -> Unit {
+  self.end_sweep()
+  self.transcript_resweep = false
+}
+
+///|
+/// A sweep over: the next starts from each workspace's first path.
+fn Exporter::end_sweep(self : Exporter) -> Unit {
+  self.transcript_cursor.clear()
+  self.transcript_scan_done.clear()
+  self.transcript_ws_done.clear()
+}
+
+///|
+fn Exporter::in_transcript_sweep(self : Exporter) -> Bool {
+  !self.transcript_cursor.is_empty() || !self.transcript_scan_done.is_empty() || !self.transcript_ws_done.is_empty()
 }
 
 ///|
@@ -248,11 +368,24 @@ fn Exporter::gen_dir(self : Exporter, ws : String, gen : String) -> String {
 
 ///|
 fn Exporter::read_head(self : Exporter, dir : String) -> JValue? {
-  let text = (try { self.files.read(self.files.join([dir, "head.json"])) } catch { _ => None })
-  match text {
+  let path = self.files.join([dir, "head.json"])
+  guard self.files.meta(path) is Some((size, mtime)) else {
+    self.head_cache.remove(dir)
+    return None
+  }
+  if self.head_cache.get(dir) is Some((c_size, c_mtime, cached)) && c_size == size && c_mtime == mtime {
+    return Some(cached)
+  }
+  let text = (try { self.files.read(path) } catch { _ => None })
+  let parsed = match text {
     Some(t) => Some(@jsjson.parse(t)) catch { _ => None }
     None => None
   }
+  match parsed {
+    Some(head) => self.head_cache[dir] = (size, mtime, head)
+    None => self.head_cache.remove(dir)
+  }
+  parsed
 }
 
 ///|
@@ -280,6 +413,9 @@ fn Exporter::gen_of(self : Exporter, ws : String) -> String raise {
   if known is Some(g) && self.files.exists(self.gen_dir(ws, g)) {
     return g
   }
+  if known is Some(g) {
+    self.head_cache.remove(self.gen_dir(ws, g))
+  }
   let after = match self.meta("after") {
     Some(a) => @string.parse_double(a) catch { _ => 0.0 }
     None => 0.0
@@ -287,8 +423,19 @@ fn Exporter::gen_of(self : Exporter, ws : String) -> String raise {
   let now = (self.now)()
   let gen = gen_name(if now > after + 1.0 { now } else { after + 1.0 }, self.files.random(4))
   self.set_meta("gen:\{ws}", gen)
-  for t in ["digests", "threads", "sent", "entering", "transcript_files"] {
+  for t in ["digests", "threads", "sent", "entering"] {
     ignore(self.state.run("DELETE FROM \{t} WHERE ws = ?", [s(ws)]))
+  }
+  let dropped = self.state.run("DELETE FROM transcript_files WHERE ws = ?", [s(ws)])
+  self.tf_cache.remove(ws)
+  self.manifest_cache.remove(ws)
+  // Its transcripts are written again, all of them: none is behind a cursor of the generation before. A workspace
+  // with none exported (one with nothing written has no generation directory, so comes here every pass) asks for no scan.
+  self.transcript_cursor.remove(ws)
+  self.transcript_scan_done.remove(ws)
+  self.transcript_ws_done.remove(ws)
+  if dropped > 0 {
+    self.transcripts_pending = true
   }
   gen
 }
@@ -311,6 +458,20 @@ pub fn Exporter::heads(self : Exporter) -> JValue raise {
 }
 
 ///|
+/// A pass failed: `export.db` goes back to before it, and what is kept of it in memory goes too.
+fn Exporter::roll_back(self : Exporter, known : Bool, pending : Bool) -> Unit {
+  self.state.exec("ROLLBACK") catch {
+    _ => ()
+  }
+  self.tf_cache.clear()
+  self.head_cache.clear()
+  self.manifest_cache.clear()
+  self.forget_sweep()
+  self.known = known
+  self.transcripts_pending = pending
+}
+
+///|
 /// One pass (`pass`): what changed, as told and as found, written as batches. Its answer as the TypeScript one's
 /// (`Passed` and whether the station has no chat of its own).
 pub async fn Exporter::pass(self : Exporter, told : JValue) -> JValue {
@@ -323,16 +484,22 @@ pub async fn Exporter::pass(self : Exporter, told : JValue) -> JValue {
       ("empty", Bool(self.empty())),
     ])
   }
+  // A pass that fails leaves what it was to do as it found it: it may have said the transcripts were done.
+  let known = self.known
+  let pending = self.transcripts_pending
   self.state.exec("BEGIN IMMEDIATE")
   let passed = self.pass_in(told, home) catch {
     e => {
-      self.state.exec("ROLLBACK") catch {
-        _ => ()
-      }
+      self.roll_back(known, pending)
       raise e
     }
   }
-  self.state.exec("COMMIT")
+  self.state.exec("COMMIT") catch {
+    e => {
+      self.roll_back(known, pending)
+      raise e
+    }
+  }
   set(passed, "empty", Bool(self.empty()))
 }
 
@@ -376,7 +543,7 @@ async fn Exporter::pass_in(self : Exporter, told : JValue, home : String) -> JVa
           ("runs", Arr([])),
         ])
     }
-    outs[ws] = { head, lines: [], bytes: 0, files: [], gone: false, messages: 0.0 }
+    outs[ws] = { head, lines: [], bytes: 0, files: [], file_at: Map([]), gone: false, messages: 0.0 }
   }
   if self.meta("entries") is None {
     for k in ["entries", "letters", "turns"] {
@@ -396,9 +563,12 @@ async fn Exporter::pass_in(self : Exporter, told : JValue, home : String) -> JVa
     if get(rec, "file") is Some(Str(f)) {
       let h = @jsjson.sanitize_str(f)
       let size = num(get(rec, "size"))
-      match out.files.search_by(e => e.0 == h) {
+      match out.file_at.get(h) {
         Some(i) => out.files[i] = (h, size)
-        None => out.files.push((h, size))
+        None => {
+          out.file_at[h] = out.files.length()
+          out.files.push((h, size))
+        }
       }
     }
   }
@@ -577,6 +747,8 @@ async fn Exporter::pass_in(self : Exporter, told : JValue, home : String) -> JVa
   let scan_transcripts = !self.known || want_transcripts || self.transcripts_pending
   let sess_rows : Array[JValue] = []
   let run_rows : Map[String, Array[JValue]] = Map([])
+  // Whether `sess_rows` and `run_rows` hold the sessions already (the small tables were read whole this pass).
+  let mut loaded_transcript_sessions = false
   self.db.exec("BEGIN")
   let body = () => {
     // What was deleted, as told.
@@ -678,27 +850,7 @@ async fn Exporter::pass_in(self : Exporter, told : JValue, home : String) -> JVa
         }
       }
       self.known = true
-    } else if scan_transcripts {
-      for table in ["sessions", "runtime_sessions"] {
-        let mut after = 0.0
-        while true {
-          let rows = all(page_of(table), [Json::number(after), ni(page)])
-          for r in rows {
-            if table == "sessions" {
-              sess_rows.push(r)
-            } else if text_of(get(r, "session_key")) is Some(sk) {
-              match run_rows.get(sk) {
-                Some(xs) => xs.push(r)
-                None => run_rows[sk] = [r]
-              }
-            }
-          }
-          if rows.length() < page {
-            break
-          }
-          after = num(get(rows[rows.length() - 1], "_rowid"))
-        }
-      }
+      loaded_transcript_sessions = true
     }
     // What changed in place, as told.
     for k in list_of(get(told, "sessions")) {
@@ -820,16 +972,33 @@ async fn Exporter::pass_in(self : Exporter, told : JValue, home : String) -> JVa
       say(ws, Obj([("file", str(hash)), ("size", Num(size)), ("path", str(path))]))
     }
   }
+  let mut sweep_completed = false
   if scan_transcripts {
+    if want_transcripts && self.in_transcript_sweep() {
+      self.transcript_resweep = true
+    }
     if more {
       self.transcripts_pending = true
     } else {
+      // The sessions the transcripts are found by, read only once the logs are caught up and outside the pass's row
+      // budget: read before, on a station with more sessions than `pass_rows`, they used up every pass's budget ahead of
+      // the logs, so `more` never came false and nothing after them (logs, transcripts) was exported again.
+      if !loaded_transcript_sessions {
+        self.transcript_sessions(sess_rows, run_rows)
+      }
       let transcripts_more = self.export_transcripts(outs, sess_rows, run_rows, ws_of_session, say)
       if transcripts_more {
         self.transcripts_pending = true
         more = true
       } else {
-        self.transcripts_pending = false
+        sweep_completed = true
+        if self.transcript_resweep {
+          self.transcript_resweep = false
+          self.transcripts_pending = true
+          more = true
+        } else {
+          self.transcripts_pending = false
+        }
       }
     }
   }
@@ -841,9 +1010,13 @@ async fn Exporter::pass_in(self : Exporter, told : JValue, home : String) -> JVa
       self.write(w.0, out)
       wrote += 1
     }
-    heads.push((w.0, out.head))
+    heads.push((w.0, if self.compact_heads { self.compact_head(w.0, out.head) } else { out.head }))
   }
-  if scan_transcripts && !self.transcripts_pending {
+  if self.compact_heads {
+    self.gc_manifests(outs)
+  }
+  // After each whole sweep, a sweep to follow or not: never in the middle of one.
+  if sweep_completed {
     self.gc_transcript_chunks()
   }
   Obj([
@@ -852,6 +1025,44 @@ async fn Exporter::pass_in(self : Exporter, told : JValue, home : String) -> JVa
     ("wrote", Num(wrote.to_double())),
     ("read", Num(self.read.to_double())),
   ])
+}
+
+///|
+/// Every session and runtime session, for finding transcripts by: in a short read of their own, not counted in the
+/// pass's rows.
+fn Exporter::transcript_sessions(self : Exporter, sess_rows : Array[JValue], run_rows : Map[String, Array[JValue]]) -> Unit raise {
+  self.db.exec("BEGIN")
+  let read = () => {
+    for table in ["sessions", "runtime_sessions"] {
+      let mut after = 0.0
+      while true {
+        let rows = self.db.all(page_of(table), [Json::number(after), ni(page)]).map(row_of)
+        for r in rows {
+          if table == "sessions" {
+            sess_rows.push(r)
+          } else if text_of(get(r, "session_key")) is Some(sk) {
+            match run_rows.get(sk) {
+              Some(xs) => xs.push(r)
+              None => run_rows[sk] = [r]
+            }
+          }
+        }
+        if rows.length() < page {
+          break
+        }
+        after = num(get(rows[rows.length() - 1], "_rowid"))
+      }
+    }
+  }
+  read() catch {
+    e => {
+      self.db.exec("COMMIT") catch {
+        _ => ()
+      }
+      raise e
+    }
+  }
+  self.db.exec("COMMIT")
 }
 
 ///|
@@ -943,10 +1154,7 @@ fn Exporter::write(self : Exporter, ws : String, out : Out) -> Unit raise {
     runs_list
   }
   let kept = if runs_list.length() > runs_kept { runs_list[runs_list.length() - runs_kept:].to_array() } else { runs_list }
-  let mut files = get(head, "files").unwrap_or(Obj([]))
-  for f in out.files {
-    files = set(files, f.0, Num(f.1))
-  }
+  let files = set_all(get(head, "files").unwrap_or(Obj([])), out.files.map(f => (f.0, Num(f.1))))
   let chats = match self.state.all("SELECT COUNT(*) AS n FROM threads WHERE ws = ?", [s(ws)]) {
     [r, ..] => field_num(r, "n")
     _ => 0.0
@@ -957,7 +1165,14 @@ fn Exporter::write(self : Exporter, ws : String, out : Out) -> Unit raise {
   next = set(next, "batches", strs(strings_of(get(head, "batches")) + names))
   next = set(next, "runs", Arr(kept))
   next = set(next, "files", files)
-  let tf_entries = self.transcript_files_map(ws)
+  let tf_entries = match self.tf_cache.get(ws) {
+    Some(cached) => cached
+    None => {
+      let entries = self.transcript_files_map(ws)
+      self.tf_cache[ws] = entries
+      entries
+    }
+  }
   if tf_entries.length() > 0 {
     next = set(next, "transcriptFiles", Obj(tf_entries))
   } else {
@@ -970,7 +1185,13 @@ fn Exporter::write(self : Exporter, ws : String, out : Out) -> Unit raise {
 
 ///|
 fn Exporter::write_head(self : Exporter, dir : String, head : JValue) -> Unit raise {
-  ignore(self.files.write(self.files.join([dir, "head.json"]), @jsjson.stringify_indent(head, 1)))
+  let path = self.files.join([dir, "head.json"])
+  self.head_cache.remove(dir)
+  ignore(self.files.write(path, @jsjson.stringify_indent(head, 1)))
+  match self.files.meta(path) {
+    Some((size, mtime)) => self.head_cache[dir] = (size, mtime, head)
+    None => ()
+  }
 }
 
 ///|
@@ -1035,11 +1256,14 @@ fn Exporter::fold_gen(self : Exporter, dir : String, head : JValue, everything :
       next = set(next, "batches", strs(bs[0:bs.length() - take.length()].to_array() + names))
       if whole {
         let files : Array[(String, JValue)] = []
+        let file_idx : Map[String, Int] = Map([])
         folded.each_named_file((_, hash, sz) => {
-          let key = hash
-          match files.search_by(e => e.0 == key) {
-            Some(i) => files[i] = (key, Num(sz))
-            None => files.push((key, Num(sz)))
+          match file_idx.get(hash) {
+            Some(i) => files[i] = (hash, Num(sz))
+            None => {
+              file_idx[hash] = files.length()
+              files.push((hash, Num(sz)))
+            }
           }
         })
         next = set(next, "files", Obj(files))
@@ -1124,31 +1348,59 @@ pub fn Exporter::empty(self : Exporter) -> Bool raise {
 }
 
 ///|
-/// Where the files of `hashes` are now on this station, for a place that lacks them (`sources`).
+/// Above this many hashes, `sources` reads the files table once instead of once a hash.
+const SOURCES_POINT_MOST = 32
+
+///|
+/// Where the files of `hashes` are now on this station, for a place that lacks them (`sources`). A level of a first copy
+/// asks it of every chunk of every transcript (246k on a real station): each hash is looked at once, the files table
+/// read once for many, and each candidate stat'ed here rather than through the shell.
 pub fn Exporter::sources(self : Exporter, hashes : Array[String]) -> JValue raise {
+  let by_hash : Map[String, Array[String]]? = if hashes.length() > SOURCES_POINT_MOST {
+    // (the table's rows are read whole, once; only the paths of the hashes asked are kept past it)
+    let m : Map[String, Array[String]] = Map([])
+    for h in hashes {
+      m[h] = []
+    }
+    for r in self.state.all("SELECT hash, path FROM files ORDER BY path", []) {
+      if m.get(field_text(r, "hash")) is Some(paths) {
+        paths.push(field_text(r, "path"))
+      }
+    }
+    Some(m)
+  } else {
+    None
+  }
   let out : Array[(String, JValue)] = []
+  let seen : Set[String] = Set([])
   for h in hashes {
+    if seen.contains(h) {
+      continue
+    }
+    seen.add(h)
+    let paths = match by_hash {
+      Some(m) => m.get(h).unwrap_or([])
+      None => self.state.all("SELECT path FROM files WHERE hash = ? ORDER BY path", [s(h)]).map(r => field_text(r, "path"))
+    }
     let mut found = false
-    for r in self.state.all("SELECT path FROM files WHERE hash = ?", [s(h)]) {
-      let path = field_text(r, "path")
-      if self.files.kind(path) is Some("file") {
-        let key = h
-        match out.search_by(e => e.0 == key) {
-          Some(i) => out[i] = (key, str(path))
-          None => out.push((key, str(path)))
-        }
+    for path in paths {
+      if self.files.is_regular_file(path) {
+        out.push((h, str(path)))
         found = true
         break
       }
     }
     if !found {
       let chunk = self.files.join([self.replica, "chunks", h])
-      if self.files.kind(chunk) is Some("file") {
-        let key = h
-        match out.search_by(e => e.0 == key) {
-          Some(i) => out[i] = (key, str(chunk))
-          None => out.push((key, str(chunk)))
-        }
+      if self.files.is_regular_file(chunk) {
+        out.push((h, str(chunk)))
+        found = true
+      }
+    }
+    if !found {
+      let manifest = self.files.join([self.replica, "manifests", h])
+      if self.files.is_regular_file(manifest) {
+        out.push((h, str(manifest)))
       }
     }
   }
@@ -1170,19 +1422,236 @@ fn Files::is_transcript_path(self : Files, data : String, path : String) -> Bool
 }
 
 ///|
+#borrow(path)
+extern "C" fn missing_ffi(path : Bytes, follow : Int) -> Int = "sfc_missing"
+
+///|
+#borrow(path)
+extern "C" fn dir_missing_ffi(path : Bytes) -> Int = "sfc_dir_missing"
+
+///|
+#borrow(path)
+extern "C" fn dir_readable_ffi(path : Bytes) -> Int = "sfc_dir_readable"
+
+///|
+#borrow(path)
+extern "C" fn is_file_ffi(path : Bytes) -> Int = "sfc_is_file"
+
+///|
+/// Whether `path` is a regular file, links followed (`kind(path) is Some("file")`), asked of the shell only where the
+/// system's answer here may differ from its (a long Windows path).
+fn Files::is_regular_file(self : Files, path : String) -> Bool {
+  match is_file_ffi(c_path(path)) {
+    1 => true
+    0 => false
+    _ => self.kind(path) is Some("file")
+  }
+}
+
+///|
+fn Files::is_missing(self : Files, path : String, follow? : Bool = true) -> Bool {
+  ignore(self)
+  missing_ffi(c_path(path), if follow { 1 } else { 0 }) == 1
+}
+
+///|
+fn Files::is_dir_missing(self : Files, path : String) -> Bool {
+  ignore(self)
+  dir_missing_ffi(c_path(path)) == 1
+}
+
+///|
+fn Exporter::dir_unreadable_checked(self : Exporter, dir : String) -> Bool raise {
+  if self.test_faults is Some(f) {
+    if f.forbid_readdir.contains(dir) {
+      fail("BUG: descended into pruned directory \{dir}")
+    }
+    if f.readdir_err.contains(dir) {
+      return true
+    }
+  }
+  dir_readable_ffi(c_path(dir)) == 0
+}
+
+///|
+fn path_under_any_dir(path : String, dirs : Set[String], sep : String) -> Bool {
+  for d in dirs {
+    let prefix = if d.has_suffix(sep) { d } else { d + sep }
+    if path == d || path.has_prefix(prefix) {
+      return true
+    }
+  }
+  false
+}
+
+///|
+fn is_pruned_brain_rel(rel_parts : Array[String]) -> Bool {
+  match rel_parts {
+    [".system_generated", "steps"] => true
+    [".system_generated", "logs", "chunks"] => true
+    ["scratch"] => true
+    _ => false
+  }
+}
+
+///|
+/// Whether `path` lies under one of the three pruned AGY brain derived cache subtrees.
+fn Files::is_pruned_brain_path(self : Files, data : String, path : String) -> Bool {
+  guard self.under_of(data, path) is Some(rel) && rel != "" else { return false }
+  let parts : Array[String] = rel.split(self.sep).map(x => x.to_string()).collect()
+  guard parts.length() >= 8 &&
+    parts[0] == "homes" &&
+    one_segment(parts[1]) &&
+    parts[2] == "agy" &&
+    parts[3] == ".gemini" &&
+    parts[4] == "antigravity-cli" &&
+    parts[5] == "brain" &&
+    one_segment(parts[6]) else {
+    return false
+  }
+  if parts[7] == "scratch" {
+    return true
+  }
+  if parts.length() >= 9 && parts[7] == ".system_generated" && parts[8] == "steps" {
+    return true
+  }
+  if parts.length() >= 10 && parts[7] == ".system_generated" && parts[8] == "logs" && parts[9] == "chunks" {
+    return true
+  }
+  false
+}
+
+///|
+/// `lstat` distinguishing confirmed missing (`Ok(None)`) from unreadable error (`Err(())`).
+fn Exporter::lstat_checked(self : Exporter, path : String) -> Result[(String, Double, Int, Double)?, Unit] {
+  if self.test_faults is Some(f) && f.lstat_err.contains(path) {
+    return Err(())
+  }
+  match self.files.lstat(path) {
+    Some(st) => Ok(Some(st))
+    None => if self.files.is_missing(path, follow=false) { Ok(None) } else { Err(()) }
+  }
+}
+
+///|
+/// `listing` distinguishing confirmed missing (`Ok(None)`) from unreadable error (`Err(())`).
+fn Exporter::listing_checked(self : Exporter, dir : String) -> Result[Array[(String, String)]?, Unit] raise {
+  if self.test_faults is Some(f) {
+    if f.forbid_readdir.contains(dir) {
+      fail("BUG: descended into pruned directory \{dir}")
+    }
+    if f.readdir_err.contains(dir) {
+      return Err(())
+    }
+  }
+  match self.files.listing(dir) {
+    Some(entries) =>
+      match self.test_faults {
+        Some(f) if !f.other_kind.is_empty() =>
+          Ok(
+            Some(
+              entries.map(e => {
+                let (name, kind) = e
+                let path = self.files.join([dir, name])
+                if f.other_kind.contains(path) {
+                  (name, "other")
+                } else {
+                  (name, kind)
+                }
+              }),
+            ),
+          )
+        _ => Ok(Some(entries))
+      }
+    None => if self.files.is_dir_missing(dir) { Ok(None) } else { Err(()) }
+  }
+}
+
+///|
 fn Exporter::walk_transcript_dir(
   self : Exporter,
   dir : String,
   add : (String) -> Unit,
-) -> Unit {
-  guard self.files.listing(dir) is Some(entries) else { return }
+  on_error? : (String) -> Unit = _ => (),
+  on_unreadable_path? : (String) -> Unit = _ => (),
+) -> Unit raise {
+  let entries = match self.listing_checked(dir) {
+    Ok(Some(es)) => es
+    Ok(None) => return
+    Err(_) => {
+      on_error(dir)
+      return
+    }
+  }
   for e in entries {
     let (name, kind) = e
     let path = self.files.join([dir, name])
     if kind == "dir" {
-      self.walk_transcript_dir(path, add)
+      self.walk_transcript_dir(path, add, on_error~, on_unreadable_path~)
     } else if kind == "file" {
       add(path)
+    } else if kind == "other" {
+      match self.lstat_checked(path) {
+        Ok(Some(("file", _, _, _))) => add(path)
+        Ok(Some(("dir", _, _, _))) => self.walk_transcript_dir(path, add, on_error~, on_unreadable_path~)
+        Ok(_) => ()
+        Err(_) => {
+          on_unreadable_path(path)
+          on_error(path)
+        }
+      }
+    }
+  }
+}
+
+///|
+/// Dedicated walker for AGY `brain/<id>/` that prunes the three derived cache subtrees by exact relative path segments
+/// before descending (never enters or reads pruned directories).
+/// `dir` is a transcript path (`Files::is_transcript_path`), so is each path under it made of a name of its own: `add`
+/// is given those without asking again. `rel_parts` is `dir`'s place under the brain, given back as it came.
+fn Exporter::walk_brain_dir(
+  self : Exporter,
+  dir : String,
+  rel_parts : Array[String],
+  add : (String) -> Unit,
+  on_error : (String) -> Unit,
+  on_unreadable_path : (String) -> Unit,
+) -> Unit raise {
+  let entries = match self.listing_checked(dir) {
+    Ok(Some(es)) => es
+    Ok(None) => return
+    Err(_) => {
+      on_error(dir)
+      return
+    }
+  }
+  fn descend(path : String, name : String) -> Unit raise {
+    rel_parts.push(name)
+    defer ignore(rel_parts.pop())
+    if !is_pruned_brain_rel(rel_parts) {
+      self.walk_brain_dir(path, rel_parts, add, on_error, on_unreadable_path)
+    }
+  }
+  for e in entries {
+    let (name, kind) = e
+    if name == "" || name == "." || name == ".." || name.contains(self.files.sep) {
+      continue
+    }
+    let path = self.files.join([dir, name])
+    if kind == "dir" {
+      descend(path, name)
+    } else if kind == "file" {
+      add(path)
+    } else if kind == "other" {
+      match self.lstat_checked(path) {
+        Ok(Some(("file", _, _, _))) => add(path)
+        Ok(Some(("dir", _, _, _))) => descend(path, name)
+        Ok(_) => ()
+        Err(_) => {
+          on_unreadable_path(path)
+          on_error(path)
+        }
+      }
     }
   }
 }
@@ -1198,14 +1667,45 @@ async fn Exporter::export_transcripts(
   ws_of_session : (JValue?) -> String,
   say : (String, JValue) -> Unit,
 ) -> Bool {
-  let finder = @locate.Finder::new(self.host, self.files.sep)
+  let finder_readdir_err : Set[String] = Set([])
+  if self.test_faults is Some(f) {
+    for d in f.readdir_err {
+      finder_readdir_err.add(d)
+    }
+    for d in f.finder_readdir_err {
+      finder_readdir_err.add(d)
+    }
+  }
+  // One finder for the pass, keeping what each directory holds: each session's look through every Claude project or
+  // Codex day reads them once in the pass, not once a session.
+  let finder = @locate.Finder::new(
+    self.host,
+    self.files.sep,
+    track_failed_dirs=true,
+    readdir_err=finder_readdir_err,
+    cache_dirs=true,
+  )
   let by_ws : Map[String, Map[String, String?]] = Map([])
+  let unreadable_dirs_by_ws : Map[String, Set[String]] = Map([])
+  let unreadable_paths_by_ws : Map[String, Set[String]] = Map([])
   for ws, _ in outs {
     by_ws[ws] = Map([])
+    unreadable_dirs_by_ws[ws] = Set([])
+    unreadable_paths_by_ws[ws] = Set([])
   }
+  // The brains walked in each workspace: sessions of one workspace sharing a brain walk it once.
+  let walked_brains : Map[String, Set[String]] = Map([])
   for sess in sess_rows {
     let ws = ws_of_session(get(sess, "ws"))
     guard by_ws.get(ws) is Some(found_map) else { continue }
+    // A workspace whose transcripts are all exported this sweep is not looked at again until the next one.
+    if self.transcript_ws_done.contains(ws) {
+      continue
+    }
+    let unreadable_dirs = unreadable_dirs_by_ws.get(ws).unwrap_or(Set([]))
+    let unreadable_paths_ws = unreadable_paths_by_ws.get(ws).unwrap_or(Set([]))
+    let add_unreadable_dir = (d : String) => unreadable_dirs.add(d)
+    let add_unreadable_path = (p : String) => unreadable_paths_ws.add(p)
     let key = text_of(get(sess, "key")).unwrap_or("")
     let s_runtime = text_of(get(sess, "runtime")).unwrap_or("")
     let orig_runtime = text_of(get(sess, "original_runtime")).unwrap_or(s_runtime)
@@ -1252,6 +1752,11 @@ async fn Exporter::export_transcripts(
     let valid_sources = sources.filter(r => @locate.runtime_kind(r.runtime))
     if valid_sources.length() > 0 {
       let (located, _) = finder.sources(self.data_dir, [], valid_sources, places, anywhere=true)
+      for d in finder.take_failed_dirs() {
+        if !self.files.is_dir_missing(d) {
+          add_unreadable_dir(d)
+        }
+      }
       for t in located {
         let (path, kind) = t
         let actual = if self.files.exists(path) { path } else { path + ".zst" }
@@ -1260,8 +1765,10 @@ async fn Exporter::export_transcripts(
           let name = path.view(start_offset=path.rev_find(self.files.sep).unwrap_or(-1) + 1).to_string()
           let id = if name.has_suffix(".jsonl") { name.view(end_offset=name.length() - 6).to_string() } else { name }
           let sub = self.files.join([self.files.dir_of(path), id])
-          if self.files.kind(sub) is Some("dir") {
-            self.walk_transcript_dir(sub, add_path)
+          match self.lstat_checked(sub) {
+            Ok(Some(("dir", _, _, _))) => self.walk_transcript_dir(sub, add_path, on_error=add_unreadable_dir, on_unreadable_path=add_unreadable_path)
+            Ok(_) => ()
+            Err(_) => add_unreadable_dir(sub)
           }
         }
       }
@@ -1274,53 +1781,119 @@ async fn Exporter::export_transcripts(
       add_path(self.files.join([cli, "conversations", r.id + ".db-wal"]))
       add_path(self.files.join([cli, "annotations", r.id + ".pbtxt"]))
       let brain = self.files.join([cli, "brain", r.id])
-      if self.files.kind(brain) is Some("dir") {
-        self.walk_transcript_dir(brain, add_path)
+      let walked = match walked_brains.get(ws) {
+        Some(w) => w
+        None => {
+          let w : Set[String] = Set([])
+          walked_brains[ws] = w
+          w
+        }
+      }
+      if walked.contains(brain) {
+        continue
+      }
+      walked.add(brain)
+      let add_found = (p : String) => if !found_map.contains(p) { found_map[p] = room }
+      match self.lstat_checked(brain) {
+        Ok(Some(("dir", _, _, _))) =>
+          if self.files.is_transcript_path(self.data_dir, brain) {
+            self.walk_brain_dir(brain, [], add_found, add_unreadable_dir, add_unreadable_path)
+          }
+        Ok(_) => ()
+        Err(_) => add_unreadable_dir(brain)
       }
     }
   }
+  if self.test_faults is Some({ finder_asked_most: Some(most), .. }) && finder.asked() > most {
+    fail("BUG: the transcript finder asked the shell \{finder.asked()} times in a pass, more than \{most}")
+  }
   let mut done_files = 0
   let mut done_bytes = 0
+  let mut done_deletes = 0
   let mut truncated = false
-  for ws, found_map in by_ws {
+  let parent_unreadable_cache : Map[String, Bool] = Map([])
+  let ancestor_lstat_cache : Map[String, String] = Map([])
+  let ws_order : Array[String] = by_ws.keys().collect()
+  ws_order.sort_by(compare_units)
+  for ws in ws_order {
     if truncated {
       break
     }
+    if self.transcript_ws_done.contains(ws) {
+      continue
+    }
+    let found_map = by_ws.get(ws).unwrap_or(Map([]))
+    let unreadable_dirs = unreadable_dirs_by_ws.get(ws).unwrap_or(Set([]))
+    let unreadable_paths = unreadable_paths_by_ws.get(ws).unwrap_or(Set([]))
     let paths = found_map.keys().collect()
     paths.sort_by(compare_units)
+    // What `transcript_files` holds for the workspace, read once rather than a query a path.
+    let existing_by_path : Map[String, (String?, Double, Double)] = Map([])
+    for row in self.state.all("SELECT path, room, size, mtime FROM transcript_files WHERE ws = ?", [s(ws)]) {
+      let prev_room = match row.get("room") {
+        Some(String(r)) => Some(r)
+        _ => None
+      }
+      existing_by_path[field_text(row, "path")] = (prev_room, field_num(row, "size"), field_num(row, "mtime"))
+    }
     let active : Set[String] = Set([])
     let mut ws_truncated = false
+    let scan_done = self.transcript_scan_done.contains(ws)
+    let cursor = self.transcript_cursor.get(ws)
     for path in paths {
-      guard self.files.lstat(path) is Some(("file", size, mode, mtime)) else { continue }
-      active.add(path)
+      // A path is found whether or not it is there (a `.db-wal`, an annotation): one gone is not kept.
+      let (kind, size, mode, mtime) = match self.lstat_checked(path) {
+        Ok(Some(st)) => st
+        Ok(None) => continue
+        Err(_) => {
+          unreadable_paths.add(path)
+          continue
+        }
+      }
+      if kind != "file" {
+        continue
+      }
+      // Gone through already in this sweep: kept as found, not read again until the next sweep.
+      if scan_done || (cursor is Some(c) && compare_units(path, c) < 0) {
+        active.add(path)
+        continue
+      }
       let room = found_map.get(path).unwrap_or(None)
       let m = mode & 0o777
       let mtime_ms = @math.floor(mtime)
-      let existing = self.state.all("SELECT room, size, mtime FROM transcript_files WHERE ws = ? AND path = ?", [s(ws), s(path)])
-      let unchanged = match existing {
-        [row, ..] => {
-          let prev_room = match row.get("room") {
-            Some(String(r)) => Some(r)
-            _ => None
-          }
-          field_num(row, "size") == size && field_num(row, "mtime") == mtime_ms && prev_room == room
-        }
-        _ => false
+      let unchanged = match existing_by_path.get(path) {
+        Some((prev_room, prev_size, prev_mtime)) => prev_size == size && prev_mtime == mtime_ms && prev_room == room
+        None => false
       }
       if unchanged {
+        active.add(path)
         continue
       }
       if done_files > 0 && (done_files >= self.transcript_pass_files || done_bytes >= self.transcript_pass_bytes) {
         truncated = true
         ws_truncated = true
+        self.transcript_cursor[ws] = path
         break
       }
       let chunks : Array[String] = []
       let total = size.to_int()
       let mut offset = 0
+      let mut read_failed = false
       while offset < total {
         let want = if total - offset < self.chunk_bytes { total - offset } else { self.chunk_bytes }
-        guard self.host.read_bytes(path, from=offset, length=want) is Some(plain) && plain.length() > 0 else { break }
+        let injected_short = match self.test_faults {
+          Some(f) => f.read_short.contains(path) || (offset > 0 && f.read_short_after_first.contains(path))
+          None => false
+        }
+        let plain_opt = if injected_short {
+          None
+        } else {
+          self.host.read_bytes(path, from=offset, length=want) catch { _ => None }
+        }
+        guard plain_opt is Some(plain) && plain.length() > 0 else {
+          read_failed = true
+          break
+        }
         let plain_hash = @hash.sha256_hex(plain[:])
         let chunk_hash = match self.state.all("SELECT chunk_hash FROM transcript_chunks WHERE plain_hash = ?", [s(plain_hash)]) {
           [row, ..] => {
@@ -1357,6 +1930,11 @@ async fn Exporter::export_transcripts(
         chunks.push(ch)
         offset += plain.length()
       }
+      if read_failed || offset != total {
+        unreadable_paths.add(path)
+        continue
+      }
+      active.add(path)
       let chunks_json = stringify(strs(chunks))
       let room_param = match room {
         Some(r) => s(r)
@@ -1373,6 +1951,8 @@ async fn Exporter::export_transcripts(
           s(chunks_json),
         ]),
       )
+      self.tf_cache.remove(ws)
+      self.manifest_cache.remove(ws)
       say(
         ws,
         Obj([
@@ -1387,31 +1967,155 @@ async fn Exporter::export_transcripts(
       done_files += 1
       done_bytes += offset
     }
-    if !ws_truncated {
-      for row in self.state.all("SELECT path FROM transcript_files WHERE ws = ? ORDER BY path", [s(ws)]) {
-        let old_path = field_text(row, "path")
-        if !active.contains(old_path) {
-          ignore(self.state.run("DELETE FROM transcript_files WHERE ws = ? AND path = ?", [s(ws), s(old_path)]))
-          say(ws, Obj([("tr_del", str(old_path))]))
+    let old_paths : Array[String] = existing_by_path.keys().collect()
+    old_paths.sort_by(compare_units)
+    if ws_truncated {
+      // The derived caches no longer exported go whatever else is found: by their path alone, so a sweep that keeps
+      // being cut short still lets them go. That path says it, not the disk: no readability check is needed.
+      let mut deleted_in_ws = false
+      for old_path in old_paths {
+        if active.contains(old_path) || !self.files.is_pruned_brain_path(self.data_dir, old_path) {
+          continue
         }
+        if done_deletes >= self.transcript_pass_deletes {
+          break
+        }
+        ignore(self.state.run("DELETE FROM transcript_files WHERE ws = ? AND path = ?", [s(ws), s(old_path)]))
+        deleted_in_ws = true
+        say(ws, Obj([("tr_del", str(old_path))]))
+        done_deletes += 1
+      }
+      if deleted_in_ws {
+        self.tf_cache.remove(ws)
+        self.manifest_cache.remove(ws)
+      }
+    } else {
+      self.transcript_cursor.remove(ws)
+      self.transcript_scan_done.add(ws)
+      let mut deleted_in_ws = false
+      let mut deletes_cut = false
+      for old_path in old_paths {
+        if active.contains(old_path) || unreadable_paths.contains(old_path) || path_under_any_dir(old_path, unreadable_dirs, self.files.sep) {
+          continue
+        }
+        if !self.files.is_pruned_brain_path(self.data_dir, old_path) {
+          match self.files.under_of(self.data_dir, old_path) {
+            Some(rel) if rel != "" => {
+              let parts : Array[String] = rel.split(self.files.sep).map(x => x.to_string()).collect()
+              let ancestors : Array[String] = []
+              let mut cur = self.data_dir
+              let mut keep = false
+              let mut all_real_dirs = true
+              for i = 0; i + 1 < parts.length(); i = i + 1 {
+                cur = self.files.join([cur, parts[i]])
+                let kind = match ancestor_lstat_cache.get(cur) {
+                  Some(k) => k
+                  None => {
+                    let k = match self.lstat_checked(cur) {
+                      Err(_) => "err"
+                      Ok(Some(("dir", _, _, _))) => "dir"
+                      Ok(_) => "other"
+                    }
+                    ancestor_lstat_cache[cur] = k
+                    k
+                  }
+                }
+                if kind == "err" {
+                  keep = true
+                  break
+                } else if kind != "dir" {
+                  all_real_dirs = false
+                  break
+                }
+                ancestors.push(cur)
+              }
+              if keep {
+                continue
+              }
+              if all_real_dirs {
+                match self.lstat_checked(old_path) {
+                  Err(_) => continue
+                  Ok(None) => ()
+                  Ok(Some(_)) => {
+                    let mut ancestor_unreadable = false
+                    let check_dir = (d : String) => {
+                      match parent_unreadable_cache.get(d) {
+                        Some(b) => b
+                        None => {
+                          let bad = self.dir_unreadable_checked(d)
+                          parent_unreadable_cache[d] = bad
+                          bad
+                        }
+                      }
+                    }
+                    if check_dir(self.data_dir) {
+                      ancestor_unreadable = true
+                    } else {
+                      for a in ancestors {
+                        if check_dir(a) {
+                          ancestor_unreadable = true
+                          break
+                        }
+                      }
+                    }
+                    if ancestor_unreadable {
+                      continue
+                    }
+                  }
+                }
+              }
+            }
+            _ => ()
+          }
+        }
+        if done_deletes >= self.transcript_pass_deletes {
+          truncated = true
+          deletes_cut = true
+          break
+        }
+        ignore(self.state.run("DELETE FROM transcript_files WHERE ws = ? AND path = ?", [s(ws), s(old_path)]))
+        deleted_in_ws = true
+        say(ws, Obj([("tr_del", str(old_path))]))
+        done_deletes += 1
+      }
+      if deleted_in_ws {
+        self.tf_cache.remove(ws)
+        self.manifest_cache.remove(ws)
+      }
+      if !deletes_cut {
+        self.transcript_ws_done.add(ws)
       }
     }
+  }
+  if !truncated {
+    self.end_sweep()
   }
   truncated
 }
 
 ///|
 fn Exporter::transcript_files_map(self : Exporter, ws : String) -> Array[(String, JValue)] raise {
+  let rows = self.state.all("SELECT chunks_json FROM transcript_files WHERE ws = ?", [s(ws)])
+  if rows.length() == 0 {
+    return []
+  }
+  let chunk_sizes : Map[String, Double] = Map([])
+  for r in self.state.all("SELECT chunk_hash, comp_size FROM transcript_chunks", []) {
+    let ch = field_text(r, "chunk_hash")
+    if !chunk_sizes.contains(ch) {
+      chunk_sizes[ch] = field_num(r, "comp_size")
+    }
+  }
   let sizes : Map[String, Double] = Map([])
-  for row in self.state.all("SELECT chunks_json FROM transcript_files WHERE ws = ?", [s(ws)]) {
+  for row in rows {
     let parsed = @jsjson.parse(field_text(row, "chunks_json")) catch { _ => Arr([]) }
     for ch in strings_of(Some(parsed)) {
       if sizes.contains(ch) {
         continue
       }
-      let sz = match self.state.all("SELECT comp_size FROM transcript_chunks WHERE chunk_hash = ? LIMIT 1", [s(ch)]) {
-        [r, ..] => field_num(r, "comp_size")
-        _ =>
+      let sz = match chunk_sizes.get(ch) {
+        Some(s) => s
+        None =>
           match self.files.meta(self.files.join([self.replica, "chunks", ch])) {
             Some((size, _)) => size
             None => 0.0
@@ -1494,5 +2198,116 @@ fn Exporter::gc_transcript_chunks(self : Exporter) -> Unit raise {
     if !live.contains(ch) && !kept_on_disk.contains(ch) {
       ignore(self.state.run("DELETE FROM transcript_chunks WHERE plain_hash = ?", [s(field_text(row, "plain_hash"))]))
     }
+  }
+}
+
+///|
+/// Writes the canonical 2-level transcript manifest for `head` under `<replica>/manifests/<hash>` (atomic tmp + fsync
+/// + rename, skipping existing files) and returns the compact IPC head carrying `transcriptManifest` instead of inline
+/// `transcriptFiles`. Disk `own/<ws>/<gen>/head.json` keeps inline `transcriptFiles` unchanged (D72a invariant).
+async fn Exporter::compact_head(self : Exporter, ws : String, head : JValue) -> JValue {
+  match get(head, "transcriptFiles") {
+    Some(Obj(entries)) if entries.length() > 0 => {
+      let manifests_dir = self.files.join([self.replica, "manifests"])
+      let root_hash = match self.manifest_cache.get(ws) {
+        Some((rh, _)) if self.files.kind(self.files.join([manifests_dir, rh])) is Some("file") => rh
+        _ => {
+          let pairs : Array[(String, Double)] = entries.map(e => (@jsjson.sanitize_str(e.0), num(Some(e.1))))
+          let enc = encode_transcript_manifest(pairs)
+          let leaf_hashes : Array[String] = []
+          for leaf in enc.leaves {
+            let (_, lh, lbytes) = leaf
+            leaf_hashes.push(lh)
+            let lp = self.files.join([manifests_dir, lh])
+            if !(self.files.kind(lp) is Some("file")) {
+              self.host.write_atomic(lp, lbytes, mode=0o644, sync=true, mkdir=true, sep=self.files.sep)
+            }
+          }
+          let rp = self.files.join([manifests_dir, enc.root_hash])
+          if !(self.files.kind(rp) is Some("file")) {
+            self.host.write_atomic(rp, enc.root_bytes, mode=0o644, sync=true, mkdir=true, sep=self.files.sep)
+          }
+          self.manifest_cache[ws] = (enc.root_hash, leaf_hashes)
+          enc.root_hash
+        }
+      }
+      set(without(head, "transcriptFiles"), "transcriptManifest", str(root_hash))
+    }
+    _ => {
+      self.manifest_cache.remove(ws)
+      without(head, "transcriptManifest")
+    }
+  }
+}
+
+///|
+/// Reclaims unreferenced manifest files under `<replica>/manifests/` after a 10-minute grace period
+/// measured from when a manifest hash leaves the live set (falling back to mtime for cross-process leftovers),
+/// always preserving root + leaf hashes referenced by current `own` heads.
+fn Exporter::gc_manifests(self : Exporter, outs : Map[String, Out]) -> Unit raise {
+  let now = (self.now)()
+  let manifests_dir = self.files.join([self.replica, "manifests"])
+  let live : Set[String] = Set([])
+  for ws, out in outs {
+    match self.manifest_cache.get(ws) {
+      Some((rh, leaves)) => {
+        live.add(rh)
+        for lh in leaves {
+          live.add(lh)
+        }
+      }
+      None =>
+        match get(out.head, "transcriptFiles") {
+          Some(Obj(entries)) if entries.length() > 0 => {
+            let pairs : Array[(String, Double)] = entries.map(e => (@jsjson.sanitize_str(e.0), num(Some(e.1))))
+            let enc = encode_transcript_manifest(pairs)
+            live.add(enc.root_hash)
+            for leaf in enc.leaves {
+              live.add(leaf.1)
+            }
+          }
+          _ => ()
+        }
+    }
+  }
+  for h in live {
+    self.manifest_superseded_at.remove(h)
+  }
+  for prev in self.manifest_live {
+    if !live.contains(prev) && !self.manifest_superseded_at.contains(prev) {
+      self.manifest_superseded_at[prev] = now
+    }
+  }
+  self.manifest_live = live
+  let on_disk : Set[String] = Set([])
+  guard self.files.names(manifests_dir) is Some(names) else { return }
+  for name in names {
+    on_disk.add(name)
+    if live.contains(name) {
+      continue
+    }
+    match self.manifest_superseded_at.get(name) {
+      Some(superseded_at) =>
+        if now - superseded_at >= manifest_gc_grace_ms {
+          let p = self.files.join([manifests_dir, name])
+          self.files.remove(p) catch {
+            _ => ()
+          }
+          self.manifest_superseded_at.remove(name)
+        }
+      None =>
+        // First time this process observes an unreferenced file on disk (e.g. after restart):
+        // record `now` and grant a full 10-minute grace period before reclaiming.
+        self.manifest_superseded_at[name] = now
+    }
+  }
+  let stale_keys : Array[String] = []
+  for k, _ in self.manifest_superseded_at {
+    if !on_disk.contains(k) {
+      stale_keys.push(k)
+    }
+  }
+  for k in stale_keys {
+    self.manifest_superseded_at.remove(k)
   }
 }

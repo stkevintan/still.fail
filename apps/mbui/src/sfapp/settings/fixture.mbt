@@ -39,6 +39,9 @@ priv struct SettingsFixture {
   mut more_gpus : Bool
   /// Willow's CPU, memory and disk all running low (settings-stations-low): its card's line of three chips.
   mut low_meters : Bool
+  /// Its stations given no mark (settings-stations-unmarked: 1), and so shown by their systems' icons as the core
+  /// gives them (settings-stations-os: 2, client-core station-os.ts); 0 the marks they are given
+  mut os_icons : Int
   /// the mode's page has no station (settings-first-station)
   mut none : Bool
   /// the subscription's sign-in: "" none, "needs_code" under way (settings-profile-login), "failed"
@@ -214,6 +217,7 @@ let fx : SettingsFixture = {
   gpus: false,
   more_gpus: false,
   low_meters: false,
+  os_icons: 0,
   none: false,
   login: "",
   login_station: false,
@@ -593,6 +597,7 @@ fn fixture_reset() -> Unit {
   fx.gpus = false
   fx.more_gpus = false
   fx.low_meters = false
+  fx.os_icons = 0
   fx.congestion = "cubic"
   fx.none = false
   fx_adb.val = ""
@@ -975,6 +980,15 @@ pub fn fixture_page(mode : String) -> String {
     "settings-station-many-profiles" => fx_station_many_profiles.val = true
     "settings-station-gpu" => fx.gpus = true
     "settings-stations-low" => fx.low_meters = true
+    // (Willow on Linux, its GPUs', Maple a Mac, Cedar on Windows: their systems apart)
+    "settings-stations-unmarked" => {
+      fx.gpus = true
+      fx.os_icons = 1
+    }
+    "settings-stations-os" => {
+      fx.gpus = true
+      fx.os_icons = 2
+    }
     "settings-station-gpu-many" => {
       fx.gpus = true
       fx.more_gpus = true
@@ -1366,11 +1380,12 @@ pub fn fixture_page(mode : String) -> String {
     "settings-bars" => "bars"
     "settings-kept" | "settings-kept-many" | "settings-kept-fill" => "kept"
     "settings-changelog" => "changelog"
-    "settings-about-flow" => "about"
+    "settings-about-flow" | "settings-about-traced" => "about"
     "settings-fonts-coming" | "settings-fonts-code" => "fonts"
     "settings-prices" => "prices:7"
     "settings-add-people" | "settings-workspace-mark" | "settings-workspace-motion" => "workspace"
-    "settings-stations-motion" | "settings-stations-incompatible" | "settings-stations-low" => "stations"
+    "settings-stations-motion" | "settings-stations-incompatible" | "settings-stations-low" | "settings-stations-unmarked" | "settings-stations-os" =>
+      "stations"
     "settings-connects-motion" => "connects"
     "settings-vault-motion" => "vault-items"
     "settings-local-fonts" => "fonts"
@@ -2548,6 +2563,24 @@ fn fx_mode_changes() -> Json {
 }
 
 ///|
+/// Station `id`'s icon as the core gives it: the one it was given, else `given` (none, or its system `os`'s, as
+/// fx.os_icons says).
+fn fx_mark(id : String, given : String, os : String) -> String {
+  match (fx.marks.get(id), fx.os_icons) {
+    (Some(m), _) => m
+    (None, 0) => given
+    (None, 1) => ""
+    (None, _) => "glyph:" + os
+  }
+}
+
+///|
+/// Whether station `id`'s icon is its system's (fx_mark): the core's `osIcon`.
+fn fx_os_icon(id : String) -> Bool {
+  fx.os_icons == 2 && fx.marks.get(id) is None
+}
+
+///|
 fn fx_station(address : String) -> Json {
   let id = station_name(address)
   let renamed = fx.names.get(id)
@@ -2557,7 +2590,8 @@ fn fx_station(address : String) -> Json {
       ("station", str(address)),
       ("id", str(id)),
       ("name", str(renamed.unwrap_or("Willow"))),
-      ("icon", str(fx.marks.get(id).unwrap_or("glyph:desktop"))),
+      ("icon", str(fx_mark(id, "glyph:desktop", "linux"))),
+      ("osIcon", Json::boolean(fx_os_icon(id))),
       ("summary", str(if fx.willow_incompatible { "版本不兼容，需要更新" } else if fx.gpus { "AMD EPYC · 2 个 agent 在工作" } else { "Apple M1 Pro · 2 个 agent 在工作" })),
       ("face", str("working")),
       ("line", str(if fx.willow_incompatible { "版本不兼容，需要更新" } else if fx.gpus { "AMD EPYC · 32 GB · Linux" } else { "Apple M1 Pro · 32 GB · macOS 26" })),
@@ -2937,8 +2971,9 @@ fn fx_station(address : String) -> Json {
     obj([
       ("station", str(address)),
       ("id", str(id)),
-      ("name", str(renamed.unwrap_or(if id == "st3" && fx.retire_others >= 2 { "Cedar" } else { "Maple" }))),
-      ("icon", str(fx.marks.get(id).unwrap_or("glyph:laptop:teal"))),
+      ("name", str(renamed.unwrap_or(if id == "st3" && (fx.retire_others >= 2 || fx.os_icons > 0) { "Cedar" } else { "Maple" }))),
+      ("icon", str(fx_mark(id, "glyph:laptop:teal", if id == "st3" { "windows" } else { "macos" }))),
+      ("osIcon", Json::boolean(fx_os_icon(id))),
       ("summary", str(if up { "Apple M3 · 空闲" } else { "离线 · 2 天前" })),
       ("face", str(if up { "idle" } else { "offline" })),
       ("online", Json::boolean(up)),
@@ -3527,7 +3562,8 @@ pub fn fixture_topic(mode : String, name : String, params : Map[String, Json]) -
       } else {
         // (settings-stations-motion: 3 comes, then Maple goes)
         let all = if rigs_fixture_made() { [fx_station("ws1/st2")] } else { [fx_station("ws1/st1"), fx_station("ws1/st2")] }
-        if fx.motion >= 1 || fx.retire_others >= 2 {
+        // (settings-stations-os: Cedar, a Windows machine, beside them)
+        if fx.motion >= 1 || fx.retire_others >= 2 || fx.os_icons > 0 {
           all.push(fx_station("ws1/st3"))
         }
         if fx.motion >= 2 {

@@ -214,7 +214,7 @@ export const UsageLive = Layer.effectDiscard(
     );
     const usage = yield* Effect.acquireRelease(
       Effect.sync(() => new UsageCounter({
-        store, config: () => ({ dataDir: data, profiles: hubConfig(config.raw(), data).profiles }), clock: hub.clock,
+        store, config: () => ({ dataDir: data, profiles: hubConfig(config.raw(), data).profiles }), clock: hub.clock, readers: readerConfig,
       })),
       (u) => Effect.promise(() => u.stop()),
     );

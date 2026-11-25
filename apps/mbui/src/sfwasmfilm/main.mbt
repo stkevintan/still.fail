@@ -1,8 +1,6 @@
 // The offscreen application scene in classic Wasm. Text, decoded images and the final frame use the Mac's native
 // renderer through scalar host calls; the scene and drive run in the same Tester as sffilm.
 ///|
-struct WasmHost { }
-///|
 fn metrics(size : Double, weight : Int, style : Int) -> Unit = "probe" "metrics"
 ///|
 fn shape_host(size : Double, weight : Int, style : Int, capacity : Int) -> Int = "probe" "shape"
@@ -81,83 +79,73 @@ fn text_key(text : String, size : Double, weight : Int, style : Int) -> Int {
 }
 
 ///|
-impl @hostapi.Host for WasmHost with font_metrics(_, size, weight, style, out) {
-  metrics(size, weight, style)
-  for i in 0..<out.length() { out[i] = result_at(i) }
+fn make_wasm_host() -> @hostapi.Host {
+  let h = @hostapi.Host::noop()
+  h.font_metrics = fn(size, weight, style, out) {
+    metrics(size, weight, style)
+    for i in 0..<out.length() { out[i] = result_at(i) }
+  }
+  h.shape = fn(text, size, weight, style, out) {
+    let n = shape_text(text, size, weight, style, out.length())
+    for i in 0..<(n * 4) { out[i] = result_at(i) }
+    n
+  }
+  h.text_key = fn(text, size, weight, style) {
+    text_key(text, size, weight, style)
+  }
+  h.glyph = fn(key, out) {
+    glyph(key)
+    for i in 0..<out.length() { out[i] = result_at(i) }
+  }
+  h.glyph_put = fn(key, x, y) { glyph_put(key, x, y) }
+  h.atlas_size = fn(colour) { atlas_size(colour) }
+  h.atlas_generation = fn() { atlas_generation() }
+  h.face_add = fn(face, path, weight) {
+    host_text.val = path
+    face_add_host(face, weight)
+  }
+  h.face_add_bytes = fn(face, data, weight) {
+    host_bytes.val = data
+    face_add_bytes_host(face, weight)
+  }
+  h.face_add_family = fn(face, family) {
+    host_text.val = family
+    face_add_family_host(face)
+  }
+  h.face_clear = fn(face) { face_clear_host(face) }
+  h.image_load = fn(src, max_px) {
+    host_text.val = src
+    image_load_host(max_px)
+  }
+  h.image_load_bytes = fn(data, max_px) {
+    host_bytes.val = data
+    image_bytes_host(max_px)
+  }
+  h.image_info = fn(id, out) {
+    let state = image_info_host(id)
+    if state == 1 { for i in 0..<out.length() { out[i] = result_at(i) } }
+    state
+  }
+  h.image_pixels = fn(id, out) {
+    let n = image_pixels_host(id, out.length())
+    if n < 0 { return false }
+    for i in 0..<n { out[i] = image_pixel_at(i).to_byte() }
+    true
+  }
+  h.image_free = fn(id) { image_free_host(id) }
+  h.drawn_pixels = fn(_, _, _, _, _) {
+    unsupported_pixels.val = true
+    false
+  }
+  h.drawn_pixels_of = fn(_, _, _, _, _, _, _, _, _) {
+    unsupported_pixels.val = true
+    false
+  }
+  h
 }
+
 ///|
-impl @hostapi.Host for WasmHost with shape(_, text, size, weight, style, out) {
-  let n = shape_text(text, size, weight, style, out.length())
-  for i in 0..<(n * 4) { out[i] = result_at(i) }
-  n
-}
-///|
-impl @hostapi.Host for WasmHost with text_key(_, text, size, weight, style) {
-  text_key(text, size, weight, style)
-}
-///|
-impl @hostapi.Host for WasmHost with glyph(_, key, out) {
-  glyph(key)
-  for i in 0..<out.length() { out[i] = result_at(i) }
-}
-///|
-impl @hostapi.Host for WasmHost with glyph_put(_, key, x, y) { glyph_put(key, x, y) }
-///|
-impl @hostapi.Host for WasmHost with atlas_size(_, colour) { atlas_size(colour) }
-///|
-impl @hostapi.Host for WasmHost with atlas_generation(_) { atlas_generation() }
-///|
-impl @hostapi.Host for WasmHost with face_add(_, face, path, weight) {
-  host_text.val = path
-  face_add_host(face, weight)
-}
-///|
-impl @hostapi.Host for WasmHost with face_add_bytes(_, face, data, weight) {
-  host_bytes.val = data
-  face_add_bytes_host(face, weight)
-}
-///|
-impl @hostapi.Host for WasmHost with face_add_family(_, face, family) {
-  host_text.val = family
-  face_add_family_host(face)
-}
-///|
-impl @hostapi.Host for WasmHost with face_clear(_, face) { face_clear_host(face) }
-///|
-impl @hostapi.Host for WasmHost with image_load(_, src, max_px) {
-  host_text.val = src
-  image_load_host(max_px)
-}
-///|
-impl @hostapi.Host for WasmHost with image_load_bytes(_, data, max_px) {
-  host_bytes.val = data
-  image_bytes_host(max_px)
-}
-///|
-impl @hostapi.Host for WasmHost with image_info(_, id, out) {
-  let state = image_info_host(id)
-  if state == 1 { for i in 0..<out.length() { out[i] = result_at(i) } }
-  state
-}
-///|
-impl @hostapi.Host for WasmHost with image_pixels(_, id, out) {
-  let n = image_pixels_host(id, out.length())
-  if n < 0 { return false }
-  for i in 0..<n { out[i] = image_pixel_at(i).to_byte() }
-  true
-}
-///|
-impl @hostapi.Host for WasmHost with image_free(_, id) { image_free_host(id) }
-///|
-impl @hostapi.Host for WasmHost with drawn_pixels(_, _, _, _, _, _) {
-  unsupported_pixels.val = true
-  false
-}
-///|
-impl @hostapi.Host for WasmHost with drawn_pixels_of(_, _, _, _, _, _, _, _, _, _) {
-  unsupported_pixels.val = true
-  false
-}
+let wasm_host : @hostapi.Host = make_wasm_host()
 
 ///|
 let instance_data : Ref[FixedArray[Double]] = Ref(FixedArray::make(0, 0.0))
@@ -228,7 +216,7 @@ pub fn draw() -> Int {
     keyboard?=match option(7) { "1" => Some(true); "0" => Some(false); _ => None },
     env=[("MBUI_TEXT_RECORD", "1"), ("MBUI_LOCALE", option(1)), ("MBUI_DARK", option(2))],
     corners_held=false, words_over_held=false, window_corner=option_number(11), nav_able=option_number(12) == 1.0,
-    live={ host: WasmHost::{}, turn: fn() { host_turn() } },
+    live={ host: wasm_host, turn: fn() { host_turn() } },
     before=fn() {
       let z = @ui.window_zoom()
       host_view(option_number(0) / z, option_number(1) / z, option_number(2) * z)
@@ -303,7 +291,7 @@ pub fn draw() -> Int {
 pub fn done() -> Unit {
   match current_tester.val {
     Some(t) => {
-      t.end_run(WasmHost::{})
+      t.end_run(wasm_host)
       current_tester.val = None
     }
     None => ()
@@ -338,7 +326,7 @@ fn main { }
 /// has them): mbui's own film over this host's text and pictures, drawn and written by the Mac host's renderer and
 /// writer (the Node host's). The process ends as the film's run ends it.
 pub fn film() -> Unit {
-  @hostapi.set_host(WasmHost::{})
+  @hostapi.set_host(wasm_host)
   let (view, tree) = scene_app(@film.arg)
   @film.run_legacy_ctx(view, tree~)
 }

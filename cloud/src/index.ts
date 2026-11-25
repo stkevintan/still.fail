@@ -206,10 +206,16 @@ async function handle(request: Request, env: Env): Promise<Response> {
   }
   const onPublic = publicOrigins(env).includes(url.origin);
   const onBeta = url.origin === betaOrigin(env);
-  if (onPublic && !env.RELEASES_UPSTREAM && path.startsWith("/releases/ci-natives")) {
-    if (path === "/releases/ci-natives" && request.method === "PUT") return stageNative(request, env);
+  if (onPublic && path.startsWith("/releases/ci-natives")) {
+    if (path === "/releases/ci-natives" && (request.method === "POST" || (request.method === "PUT" && !env.RELEASES_UPSTREAM))) {
+      return stageNative(request, env);
+    }
     const receipt = /^\/releases\/ci-natives\/(\d{10}-[0-9a-f]{40}\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.exec(path);
-    if (receipt && request.method === "GET") return serveRelease(request, env.RELEASES, `staged/ci-natives/${receipt[1]}`, "application/octet-stream");
+    if (receipt && request.method === "GET") {
+      if (!env.RELEASES_UPSTREAM || env.CI_NATIVE_R2_ACCOUNT_ID) {
+        return serveRelease(request, env.RELEASES, `staged/ci-natives/${receipt[1]}`, "application/octet-stream");
+      }
+    }
     return notFound();
   }
   // Installing a station: the installer, and the releases it gets; the apps' builds, for their updaters. The installer

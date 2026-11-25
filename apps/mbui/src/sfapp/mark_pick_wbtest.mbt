@@ -506,3 +506,12 @@ test "不使用图标: a mark with none has none's cell picked, the grid's first
     mark_close(t)
   }
 }
+
+///|
+test "图标: a station shown by its system's icon (the core's osIcon, given no mark) has none picked, its system's not" {
+  let t = settings_tester("station:ws1/st1", shows="settings-stations-os")
+  t.click(Button, label="图标")
+  t.run_for(@ui.move_most_ms)
+  assert_eq(mark_cells(t).filter(fn(b) { b.selected == Some(true) }).map(fn(b) { b.label }), ["不使用图标"])
+  assert_true(mark_cells(t).iter().all(fn(b) { b.label != "linux" || b.selected == Some(false) }))
+}

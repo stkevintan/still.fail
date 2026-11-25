@@ -20,7 +20,8 @@
 // index and streams the lists, and what goes between the two stations is a list's piece at a time (retire.ts).
 import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { MbProcess, mbReaderBinary } from "../read/mb-reader.ts";
+import { MbProcess, mbReaderBinary, pionBinary, resolveReaderSelectionAsync, resolveReaderSelectionOrPending } from "../read/mb-reader.ts";
+import { type ReaderSelectConfig, resolveReaderEngine } from "../read/reader-select.ts";
 import { BUILTIN_SKILLS, FEEDBACK_SKILL, RETIRED_SKILLS } from "../sessions/agent-home.ts";
 
 /// A file that goes along, a line of its session's list: where it is (under the station's data directory), its bytes'
@@ -111,72 +112,134 @@ const OWN_SKILLS = [...BUILTIN_SKILLS, FEEDBACK_SKILL, ...RETIRED_SKILLS];
 /// cancel: "called off"). `binary`: the program (mbReaderBinary unless a test says). Settled only once the program has
 /// ended (it ends as it answers; a cancel kills it): what asked never goes on while it still runs (a test file's end
 /// found one so on Linux, setup-env.mjs's leftover, and failed the file).
-export function inProgram<T>(asked: Record<string, unknown> & { dataDir: string }, signal?: AbortSignal, binary: string | null = mbReaderBinary()): Promise<T> {
+const MISSING_CARRY_BINARY_ERROR = "the station's MoonBit program (stillfail-reader) is not here: its files cannot be gathered or placed";
+
+export function inProgram<T>(
+  asked: Record<string, unknown> & { dataDir: string },
+  signal?: AbortSignal,
+  binary?: string | null,
+  readers?: ReaderSelectConfig | (() => ReaderSelectConfig),
+): Promise<T> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error("called off"));
-    if (binary === null) return reject(new Error("the station's MoonBit program (stillfail-reader) is not here: its files cannot be gathered or placed"));
-    const p = new MbProcess(binary, ["--builder", "replica-carry", "--sep", sep, "--shell-dir", join(asked.dataDir, "shell")]);
-    // (what it comes to, the first thing told: given as the program has ended)
-    let outcome: (() => void) | null = null;
-    const decide = (f: () => void) => {
-      if (outcome !== null) return;
-      outcome = f;
-      signal?.removeEventListener("abort", stop);
+    if (binary === null) return reject(new Error(MISSING_CARRY_BINARY_ERROR));
+
+    const spawnAndRun = (bin: string) => {
+      if (signal?.aborted) return reject(new Error("called off"));
+      let p: MbProcess;
+      try {
+        p = new MbProcess(bin, ["--builder", "replica-carry", "--sep", sep, "--shell-dir", join(asked.dataDir, "shell")]);
+      } catch (e) {
+        return reject(e instanceof Error ? e : new Error(String(e)));
+      }
+      // (what it comes to, the first thing told: given as the program has ended)
+      let outcome: (() => void) | null = null;
+      const decide = (f: () => void) => {
+        if (outcome !== null) return;
+        outcome = f;
+        signal?.removeEventListener("abort", stop);
+      };
+      const stop = () => {
+        decide(() => reject(new Error("called off")));
+        p.kill();
+      };
+      signal?.addEventListener("abort", stop, { once: true });
+      p.on("message", (m: { answer?: T; error?: string }) => decide(() => (m.error !== undefined ? reject(new Error(m.error)) : resolve(m.answer as T))));
+      // (an error is one that could not be started: no end of it to wait for)
+      let ended = false;
+      const end = () => {
+        if (ended) return;
+        ended = true;
+        outcome!();
+      };
+      p.on("error", (e: Error) => {
+        decide(() => reject(e));
+        end();
+      });
+      p.on("exit", (code: number) => {
+        decide(() => reject(new Error(`the gathering's program ended saying nothing (${code})`)));
+        end();
+      });
+      try {
+        p.postMessage(asked);
+      } catch (e) {
+        decide(() => reject(e instanceof Error ? e : new Error(String(e))));
+        p.kill();
+      }
     };
-    const stop = () => {
-      decide(() => reject(new Error("called off")));
-      p.kill();
-    };
-    signal?.addEventListener("abort", stop, { once: true });
-    p.on("message", (m: { answer?: T; error?: string }) => decide(() => (m.error !== undefined ? reject(new Error(m.error)) : resolve(m.answer as T))));
-    // (an error is one that could not be started: no end of it to wait for)
-    let ended = false;
-    const end = () => {
-      if (ended) return;
-      ended = true;
-      outcome!();
-    };
-    p.on("error", (e: Error) => {
-      decide(() => reject(e));
-      end();
-    });
-    p.on("exit", (code: number) => {
-      decide(() => reject(new Error(`the gathering's program ended saying nothing (${code})`)));
-      end();
-    });
-    p.postMessage(asked);
+
+    if (binary !== undefined) {
+      spawnAndRun(binary);
+      return;
+    }
+
+    // Preserve exact missing-binary error message when mb is unavailable and pion isn't selected/present.
+    const cfg = typeof readers === "function" ? readers() : readers;
+    const intent = resolveReaderEngine("replica-carry", { config: cfg, hasPionBinary: true });
+    if (mbReaderBinary() === null && !(intent.engine === "pion" && pionBinary() !== null)) {
+      return reject(new Error(MISSING_CARRY_BINARY_ERROR));
+    }
+
+    let sync;
+    try {
+      sync = resolveReaderSelectionOrPending("replica-carry", { config: readers, logAt: "replica" });
+    } catch (e) {
+      return reject(e instanceof Error ? e : new Error(String(e)));
+    }
+    if (!sync.pending) {
+      // Synchronous fast path: spawn in the same call stack as `inProgram()` (keeps mb-replica-carry.test.ts:495-502).
+      spawnAndRun(sync.primaryBinary);
+      return;
+    }
+
+    resolveReaderSelectionAsync("replica-carry", { config: readers, logAt: "replica" }, signal).then(
+      (resolved) => {
+        try {
+          spawnAndRun(resolved.primaryBinary);
+        } catch (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      },
+      (err) => reject(err instanceof Error ? err : new Error(String(err))),
+    );
   });
 }
 
-/// What goes along with the chats of `ws` on the station whose data directory is `dataDir`: their transcripts and each
-/// one's room, a git checkout in it as git lists its files (tracked and not ignored) with its repository, a linked
-/// worktree's commits no remote has in a bundle; written in `scratch` (a list a session, the index of them). A file of
-/// the gathering before that has the same size and time is not read again (its hash from that session's list then).
-/// `agent`: the workspace's agent home here, whose own files go along too (its MEMORY.md and presets.json, and every
-/// skill people or agents made: none of the station's own, none whose name begins with a dot or is `synced`, none linked
-/// there). `keys`: those sessions alone, not the workspace's (a chat handed over: its scratch is its own).
-export const gatherSoon = (dataDir: string, db: string, ws: string, home: boolean, scratch: string, signal?: AbortSignal, agent: string | null = null, keys: readonly string[] | null = null) =>
-  inProgram<Gathered>({ op: "gather", dataDir, db, ws, home, scratch, agent, keys, own: OWN_SKILLS }, signal);
+export const gatherSoon = (
+  dataDir: string,
+  db: string,
+  ws: string,
+  home: boolean,
+  scratch: string,
+  signal?: AbortSignal,
+  agent: string | null = null,
+  keys: readonly string[] | null = null,
+  readers?: ReaderSelectConfig | (() => ReaderSelectConfig),
+) => inProgram<Gathered>({ op: "gather", dataDir, db, ws, home, scratch, agent, keys, own: OWN_SKILLS }, signal, undefined, readers);
 
-/// What the index at `index` says put under this station's data directory `dataDir`, each session's list and each
-/// file's bytes read from `from` (`<hash>` each, linked into place where nothing else links it, else copied: two paths
-/// never share a file): where the retired station had it, moved to here. One there already with the same size and
-/// time, or the same bytes, is left as it is, another put in its place. A link to the retired station's data directory
-/// names this one's. What of it could not be put (its bytes not brought) is counted. `made`: a file the paths it put
-/// where nothing was are written to, a line each (what a hand-over that fails takes away again, handover.ts). `aside`:
-/// a directory what was there and is replaced is moved into, the first time (`list.txt` says where each was: what a
-/// hand-over that fails puts back, handover.ts); none: what is replaced is removed. `placed`: a file of what this placing
-/// put or found in place before (path, hash, size, time), kept by it: one the index says the same of again is left
-/// without being looked at (a hand-over's second pass touches only what changed since its first). `projects` (a chat
-/// handed over): its Claude transcripts under its room's project here.
-export const placeSoon = (dataDir: string, index: string, from: string, made: string | null = null, aside: string | null = null, placed: string | null = null, projects = false) =>
-  inProgram<Placed>({ op: "place", dataDir, index, from, made, aside, placed, projects });
+export const placeSoon = (
+  dataDir: string,
+  index: string,
+  from: string,
+  made: string | null = null,
+  aside: string | null = null,
+  placed: string | null = null,
+  projects = false,
+  readers?: ReaderSelectConfig | (() => ReaderSelectConfig),
+) => inProgram<Placed>({ op: "place", dataDir, index, from, made, aside, placed, projects }, undefined, undefined, readers);
 
-/// Sessions `keys` sized as a move would gather them (`Sizing`), by the program's own walk of the gathering; with
-/// `places`, what this station has where those would go (no database read).
-export const sizesSoon = (dataDir: string, db: string, keys: readonly string[], sizing: Sizing) => inProgram<Sized[]>({ op: "sizes", dataDir, db, keys, sizing, own: OWN_SKILLS });
+export const sizesSoon = (
+  dataDir: string,
+  db: string,
+  keys: readonly string[],
+  sizing: Sizing,
+  readers?: ReaderSelectConfig | (() => ReaderSelectConfig),
+) => inProgram<Sized[]>({ op: "sizes", dataDir, db, keys, sizing, own: OWN_SKILLS }, undefined, undefined, readers);
 
-/// What a retirement of `ws` would take of its sessions here, as the app shows it first (retire.ts `preview`): how many
-/// chats, archived or not, and how many have a directory that is not the station's own (the gathering's `skipped`),
-/// found as the gathering finds it, no directory walked.
-export const previewSoon = (dataDir: string, db: string, ws: string, home: boolean) => inProgram<Counted>({ op: "preview", dataDir, db, ws, home });
+export const previewSoon = (
+  dataDir: string,
+  db: string,
+  ws: string,
+  home: boolean,
+  readers?: ReaderSelectConfig | (() => ReaderSelectConfig),
+) => inProgram<Counted>({ op: "preview", dataDir, db, ws, home }, undefined, undefined, readers);

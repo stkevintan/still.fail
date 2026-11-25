@@ -38,7 +38,7 @@ function exportedSpans(bodies: unknown[]): Exported[] {
 
 test("client.error records new native/hang sources with 60s dedup, sanitization, and respects client.reports", async () => {
   const host = new FakeHost();
-  const core = await Core.create(host, { clock: host.time.clock, sample: 1, usage: null });
+  const core = await Core.create(host, { clock: host.time.clock, sample: 1, usage: null, reports: true });
   const bodies: unknown[] = [];
   core.inner.tracer.setExport((b) => Effect.sync(() => void bodies.push(parseJson(b))));
   const ui = core.connect();
@@ -77,7 +77,7 @@ test("client.metric enforces strict allowlist, 20%/slow/cut/failed sampling for 
   assert.throws(() => parseCall("client.metric", { kind: "unknown", duration_ms: 10 }));
 
   const host = new FakeHost();
-  const core = await Core.create(host, { clock: host.time.clock, sample: 1, usage: null });
+  const core = await Core.create(host, { clock: host.time.clock, sample: 1, usage: null, reports: true });
   const bodies: unknown[] = [];
   core.inner.tracer.setExport((b) => Effect.sync(() => void bodies.push(parseJson(b))));
   const ui = core.connect();

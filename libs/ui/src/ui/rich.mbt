@@ -57,6 +57,9 @@ priv struct Rich {
   faces : Int
   // the faces as they were given when it was built (faces.mbt words_shaped_in): laid out again once they change
   shaped_in : Int
+  // optional local CJK companion overrides for preview cards (zero global cache invalidation)
+  cjk_override : @view.CjkOverride?
+  code_cjk_override : @view.CjkOverride?
 }
 
 ///|
@@ -150,6 +153,7 @@ pub struct RichLayout {
   /// and with its share of the line's leading
   run_lasc : Array[Double]
   run_ldesc : Array[Double]
+  run_extra : Array[Double]
   /// Inline drawings scaled once when laid out, never rescaled for each painted frame.
   drawings : Array[InlineDrawing?]
   starts : Array[Int]
@@ -196,9 +200,20 @@ fn Rich::run_style(self : Rich, run : Run) -> Int {
   let faces = match run.face {
     None => self.faces
     Some(face) =>
-      (self.faces & (@hostapi.style_face(15) | @hostapi.style_words).lnot()) | faces_style(false, face)
+      (self.faces & (@hostapi.style_face_bits | @hostapi.style_words).lnot()) | faces_style(false, face)
   }
   run_style(run) | faces
+}
+
+///|
+/// Local CJK companion override for `run` with resolved `style`: code/mono runs take `code_cjk_override`,
+/// prose runs take `cjk_override`, preventing prose preview hovers from leaking into inline code.
+fn Rich::run_cjk_override(self : Rich, run : Run, style : Int) -> @view.CjkOverride? {
+  if run.code || (style & @hostapi.style_mono) != 0 {
+    self.code_cjk_override
+  } else {
+    self.cjk_override
+  }
 }
 
 ///|
@@ -312,19 +327,40 @@ fn layout_rich(r : Rich, max_w : Double) -> RichLayout {
   // (greedy wrapping gives the same lines in any width from the widest line up to the one they were made in, a label
   // kept whole in it too: what is not wrapped, in any)
   for i, e in k.lays {
-    let (made, lay) = e
-    if !r.wrap || (lay.w <= max_w + 0.01 && max_w <= made) {
+    let lay = e.lay
+    if !r.wrap || (lay.w <= max_w + 0.01 && max_w <= e.made) {
       if i > 0 {
         k.lays.remove(i) |> ignore
         k.lays.insert(0, e)
+      }
+      if measuring_origin_known.val && paint_phase.val != 1 {
+        let zoomed = words_zoom.val != 1.0
+        if !e.ahead_known ||
+          e.ahead_moves != glyph_moves.val ||
+          e.ahead_zoomed != zoomed ||
+          (!zoomed && !ahead_origin_same(measuring_origin_x.val, e.ahead_ox, g().scale)) {
+          if laid_ahead(lay.keys, fn(c) { lay.xs[c] + lay.pre[c] }) {
+            e.ahead_known = true
+            e.ahead_ox = measuring_origin_x.val
+            e.ahead_zoomed = zoomed
+            e.ahead_moves = glyph_moves.val
+          }
+        }
       }
       return lay
     }
   }
   let lay = rich_lines(r, k.prep, max_w)
   // (its glyphs not drawn yet, at the phases its lines put them at: drawn ahead so, text.mbt glyphs_ahead)
-  laid_ahead(lay.keys, fn(c) { lay.xs[c] + lay.pre[c] })
-  k.lays.insert(0, (max_w, lay))
+  let complete = laid_ahead(lay.keys, fn(c) { lay.xs[c] + lay.pre[c] })
+  k.lays.insert(0, {
+    made: max_w,
+    lay,
+    ahead_known: complete && measuring_origin_known.val && paint_phase.val != 1,
+    ahead_ox: measuring_origin_x.val,
+    ahead_zoomed: words_zoom.val != 1.0,
+    ahead_moves: glyph_moves.val,
+  })
   if k.lays.length() > rich_lays_most {
     k.lays.pop() |> ignore
   }
@@ -403,6 +439,7 @@ priv struct RichPrep {
   run_d : Array[Double]
   run_lasc : Array[Double]
   run_ldesc : Array[Double]
+  run_extra : Array[Double]
   drawings : Array[InlineDrawing?]
   starts : Array[Int]
   lens : Array[Int]
@@ -438,6 +475,16 @@ fn RichPrep::breaks(self : RichPrep) -> Array[Int] {
 }
 
 ///|
+priv struct KeptRichLay {
+  made : Double
+  lay : RichLayout
+  mut ahead_known : Bool
+  mut ahead_ox : Double
+  mut ahead_zoomed : Bool
+  mut ahead_moves : Int
+}
+
+///|
 /// A paragraph laid out before (layout_rich), as it was given then (`r`, at the scale, the lines' way and the faces
 /// measured in then), what of it any width shares, the layouts made of it (the latest asked first, each with the width
 /// it was made in) and the last frame that asked for it.
@@ -447,7 +494,7 @@ priv struct RichKept {
   web : Bool
   gen : Int
   prep : RichPrep
-  lays : Array[(Double, RichLayout)]
+  lays : Array[KeptRichLay]
   mut used : Int
 }
 
@@ -475,10 +522,33 @@ fn rich_key(r : Rich) -> Int64 {
   h = mix(h, r.spacing.reinterpret_as_int64())
   h = mix(h, r.faces.to_int64())
   h = mix(h, r.shaped_in.to_int64())
+  match r.cjk_override {
+    Some(ov) => {
+      h = mix(h, ov.face.to_int64() + 1L)
+      h = mix(h, (ov.scale * 100.0).round().to_int().to_int64())
+      h = mix(h, ov.weight_off.to_int64())
+    }
+    None => h = mix(h, 0L)
+  }
+  match r.code_cjk_override {
+    Some(ov) => {
+      h = mix(h, ov.face.to_int64() + 1L)
+      h = mix(h, (ov.scale * 100.0).round().to_int().to_int64())
+      h = mix(h, ov.weight_off.to_int64())
+    }
+    None => h = mix(h, 0L)
+  }
   for run in r.runs {
     h = mix(h, stable_hash(run.text))
     h = mix(h, run.weight.to_int64())
     h = mix(h, run.scale.reinterpret_as_int64())
+    h = mix(
+      h,
+      match run.face {
+        Some(f) => f.to_int64() + 1L
+        None => 0L
+      },
+    )
   }
   h
 }
@@ -502,6 +572,51 @@ fn rich_kept_thin() -> Unit {
 }
 
 ///|
+/// Surgically drop cached rich paragraphs that reference `face` (via paragraph face, any run face, or local CJK
+/// override), leaving unrelated primary UI paragraphs intact.
+fn rich_forget_face(face : Int) -> Unit {
+  let gone : Array[Int64] = []
+  for key, k in rich_kept {
+    let r = k.r
+    let mut hit = @hostapi.face_of_style(r.faces) == face
+    if !hit {
+      match r.cjk_override {
+        Some(ov) if ov.face == face => hit = true
+        _ => ()
+      }
+    }
+    if !hit {
+      match r.code_cjk_override {
+        Some(ov) if ov.face == face => hit = true
+        _ => ()
+      }
+    }
+    if !hit {
+      for run in r.runs {
+        let style = r.run_style(run)
+        if run.face == Some(face) || @hostapi.face_of_style(style) == face {
+          hit = true
+          break
+        }
+        match effective_cjk(style, r.run_cjk_override(run, style)) {
+          Some((cjk_slot, _, _)) if cjk_slot == face => {
+            hit = true
+            break
+          }
+          _ => ()
+        }
+      }
+    }
+    if hit {
+      gone.push(key)
+    }
+  }
+  for key in gone {
+    rich_kept.remove(key)
+  }
+}
+
+///|
 /// Whether run `run` of paragraph `r` (in `style`, its r.run_style) is words that an eighth of an em parts from the
 /// words of the run beside it where a Han character or kana meets a Latin letter or a digit, as words_spaced_in parts
 /// them within one run: not a drawing, not code or on a ground of its own (its room round it parts it already), not in
@@ -514,6 +629,7 @@ fn rich_spaced_run(r : Rich, run : Run, style : Int) -> Bool {
   r.run_bg(run) == 0L &&
   (style & @hostapi.style_mono) == 0 &&
   @hostapi.face_of_style(style) != @hostapi.face_code &&
+  cjk_autospace_on.val &&
   spaced_now() != @hostapi.words_spaced_none
 }
 
@@ -544,10 +660,18 @@ fn rich_prep(r : Rich, one? : Bool = true, batch? : Bool = true) -> RichPrep {
   // Chinese in it: measured by the CJK font's too (taller), as Android measures a line by the fonts it draws in (as a
   // browser, by the first font's alone: line_metrics)
   let cjk = r.runs.iter().any(fn(run) { words_cjk(run.text) })
-  let (a0, d0) = line_metrics(r.size, r.weight, cjk)
+  let all_code_or_mono = r.runs.length() > 0 && r.runs.iter().all(fn(run) { run.code || run.mono })
+  let base_cjk_ov = if all_code_or_mono { r.code_cjk_override } else { r.cjk_override }
+  let base_eff_cjk = effective_cjk(r.faces, base_cjk_ov)
+  let base_style = if base_eff_cjk is Some(_) { r.faces } else { 0 }
+  let base_cjk_enlarged = match base_eff_cjk {
+    Some((_, s, _)) => s > 1.0
+    None => false
+  }
+  let (a0, d0) = line_metrics(r.size, r.weight, cjk, style=base_style, cjk_override=base_cjk_ov)
   let lh = if r.line > 0.0 { r.line } else { own0 }
   let px = whole_pixel_lines(r.size, r.weight)
-  let (pitch0, base_asc, extra) = set_line(lh, a0, d0, sc, px, trim=r.trim)
+  let (pitch0, base_asc, extra) = set_line(lh, a0, d0, sc, px, trim=r.trim, cjk_fit=cjk && base_cjk_enlarged)
   let base_desc = pitch0 - base_asc
   // one run of words (a paragraph, a heading, an item, most of what a chat's message is made of): its clusters, their
   // breaks and its levels are its shape's, as they are (nothing laid out of a paragraph writes in them), not copied
@@ -564,6 +688,7 @@ fn rich_prep(r : Rich, one? : Bool = true, batch? : Bool = true) -> RichPrep {
   let run_d = []
   let run_lasc = []
   let run_ldesc = []
+  let run_extra = []
   let drawings = []
   let starts = []
   let lens = []
@@ -583,15 +708,23 @@ fn rich_prep(r : Rich, one? : Bool = true, batch? : Bool = true) -> RichPrep {
     drawings.push(None)
     let weight = r.run_weight(run)
     let style = r.run_style(run)
-    let s = shape(run.text, size, weight, style~, spacing=r.spacing)
-    let (a, d) = line_metrics(size, weight, words_cjk(run.text), style~)
-    let (l, lasc, _) = set_line(lh * size / r.size, a, d, sc, px)
+    let ov = r.run_cjk_override(run, style)
+    let s = shape(run.text, size, weight, style~, spacing=r.spacing, cjk_override=ov)
+    let run_cjk = words_cjk(run.text)
+    let run_cjk_enlarged = match effective_cjk(style, ov) {
+      Some((_, s, _)) => s > 1.0
+      None => false
+    }
+    let fit = run_cjk && run_cjk_enlarged
+    let (a, d) = line_metrics(size, weight, run_cjk, style~, cjk_override=ov)
+    let (l, lasc, rx) = set_line(lh * size / r.size, a, d, sc, px, cjk_fit=fit)
     run_start.push(off)
     run_size.push(size)
     run_a.push(a)
     run_d.push(d)
     run_lasc.push(lasc)
     run_ldesc.push(l - lasc)
+    run_extra.push(if fit { rx } else { 0.0 })
     run_c0.push(starts.length())
     let n = s.starts.length()
     let (room, after) = r.run_room(run, size)
@@ -642,6 +775,7 @@ fn rich_prep(r : Rich, one? : Bool = true, batch? : Bool = true) -> RichPrep {
         run_d.push((d.height - d.baseline) * size)
         run_lasc.push(dmax(base_asc, d.baseline * size))
         run_ldesc.push(dmax(base_desc, (d.height - d.baseline) * size))
+        run_extra.push(0.0)
         run_c0.push(starts.length())
         starts.push(off)
         lens.push(run.text.length())
@@ -708,7 +842,8 @@ fn rich_prep(r : Rich, one? : Bool = true, batch? : Bool = true) -> RichPrep {
           local_end[j] = loff
         }
         let chunk = chunk_sb.to_string()
-        let s = shape(chunk, size, weight, style~, spacing=r.spacing)
+        let batch_ov = r.run_cjk_override(run, style)
+        let s = shape(chunk, size, weight, style~, spacing=r.spacing, cjk_override=batch_ov)
         let batch_c0 = Array::make(count, 0)
         let batch_c1 = Array::make(count, 0)
         let m = s.starts.length()
@@ -744,8 +879,14 @@ fn rich_prep(r : Rich, one? : Bool = true, batch? : Bool = true) -> RichPrep {
           for j in 0..<count {
             let rk = k + j
             let rrun = r.runs[rk]
-            let (a, d) = line_metrics(size, weight, words_cjk(rrun.text), style~)
-            let (l, lasc, _) = set_line(lh * size / r.size, a, d, sc, px)
+            let rrun_cjk = words_cjk(rrun.text)
+            let batch_cjk_enlarged = match effective_cjk(style, batch_ov) {
+              Some((_, s, _)) => s > 1.0
+              None => false
+            }
+            let fit = rrun_cjk && batch_cjk_enlarged
+            let (a, d) = line_metrics(size, weight, rrun_cjk, style~, cjk_override=batch_ov)
+            let (l, lasc, rx) = set_line(lh * size / r.size, a, d, sc, px, cjk_fit=fit)
             drawings.push(None)
             run_start.push(off + local_start[j])
             run_size.push(size)
@@ -753,6 +894,7 @@ fn rich_prep(r : Rich, one? : Bool = true, batch? : Bool = true) -> RichPrep {
             run_d.push(d)
             run_lasc.push(lasc)
             run_ldesc.push(l - lasc)
+            run_extra.push(if fit { rx } else { 0.0 })
             run_c0.push(starts.length())
             for c in batch_c0[j]..<batch_c1[j] {
               starts.push(s.starts[c] + off)
@@ -810,6 +952,7 @@ fn rich_prep(r : Rich, one? : Bool = true, batch? : Bool = true) -> RichPrep {
     run_d,
     run_lasc,
     run_ldesc,
+    run_extra,
     drawings,
     starts,
     lens,
@@ -844,9 +987,16 @@ fn rich_prep_one(
   let size = r.run_size(run)
   let weight = r.run_weight(run)
   let style = r.run_style(run)
-  let s = shape(run.text, size, weight, style~, spacing=r.spacing)
-  let (a, d) = line_metrics(size, weight, words_cjk(run.text), style~)
-  let (l, lasc, _) = set_line(lh * size / r.size, a, d, sc, px)
+  let ov = r.run_cjk_override(run, style)
+  let s = shape(run.text, size, weight, style~, spacing=r.spacing, cjk_override=ov)
+  let run_cjk = words_cjk(run.text)
+  let run_cjk_enlarged = match effective_cjk(style, ov) {
+    Some((_, s, _)) => s > 1.0
+    None => false
+  }
+  let fit = run_cjk && run_cjk_enlarged
+  let (a, d) = line_metrics(size, weight, run_cjk, style~, cjk_override=ov)
+  let (l, lasc, rx) = set_line(lh * size / r.size, a, d, sc, px, cjk_fit=fit)
   let n = s.starts.length()
   let (room, after) = r.run_room(run, size)
   let (adv, pre) = if room == 0.0 && after == 0.0 {
@@ -871,6 +1021,7 @@ fn rich_prep_one(
     run_d: [d],
     run_lasc: [lasc],
     run_ldesc: [l - lasc],
+    run_extra: [if fit { rx } else { 0.0 }],
     drawings: [None],
     starts: s.starts,
     lens: s.lens,
@@ -900,6 +1051,7 @@ fn rich_lines(r : Rich, p : RichPrep, max_w : Double) -> RichLayout {
   let run_d = p.run_d
   let run_lasc = p.run_lasc
   let run_ldesc = p.run_ldesc
+  let run_extra = p.run_extra
   let drawings = p.drawings
   let starts = p.starts
   let lens = p.lens
@@ -948,6 +1100,7 @@ fn rich_lines(r : Rich, p : RichPrep, max_w : Double) -> RichLayout {
     run_d,
     run_lasc,
     run_ldesc,
+    run_extra,
     drawings,
     starts,
     lens,
@@ -1044,20 +1197,26 @@ fn rich_lines(r : Rich, p : RichPrep, max_w : Double) -> RichLayout {
   }
   // each line as high as its tallest run needs, its baseline shared
   let mut y = 0.0
+  let mut last_extra = extra
+  let last_line = line_start.length() - 1
   for l in 0..<line_start.length() {
     let mut asc = base_asc
     let mut desc = base_desc
+    let is_last = l == last_line
     for c in line_start[l]..<line_end[l] {
       let k = run_of[c]
       asc = dmax(asc, run_lasc[k])
       desc = dmax(desc, run_ldesc[k])
+      if is_last {
+        last_extra = dmax(last_extra, run_extra[k])
+      }
     }
     lay.line_y.push(y)
     lay.line_h.push(asc + desc)
     lay.line_base.push(asc)
     y = y + asc + desc
   }
-  { ..lay, w: w_max, h: y + extra }
+  { ..lay, w: w_max, h: y + last_extra }
 }
 
 ///|
@@ -1433,6 +1592,8 @@ pub fn Ctx::rich(
       }
     ),
     shaped_in: words_shaped_in.get(),
+    cjk_override: None,
+    code_cjk_override: None,
   })
   // each link told with its words and its id, once the paragraph is there
   match on_link_shown {
@@ -1570,8 +1731,9 @@ fn rich_zoomed_keys(r : Rich, lay : RichLayout) -> Array[Int]? {
     }
     let (c0, c1) = (lay.run_c0[k], lay.run_c1[k])
     let style = r.run_style(run)
-    let s = shape(run.text, r.run_size(run), r.run_weight(run), style~, spacing=r.spacing)
-    match zoomed_keys(run.text, s, r.run_size(run), r.run_weight(run), style, r.spacing) {
+    let cjk_override = r.run_cjk_override(run, style)
+    let s = shape(run.text, r.run_size(run), r.run_weight(run), style~, spacing=r.spacing, cjk_override~)
+    match zoomed_keys(run.text, s, r.run_size(run), r.run_weight(run), style, r.spacing, cjk_override~) {
       Some(big) if big.length() == c1 - c0 =>
         for c in c0..<c1 {
           keys[c] = big[c - c0]

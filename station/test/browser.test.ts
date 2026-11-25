@@ -149,13 +149,13 @@ test("keys: what they type, the codes Chrome acts on, shortcuts as commands", ()
   assert.equal(keyEvent({ t: "key", kind: "up", key: "a", code: "KeyA", mods: 8 }).type, "keyUp");
 });
 
-/// A view over a fake connection, started; `now` moved by the test.
+/// A view over a fake connection in JPEG fallback mode, started; `now` moved by the test.
 async function view(viewport = { width: 1000, height: 500 }) {
   const cdp = new FakeCdp();
   cdp.answers["Runtime.evaluate"] = () => ({ result: { value: "visible" } });
   let now = 1000;
   const sizes: { width: number; height: number }[] = [];
-  const v = new TabView({ cdp, session: "S", targetId: "T", now: () => now, sized: (s) => sizes.push(s) });
+  const v = new TabView({ cdp, session: "S", targetId: "T", now: () => now, sized: (s) => sizes.push(s), createEncoder: async () => null });
   await v.start({ maxWidth: 1280, maxHeight: 720, codecs: ["h264", "jpeg"] }, viewport);
   const frame = (ack: number, width = 800, height = 400, meta: any = { deviceWidth: viewport.width, deviceHeight: viewport.height, timestamp: ack }) =>
     cdp.emit("Page.screencastFrame", { data: b64(jpeg(width, height, ack)), sessionId: ack, metadata: meta }, "S");
@@ -163,43 +163,42 @@ async function view(viewport = { width: 1000, height: 500 }) {
   return { cdp, v, frame, acks, sizes, at: (ms: number) => (now = ms) };
 }
 
-test("a view casts JPEG within the viewer's size, and acknowledges a frame only once the next is asked for", async () => {
+test("a view casts JPEG within the viewer's size, pipelines CDP acks, and delivers the newest frame", async () => {
   const { cdp, v, frame, acks } = await view();
   assert.deepEqual(cdp.of("Page.startScreencast")[0]!.params, { format: "jpeg", quality: 82, maxWidth: 1280, maxHeight: 720, everyNthFrame: 1 });
   assert.equal(cdp.of("Page.startScreencast")[0]!.sessionId, "S", "on the view's own session");
 
-  // Asked before any frame: given the first when it comes, with its config.
+  // Asked before any frame: given the first when it comes, with its config, and acked immediately to pipeline capture.
   const first = v.next();
   frame(1);
   const f1 = (await first)!;
   assert.deepEqual(f1.config, { codec: "jpeg", width: 800, height: 400 });
   assert.equal(f1.key, true);
   assert.equal(f1.ts, 1_000_000);
-  assert.deepEqual(acks(), [], "not acknowledged while the viewer has not asked for more");
+  assert.deepEqual(acks(), [1], "pipelined CDP ack on receipt avoids an extra round trip");
 
-  // Two more come meanwhile: the next ask takes the first as taken, gives the newest and lets the older go.
+  // Two more come meanwhile: the next ask gives the newest and lets the older go.
   frame(2);
   frame(3);
   const f3 = (await v.next())!;
   assert.equal(f3.data[f3.data.length - 3], 3, "the newest");
   assert.equal(f3.config, undefined, "the same size: no config again");
-  assert.deepEqual(acks(), [1, 2]);
+  assert.deepEqual(acks(), [1, 2, 3]);
 
   // A size change comes with its config.
   const next = v.next();
-  assert.deepEqual(acks(), [1, 2, 3]);
   frame(4, 640, 320);
   assert.deepEqual((await next)!.config, { codec: "jpeg", width: 640, height: 320 });
+  assert.deepEqual(acks(), [1, 2, 3, 4]);
 });
 
-test("a view never holds more than two frames unacknowledged", async () => {
+test("a view pipelines CDP acks and retains only the newest buffered frames", async () => {
   const { v, frame, acks } = await view();
   frame(1);
   frame(2);
   frame(3);
-  assert.deepEqual(acks(), [1], "the oldest let go when a third came");
+  assert.deepEqual(acks(), [1, 2, 3], "all received frames are acked immediately");
   assert.equal((await v.next())!.ts, 3_000_000);
-  assert.deepEqual(acks(), [1, 2]);
 });
 
 test("a key frame asked for is the last frame again, with its config, at once", async () => {
@@ -381,10 +380,10 @@ test("a title the page gives itself after it loads (Chrome does not tell of it) 
   assert.deepEqual(lists.at(-1), ["browser:A New Tab", "browser:B Inbox (3)"]);
 });
 
-test("a tab's view is on a connection of its own, and only for viewers that take JPEG", async () => {
+test("a tab's view is on a connection of its own, and rejects viewers taking neither H.264 nor JPEG", async () => {
   const { cdp, screens, views, t } = await tabs();
   const tab = screens.get("browser:A")!;
-  await assert.rejects(tab.open({ maxWidth: 100, maxHeight: 100, codecs: ["h264"] }), /JPEG/);
+  await assert.rejects(tab.open({ maxWidth: 100, maxHeight: 100, codecs: ["h265"] }), /H\.264 or JPEG/);
   await turn();
   // The connection that measured the tab's viewport, closed.
   assert.equal(views.length, 1);
@@ -1556,109 +1555,68 @@ test("remote browser screencast caps default/smooth bounds, opens up hd/qhd/orig
   }
 });
 
-test("TabView.rate degrades JPEG quality and bounds with hysteresis and cooldown, and recovers on good links", async () => {
+test("TabView.rate in JPEG fallback avoids 2s quality=45/960x675 oscillation and steps gently after sustained congestion", async () => {
   const cdp = new FakeCdp();
   let now = 10_000;
-  const v = new TabView({ cdp, session: "S", targetId: "T", now: () => now });
+  const v = new TabView({ cdp, session: "S", targetId: "T", now: () => now, createEncoder: async () => null });
   await v.start({ maxWidth: 2560, maxHeight: 1800, codecs: ["jpeg"] }, { width: 1280, height: 900 });
   const casts = () => cdp.of("Page.startScreencast").map((c) => ({ q: c.params.quality, w: c.params.maxWidth, h: c.params.maxHeight }));
   assert.deepEqual(casts(), [{ q: 82, w: 1280, h: 900 }]);
 
-  // Healthy rate: stays at tier 0, no recast.
+  // Healthy rate and transient dips (< 5s): never restart screencast.
   v.rate(1_500_000);
+  v.rate(300_000);
+  now += 4_000;
+  v.rate(300_000);
   assert.equal(casts().length, 1);
 
-  // Drop into tier 1: immediately lowers JPEG quality to 60 at base bounds.
-  v.rate(800_000);
-  assert.deepEqual(casts().at(-1), { q: 60, w: 1280, h: 900 });
-
-  // Inside 2000ms cooldown: no jitter even if rate drops sharply.
-  now += 1_500;
+  // Sustained severe congestion >= 5s: steps gently once to quality=72 while keeping full 1280x900 bounds.
+  now += 1_000;
   v.rate(300_000);
+  assert.deepEqual(casts().at(-1), { q: 72, w: 1280, h: 900 });
+
+  // Inside 8s cooldown: does not flap back on brief recovery.
+  now += 5_000;
+  v.rate(1_500_000);
   assert.equal(casts().length, 2);
 
-  // After 2000ms cooldown: drops to tier 2 (q=45, 960x675).
-  now += 500;
-  v.rate(300_000);
-  assert.deepEqual(casts().at(-1), { q: 45, w: 960, h: 675 });
-
-  // Hysteresis band [500k, 650k): stays in tier 2 without recasting.
-  now += 2_500;
-  v.rate(600_000);
-  assert.equal(casts().length, 3);
-
-  // Hysteresis band [1M, 1.25M) from tier 2: steps up to tier 1, does not jump to tier 0.
-  v.rate(1_100_000);
-  assert.deepEqual(casts().at(-1), { q: 60, w: 1280, h: 900 });
-
-  // Hysteresis band [500k, 650k) from tier 1: stays in tier 1 without recasting.
-  now += 2_500;
-  v.rate(600_000);
-  assert.equal(casts().length, 4);
-
-  // Full recovery >= 1.25M: restores baseQuality and baseBounds.
+  // After >= 8s cooldown: restores baseQuality and baseBounds.
+  now += 3_000;
   v.rate(1_500_000);
   assert.deepEqual(casts().at(-1), { q: 82, w: 1280, h: 900 });
 
   // Closed view ignores rate updates.
   v.close();
-  now += 5_000;
+  now += 10_000;
   v.rate(300_000);
-  assert.equal(casts().length, 5);
+  assert.equal(casts().length, 3);
 });
 
-test("TabView.rate respects original, peek, and qhd constraints", async () => {
+test("TabView.rate respects original, peek, and qhd constraints in JPEG fallback", async () => {
   for (const options of [
     { maxWidth: 2560, maxHeight: 1440, codecs: ["jpeg"] as ("jpeg")[], quality: "original" as const },
     { maxWidth: 480, maxHeight: 270, codecs: ["jpeg"] as ("jpeg")[], peek: true },
   ]) {
     const cdp = new FakeCdp();
-    const v = new TabView({ cdp, session: "S", targetId: "T", now: () => 5_000 });
+    let now = 5_000;
+    const v = new TabView({ cdp, session: "S", targetId: "T", now: () => now, createEncoder: async () => null });
     await v.start(options, { width: 1280, height: 900 });
+    v.rate(300_000);
+    now += 6_000;
     v.rate(300_000);
     assert.equal(cdp.of("Page.startScreencast").length, 1, JSON.stringify(options));
     v.close();
   }
 
-  // qhd lowers JPEG quality to 45 on severe congestion but preserves full requested bounds.
+  // qhd lowers JPEG quality gently to 72 on sustained severe congestion while preserving full requested bounds.
   const cdp = new FakeCdp();
-  const v = new TabView({ cdp, session: "S", targetId: "T", now: () => 5_000 });
+  let now = 5_000;
+  const v = new TabView({ cdp, session: "S", targetId: "T", now: () => now, createEncoder: async () => null });
   await v.start({ maxWidth: 2560, maxHeight: 1440, codecs: ["jpeg"], quality: "qhd" }, { width: 1280, height: 900 });
   v.rate(300_000);
-  const last = cdp.of("Page.startScreencast").at(-1)!.params;
-  assert.deepEqual({ q: last.quality, w: last.maxWidth, h: last.maxHeight }, { q: 45, w: 2560, h: 1440 });
-  v.close();
-});
-
-test("TabView applies deferred cooldown rate changes on next() without another rate() call", async () => {
-  const cdp = new FakeCdp();
-  let now = 10_000;
-  const v = new TabView({ cdp, session: "S", targetId: "T", now: () => now });
-  await v.start({ maxWidth: 2560, maxHeight: 1800, codecs: ["jpeg"] }, { width: 1280, height: 900 });
-  const casts = () => cdp.of("Page.startScreencast").map((c) => ({ q: c.params.quality, w: c.params.maxWidth, h: c.params.maxHeight }));
-
-  // Drop to tier 1 immediately, then hit MIN_RATE (300_000) during cooldown -> deferred.
-  v.rate(800_000);
-  assert.deepEqual(casts().at(-1), { q: 60, w: 1280, h: 900 });
-  now += 500;
+  now += 5_000;
   v.rate(300_000);
-  assert.equal(casts().length, 2);
-
-  // Cooldown expires; no new rate() call arrives, next() flushes pending downgrade to tier 2.
-  now += 1_500;
-  cdp.emit("Page.screencastFrame", { data: b64(jpeg(960, 675, 1)), sessionId: 1, metadata: { deviceWidth: 1280, deviceHeight: 900, timestamp: 1 } }, "S");
-  await v.next();
-  assert.deepEqual(casts().at(-1), { q: 45, w: 960, h: 675 });
-
-  // Now hit JPEG_RATE_CEILING (4_000_000) during cooldown -> deferred.
-  now += 500;
-  v.rate(4_000_000);
-  assert.equal(casts().length, 3);
-
-  // Cooldown expires; next() flushes pending recovery to tier 0 without another rate() call.
-  now += 1_500;
-  const pendingFrame = v.next();
-  assert.deepEqual(casts().at(-1), { q: 82, w: 1280, h: 900 });
+  const last = cdp.of("Page.startScreencast").at(-1)!.params;
+  assert.deepEqual({ q: last.quality, w: last.maxWidth, h: last.maxHeight }, { q: 72, w: 2560, h: 1440 });
   v.close();
-  await pendingFrame;
 });

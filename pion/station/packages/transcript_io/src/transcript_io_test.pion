@@ -1,0 +1,64 @@
+fn expect_tio(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+fn put32_le(out : Bytes, at : Int, v : Int64) -> Unit {
+  for i in 0..<4 {
+    let shift = (i * 8).to_int64()
+    out[at + i] = ((v >> shift) & 0xFF.to_int64()).to_int() as Byte
+  }
+}
+
+test "sha1_utf8_hex, sha256_utf8_hex, sha256_bytes_hex use locked crypto-v0.4.1" {
+  expect_tio(
+    sha1_utf8_hex("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d",
+    "sha1(abc)",
+  )
+  expect_tio(
+    sha256_utf8_hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "sha256(abc)",
+  )
+  expect_tio(
+    sha256_bytes_hex("abc".to_bytes()) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "sha256_bytes(abc)",
+  )
+}
+
+test "seek-table parse_footer and parse_frames" {
+  // Build a valid 2-frame seek table: frame0 (packed=100, size=500), frame1 (packed=200, size=600)
+  // table_len = 8 + 2*8 + 9 = 33, total file size = 300 + 33 = 333
+  let table = Bytes::new(33)
+  put32_le(table, 0, skippable_magic())
+  put32_le(table, 4, 25.to_int64())
+  put32_le(table, 8, 100.to_int64())
+  put32_le(table, 12, 500.to_int64())
+  put32_le(table, 16, 200.to_int64())
+  put32_le(table, 20, 600.to_int64())
+  put32_le(table, 24, 2.to_int64())
+  table[28] = 0 as Byte
+  put32_le(table, 29, seekable_magic())
+
+  let foot = Bytes::new(9)
+  for i in 0..<9 {
+    foot[i] = table[24 + i]
+  }
+  match parse_footer(333.to_int64(), foot) {
+    Some((len, entry)) => expect_tio(len == 33.to_int64() && entry == 8.to_int64(), "footer len/entry")
+    None => panic("expected valid footer")
+  }
+  match parse_frames(333.to_int64(), table, 8.to_int64()) {
+    Some(fs) => {
+      expect_tio(fs.length() == 2, "2 frames")
+      expect_tio(fs[0].at == 0.to_int64() && fs[0].packed == 100.to_int64() && fs[0].from == 0.to_int64() && fs[0].size == 500.to_int64(), "frame 0")
+      expect_tio(fs[1].at == 100.to_int64() && fs[1].packed == 200.to_int64() && fs[1].from == 500.to_int64() && fs[1].size == 600.to_int64(), "frame 1")
+    }
+    None => panic("expected valid frames")
+  }
+  // Mismatched total size -> None
+  match parse_frames(334.to_int64(), table, 8.to_int64()) {
+    None => ()
+    Some(_) => panic("mismatched file size must return None")
+  }
+}

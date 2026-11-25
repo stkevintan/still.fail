@@ -5,7 +5,8 @@
 import { join, sep } from "node:path";
 import type { Clock } from "effect";
 import { Fibers } from "../ops/fibers.ts";
-import { MbProcess, readerBinary } from "../read/mb-reader.ts";
+import { MbProcess, resolveReaderSelection, resolveReaderSelectionAsync, resolveReaderSelectionOrPending } from "../read/mb-reader.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import { onTranscriptHintsChanged, transcriptLocationHints } from "../read/transcript.ts";
 import { locationIdentity, type LiveLocation, type LiveLocationIdentity, type LiveLocationProfile, type LiveSession, type LiveSource, type LocateMessage, type LocateReply, type LocateRequest } from "./live-location-protocol.ts";
 
@@ -43,6 +44,7 @@ export class LiveLocator {
   private cancelling = new Map<number, { worker: Locating; stop: () => void }>();
   private idle: (() => void) | null = null;
   private retiring: Promise<void> | null = null;
+  private starting: Promise<void> | null = null;
   private closed = false;
   private next = 0;
   private merging: Pending | null = null;
@@ -51,11 +53,13 @@ export class LiveLocator {
   private readonly session: (key: string) => LiveSession | null;
   private readonly profiles: () => readonly LiveLocationProfile[];
   private readonly reference: ((data: string) => Locating) | undefined;
+  private readonly readers: ReaderSelectConfig | (() => ReaderSelectConfig) | undefined;
   private readonly time: Fibers;
 
   constructor(data: string, session: (key: string) => LiveSession | null,
-    profiles: () => readonly LiveLocationProfile[], reference?: (data: string) => Locating, clock?: Clock.Clock) {
-    this.data = data; this.session = session; this.profiles = profiles; this.reference = reference;
+    profiles: () => readonly LiveLocationProfile[], reference?: (data: string) => Locating, clock?: Clock.Clock,
+    readers?: ReaderSelectConfig | (() => ReaderSelectConfig)) {
+    this.data = data; this.session = session; this.profiles = profiles; this.reference = reference; this.readers = readers;
     this.time = new Fibers("live locator", clock);
     this.unlisten = onTranscriptHintsChanged((id) => {
       for (const request of this.active.values()) {
@@ -97,9 +101,10 @@ export class LiveLocator {
     else request.resolve(value);
   }
 
-  private start(): Locating {
+  private start(binary?: string): Locating {
     if (this.reference !== undefined) return this.listen(this.reference(this.data));
-    return this.listen(new MbProcess(readerBinary(), ["--builder", "live-locator", "--db", join(this.data, "stillfail.db"), "--data", this.data, "--sep", sep]));
+    const bin = binary ?? resolveReaderSelection("live-locator", { config: this.readers, logAt: "live-locator" }).primaryBinary;
+    return this.listen(new MbProcess(bin, ["--builder", "live-locator", "--db", join(this.data, "stillfail.db"), "--data", this.data, "--sep", sep]));
   }
 
   private listen(worker: Locating): Locating {
@@ -111,7 +116,39 @@ export class LiveLocator {
   }
 
   private pump() {
-    if (this.closed || this.retiring !== null) return;
+    if (this.closed || this.retiring !== null || this.starting !== null) return;
+    if (this.worker === null && this.reference === undefined && this.waiting.length > 0 && this.active.size < IN_FLIGHT) {
+      let sel;
+      try {
+        sel = resolveReaderSelectionOrPending("live-locator", { config: this.readers, logAt: "live-locator" });
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        for (const req of this.waiting.splice(0)) this.finish(req, err);
+        return;
+      }
+      if (sel.pending) {
+        const pending = resolveReaderSelectionAsync("live-locator", { config: this.readers, logAt: "live-locator" }).then(
+          () => {
+            if (this.starting === pending) this.starting = null;
+            if (!this.closed && this.retiring === null && this.waiting.length > 0) this.pump();
+          },
+          (error) => {
+            if (this.starting === pending) this.starting = null;
+            const err = error instanceof Error ? error : new Error(String(error));
+            for (const req of this.waiting.splice(0)) this.finish(req, err);
+          },
+        );
+        this.starting = pending;
+        return;
+      }
+      try {
+        this.start(sel.primaryBinary);
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        for (const req of this.waiting.splice(0)) this.finish(req, err);
+        return;
+      }
+    }
     while (this.active.size < IN_FLIGHT) {
       const request = this.waiting.shift();
       if (request === undefined) break;

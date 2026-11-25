@@ -5,28 +5,28 @@
 
 ///|
 /// A package handed to the system's installer: kept by its name (Tester::installs).
-impl @hostapi.Host for FakeHost with install_package(self, name, _) {
+fn FakeHost::install_package(self : FakeHost, name : String, _ : Bytes) -> Unit {
   self.installs.push(name)
 }
 
 ///|
-impl @hostapi.Host for FakeHost with window_show(self) {
+fn FakeHost::window_show(self : FakeHost) -> Unit {
   self.window_shows = self.window_shows + 1
 }
 
 ///|
-impl @hostapi.Host for FakeHost with auto_launch(self) {
+fn FakeHost::auto_launch(self : FakeHost) -> Bool {
   self.auto_launch
 }
 
 ///|
-impl @hostapi.Host for FakeHost with set_auto_launch(self, enabled) {
+fn FakeHost::set_auto_launch(self : FakeHost, enabled : Bool) -> Bool {
   self.auto_launch = enabled
   true
 }
 
 ///|
-impl @hostapi.Host for FakeHost with hotkey_set(self, id, accel) {
+fn FakeHost::hotkey_set(self : FakeHost, id : String, accel : String) -> Bool {
   if id == "" || accel == "" {
     return false
   }
@@ -35,25 +35,25 @@ impl @hostapi.Host for FakeHost with hotkey_set(self, id, accel) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with hotkey_clear(self, id) {
+fn FakeHost::hotkey_clear(self : FakeHost, id : String) -> Unit {
   self.hotkeys.remove(id)
 }
 
 ///|
 /// The person's setting for motion (Tester::set_reduce_motion).
-impl @hostapi.Host for FakeHost with reduce_motion(self) {
+fn FakeHost::reduce_motion(self : FakeHost) -> Bool {
   self.reduce_motion
 }
 
 ///|
-impl @hostapi.Host for FakeHost with display_hz(self) {
+fn FakeHost::display_hz(self : FakeHost) -> Double {
   self.display_hz
 }
 
 ///|
 /// Scripted system input (drive.mbt): tap a matching notification (6), look for one (7), resize the next frame (8), or
 /// let files go on the window as a file manager does (13: fake_drop_drive).
-impl @hostapi.Host for FakeHost with drive(self, kind, text) {
+fn FakeHost::drive(self : FakeHost, kind : Int, text : String) -> Bool {
   if kind == 13 {
     return fake_drop_drive(self, text)
   }
@@ -136,24 +136,24 @@ fn fake_drop_drive(f : FakeHost, text : String) -> Bool {
 
 ///|
 /// The app ended (a scripted run's verdict): noted on its log ("EXIT <code>").
-impl @hostapi.Host for FakeHost with exit(self, code) {
+fn FakeHost::exit(self : FakeHost, code : Int) -> Unit {
   self.logs.push("EXIT \{code}")
 }
 
 ///|
 /// An update asked for: kept as asked (Tester::update_asked), with the delta it was given where there was one.
-impl @hostapi.Host for FakeHost with update_fetch(_, _, _, _, name, now, delta) {
+fn FakeHost::update_fetch(_ : FakeHost, _ : String, _ : String, _ : Double, name : String, now : Bool, delta : String) -> Unit {
   update_asked.push(if delta == "" { "fetch \{name} \{now}" } else { "fetch \{name} \{now} delta \{delta}" })
 }
 
 ///|
-impl @hostapi.Host for FakeHost with update_apply(_, _) {
+fn FakeHost::update_apply(_ : FakeHost, _ : String) -> Unit {
   update_asked.push("apply")
 }
 
 ///|
 /// How an update goes: as the test told it (Tester::tells_update).
-impl @hostapi.Host for FakeHost with update_state(_) {
+fn FakeHost::update_state(_ : FakeHost) -> String {
   update_told.untracked()
 }
 
@@ -183,7 +183,7 @@ priv struct FakeKeep {
 
 ///|
 /// An ask of its pickers (its id, from 1: the ask's place; Tester::drop_files's too).
-impl @hostapi.Host for FakeHost with pk_start(self, kind) {
+fn FakeHost::pk_start(self : FakeHost, kind : Int) -> Int {
   let kind : @hostapi.PickKind = match kind & 15 {
     1 => Photos
     3 => Camera
@@ -200,8 +200,8 @@ impl @hostapi.Host for FakeHost with pk_start(self, kind) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with pk_photo(self, _) {
-  @hostapi.Host::pk_start(self, 1)
+fn FakeHost::pk_photo(self : FakeHost, _ : String) -> Int {
+  self.pk_start(1)
 }
 
 ///|
@@ -214,7 +214,7 @@ fn fake_pick_said(f : FakeHost, id : Int) -> Unit {
 
 ///|
 /// How ask `id` goes: 0 asking (till its answer is told: fake_pick_said), 1 answered, -1 let go of or none.
-impl @hostapi.Host for FakeHost with pk_state(self, id) {
+fn FakeHost::pk_state(self : FakeHost, id : Int) -> Int {
   match self.pick_asks.get(id - 1) {
     Some(a) if !a.taken => if a.said { 1 } else { 0 }
     _ => -1
@@ -222,12 +222,12 @@ impl @hostapi.Host for FakeHost with pk_state(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with pk_count(self, _) {
+fn FakeHost::pk_count(self : FakeHost, _ : Int) -> Int {
   self.picks.length()
 }
 
 ///|
-impl @hostapi.Host for FakeHost with pk_name(self, _, i) {
+fn FakeHost::pk_name(self : FakeHost, _ : Int, i : Int) -> String {
   match self.picks.get(i) {
     Some(p) => p.name
     None => ""
@@ -235,7 +235,7 @@ impl @hostapi.Host for FakeHost with pk_name(self, _, i) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with pk_bytes(self, _, i) {
+fn FakeHost::pk_bytes(self : FakeHost, _ : Int, i : Int) -> Bytes {
   match self.picks.get(i) {
     Some(p) => p.bytes
     None => b""
@@ -243,7 +243,7 @@ impl @hostapi.Host for FakeHost with pk_bytes(self, _, i) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with pk_info(self, _, i) {
+fn FakeHost::pk_info(self : FakeHost, _ : Int, i : Int) -> String {
   match self.picks.get(i) {
     Some(p) => "\{p.held}\t\{p.size.to_int64()}\t\{p.src}"
     None => ""
@@ -252,7 +252,7 @@ impl @hostapi.Host for FakeHost with pk_info(self, _, i) {
 
 ///|
 /// An ask let go of (answered, or a drop nothing took): taken.
-impl @hostapi.Host for FakeHost with pk_end(self, id) {
+fn FakeHost::pk_end(self : FakeHost, id : Int) -> Unit {
   match self.pick_asks.get(id - 1) {
     Some(a) => a.taken = true
     None => ()
@@ -261,7 +261,7 @@ impl @hostapi.Host for FakeHost with pk_end(self, id) {
 
 ///|
 /// A file to keep (its id, from 1).
-impl @hostapi.Host for FakeHost with kp_begin(self, name, mime, way) {
+fn FakeHost::kp_begin(self : FakeHost, name : String, mime : String, way : Int) -> Int {
   let way : @hostapi.KeepWay = match way {
     2 => Choose
     3 => Photos
@@ -272,7 +272,7 @@ impl @hostapi.Host for FakeHost with kp_begin(self, name, mime, way) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with kp_append(self, id, data) {
+fn FakeHost::kp_append(self : FakeHost, id : Int, data : Bytes) -> Int {
   match self.keeps.get(id - 1) {
     Some(k) if k.finished < 0 && !k.ended => {
       for b in data {
@@ -285,7 +285,7 @@ impl @hostapi.Host for FakeHost with kp_append(self, id, data) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with kp_finish(self, id) {
+fn FakeHost::kp_finish(self : FakeHost, id : Int) -> Unit {
   match self.keeps.get(id - 1) {
     Some(k) if k.finished < 0 => {
       k.finished = g().frame_no
@@ -297,7 +297,7 @@ impl @hostapi.Host for FakeHost with kp_finish(self, id) {
 
 ///|
 /// How a keep stands: kept from the frame after it was finished (1), called off (2), keeping (0), none (-1).
-impl @hostapi.Host for FakeHost with kp_state(self, id) {
+fn FakeHost::kp_state(self : FakeHost, id : Int) -> Int {
   match self.keeps.get(id - 1) {
     Some(k) if k.ended && k.finished < 0 => 2
     Some(k) if k.finished >= 0 && g().frame_no > k.finished => 1
@@ -309,7 +309,7 @@ impl @hostapi.Host for FakeHost with kp_state(self, id) {
 ///|
 /// Where it was kept: where the system keeps downloads ("Download/" and its name; in MBUI_DOWNLOADS_DIR, as a
 /// scripted run's host keeps there, its path).
-impl @hostapi.Host for FakeHost with kp_where(self, id) {
+fn FakeHost::kp_where(self : FakeHost, id : Int) -> String {
   match self.keeps.get(id - 1) {
     Some(k) =>
       match self.env.get("MBUI_DOWNLOADS_DIR").unwrap_or("") {
@@ -321,7 +321,7 @@ impl @hostapi.Host for FakeHost with kp_where(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with kp_end(self, id) {
+fn FakeHost::kp_end(self : FakeHost, id : Int) -> Unit {
   match self.keeps.get(id - 1) {
     Some(k) => k.ended = true
     None => ()
@@ -330,40 +330,40 @@ impl @hostapi.Host for FakeHost with kp_end(self, id) {
 
 ///|
 /// Its clock: the frames' (Tester::run_for…).
-impl @hostapi.Host for FakeHost with now(self) {
+fn FakeHost::now(self : FakeHost) -> Double {
   self.time
 }
 
 ///|
 /// Its day: Tester::set_wall's at its clock's 0, on with its clock.
-impl @hostapi.Host for FakeHost with wall_ms(self) {
+fn FakeHost::wall_ms(self : FakeHost) -> Double {
   self.wall + self.time
 }
 
 ///|
 /// Its day at its clock's 0 taken from `ms`, as it is (both whole ms where the test says them; its local time is
 /// UTC's: utc_offset_min's default 0).
-impl @hostapi.Host for FakeHost with clock_at_wall(self, ms) {
+fn FakeHost::clock_at_wall(self : FakeHost, ms : Double) -> Double {
   ms - self.wall
 }
 
 ///|
 /// When the input event being handled happened where the test says it apart from its clock (a test's event taken
 /// late: Tester::touch_at); -1, as the clock has it.
-impl @hostapi.Host for FakeHost with event_time(self) {
+fn FakeHost::event_time(self : FakeHost) -> Double {
   self.event_at
 }
 
 ///|
 /// What it says the pointer's events come from (Tester::host_says_finger): 1 a finger, 0 a mouse, -1 not said.
-impl @hostapi.Host for FakeHost with event_finger(self) {
+fn FakeHost::event_finger(self : FakeHost) -> Int {
   self.event_finger
 }
 
 ///|
 /// How late the frame before this one reached the screen: as said for this frame (Tester::frame_late, a run's LATE
 /// line), else on time.
-impl @hostapi.Host for FakeHost with frame_late(self) {
+fn FakeHost::frame_late(self : FakeHost) -> Double {
   let c = g()
   if self.late_after < 0.0 || c.clock <= self.late_after {
     return 0.0
@@ -381,18 +381,18 @@ impl @hostapi.Host for FakeHost with frame_late(self) {
 
 ///|
 /// The system it plays (Tester::new's `platform`).
-impl @hostapi.Host for FakeHost with platform(self) {
+fn FakeHost::platform(self : FakeHost) -> Int {
   self.platform
 }
 
 ///|
 /// The system whose keys are typed (Tester::new's `keys`: by default the system it plays).
-impl @hostapi.Host for FakeHost with keys_platform(self) {
+fn FakeHost::keys_platform(self : FakeHost) -> Int {
   self.keys
 }
 
 ///|
-impl @hostapi.Host for FakeHost with request_frame(self) {
+fn FakeHost::request_frame(self : FakeHost) -> Unit {
   self.wants = true
   self.paced = 0.0
 }
@@ -400,7 +400,7 @@ impl @hostapi.Host for FakeHost with request_frame(self) {
 ///|
 /// A frame for what moves on by the clock: owed none at this moment (its time goes by run_for), counted
 /// (Tester::frames_on).
-impl @hostapi.Host for FakeHost with request_frame_on(self) {
+fn FakeHost::request_frame_on(self : FakeHost) -> Unit {
   self.frames_on = self.frames_on + 1
   self.paced = 0.0
 }
@@ -408,13 +408,13 @@ impl @hostapi.Host for FakeHost with request_frame_on(self) {
 ///|
 /// A frame for what moves on by the clock that needs only `hz` frames a second: counted as request_frame_on's, its rate
 /// told (Tester::frames_paced); its own frames are run_for's, whatever it is told.
-impl @hostapi.Host for FakeHost with frames_paced(self, hz) {
+fn FakeHost::frames_paced(self : FakeHost, hz : Double) -> Unit {
   self.frames_on = self.frames_on + 1
   self.paced = hz
 }
 
 ///|
-impl @hostapi.Host for FakeHost with wake_after(self, ms) {
+fn FakeHost::wake_after(self : FakeHost, ms : Double) -> Unit {
   if self.wake < 0.0 || self.time + ms < self.wake {
     self.wake = self.time + ms
   }
@@ -423,9 +423,9 @@ impl @hostapi.Host for FakeHost with wake_after(self, ms) {
 ///|
 /// Its text: a live host's (Tester::new's `live`); else a host's kept text where it has it (text_table); else its own
 /// deterministic metrics.
-impl @hostapi.Host for FakeHost with font_metrics(self, size, weight, style, out) {
+fn FakeHost::font_metrics(self : FakeHost, size : Double, weight : Int, style : Int, out : FixedArray[Double]) -> Unit {
   if self.live is Some(l) {
-    l.host.font_metrics(size, weight, style, out)
+    (l.host.font_metrics)(size, weight, style, out)
     return
   }
   if kept_metrics(size, weight, style, out) {
@@ -439,7 +439,7 @@ impl @hostapi.Host for FakeHost with font_metrics(self, size, weight, style, out
 ///|
 /// Who spaces Chinese and Japanese words: nobody where the run says MBUI_AUTOSPACE=off, else a live host's answer, else
 /// the fake's own (Tester::words_spaced_here).
-impl @hostapi.Host for FakeHost with words_spaced(self) {
+fn FakeHost::words_spaced(self : FakeHost) -> Int {
   // (none, as the run's own MBUI_AUTOSPACE says: a film's, its live host not asked)
   if self.env.get("MBUI_AUTOSPACE") == Some("off") {
     return @hostapi.words_spaced_none
@@ -460,13 +460,13 @@ impl @hostapi.Host for FakeHost with words_spaced(self) {
 let fake_shape_calls : Ref[Int?] = Ref(None)
 
 ///|
-impl @hostapi.Host for FakeHost with shape(self, text, size, weight, style, out) {
+fn FakeHost::shape(self : FakeHost, text : String, size : Double, weight : Int, style : Int, out : FixedArray[Double]) -> Int {
   match fake_shape_calls.val {
     Some(n) => fake_shape_calls.val = Some(n + 1)
     None => ()
   }
   if self.live is Some(l) {
-    return l.host.shape(text, size, weight, style, out)
+    return (l.host.shape)(text, size, weight, style, out)
   }
   if kept_shape(text, size, weight, style, out) is Some(k) {
     return k
@@ -546,9 +546,9 @@ fn in_ui_face(style : Int) -> Bool {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with text_key(self, text, size, weight, style) {
+fn FakeHost::text_key(self : FakeHost, text : String, size : Double, weight : Int, style : Int) -> Int {
   if self.live is Some(l) {
-    return l.host.text_key(text, size, weight, style)
+    return (l.host.text_key)(text, size, weight, style)
   }
   match kept_key(text, size, weight, style) {
     Some(k) => k
@@ -568,26 +568,29 @@ impl @hostapi.Host for FakeHost with text_key(self, text, size, weight, style) {
 let fake_ahead : Ref[Array[Int]?] = Ref(None)
 
 ///|
-impl @hostapi.Host for FakeHost with glyphs_ahead(self, keys, n) {
+fn FakeHost::glyphs_ahead(self : FakeHost, keys : FixedArray[Int], n : Int) -> Unit {
   if fake_ahead.val is Some(asked) {
     for i in 0..<n {
       asked.push(keys[i])
     }
   }
   if self.live is Some(l) {
-    l.host.glyphs_ahead(keys, n)
+    (l.host.glyphs_ahead)(keys, n)
   }
 }
 
 ///|
-impl @hostapi.Host for FakeHost with glyphs_ahead_able(_) {
+fn FakeHost::glyphs_ahead_able(_ : FakeHost) -> Bool {
   fake_ahead.val is Some(_)
 }
 
 ///|
-impl @hostapi.Host for FakeHost with glyph(self, key, out) {
+fn FakeHost::glyph(self : FakeHost, key : Int, out : FixedArray[Double]) -> Unit {
+  if self.glyph_ms > 0.0 {
+    self.time = self.time + self.glyph_ms
+  }
   if self.live is Some(l) {
-    l.host.glyph(key, out)
+    (l.host.glyph)(key, out)
     return
   }
   if (key & fake_fallback_glyph_bit) == 0 && kept_glyph(key, out) {
@@ -605,18 +608,18 @@ impl @hostapi.Host for FakeHost with glyph(self, key, out) {
 
 ///|
 /// A glyph's picture put in the atlas: a live host's; the fake has no pictures.
-impl @hostapi.Host for FakeHost with glyph_put(self, key, x, y) {
+fn FakeHost::glyph_put(self : FakeHost, key : Int, x : Int, y : Int) -> Unit {
   if self.live is Some(l) {
-    l.host.glyph_put(key, x, y)
+    (l.host.glyph_put)(key, x, y)
   }
 }
 
 ///|
 /// A glyph's picture given back (what words' halo is blurred from, halo.mbt): a live host's; the fake's glyph box all
 /// covered, so a halo is made and drawn as a host's is.
-impl @hostapi.Host for FakeHost with glyph_picture(self, key, out) {
+fn FakeHost::glyph_picture(self : FakeHost, key : Int, out : FixedArray[Byte]) -> Bool {
   match self.live {
-    Some(l) => l.host.glyph_picture(key, out)
+    Some(l) => (l.host.glyph_picture)(key, out)
     None => {
       out.fill(b'\xFF')
       true
@@ -626,9 +629,9 @@ impl @hostapi.Host for FakeHost with glyph_picture(self, key, out) {
 
 ///|
 /// Pixels made here put in the atlas (a halo, halo.mbt): a live host's; the fake takes them, as it has no pictures.
-impl @hostapi.Host for FakeHost with atlas_put(self, x, y, w, h, px) {
+fn FakeHost::atlas_put(self : FakeHost, x : Int, y : Int, w : Int, h : Int, px : FixedArray[Byte]) -> Bool {
   match self.live {
-    Some(l) => l.host.atlas_put(x, y, w, h, px)
+    Some(l) => (l.host.atlas_put)(x, y, w, h, px)
     None => true
   }
 }
@@ -639,9 +642,9 @@ impl @hostapi.Host for FakeHost with atlas_put(self, x, y, w, h, px) {
 let fake_atlas_size : Int = 2048
 
 ///|
-impl @hostapi.Host for FakeHost with atlas_size(self, colour) {
+fn FakeHost::atlas_size(self : FakeHost, colour : Bool) -> Int {
   match self.live {
-    Some(l) => l.host.atlas_size(colour)
+    Some(l) => (l.host.atlas_size)(colour)
     None => if colour { 0 } else { fake_atlas_size }
   }
 }
@@ -649,9 +652,9 @@ impl @hostapi.Host for FakeHost with atlas_size(self, colour) {
 ///|
 /// A face's file: a live host's; the fake takes any (its words measured as ever), but one the test made unreadable
 /// (Tester::set_unreadable_font).
-impl @hostapi.Host for FakeHost with face_add(self, face, path, weight) {
+fn FakeHost::face_add(self : FakeHost, face : Int, path : String, weight : Int) -> Bool {
   match self.live {
-    Some(l) => l.host.face_add(face, path, weight)
+    Some(l) => (l.host.face_add)(face, path, weight)
     None => {
       let ok = !self.unreadable_fonts.contains(path)
       if ok && self.generation_on_face_add.val {
@@ -663,24 +666,24 @@ impl @hostapi.Host for FakeHost with face_add(self, face, path, weight) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with face_add_bytes(self, face, data, weight) {
+fn FakeHost::face_add_bytes(self : FakeHost, face : Int, data : Bytes, weight : Int) -> Bool {
   match self.live {
-    Some(l) => l.host.face_add_bytes(face, data, weight)
+    Some(l) => (l.host.face_add_bytes)(face, data, weight)
     None => data.length() > 0
   }
 }
 
 ///|
-impl @hostapi.Host for FakeHost with face_clear(self, face) {
+fn FakeHost::face_clear(self : FakeHost, face : Int) -> Unit {
   if self.live is Some(l) {
-    l.host.face_clear(face)
+    (l.host.face_clear)(face)
   }
 }
 
 ///|
-impl @hostapi.Host for FakeHost with face_add_family(self, face, family) {
+fn FakeHost::face_add_family(self : FakeHost, face : Int, family : String) -> Bool {
   match self.live {
-    Some(l) => l.host.face_add_family(face, family)
+    Some(l) => (l.host.face_add_family)(face, family)
     None => {
       self.families_given[face] = family
       true
@@ -689,47 +692,87 @@ impl @hostapi.Host for FakeHost with face_add_family(self, face, family) {
 }
 
 ///|
+fn FakeHost::has_local_fonts(self : FakeHost) -> Bool {
+  self.local_fonts != ""
+}
+
+///|
 /// The font families installed as it says them (Tester::set_local_fonts).
-impl @hostapi.Host for FakeHost with local_font_families(self) {
+fn FakeHost::local_font_families(self : FakeHost) -> String {
   self.local_fonts
 }
 
 ///|
+fn FakeHost::face_set_ligatures(self : FakeHost, face : Int, on : Bool) -> Unit {
+  self.face_ligatures[face] = on
+  if self.live is Some(l) {
+    (l.host.face_set_ligatures)(face, on)
+  }
+}
+
+///|
+fn FakeHost::set_host_autospace(self : FakeHost, on : Bool) -> Unit {
+  self.host_autospace = on
+  if self.live is Some(l) {
+    (l.host.set_host_autospace)(on)
+  }
+}
+
+///|
+fn FakeHost::local_font_info(self : FakeHost) -> String {
+  if self.local_fonts_info != "" {
+    return self.local_fonts_info
+  }
+  if self.live is Some(l) {
+    return (l.host.local_font_info)()
+  }
+  ""
+}
+
+///|
+fn FakeHost::has_async_local_font_info(self : FakeHost) -> Bool {
+  if self.local_fonts_info != "" {
+    return true
+  }
+  self.local_fonts == ""
+}
+
+///|
 /// Its glyphs' generation (each ask counted: Tester's): a live host's, else its own.
-impl @hostapi.Host for FakeHost with atlas_generation(self) {
+fn FakeHost::atlas_generation(self : FakeHost) -> Int {
   self.generation_asks += 1
   match self.live {
-    Some(l) => l.host.atlas_generation()
+    Some(l) => (l.host.atlas_generation)()
     None => self.generation
   }
 }
 
 ///|
 /// The system asks for less transparency (Tester::set_reduce_transparency).
-impl @hostapi.Host for FakeHost with reduce_transparency(self) {
+fn FakeHost::reduce_transparency(self : FakeHost) -> Bool {
   self.reduce_transparency
 }
 
 ///|
 /// The system asks for more contrast (Tester::set_increase_contrast).
-impl @hostapi.Host for FakeHost with increase_contrast(self) {
+fn FakeHost::increase_contrast(self : FakeHost) -> Bool {
   self.increase_contrast
 }
 
 ///|
 /// The system slows the device down for its heat (Tester::set_thermal_throttled).
-impl @hostapi.Host for FakeHost with thermal_throttled(self) {
+fn FakeHost::thermal_throttled(self : FakeHost) -> Bool {
   self.thermal_throttled
 }
 
 ///|
 /// Its performance record (Tester::set_perf): -1 none kept here, 0 off, 1 on.
-impl @hostapi.Host for FakeHost with perf_state(self) {
+fn FakeHost::perf_state(self : FakeHost) -> Int {
   self.perf
 }
 
 ///|
-impl @hostapi.Host for FakeHost with set_perf(self, on) {
+fn FakeHost::set_perf(self : FakeHost, on : Bool) -> Unit {
   if self.perf >= 0 {
     self.perf_sets.push(on)
     self.perf = if on { 1 } else { 0 }
@@ -737,14 +780,14 @@ impl @hostapi.Host for FakeHost with set_perf(self, on) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with perf_line(self, line) {
+fn FakeHost::perf_line(self : FakeHost, line : String) -> Unit {
   if self.perf == 1 {
     self.perf_lines.push(line)
   }
 }
 
 ///|
-impl @hostapi.Host for FakeHost with perf_where(self) {
+fn FakeHost::perf_where(self : FakeHost) -> String {
   if self.perf >= 0 {
     "Documents/perf"
   } else {
@@ -753,7 +796,7 @@ impl @hostapi.Host for FakeHost with perf_where(self) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with reveal_file(self, path, go) {
+fn FakeHost::reveal_file(self : FakeHost, path : String, go : Bool) -> Bool {
   if !self.reveals {
     return false
   }
@@ -764,7 +807,7 @@ impl @hostapi.Host for FakeHost with reveal_file(self, path, go) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with perf_open(self, go) {
+fn FakeHost::perf_open(self : FakeHost, go : Bool) -> Bool {
   if !self.perf_opens {
     return false
   }
@@ -775,14 +818,14 @@ impl @hostapi.Host for FakeHost with perf_open(self, go) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with perf_size(self) {
+fn FakeHost::perf_size(self : FakeHost) -> Double {
   // (what the lines weigh is the real host's, whose times are not a test's: as the test says, Tester::set_perf_size)
   self.perf_bytes
 }
 
 ///|
 /// The field as it was told (its input method's), counted.
-impl @hostapi.Host for FakeHost with set_ime(self, active, x, y, w, h, text, a, b) {
+fn FakeHost::set_ime(self : FakeHost, active : Bool, x : Double, y : Double, w : Double, h : Double, text : String, a : Int, b : Int) -> Unit {
   self.ime_active = active
   self.ime_text = text
   self.ime_sel = (a, b)
@@ -791,22 +834,22 @@ impl @hostapi.Host for FakeHost with set_ime(self, active, x, y, w, h, text, a, 
 }
 
 ///|
-impl @hostapi.Host for FakeHost with text_menu(self, shown, x, y, w, h, can) {
+fn FakeHost::text_menu(self : FakeHost, shown : Bool, x : Double, y : Double, w : Double, h : Double, can : Int) -> Unit {
   self.text_menu = (shown, x, y, w, h, can)
 }
 
 ///|
-impl @hostapi.Host for FakeHost with text_menu_own(self, words) {
+fn FakeHost::text_menu_own(self : FakeHost, words : String) -> Unit {
   self.text_menu_own = words
 }
 
 ///|
-impl @hostapi.Host for FakeHost with edit_can(self, can) {
+fn FakeHost::edit_can(self : FakeHost, can : Int) -> Unit {
   self.edit_can = can
 }
 
 ///|
-impl @hostapi.Host for FakeHost with clipboard_set(self, s) {
+fn FakeHost::clipboard_set(self : FakeHost, s : String) -> Unit {
   self.clipboard = s
   self.clipboard_secret = -1.0
   self.clipboard_html = ""
@@ -814,7 +857,7 @@ impl @hostapi.Host for FakeHost with clipboard_set(self, s) {
 
 ///|
 /// Words on the clipboard with their HTML (Tester::clipboard, Tester::clipboard_html).
-impl @hostapi.Host for FakeHost with clipboard_set_html(self, text, html) {
+fn FakeHost::clipboard_set_html(self : FakeHost, text : String, html : String) -> Unit {
   self.clipboard = text
   self.clipboard_secret = -1.0
   self.clipboard_html = html
@@ -823,9 +866,9 @@ impl @hostapi.Host for FakeHost with clipboard_set_html(self, text, html) {
 ///|
 /// A word's bounds: a live host's; under a host's kept text, the host's word as it said it (a word it did not say: the
 /// test is told, Tester::text_missing, and gets none of its own made up in its place); with no kept text, none.
-impl @hostapi.Host for FakeHost with word_at(self, text, off) {
+fn FakeHost::word_at(self : FakeHost, text : String, off : Int) -> (Int, Int) {
   if self.live is Some(l) {
-    return l.host.word_at(text, off)
+    return (l.host.word_at)(text, off)
   }
   match text_table.val {
     Some(_) => {
@@ -841,36 +884,36 @@ impl @hostapi.Host for FakeHost with word_at(self, text, off) {
 
 ///|
 /// A URL handed to the system: kept (Tester::opened).
-impl @hostapi.Host for FakeHost with open_url(self, url) {
+fn FakeHost::open_url(self : FakeHost, url : String) -> Bool {
   self.opened.push(url)
   true
 }
 
 ///|
 /// A page in a browser's tab: kept as one handed to the system (Tester::opened).
-impl @hostapi.Host for FakeHost with open_tab(self, url) {
+fn FakeHost::open_tab(self : FakeHost, url : String) -> Bool {
   self.opened.push(url)
   true
 }
 
 ///|
-impl @hostapi.Host for FakeHost with back_enabled(self, on) {
+fn FakeHost::back_enabled(self : FakeHost, on : Bool) -> Unit {
   self.back_on = on
 }
 
 ///|
-impl @hostapi.Host for FakeHost with wheel_kept(self, kept) {
+fn FakeHost::wheel_kept(self : FakeHost, kept : Bool) -> Unit {
   self.wheel_kept = kept
 }
 
 ///|
 /// Something reading the widgets out (Tester's a11y_on).
-impl @hostapi.Host for FakeHost with a11y_on(self) {
+fn FakeHost::a11y_on(self : FakeHost) -> Bool {
   self.a11y
 }
 
 ///|
-impl @hostapi.Host for FakeHost with a11y_tree(self, tree) {
+fn FakeHost::a11y_tree(self : FakeHost, tree : String) -> Unit {
   self.a11y_said = tree
   // (kept as a host keeps it: A11yMirror::apply)
   match a11y_update_read(tree) {
@@ -880,18 +923,18 @@ impl @hostapi.Host for FakeHost with a11y_tree(self, tree) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with log(self, s) {
+fn FakeHost::log(self : FakeHost, s : String) -> Unit {
   self.logs.push(s)
 }
 
 ///|
 /// A picture by its source: a live host's decode (its sizes as that host has them); else as the host decoded it, when
 /// kept with the text; else as the test made it up (Tester::new's images), one it does not know failed at once.
-impl @hostapi.Host for FakeHost with image_load(self, src, max_px) {
+fn FakeHost::image_load(self : FakeHost, src : String, max_px : Int) -> Int {
   self.image_loads.push((src, max_px))
   let head : Json = [Json::string(src), Json::number(max_px.to_double())]
   let id = match self.live {
-    Some(l) => live_image(self, l, l.host.image_load(src, max_px), { "is": head })
+    Some(l) => live_image(self, l, (l.host.image_load)(src, max_px), { "is": head })
     None => {
       let id = match (self.image_sizes.get(src), text_table.val) {
         (None, Some(_)) =>
@@ -924,11 +967,11 @@ impl @hostapi.Host for FakeHost with image_load(self, src, max_px) {
 ///|
 /// Bytes decoded: a live host's decode; else as the host decoded these bytes, when kept with the text; else a made-up
 /// 400 × 300.
-impl @hostapi.Host for FakeHost with image_load_bytes(self, data, max_px) {
+fn FakeHost::image_load_bytes(self : FakeHost, data : Bytes, max_px : Int) -> Int {
   self.image_loads.push(("bytes:\{data.length()}", max_px))
   let head = image_bytes_head(data, max_px)
   let id = match self.live {
-    Some(l) => live_image(self, l, l.host.image_load_bytes(data, max_px), { "ib": head })
+    Some(l) => live_image(self, l, (l.host.image_load_bytes)(data, max_px), { "ib": head })
     None =>
       match (text_table.val, kept_sizes(kept_answer("ib", head))) {
         (Some(_), Some((w, h, ow, oh))) => fake_image_sized(self, w, h, ow, oh)
@@ -1005,7 +1048,7 @@ fn host_image_bytes_held(f : FakeHost) -> Unit {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with image_info(self, id, out) {
+fn FakeHost::image_info(self : FakeHost, id : Int, out : FixedArray[Double]) -> Int {
   match self.images.get(id) {
     Some(im) => {
       if im.state == 1 {
@@ -1023,9 +1066,9 @@ impl @hostapi.Host for FakeHost with image_info(self, id, out) {
 ///|
 /// A ready image's pixels: a live host's; else as the test made them (Tester::add_pixels), else every pixel a mid
 /// grey, opaque.
-impl @hostapi.Host for FakeHost with image_pixels(self, id, out) {
+fn FakeHost::image_pixels(self : FakeHost, id : Int, out : FixedArray[Byte]) -> Bool {
   match (self.live, self.live_images.get(id)) {
-    (Some(l), Some(mine)) => return l.host.image_pixels(mine, out)
+    (Some(l), Some(mine)) => return (l.host.image_pixels)(mine, out)
     _ => ()
   }
   match self.images.get(id) {
@@ -1046,9 +1089,9 @@ impl @hostapi.Host for FakeHost with image_pixels(self, id, out) {
 
 ///|
 /// The last frame's pixels: a live host's as it drew the frame (a film's), the fake's every pixel a mid grey, opaque.
-impl @hostapi.Host for FakeHost with drawn_pixels(self, x, y, w, h, out) {
+fn FakeHost::drawn_pixels(self : FakeHost, x : Int, y : Int, w : Int, h : Int, out : FixedArray[Byte]) -> Bool {
   match self.live {
-    Some(l) => l.host.drawn_pixels(x, y, w, h, out)
+    Some(l) => (l.host.drawn_pixels)(x, y, w, h, out)
     None => {
       for i in 0..<(w * h * 4) {
         out[i] = if i % 4 == 3 { b'\xFF' } else { b'\x80' }
@@ -1061,7 +1104,7 @@ impl @hostapi.Host for FakeHost with drawn_pixels(self, x, y, w, h, out) {
 ///|
 /// Instances never presented drawn: a live host's, its pictures that host's own as a film draws a frame (film.mbt
 /// draw_frame: one it has not, nothing); the fake's every pixel a mid grey, opaque.
-impl @hostapi.Host for FakeHost with drawn_pixels_of(self, inst, count, r, gg, b, scale, w, h, out) {
+fn FakeHost::drawn_pixels_of(self : FakeHost, inst : FixedArray[Double], count : Int, r : Double, gg : Double, b : Double, scale : Double, w : Int, h : Int, out : FixedArray[Byte]) -> Bool {
   match self.live {
     Some(l) => {
       let len = count * inst_size
@@ -1082,7 +1125,7 @@ impl @hostapi.Host for FakeHost with drawn_pixels_of(self, inst, count, r, gg, b
           }
         }
       }
-      l.host.drawn_pixels_of(mine, count, r, gg, b, scale, w, h, out)
+      (l.host.drawn_pixels_of)(mine, count, r, gg, b, scale, w, h, out)
     }
     None => {
       for i in 0..<(w * h * 4) {
@@ -1094,7 +1137,7 @@ impl @hostapi.Host for FakeHost with drawn_pixels_of(self, inst, count, r, gg, b
 }
 
 ///|
-impl @hostapi.Host for FakeHost with image_free(self, id) {
+fn FakeHost::image_free(self : FakeHost, id : Int) -> Unit {
   self.images.remove(id)
   match self.image_bytes.get(id) {
     Some(n) => {
@@ -1106,7 +1149,7 @@ impl @hostapi.Host for FakeHost with image_free(self, id) {
   match (self.live, self.live_images.get(id)) {
     (Some(l), Some(mine)) => {
       self.live_images.remove(id)
-      l.host.image_free(mine)
+      (l.host.image_free)(mine)
     }
     _ => ()
   }
@@ -1116,7 +1159,7 @@ impl @hostapi.Host for FakeHost with image_free(self, id) {
 // never ask to read; it notes what is asked of them (FakeHost.views).
 
 ///|
-impl @hostapi.Host for FakeHost with view_open(self, kind, arg) {
+fn FakeHost::view_open(self : FakeHost, kind : Int, arg : String) -> Int {
   self.view_ids += 1
   self.views.push("open \{self.view_ids} \{kind} \{arg.length()}")
   self.view_kinds[self.view_ids] = kind
@@ -1126,7 +1169,7 @@ impl @hostapi.Host for FakeHost with view_open(self, kind, arg) {
 ///|
 /// A view placed (device pixels, as a host is told): noted, and where it shows kept in points (what a finger on it
 /// is by).
-impl @hostapi.Host for FakeHost with view_place(self, id, px, py, pw, ph, pcx0, pcy0, pcx1, pcy1, pr0, pr1, pr2, pr3, shown) {
+fn FakeHost::view_place(self : FakeHost, id : Int, px : Double, py : Double, pw : Double, ph : Double, pcx0 : Double, pcy0 : Double, pcx1 : Double, pcy1 : Double, pr0 : Double, pr1 : Double, pr2 : Double, pr3 : Double, shown : Bool) -> Unit {
   self.views.push(
     "place \{id} \{px} \{py} \{pw} \{ph} in \{pcx0} \{pcy0} \{pcx1} \{pcy1}" +
     (if pr0 == pr1 && pr1 == pr2 && pr2 == pr3 {
@@ -1149,7 +1192,7 @@ impl @hostapi.Host for FakeHost with view_place(self, id, px, py, pw, ph, pcx0, 
 }
 
 ///|
-impl @hostapi.Host for FakeHost with view_close(self, id) {
+fn FakeHost::view_close(self : FakeHost, id : Int) -> Unit {
   self.views.push("close \{id}")
   self.view_at.remove(id)
   self.scripts_waiting.remove(id)
@@ -1159,13 +1202,13 @@ impl @hostapi.Host for FakeHost with view_close(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with view_control(self, id, op, value) {
+fn FakeHost::view_control(self : FakeHost, id : Int, op : Int, value : Double) -> Unit {
   self.views.push("control \{id} \{op} \{value}")
 }
 
 ///|
 /// How a view stands (each read counted: Tester's); a page there now runs what was sent to it.
-impl @hostapi.Host for FakeHost with view_info(self, id, out) {
+fn FakeHost::view_info(self : FakeHost, id : Int, out : FixedArray[Double]) -> Int {
   self.view_reads += 1
   let state = fake_view_info(self, id, out)
   fake_scripts_flush(self, id)
@@ -1216,7 +1259,7 @@ fn fake_view_info(f : FakeHost, id : Int, out : FixedArray[Double]) -> Int {
 
 ///|
 /// What its sites say, the view's own first (Tester::view_says…), then the views' common queue (Tester::site_says).
-impl @hostapi.Host for FakeHost with view_site_next(self, id) {
+fn FakeHost::view_site_next(self : FakeHost, id : Int) -> String {
   let e = match self.site_of.get(id) {
     Some(q) if q.length() > 0 => q.remove(0)
     _ => if self.site.length() > 0 { self.site.remove(0) } else { "" }
@@ -1233,7 +1276,7 @@ impl @hostapi.Host for FakeHost with view_site_next(self, id) {
 /// What the app tells a view's host beyond its controls: each noted ("script 1 42 9a0b…", "touch 1 vertical 8",
 /// "settings 1 …"), a page's scripts run as a host does: once its page is there (ready and not loading, or said
 /// something since it started), in the order sent.
-impl @hostapi.Host for FakeHost with view_tell(self, id, what, text) {
+fn FakeHost::view_tell(self : FakeHost, id : Int, what : Int, text : String) -> Unit {
   if what == 1 {
     self.scripts_sent.push("\{id} \{text.length()} \{script_hash(text)}")
     match self.scripts_waiting.get(id) {
@@ -1311,29 +1354,29 @@ fn fake_scripts_flush(f : FakeHost, id : Int) -> Unit {
 
 ///|
 /// A request's body: as the run recorded it (Tester::view_said); else none.
-impl @hostapi.Host for FakeHost with view_site_body(self, id, req) {
+fn FakeHost::view_site_body(self : FakeHost, id : Int, req : Int) -> Bytes {
   self.site_bodies.get((id, req)).unwrap_or(Bytes::make(0, b'\x00'))
 }
 
 ///|
-impl @hostapi.Host for FakeHost with view_site_head(self, id, req, status, headers) {
+fn FakeHost::view_site_head(self : FakeHost, id : Int, req : Int, status : Int, headers : String) -> Unit {
   self.views.push("site head \{id} \{req} \{status} \{headers}")
 }
 
 ///|
-impl @hostapi.Host for FakeHost with view_site_chunk(self, id, req, data) {
+fn FakeHost::view_site_chunk(self : FakeHost, id : Int, req : Int, data : Bytes) -> Unit {
   self.views.push("site chunk \{id} \{req} \{data.length()}")
 }
 
 ///|
-impl @hostapi.Host for FakeHost with view_site_end(self, id, req, error) {
+fn FakeHost::view_site_end(self : FakeHost, id : Int, req : Int, error : String) -> Unit {
   self.views.push("site end \{id} \{req} \{error}")
 }
 
 ///|
 /// A site's page: as the run recorded the host's saying it (Tester::view_said); not said: at its start, loaded,
 /// untitled.
-impl @hostapi.Host for FakeHost with view_site_state(self, id) {
+fn FakeHost::view_site_state(self : FakeHost, id : Int) -> String {
   let st = self.site_states.get(id).unwrap_or(
     "{\"path\":\"/\",\"back\":false,\"forward\":false,\"loading\":false,\"title\":\"\"}",
   )
@@ -1345,7 +1388,7 @@ impl @hostapi.Host for FakeHost with view_site_state(self, id) {
 /// What a view says: as the run recorded the host's saying it (Tester::view_said); not said yet: not known (a grab:
 /// none asked). A grab said ready before its frame is said ("2", then the `still` line: a host says both in one frame,
 /// a replay may give them a frame apart): still grabbing until the frame is here, not ready with none.
-impl @hostapi.Host for FakeHost with view_text(self, id, what) {
+fn FakeHost::view_text(self : FakeHost, id : Int, what : Int) -> String? {
   match self.view_texts.get((id, what)) {
     Some("2") if what == 2 && !(self.view_stills.get(id) is Some(q) && q.length() > 0) => Some("1")
     Some(t) => Some(t)
@@ -1355,7 +1398,7 @@ impl @hostapi.Host for FakeHost with view_text(self, id, what) {
 
 ///|
 /// The oldest frame grabbed, taken (the grab's state back to none asked, as a host's).
-impl @hostapi.Host for FakeHost with view_still(self, id) {
+fn FakeHost::view_still(self : FakeHost, id : Int) -> Bytes {
   let b = match self.view_stills.get(id) {
     Some(q) if q.length() > 0 => q.remove(0)
     _ => b""
@@ -1367,17 +1410,17 @@ impl @hostapi.Host for FakeHost with view_still(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with view_site_load(self, id, path) {
+fn FakeHost::view_site_load(self : FakeHost, id : Int, path : String) -> Unit {
   self.views.push("site load \{id} \{path}")
 }
 
 ///|
-impl @hostapi.Host for FakeHost with view_read_next(self, id, out) {
+fn FakeHost::view_read_next(self : FakeHost, id : Int, out : FixedArray[Double]) -> Int {
   fake_read_next(self, id, out)
 }
 
 ///|
-impl @hostapi.Host for FakeHost with view_read_answer(self, id, req, data, total, more) {
+fn FakeHost::view_read_answer(self : FakeHost, id : Int, req : Int, data : Bytes, total : Double, more : Bool) -> Unit {
   self.read_answers.push((id, req, data.length(), total, more))
 }
 
@@ -1385,7 +1428,7 @@ impl @hostapi.Host for FakeHost with view_read_answer(self, id, req, data, total
 // shape. Under a host's kept text (text_table), its answers as the host gave them.
 
 ///|
-impl @hostapi.Host for FakeHost with pdf_open(self, data) {
+fn FakeHost::pdf_open(self : FakeHost, data : Bytes) -> Int {
   self.views.push("pdf \{data.length()}")
   let doc = 7 + self.pdfs.length()
   self.pdfs[doc] = (bytes_name(data), data.length())
@@ -1393,7 +1436,7 @@ impl @hostapi.Host for FakeHost with pdf_open(self, data) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with pdf_pages(self, doc) {
+fn FakeHost::pdf_pages(self : FakeHost, doc : Int) -> Int {
   match self.pdfs.get(doc) {
     // as the host counted them, when kept with the text; else the fake's 3
     Some(named) if text_table.val is Some(_) =>
@@ -1407,7 +1450,7 @@ impl @hostapi.Host for FakeHost with pdf_pages(self, doc) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with pdf_page_size(self, doc, page, out) {
+fn FakeHost::pdf_page_size(self : FakeHost, doc : Int, page : Int, out : FixedArray[Double]) -> Unit {
   out[0] = 612.0
   out[1] = 792.0
   match self.pdfs.get(doc) {
@@ -1424,7 +1467,7 @@ impl @hostapi.Host for FakeHost with pdf_page_size(self, doc, page, out) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with pdf_page_load(self, doc, page, max_px) {
+fn FakeHost::pdf_page_load(self : FakeHost, doc : Int, page : Int, max_px : Int) -> Int {
   self.image_loads.push(("pdf:\{doc}/\{page}", max_px))
   match self.pdfs.get(doc) {
     Some(named) if text_table.val is Some(_) =>
@@ -1437,38 +1480,38 @@ impl @hostapi.Host for FakeHost with pdf_page_load(self, doc, page, max_px) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with pdf_close(self, doc) {
+fn FakeHost::pdf_close(self : FakeHost, doc : Int) -> Unit {
   self.views.push("pdf close \{doc}")
 }
 
 ///|
 /// The pointer's shape as last told (desktop.mbt).
-impl @hostapi.Host for FakeHost with set_cursor(self, kind) {
+fn FakeHost::set_cursor(self : FakeHost, kind : Int) -> Unit {
   self.cursor = kind
   self.cursors_told = self.cursors_told + 1
 }
 
 ///|
 /// The number on the app's icon, kept (Tester::badge).
-impl @hostapi.Host for FakeHost with set_badge(self, n) {
+fn FakeHost::set_badge(self : FakeHost, n : Int) -> Unit {
   self.badge = n
 }
 
 ///|
 /// What the app's own native call `name` says, as the test set it (Tester::set_app_said); "" unset.
-impl @hostapi.Host for FakeHost with app_said(self, name) {
+fn FakeHost::app_said(self : FakeHost, name : String) -> String {
   self.app_said.get(name).unwrap_or("")
 }
 
 ///|
 /// What the app told its own native calls, kept (Tester::app_told).
-impl @hostapi.Host for FakeHost with app_tell(self, name, arg) {
+fn FakeHost::app_tell(self : FakeHost, name : String, arg : String) -> Unit {
   self.app_told.push((name, arg))
 }
 
 ///|
 /// The keys held down as the test says (Tester::hold_mods).
-impl @hostapi.Host for FakeHost with mods_held(self) {
+fn FakeHost::mods_held(self : FakeHost) -> Int {
   self.mods
 }
 
@@ -1520,7 +1563,7 @@ fn fake_pointer_reset() -> Unit {
 
 ///|
 /// The pointer held or let go of, as told (Tester::pointer_locked); what it moved while held let go of with it.
-impl @hostapi.Host for FakeHost with pointer_lock(self, on) {
+fn FakeHost::pointer_lock(self : FakeHost, on : Bool) -> Unit {
   let p = fake_pointer(self)
   p.locks_told = p.locks_told + 1
   p.lock = on
@@ -1528,7 +1571,7 @@ impl @hostapi.Host for FakeHost with pointer_lock(self, on) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with pointer_locked(self) {
+fn FakeHost::pointer_locked(self : FakeHost) -> Bool {
   match fake_pointer_of(self) {
     Some(p) => p.lock
     None => false
@@ -1537,7 +1580,7 @@ impl @hostapi.Host for FakeHost with pointer_locked(self) {
 
 ///|
 /// How far the mouse moved while the pointer is held (Tester::locked_move), taken.
-impl @hostapi.Host for FakeHost with pointer_delta(self, out) {
+fn FakeHost::pointer_delta(self : FakeHost, out : FixedArray[Double]) -> Unit {
   match fake_pointer_of(self) {
     Some(p) => {
       out[0] = p.delta.0
@@ -1553,7 +1596,7 @@ impl @hostapi.Host for FakeHost with pointer_delta(self, out) {
 
 ///|
 /// The game controllers as the test says (Tester::set_gamepads), their sticks and triggers as they are.
-impl @hostapi.Host for FakeHost with gamepads(self, out) {
+fn FakeHost::gamepads(self : FakeHost, out : FixedArray[Double]) -> Int {
   guard fake_pointer_of(self) is Some(fp) else { return 0 }
   let mut n = 0
   for p in fp.pads {
@@ -1577,7 +1620,7 @@ impl @hostapi.Host for FakeHost with gamepads(self, out) {
 
 ///|
 /// The window dragged: counted.
-impl @hostapi.Host for FakeHost with window_drag(self) {
+fn FakeHost::window_drag(self : FakeHost) -> Unit {
   self.window_drags = self.window_drags + 1
 }
 
@@ -1585,7 +1628,7 @@ impl @hostapi.Host for FakeHost with window_drag(self) {
 /// What the app asked of the window's own buttons, oldest first (Tester's), the window in place's (window_acts_by;
 /// the first's in window_acts too, as ever). Close (3) in a window beside the first closes it as a host's own close
 /// does: told the app between frames, as the person's (Tester::close_window_beside).
-impl @hostapi.Host for FakeHost with window_act(self, what) {
+fn FakeHost::window_act(self : FakeHost, what : Int) -> Unit {
   let wid = self.window_at
   if wid == 0 {
     self.window_acts.push(what)
@@ -1607,7 +1650,7 @@ impl @hostapi.Host for FakeHost with window_act(self, what) {
 
 ///|
 /// Whether the window in place is maximized (Tester::set_window_zoomed, set_window_zoomed_of).
-impl @hostapi.Host for FakeHost with window_zoomed(self) {
+fn FakeHost::window_zoomed(self : FakeHost) -> Bool {
   match self.window_zooms.get(self.window_at) {
     Some(z) if self.window_at > 0 => z
     _ => self.zoomed
@@ -1616,13 +1659,13 @@ impl @hostapi.Host for FakeHost with window_zoomed(self) {
 
 ///|
 /// Where the app last said its maximize button is (device pixels).
-impl @hostapi.Host for FakeHost with window_snap(self, x, y, w, h) {
+fn FakeHost::window_snap(self : FakeHost, x : Double, y : Double, w : Double, h : Double) -> Unit {
   self.snap = (x, y, w, h)
 }
 
 ///|
 /// How the pointer stands on the maximize button (Tester::set_window_snap).
-impl @hostapi.Host for FakeHost with window_snap_state(self) {
+fn FakeHost::window_snap_state(self : FakeHost) -> Int {
   match self.window_snaps.get(self.window_at) {
     Some(s) if self.window_at > 0 => s
     _ => self.snap_state
@@ -1630,13 +1673,13 @@ impl @hostapi.Host for FakeHost with window_snap_state(self) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with window_opens(self) {
+fn FakeHost::window_opens(self : FakeHost) -> Bool {
   self.window_opens
 }
 
 ///|
 /// Another window opened where it can (Tester::set_window_opens), kept.
-impl @hostapi.Host for FakeHost with window_open(self, what) {
+fn FakeHost::window_open(self : FakeHost, what : String) -> Bool {
   if self.window_opens {
     self.windows_opened.push(what)
   }
@@ -1645,7 +1688,7 @@ impl @hostapi.Host for FakeHost with window_open(self, what) {
 
 ///|
 /// A window brought to the front where one opened for `what` is open still (Tester::close_window), kept.
-impl @hostapi.Host for FakeHost with window_front(self, what) {
+fn FakeHost::window_front(self : FakeHost, what : String) -> Bool {
   let open = self.windows_opened.iter().filter(fn(w) { w == what }).count() >
     self.windows_closed.iter().filter(fn(w) { w == what }).count()
   if open {
@@ -1656,7 +1699,7 @@ impl @hostapi.Host for FakeHost with window_front(self, what) {
 
 ///|
 /// Its windows in this run where the test says so (Tester::set_windows_in_process).
-impl @hostapi.Host for FakeHost with windows_in_process(self) {
+fn FakeHost::windows_in_process(self : FakeHost) -> Bool {
   self.windows_in_process
 }
 
@@ -1682,7 +1725,7 @@ fn init {
 /// Another window of the run, its size the one a test said for it (Tester::set_window_beside_size), else what it was
 /// opened at (a JSON object's positive "w" and "h": @ui.WindowSpec), else 480 × 720; its title and role kept as it says
 /// them, its buttons in its top row as its "inset" says (else the first window's).
-impl @hostapi.Host for FakeHost with window_open_id(self, what) {
+fn FakeHost::window_open_id(self : FakeHost, what : String) -> Int {
   guard self.windows_in_process else { return 0 }
   self.window_ids = self.window_ids + 1
   let wid = self.window_ids
@@ -1719,13 +1762,13 @@ impl @hostapi.Host for FakeHost with window_open_id(self, what) {
 
 ///|
 /// A window's title, kept (Tester::window_title): the window drawn or handed input now's where it says none (< 0).
-impl @hostapi.Host for FakeHost with window_set_title(self, wid, title) {
+fn FakeHost::window_set_title(self : FakeHost, wid : Int, title : String) -> Unit {
   fake_window_titles[if wid < 0 { self.window_at } else { wid }] = title
 }
 
 ///|
 /// A window of the run to the front, while it is open (Tester::close_window_beside), kept.
-impl @hostapi.Host for FakeHost with window_front_id(self, wid) {
+fn FakeHost::window_front_id(self : FakeHost, wid : Int) -> Bool {
   let open = wid > 0 && wid <= self.window_ids && !self.window_ids_closed.contains(wid)
   if open {
     self.window_ids_fronted.push(wid)
@@ -1735,7 +1778,7 @@ impl @hostapi.Host for FakeHost with window_front_id(self, wid) {
 
 ///|
 /// A window of the run closed by the app, kept.
-impl @hostapi.Host for FakeHost with window_close_id(self, wid) {
+fn FakeHost::window_close_id(self : FakeHost, wid : Int) -> Unit {
   if !self.window_ids_closed.contains(wid) {
     self.window_ids_closed.push(wid)
   }
@@ -1743,13 +1786,13 @@ impl @hostapi.Host for FakeHost with window_close_id(self, wid) {
 
 ///|
 /// The window of the run drawn or handed input now (Tester::in_window).
-impl @hostapi.Host for FakeHost with window_current(self) {
+fn FakeHost::window_current(self : FakeHost) -> Int {
   self.window_at
 }
 
 ///|
 /// What another app shared in (Tester::share_in), from the frame after it was told; taken once.
-impl @hostapi.Host for FakeHost with shared_in(self) {
+fn FakeHost::shared_in(self : FakeHost) -> String {
   match self.share {
     Some((said, frame)) if g().frame_no > frame => {
       self.share = None
@@ -1761,7 +1804,7 @@ impl @hostapi.Host for FakeHost with shared_in(self) {
 
 ///|
 /// The i-th of the files shared in, taken once.
-impl @hostapi.Host for FakeHost with shared_in_file(self, i) {
+fn FakeHost::shared_in_file(self : FakeHost, i : Int) -> Bytes {
   if i >= 0 && i < self.share_files.length() {
     let b = self.share_files[i]
     self.share_files[i] = b""
@@ -1773,7 +1816,7 @@ impl @hostapi.Host for FakeHost with shared_in_file(self, i) {
 
 ///|
 /// What the app hands the share sheet: taken, kept for the test (Tester::shared_out).
-impl @hostapi.Host for FakeHost with share(self, text, name, mime, data) {
+fn FakeHost::share(self : FakeHost, text : String, name : String, mime : String, data : Bytes) -> Bool {
   self.shares.push((text, name, mime, data))
   true
 }
@@ -1781,7 +1824,7 @@ impl @hostapi.Host for FakeHost with share(self, text, name, mime, data) {
 ///|
 /// Marks drawn onto an image: kept (Tester::marks_drawn), drawn by the frame after (or as the test says,
 /// Tester::marks_by_hand); its PNG the test's (Tester::marks_make) or one clear pixel (its id, from 1: its place).
-impl @hostapi.Host for FakeHost with mk_start(self, _, marks) {
+fn FakeHost::mk_start(self : FakeHost, _ : Bytes, marks : String) -> Int {
   self.marks.push((marks, g().frame_no))
   self.marks_out.push(self.marks_next.unwrap_or(marked_png))
   self.marks_next = None
@@ -1792,7 +1835,7 @@ impl @hostapi.Host for FakeHost with mk_start(self, _, marks) {
 ///|
 /// How drawing `id` goes: 0 drawing (until the frame after it was asked, or by hand: at once, the test's word told
 /// as a host's event), 1 drawn, -1 none.
-impl @hostapi.Host for FakeHost with mk_state(self, id) {
+fn FakeHost::mk_state(self : FakeHost, id : Int) -> Int {
   match self.marks.get(id - 1) {
     Some((_, frame)) => if self.marks_by_hand || g().frame_no > frame { 1 } else { 0 }
     None => -1
@@ -1800,37 +1843,37 @@ impl @hostapi.Host for FakeHost with mk_state(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with mk_png(self, id) {
+fn FakeHost::mk_png(self : FakeHost, id : Int) -> Bytes {
   self.marks_out.get(id - 1).unwrap_or(b"")
 }
 
 ///|
 /// Its clock is its own (its frames').
-impl @hostapi.Host for FakeHost with own_clock(_) {
+fn FakeHost::own_clock(_ : FakeHost) -> Bool {
   true
 }
 
 ///|
-impl @hostapi.Host for FakeHost with system_dark(self) {
+fn FakeHost::system_dark(self : FakeHost) -> Bool {
   self.dark
 }
 
 ///|
 /// The system's size of words (Tester::set_font_scale).
-impl @hostapi.Host for FakeHost with font_scale(self) {
+fn FakeHost::font_scale(self : FakeHost) -> Double {
   self.font_scale
 }
 
 ///|
 /// How far its local time is ahead of UTC (Tester::set_utc_offset), whatever the moment.
-impl @hostapi.Host for FakeHost with utc_offset_min(self, _) {
+fn FakeHost::utc_offset_min(self : FakeHost, _ : Double) -> Int {
   self.utc_offset
 }
 
 ///|
 /// What the person points with as it starts (Tester::new's `pointing`): 1 a finger, 0 a mouse; each event's word
 /// after (@ui.pointing).
-impl @hostapi.Host for FakeHost with pointing(self) {
+fn FakeHost::pointing(self : FakeHost) -> Int {
   match self.pointing {
     Finger => 1
     Mouse => 0
@@ -1839,7 +1882,7 @@ impl @hostapi.Host for FakeHost with pointing(self) {
 
 ///|
 /// What the app was started to be used with (Tester::new's `native`): 1 a finger, 2 a mouse.
-impl @hostapi.Host for FakeHost with native_pointing(self) {
+fn FakeHost::native_pointing(self : FakeHost) -> Int {
   match self.native {
     Finger => 1
     Mouse => 2
@@ -1848,7 +1891,7 @@ impl @hostapi.Host for FakeHost with native_pointing(self) {
 
 ///|
 /// A keyboard at hand (Tester::new's `keyboard`, Tester::set_keyboard).
-impl @hostapi.Host for FakeHost with keyboard(self) {
+fn FakeHost::keyboard(self : FakeHost) -> Int {
   if self.keyboard {
     1
   } else {
@@ -1857,7 +1900,7 @@ impl @hostapi.Host for FakeHost with keyboard(self) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with window_inset(self) {
+fn FakeHost::window_inset(self : FakeHost) -> Bool {
   match self.window_insets.get(self.window_at) {
     Some(i) if self.window_at > 0 => i
     _ => self.inset
@@ -1865,14 +1908,14 @@ impl @hostapi.Host for FakeHost with window_inset(self) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with full_screen(self) {
+fn FakeHost::full_screen(self : FakeHost) -> Bool {
   self.full
 }
 
 ///|
 /// The window made to fill the screen or back: kept (@ui.full_screen), a frame asked for it as a host's window that
 /// changes so draws one, between frames; in one, that frame draws it (view_told_as_built).
-impl @hostapi.Host for FakeHost with set_full_screen(self, on) {
+fn FakeHost::set_full_screen(self : FakeHost, on : Bool) -> Unit {
   if self.full != on {
     self.full = on
     if !frame_running.val {
@@ -1883,14 +1926,14 @@ impl @hostapi.Host for FakeHost with set_full_screen(self, on) {
 
 ///|
 /// The window's buttons moved lower: kept (Tester::window_buttons_down).
-impl @hostapi.Host for FakeHost with window_buttons_down(self, by, ms) {
+fn FakeHost::window_buttons_down(self : FakeHost, by : Double, ms : Double) -> Unit {
   self.buttons_down = (by, ms)
 }
 
 ///|
 /// How round the window's corners are (Tester::new's `window_corner`, the roundest of its `window_corners`): none
 /// while it fills the screen.
-impl @hostapi.Host for FakeHost with window_corner(self) {
+fn FakeHost::window_corner(self : FakeHost) -> Double {
   if self.full {
     0.0
   } else {
@@ -1903,7 +1946,7 @@ impl @hostapi.Host for FakeHost with window_corner(self) {
 
 ///|
 /// Corner `k` (0 top left, then round it: Tester::new's `window_corners`, else its `window_corner`).
-impl @hostapi.Host for FakeHost with window_corner_at(self, k) {
+fn FakeHost::window_corner_at(self : FakeHost, k : Int) -> Double {
   if self.full {
     0.0
   } else {
@@ -1916,13 +1959,13 @@ impl @hostapi.Host for FakeHost with window_corner_at(self, k) {
 
 ///|
 /// Whether it lays out the app's tabs itself (Tester::set_nav_able).
-impl @hostapi.Host for FakeHost with nv_able(self) {
+fn FakeHost::nv_able(self : FakeHost) -> Bool {
   self.nav_able
 }
 
 ///|
 /// The bars handed it, kept (Tester::nav_said): shown where it lays them out.
-impl @hostapi.Host for FakeHost with nv_bar(self, spec) {
+fn FakeHost::nv_bar(self : FakeHost, spec : String) -> Int {
   self.nav_said = spec
   if self.nav_able {
     1
@@ -1933,17 +1976,17 @@ impl @hostapi.Host for FakeHost with nv_bar(self, spec) {
 
 ///|
 /// Its environment (Tester::new's `env`, Tester::set_env).
-impl @hostapi.Host for FakeHost with env(self, name) {
+fn FakeHost::env(self : FakeHost, name : String) -> String {
   self.env.get(name).unwrap_or("")
 }
 
 ///|
-impl @hostapi.Host for FakeHost with app_version(self) {
+fn FakeHost::app_version(self : FakeHost) -> Int {
   self.app_version
 }
 ///|
 /// A secret on the clipboard: kept as any words (Tester::clipboard), said to be a secret (Tester::clipboard_secret).
-impl @hostapi.Host for FakeHost with clipboard_set_secret(self, s, clear_ms) {
+fn FakeHost::clipboard_set_secret(self : FakeHost, s : String, clear_ms : Double) -> Unit {
   self.clipboard = s
   self.clipboard_html = ""
   self.clipboard_secret = clear_ms
@@ -1951,7 +1994,7 @@ impl @hostapi.Host for FakeHost with clipboard_set_secret(self, s, clear_ms) {
 
 ///|
 /// The last secret taken off while it is there still (Tester::clipboard empty again, Tester::clipboard_secret None).
-impl @hostapi.Host for FakeHost with clipboard_secret_off(self) {
+fn FakeHost::clipboard_secret_off(self : FakeHost) -> Unit {
   if self.clipboard_secret >= 0.0 {
     self.clipboard = ""
     self.clipboard_secret = -1.0
@@ -1960,7 +2003,7 @@ impl @hostapi.Host for FakeHost with clipboard_secret_off(self) {
 
 ///|
 /// A picture on the clipboard: how long it was kept (Tester::clipboard_image).
-impl @hostapi.Host for FakeHost with clipboard_set_image(self, data) {
+fn FakeHost::clipboard_set_image(self : FakeHost, data : Bytes) -> Unit {
   self.clipboard_image = data.length()
 }
 
@@ -1970,7 +2013,7 @@ impl @hostapi.Host for FakeHost with clipboard_set_image(self, data) {
 /// Drawn out where a header stands for a group it keeps, as a host draws them (Ctx::flat_from): what a test reads of
 /// the frame reads the instances drawn. Those are the frame's, every one: what a host is handed leaves out what
 /// cannot be seen (h_present, @damage's Damage::occlude), which draws the same.
-impl @hostapi.Host for FakeHost with present(self, _, _, _, _, _) {
+fn FakeHost::present(self : FakeHost, _ : FixedArray[Double], _ : Int, _ : Double, _ : Double, _ : Double) -> Unit {
   let c = g()
   c.flat_from(0)
   self.instances = c.ninst
@@ -1988,13 +2031,13 @@ impl @hostapi.Host for FakeHost with present(self, _, _, _, _, _) {
 
 ///|
 /// The app over another app done, kept (Tester::overs_done).
-impl @hostapi.Host for FakeHost with over_done(self, open_app) {
+fn FakeHost::over_done(self : FakeHost, open_app : Bool) -> Unit {
   self.overs_done.push(open_app)
 }
 
 ///|
 /// What the notice holding the app up says, kept (Tester::hold_words).
-impl @hostapi.Host for FakeHost with hold_words(self, channel, title, body) {
+fn FakeHost::hold_words(self : FakeHost, channel : String, title : String, body : String) -> Unit {
   self.hold_words = Some((channel, title, body))
 }
 
@@ -2007,7 +2050,7 @@ fn fake_charset(charset : String) -> Bool {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with cs_known(_, charset) {
+fn FakeHost::cs_known(_ : FakeHost, charset : String) -> Int {
   if fake_charset(charset) {
     1
   } else {
@@ -2016,7 +2059,7 @@ impl @hostapi.Host for FakeHost with cs_known(_, charset) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with cs_decode(_, data, charset) {
+fn FakeHost::cs_decode(_ : FakeHost, data : Bytes, charset : String) -> String {
   if fake_charset(charset) {
     gb18030_decode(data)
   } else {
@@ -2026,28 +2069,28 @@ impl @hostapi.Host for FakeHost with cs_decode(_, data, charset) {
 
 ///|
 /// The access level of a Tester's gallery (Tester::gallery).
-impl @hostapi.Host for FakeHost with ga_access(self) {
+fn FakeHost::ga_access(self : FakeHost) -> Int {
   guard self.gallery is Some(_) else { return 0 }
   if self.gallery_limited { 2 } else { 1 }
 }
 
 ///|
-impl @hostapi.Host for FakeHost with ga_read(self) {
+fn FakeHost::ga_read(self : FakeHost) -> Int {
   self.gallery_read()
 }
 
 ///|
-impl @hostapi.Host for FakeHost with ga_read_state(self, a0) {
+fn FakeHost::ga_read_state(self : FakeHost, a0 : Int) -> Int {
   self.gallery_read_state(a0)
 }
 
 ///|
-impl @hostapi.Host for FakeHost with ga_read_rows(self, a0) {
+fn FakeHost::ga_read_rows(self : FakeHost, a0 : Int) -> String {
   self.gallery_read_rows(a0)
 }
 
 ///|
-impl @hostapi.Host for FakeHost with ga_read_end(self, a0) {
+fn FakeHost::ga_read_end(self : FakeHost, a0 : Int) -> Unit {
   self.gallery_read_end(a0)
 }
 
@@ -2068,12 +2111,12 @@ pub let fake_op : Ref[((Array[String]) -> (Int, String, String))?] = Ref(None)
 pub let fake_op_runs : Array[Array[String]] = []
 
 ///|
-impl @hostapi.Host for FakeHost with pw_able(_) {
+fn FakeHost::pw_able(_ : FakeHost) -> Bool {
   fake_op.val is Some(_)
 }
 
 ///|
-impl @hostapi.Host for FakeHost with pw_run(_, args) {
+fn FakeHost::pw_run(_ : FakeHost, args : String) -> Int {
   guard fake_op.val is Some(_) else { return 0 }
   let given = args.split("\u{1f}").map(fn(a) { a.to_owned() }).to_array()
   // (each argument ended by the separator: the last piece is none)
@@ -2087,14 +2130,14 @@ impl @hostapi.Host for FakeHost with pw_run(_, args) {
 pub let fake_op_pending : Ref[Bool] = Ref(false)
 
 ///|
-impl @hostapi.Host for FakeHost with pw_out(_, id) {
+fn FakeHost::pw_out(_ : FakeHost, id : Int) -> String {
   guard fake_op.val is Some(answer) && id >= 1 && id <= fake_op_runs.length() && !fake_op_pending.val else { return "" }
   let (code, out, err) = answer(fake_op_runs[id - 1])
   "\{code}\u{1f}\{out}\u{1f}\{err}\u{1f}"
 }
 
 ///|
-impl @hostapi.Host for FakeHost with pw_end(_, _) {
+fn FakeHost::pw_end(_ : FakeHost, _ : Int) -> Unit {
   ()
 }
 
@@ -2119,26 +2162,26 @@ pub fn fake_autofill_picks(host : String, username : String, password : String) 
 }
 
 ///|
-impl @hostapi.Host for FakeHost with af_able(_) {
+fn FakeHost::af_able(_ : FakeHost) -> Bool {
   fake_autofill.val
 }
 
 ///|
-impl @hostapi.Host for FakeHost with af_ask(_, host) {
+fn FakeHost::af_ask(_ : FakeHost, host : String) -> Int {
   guard fake_autofill.val else { return 0 }
   fake_autofill_asks.push(host)
   1
 }
 
 ///|
-impl @hostapi.Host for FakeHost with af_take(_) {
+fn FakeHost::af_take(_ : FakeHost) -> String {
   let p = fake_autofill_picked.val
   fake_autofill_picked.val = ""
   p
 }
 
 ///|
-impl @hostapi.Host for FakeHost with af_end(_) {
+fn FakeHost::af_end(_ : FakeHost) -> Unit {
   fake_autofill_picked.val = ""
   fake_autofill_asks.push("")
 }
@@ -2157,12 +2200,12 @@ pub let fake_passkey : Ref[((String, String, String, String) -> String)?] = Ref(
 pub let fake_passkey_asks : Array[(String, String, String, String)] = []
 
 ///|
-impl @hostapi.Host for FakeHost with wa_able(_) {
+fn FakeHost::wa_able(_ : FakeHost) -> Bool {
   fake_passkey.val is Some(_)
 }
 
 ///|
-impl @hostapi.Host for FakeHost with wa_get(_, ask) {
+fn FakeHost::wa_get(_ : FakeHost, ask : String) -> Int {
   guard fake_passkey.val is Some(_) else { return 0 }
   let p = ask.split("\u{1f}").map(fn(a) { a.to_owned() }).to_array()
   fake_passkey_asks.push((p.get(0).unwrap_or(""), p.get(1).unwrap_or(""), p.get(2).unwrap_or(""), p.get(3).unwrap_or("")))
@@ -2170,14 +2213,14 @@ impl @hostapi.Host for FakeHost with wa_get(_, ask) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with wa_out(_, id) {
+fn FakeHost::wa_out(_ : FakeHost, id : Int) -> String {
   guard fake_passkey.val is Some(answer) && id >= 1 && id <= fake_passkey_asks.length() else { return "" }
   let (rp, client, uv, ids) = fake_passkey_asks[id - 1]
   answer(rp, client, uv, ids)
 }
 
 ///|
-impl @hostapi.Host for FakeHost with wa_end(_, _) {
+fn FakeHost::wa_end(_ : FakeHost, _ : Int) -> Unit {
   ()
 }
 
@@ -2186,7 +2229,7 @@ impl @hostapi.Host for FakeHost with wa_end(_, _) {
 
 ///|
 /// A haptic fired, kept (Tester::haptics).
-impl @hostapi.Host for FakeHost with dv_haptic(self, kind) {
+fn FakeHost::dv_haptic(self : FakeHost, kind : Int) -> Unit {
   let all : Array[Haptic] = [LongPress, ContextClick, TextHandleMove, Confirm, Reject, KeyboardTap]
   for h in all {
     if h.code() == kind {
@@ -2198,13 +2241,13 @@ impl @hostapi.Host for FakeHost with dv_haptic(self, kind) {
 
 ///|
 /// The screen kept awake as last told (Tester::awake).
-impl @hostapi.Host for FakeHost with dv_keep_awake(self, on) {
+fn FakeHost::dv_keep_awake(self : FakeHost, on : Int) -> Unit {
   self.dev.awake = on != 0
 }
 
 ///|
 /// Whether the system says a copy itself (Tester::new's `copy_shown`).
-impl @hostapi.Host for FakeHost with dv_copy_shown(self) {
+fn FakeHost::dv_copy_shown(self : FakeHost) -> Int {
   if self.dev.copy_shown {
     1
   } else {
@@ -2213,30 +2256,30 @@ impl @hostapi.Host for FakeHost with dv_copy_shown(self) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with dv_key_catch(self, on) {
+fn FakeHost::dv_key_catch(self : FakeHost, on : Int) -> Unit {
   self.dev.key_catch = on != 0
 }
 
 ///|
 /// The soft keyboard's height as the test says it.
-impl @hostapi.Host for FakeHost with dv_ime_inset(self) {
+fn FakeHost::dv_ime_inset(self : FakeHost) -> Double {
   self.dev.ime_inset
 }
 
 ///|
-impl @hostapi.Host for FakeHost with dv_ime_action(self, kind) {
+fn FakeHost::dv_ime_action(self : FakeHost, kind : Int) -> Unit {
   self.dev.ime_action = kind
 }
 
 ///|
-impl @hostapi.Host for FakeHost with dv_ime_let_go(self) {
+fn FakeHost::dv_ime_let_go(self : FakeHost) -> Unit {
   self.dev.ime_let_go += 1
 }
 
 ///|
 /// Words or a picture put on the clipboard (@hostapi.clip_set_text, clip_set_png), held with their label
 /// (Tester::clipboard, clipboard_png, clipboard_label).
-impl @hostapi.Host for FakeHost with cl_set(self, text, png, label) {
+fn FakeHost::cl_set(self : FakeHost, text : String, png : Bytes, label : String) -> Unit {
   if png.length() > 0 {
     self.clipboard = ""
     self.dev.clip_png = Some(png)
@@ -2250,7 +2293,7 @@ impl @hostapi.Host for FakeHost with cl_set(self, text, png, label) {
 ///|
 /// A read of the clipboard asked (its id, from 1: the ask's place): answered by what the test gave before it, if it
 /// did, else by what it gives next.
-impl @hostapi.Host for FakeHost with cl_read(self) {
+fn FakeHost::cl_read(self : FakeHost) -> Int {
   let ask : FakeClipRead = { answer: None }
   if self.dev.held.length() > 0 {
     ask.answer = Some((self.dev.held.remove(0), g().frame_no))
@@ -2272,7 +2315,7 @@ fn FakeHost::clip_given(self : FakeHost, id : Int) -> Clipboard? {
 
 ///|
 /// How read `id` goes: 0 reading (until the test's answer is a frame old), 1 read.
-impl @hostapi.Host for FakeHost with cl_state(self, id) {
+fn FakeHost::cl_state(self : FakeHost, id : Int) -> Int {
   if self.clip_given(id) is Some(_) {
     1
   } else {
@@ -2281,7 +2324,7 @@ impl @hostapi.Host for FakeHost with cl_state(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with cl_text(self, id) {
+fn FakeHost::cl_text(self : FakeHost, id : Int) -> String {
   match self.clip_given(id) {
     Some(c) => c.text
     None => ""
@@ -2289,7 +2332,7 @@ impl @hostapi.Host for FakeHost with cl_text(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with cl_picture(self, id) {
+fn FakeHost::cl_picture(self : FakeHost, id : Int) -> Int {
   match self.clip_given(id) {
     Some({ picture: Png(_), .. }) => @hostapi.clip_png
     Some({ picture: TooLarge, .. }) => @hostapi.clip_too_large
@@ -2299,7 +2342,7 @@ impl @hostapi.Host for FakeHost with cl_picture(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with cl_png(self, id) {
+fn FakeHost::cl_png(self : FakeHost, id : Int) -> Bytes {
   match self.clip_given(id) {
     Some({ picture: Png(b), .. }) => b
     _ => Bytes::make(0, b'\x00')
@@ -2307,7 +2350,7 @@ impl @hostapi.Host for FakeHost with cl_png(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with cl_files(self, id) {
+fn FakeHost::cl_files(self : FakeHost, id : Int) -> Int {
   match self.clip_given(id) {
     Some(c) => c.files.length()
     None => 0
@@ -2315,7 +2358,7 @@ impl @hostapi.Host for FakeHost with cl_files(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with cl_file_name(self, id, i) {
+fn FakeHost::cl_file_name(self : FakeHost, id : Int, i : Int) -> String {
   match self.clip_given(id) {
     Some(c) if i >= 0 && i < c.files.length() => c.files[i].0
     _ => ""
@@ -2323,7 +2366,7 @@ impl @hostapi.Host for FakeHost with cl_file_name(self, id, i) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with cl_file(self, id, i) {
+fn FakeHost::cl_file(self : FakeHost, id : Int, i : Int) -> Bytes {
   match self.clip_given(id) {
     Some(c) if i >= 0 && i < c.files.length() => c.files[i].1
     _ => Bytes::make(0, b'\x00')
@@ -2346,7 +2389,7 @@ fn FakeHost::open_notice(self : FakeHost, index : Int) -> Unit {
 
 ///|
 /// A notification shown: kept, one of the same tag replaced.
-impl @hostapi.Host for FakeHost with nt_show(self, channel, tag, title, body, opens) {
+fn FakeHost::nt_show(self : FakeHost, channel : String, tag : String, title : String, body : String, opens : String) -> Unit {
   let kept = self.notices.filter(fn(n) { tag == "" || n.tag != tag })
   self.notices.clear()
   self.notices.append(kept)
@@ -2354,7 +2397,7 @@ impl @hostapi.Host for FakeHost with nt_show(self, channel, tag, title, body, op
 }
 
 ///|
-impl @hostapi.Host for FakeHost with nt_cancel(self, tag) {
+fn FakeHost::nt_cancel(self : FakeHost, tag : String) -> Unit {
   let kept = self.notices.filter(fn(n) { n.tag != tag })
   self.notices.clear()
   self.notices.append(kept)
@@ -2366,7 +2409,7 @@ impl @hostapi.Host for FakeHost with nt_cancel(self, tag) {
 /// frames: the person answers as the frame after the ask begins), refused leaving it denied, but a browser's "default"
 /// as it was (its prompt put away); 3: its settings opened, counted, as the system it plays has them (none a browser's
 /// page opens: 0, nothing counted); 4: whether it shows the number on the app's icon, as the system it plays does.
-impl @hostapi.Host for FakeHost with nt_state(self, what) {
+fn FakeHost::nt_state(self : FakeHost, what : Int) -> Int {
   match what {
     0 =>
       match self.notice_perm {
@@ -2421,7 +2464,7 @@ impl @hostapi.Host for FakeHost with nt_state(self, what) {
 
 ///|
 /// 0: the notification tapped (what it opens), once.
-impl @hostapi.Host for FakeHost with nt_text(self, what) {
+fn FakeHost::nt_text(self : FakeHost, what : Int) -> String {
   if what != 0 {
     return ""
   }
@@ -2442,7 +2485,7 @@ fn fake_fed(f : FakeHost, id : Int, line : String) -> Unit {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_open(self) {
+fn FakeHost::st_open(self : FakeHost) -> Int {
   self.stream_ids += 1
   self.streams_fed[self.stream_ids] = []
   self.stream_said[self.stream_ids] = []
@@ -2450,29 +2493,29 @@ impl @hostapi.Host for FakeHost with st_open(self) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_h264(self, id, avcc, w, h) {
+fn FakeHost::st_h264(self : FakeHost, id : Int, avcc : Bytes, w : Int, h : Int) -> Unit {
   fake_fed(self, id, "h264 \{w}x\{h} avcc=\{avcc.length()}")
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_hevc(self, id, hvcc, w, h) {
+fn FakeHost::st_hevc(self : FakeHost, id : Int, hvcc : Bytes, w : Int, h : Int) -> Unit {
   fake_fed(self, id, "hevc \{w}x\{h} hvcc=\{hvcc.length()}")
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_av1(self, id, av1c, w, h) {
+fn FakeHost::st_av1(self : FakeHost, id : Int, av1c : Bytes, w : Int, h : Int) -> Unit {
   fake_fed(self, id, "av1 \{w}x\{h} av1c=\{av1c.length()}")
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_frame(self, id, data, key, ts) {
+fn FakeHost::st_frame(self : FakeHost, id : Int, data : Bytes, key : Int, ts : Double) -> Unit {
   fake_fed(self, id, "frame key=\{key != 0} ts=\{ts} bytes=\{data.length()}")
 }
 
 ///|
 /// A frame not to be shown: "frame … hidden", taken (as Windows' host does), unless the test said its host has nothing
 /// for one (Tester::set_stream_hides false: one shown as st_frame's, the other not taken).
-impl @hostapi.Host for FakeHost with st_frame_shown(self, id, data, key, ts, show) {
+fn FakeHost::st_frame_shown(self : FakeHost, id : Int, data : Bytes, key : Int, ts : Double, show : Int) -> Int {
   if show != 0 {
     fake_fed(self, id, "frame key=\{key != 0} ts=\{ts} bytes=\{data.length()}")
     1
@@ -2485,12 +2528,12 @@ impl @hostapi.Host for FakeHost with st_frame_shown(self, id, data, key, ts, sho
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_flush(self, id, drain) {
+fn FakeHost::st_flush(self : FakeHost, id : Int, drain : Int) -> Unit {
   fake_fed(self, id, "flush drain=\{drain != 0}")
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_audio_played(self, id) {
+fn FakeHost::st_audio_played(self : FakeHost, id : Int) -> Double {
   match self.stream_audio_clock.get(id) {
     Some((played, _)) => played
     None => 0.0
@@ -2498,7 +2541,7 @@ impl @hostapi.Host for FakeHost with st_audio_played(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_audio_queued(self, id) {
+fn FakeHost::st_audio_queued(self : FakeHost, id : Int) -> Double {
   match self.stream_audio_clock.get(id) {
     Some((_, queued)) => queued
     None => 0.0
@@ -2506,7 +2549,7 @@ impl @hostapi.Host for FakeHost with st_audio_queued(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_audio_wanted(self, id) {
+fn FakeHost::st_audio_wanted(self : FakeHost, id : Int) -> Double {
   if !self.audio_here {
     return 0.0
   }
@@ -2517,33 +2560,33 @@ impl @hostapi.Host for FakeHost with st_audio_wanted(self, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_audio_volume(self, id, v) {
+fn FakeHost::st_audio_volume(self : FakeHost, id : Int, v : Double) -> Unit {
   fake_fed(self, id, "volume \{v}")
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_jpeg(self, id, data, ts) {
+fn FakeHost::st_jpeg(self : FakeHost, id : Int, data : Bytes, ts : Double) -> Unit {
   fake_fed(self, id, "jpeg ts=\{ts} bytes=\{data.length()}")
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_show(self, id, ts) {
+fn FakeHost::st_show(self : FakeHost, id : Int, ts : Double) -> Unit {
   fake_fed(self, id, "show ts=\{ts}")
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_codec(self, id, cmd, data) {
+fn FakeHost::st_codec(self : FakeHost, id : Int, cmd : String, data : Bytes) -> Unit {
   fake_fed(self, id, if data.length() > 0 { "do \{cmd} bytes=\{data.length()}" } else { "do \{cmd}" })
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_close(self, id) {
+fn FakeHost::st_close(self : FakeHost, id : Int) -> Unit {
   fake_fed(self, id, "close")
 }
 
 ///|
 /// A route's frames (@hostapi.stream_direct: `flags` 1 video, 2 audio; none, the route let go of: 0).
-impl @hostapi.Host for FakeHost with st_direct(self, id, route, after, flags) {
+fn FakeHost::st_direct(self : FakeHost, id : Int, route : Double, after : Double, flags : Int) -> Unit {
   let video = (flags & 1) != 0
   let audio = (flags & 2) != 0
   let r = if video || audio { route.to_int() } else { 0 }
@@ -2551,25 +2594,25 @@ impl @hostapi.Host for FakeHost with st_direct(self, id, route, after, flags) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_audio(self, id, data) {
+fn FakeHost::st_audio(self : FakeHost, id : Int, data : Bytes) -> Unit {
   fake_fed(self, id, "audio bytes=\{data.length()}")
 }
 
 ///|
 /// The pointer's picture said by the name the app gives it, its size and hot spot in points.
-impl @hostapi.Host for FakeHost with st_pointer_named(self, id, key, _, w, h, hx, hy) {
+fn FakeHost::st_pointer_named(self : FakeHost, id : Int, key : String, _ : () -> Bytes, w : Double, h : Double, hx : Double, hy : Double) -> Unit {
   let z = window_zoom_drawn.val
   fake_fed(self, id, "pointer \{key} \{w / z}x\{h / z} hot=\{hx / z},\{hy / z}")
 }
 
 ///|
-impl @hostapi.Host for FakeHost with st_pointer_at(self, id, x, y, shown) {
+fn FakeHost::st_pointer_at(self : FakeHost, id : Int, x : Double, y : Double, shown : Int) -> Unit {
   fake_fed(self, id, if shown != 0 { "pointer at \{x} \{y}" } else { "pointer none" })
 }
 
 ///|
 /// Stream `id`'s next event, as the test or the run said it.
-impl @hostapi.Host for FakeHost with st_next(self, id) {
+fn FakeHost::st_next(self : FakeHost, id : Int) -> String {
   match self.stream_said.get(id) {
     Some(q) if q.length() > 0 => q.remove(0)
     _ => ""
@@ -2578,7 +2621,7 @@ impl @hostapi.Host for FakeHost with st_next(self, id) {
 
 ///|
 /// Whether it decodes H.264 (Tester::new's `h264`).
-impl @hostapi.Host for FakeHost with st_h264_here(self) {
+fn FakeHost::st_h264_here(self : FakeHost) -> Int {
   if self.h264 {
     1
   } else {
@@ -2588,7 +2631,7 @@ impl @hostapi.Host for FakeHost with st_h264_here(self) {
 
 ///|
 /// Whether it decodes H.265 (Tester::set_h265).
-impl @hostapi.Host for FakeHost with st_h265_here(self) {
+fn FakeHost::st_h265_here(self : FakeHost) -> Int {
   if self.h265_here {
     1
   } else {
@@ -2598,7 +2641,7 @@ impl @hostapi.Host for FakeHost with st_h265_here(self) {
 
 ///|
 /// Whether it decodes AV1 (Tester::set_av1).
-impl @hostapi.Host for FakeHost with st_av1_here(self) {
+fn FakeHost::st_av1_here(self : FakeHost) -> Int {
   if self.av1_here {
     1
   } else {
@@ -2608,7 +2651,7 @@ impl @hostapi.Host for FakeHost with st_av1_here(self) {
 
 ///|
 /// Whether its H.264 decoder is driven from the app (Tester::set_stream_feeds).
-impl @hostapi.Host for FakeHost with st_feeds(self) {
+fn FakeHost::st_feeds(self : FakeHost) -> Int {
   if self.stream_feeds {
     1
   } else {
@@ -2619,7 +2662,7 @@ impl @hostapi.Host for FakeHost with st_feeds(self) {
 ///|
 /// Its streams' system video layers (Tester::set_stream_layers): 0 none, 1 in a stream's tagged colours, 2 in sRGB
 /// (Tester::set_stream_layers_srgb).
-impl @hostapi.Host for FakeHost with st_layers(self) {
+fn FakeHost::st_layers(self : FakeHost) -> Int {
   if !self.stream_layers {
     0
   } else if self.stream_layers_srgb {
@@ -2631,7 +2674,7 @@ impl @hostapi.Host for FakeHost with st_layers(self) {
 
 ///|
 /// Whether it plays a remote screen's audio (Tester::set_stream_audio).
-impl @hostapi.Host for FakeHost with st_audio_here(self) {
+fn FakeHost::st_audio_here(self : FakeHost) -> Int {
   if self.audio_here {
     1
   } else {
@@ -2649,12 +2692,12 @@ fn Tester::fake_pages_run(self : Tester) -> Unit {
 
 ///|
 /// What was posted to it (fake_post) since a frame took the last: how many, taken one by one (post_next).
-impl @hostapi.Host for FakeHost with post_take(_) {
+fn FakeHost::post_take(_ : FakeHost) -> Int {
   fake_posted.length()
 }
 
 ///|
-impl @hostapi.Host for FakeHost with post_next(_) {
+fn FakeHost::post_next(_ : FakeHost) -> (String, String, Bytes)? {
   if fake_posted.is_empty() {
     return None
   }
@@ -2669,7 +2712,7 @@ impl @hostapi.Host for FakeHost with post_next(_) {
 
 ///|
 /// A call asked (its id, from 1: its place).
-impl @hostapi.Host for FakeHost with ncall_call(self, name, params) {
+fn FakeHost::ncall_call(self : FakeHost, name : String, params : String) -> Int {
   let params = @json.parse(params) catch { _ => Json::string(params) }
   let ask : FakeNative = { name, params, answer: None, said: false }
   let mut held = -1
@@ -2704,7 +2747,7 @@ fn FakeHost::native_given(self : FakeHost, id : Int) -> Result[Json, String]? {
 
 ///|
 /// How call `id` goes: 0 waiting, 1 answered, 2 refused.
-impl @hostapi.Host for FakeHost with ncall_state(self, id) {
+fn FakeHost::ncall_state(self : FakeHost, id : Int) -> Int {
   match self.native_given(id) {
     Some(Ok(_)) => 1
     Some(Err(_)) => 2
@@ -2714,7 +2757,7 @@ impl @hostapi.Host for FakeHost with ncall_state(self, id) {
 
 ///|
 /// Its answer's JSON, or why it was refused.
-impl @hostapi.Host for FakeHost with ncall_result(self, id) {
+fn FakeHost::ncall_result(self : FakeHost, id : Int) -> String {
   match self.native_given(id) {
     Some(Ok(j)) => j.stringify()
     Some(Err(why)) => why
@@ -2727,7 +2770,7 @@ impl @hostapi.Host for FakeHost with ncall_result(self, id) {
 /// no event; but what was picked and a native call's answer, told at their moment as a host's event tells them
 /// (fake_pick_said, fake_native_due), and the marks' drawings where the test answers them by hand
 /// (Tester::marks_by_hand), told so (Tester::marks_answer).
-impl @hostapi.Host for FakeHost with answers_by_frame(self, kind) {
+fn FakeHost::answers_by_frame(self : FakeHost, kind : Int) -> Bool {
   kind != outside_pick &&
   kind != outside_native &&
   !(kind == outside_marks && self.marks_by_hand)
@@ -2735,7 +2778,7 @@ impl @hostapi.Host for FakeHost with answers_by_frame(self, kind) {
 
 ///|
 /// What it answers at a moment is told as a host's event (on_outside); the rest by the frame (answers_by_frame).
-impl @hostapi.Host for FakeHost with set_outside(_, _) {
+fn FakeHost::set_outside(_ : FakeHost, _ : FuncRef[(Int, Int, Int) -> Unit]) -> Bool {
   true
 }
 
@@ -2830,7 +2873,7 @@ fn finger_wheel(x : Double, y : Double, dx : Double, dy : Double, phase : Int) -
 
 ///|
 /// What a script tells its system, its native views' host, its keyboard and its pickers, done as told (drive.mbt).
-impl @hostapi.Host for FakeHost with script_step(self, step, arg) {
+fn FakeHost::script_step(self : FakeHost, step : String, arg : String) -> String {
   match step {
     "system" => {
       fake_post(self, @hostapi.system_channel, arg, None)
@@ -2925,27 +2968,27 @@ fn picked_picture(w : Int, h : Int) -> Bytes {
 ///|
 /// It keeps groups of instances, as every platform's host does: drawn out as it is handed them (present); none where
 /// the test says so (Tester::set_groups), as the web's host.
-impl @hostapi.Host for FakeHost with groups_here(self) {
+fn FakeHost::groups_here(self : FakeHost) -> Bool {
   self.groups
 }
 
 ///|
 /// A list's rows set on its pixels as every platform's host sets them, where the test says so
 /// (Tester::set_rows_on_pixels).
-impl @hostapi.Host for FakeHost with rows_on_pixels(self) {
+fn FakeHost::rows_on_pixels(self : FakeHost) -> Bool {
   self.rows_on_pixels
 }
 
 ///|
 /// The window's tree keeps where in the source each node was made, for what a test finds to say where to change it
 /// (view's source.mbt), unless the test runs it as a device does (Tester::new's `keeps_sources`).
-impl @hostapi.Host for FakeHost with keeps_sources(self) {
+fn FakeHost::keeps_sources(self : FakeHost) -> Bool {
   self.keeps_sources
 }
 
 ///|
 /// Over a host's kept text, as that host said of its fonts (any of them), asked of nothing new; else not.
-impl @hostapi.Host for FakeHost with lines_on_pixels(_) {
+fn FakeHost::lines_on_pixels(_ : FakeHost) -> Bool {
   match text_table.val {
     Some(t) => t.metrics.values().any(fn(r) { r.length() > 5 && r[5] == 1.0 })
     None => false
@@ -3071,4 +3114,264 @@ fn fake_dues_to(f : FakeHost, t : Double) -> Unit {
     }
     posted_tell()
   }
+}
+
+///|
+/// Closure table view of this fake host, built once per Tester run.
+fn FakeHost::as_host(self : FakeHost) -> @hostapi.Host {
+  let h = @hostapi.Host::noop()
+  h.install_package = fn(a0, a1) { self.install_package(a0, a1) }
+  h.window_show = fn() { self.window_show() }
+  h.auto_launch = fn() { self.auto_launch() }
+  h.set_auto_launch = fn(a0) { self.set_auto_launch(a0) }
+  h.hotkey_set = fn(a0, a1) { self.hotkey_set(a0, a1) }
+  h.hotkey_clear = fn(a0) { self.hotkey_clear(a0) }
+  h.reduce_motion = fn() { self.reduce_motion() }
+  h.display_hz = fn() { self.display_hz() }
+  h.drive = fn(a0, a1) { self.drive(a0, a1) }
+  h.exit = fn(a0) { self.exit(a0) }
+  h.update_fetch = fn(a0, a1, a2, a3, a4, a5) { self.update_fetch(a0, a1, a2, a3, a4, a5) }
+  h.update_apply = fn(a0) { self.update_apply(a0) }
+  h.update_state = fn() { self.update_state() }
+  h.pk_start = fn(a0) { self.pk_start(a0) }
+  h.pk_photo = fn(a0) { self.pk_photo(a0) }
+  h.pk_state = fn(a0) { self.pk_state(a0) }
+  h.pk_count = fn(a0) { self.pk_count(a0) }
+  h.pk_name = fn(a0, a1) { self.pk_name(a0, a1) }
+  h.pk_bytes = fn(a0, a1) { self.pk_bytes(a0, a1) }
+  h.pk_info = fn(a0, a1) { self.pk_info(a0, a1) }
+  h.pk_end = fn(a0) { self.pk_end(a0) }
+  h.kp_begin = fn(a0, a1, a2) { self.kp_begin(a0, a1, a2) }
+  h.kp_append = fn(a0, a1) { self.kp_append(a0, a1) }
+  h.kp_finish = fn(a0) { self.kp_finish(a0) }
+  h.kp_state = fn(a0) { self.kp_state(a0) }
+  h.kp_where = fn(a0) { self.kp_where(a0) }
+  h.kp_end = fn(a0) { self.kp_end(a0) }
+  h.now = fn() { self.now() }
+  h.wall_ms = fn() { self.wall_ms() }
+  h.clock_at_wall = Some(fn(a0) { self.clock_at_wall(a0) })
+  h.event_time = fn() { self.event_time() }
+  h.event_finger = fn() { self.event_finger() }
+  h.frame_late = fn() { self.frame_late() }
+  h.platform = fn() { self.platform() }
+  h.keys_platform = fn() { self.keys_platform() }
+  h.request_frame = fn() { self.request_frame() }
+  h.request_frame_on = Some(fn() { self.request_frame_on() })
+  h.frames_paced = Some(fn(a0) { self.frames_paced(a0) })
+  h.wake_after = fn(a0) { self.wake_after(a0) }
+  h.font_metrics = fn(a0, a1, a2, a3) { self.font_metrics(a0, a1, a2, a3) }
+  h.words_spaced = Some(fn() { self.words_spaced() })
+  h.shape = fn(a0, a1, a2, a3, a4) { self.shape(a0, a1, a2, a3, a4) }
+  h.text_key = fn(a0, a1, a2, a3) { self.text_key(a0, a1, a2, a3) }
+  h.glyphs_ahead = fn(a0, a1) { self.glyphs_ahead(a0, a1) }
+  h.glyphs_ahead_able = fn() { self.glyphs_ahead_able() }
+  h.glyph = fn(a0, a1) { self.glyph(a0, a1) }
+  h.glyph_put = fn(a0, a1, a2) { self.glyph_put(a0, a1, a2) }
+  h.glyph_picture = fn(a0, a1) { self.glyph_picture(a0, a1) }
+  h.atlas_put = fn(a0, a1, a2, a3, a4) { self.atlas_put(a0, a1, a2, a3, a4) }
+  h.atlas_size = fn(a0) { self.atlas_size(a0) }
+  h.face_add = fn(a0, a1, a2) { self.face_add(a0, a1, a2) }
+  h.face_add_bytes = fn(a0, a1, a2) { self.face_add_bytes(a0, a1, a2) }
+  h.face_clear = fn(a0) { self.face_clear(a0) }
+  h.face_add_family = fn(a0, a1) { self.face_add_family(a0, a1) }
+  h.has_local_fonts = fn() { self.has_local_fonts() }
+  h.local_font_families = fn() { self.local_font_families() }
+  h.face_set_ligatures = fn(a0, a1) { self.face_set_ligatures(a0, a1) }
+  h.set_host_autospace = fn(a0) { self.set_host_autospace(a0) }
+  h.local_font_info = fn() { self.local_font_info() }
+  h.has_async_local_font_info = fn() { self.has_async_local_font_info() }
+  h.atlas_generation = fn() { self.atlas_generation() }
+  h.reduce_transparency = fn() { self.reduce_transparency() }
+  h.increase_contrast = fn() { self.increase_contrast() }
+  h.thermal_throttled = fn() { self.thermal_throttled() }
+  h.perf_state = fn() { self.perf_state() }
+  h.set_perf = fn(a0) { self.set_perf(a0) }
+  h.perf_line = fn(a0) { self.perf_line(a0) }
+  h.perf_where = fn() { self.perf_where() }
+  h.reveal_file = fn(a0, a1) { self.reveal_file(a0, a1) }
+  h.perf_open = fn(a0) { self.perf_open(a0) }
+  h.perf_size = fn() { self.perf_size() }
+  h.set_ime = fn(a0, a1, a2, a3, a4, a5, a6, a7) { self.set_ime(a0, a1, a2, a3, a4, a5, a6, a7) }
+  h.text_menu = fn(a0, a1, a2, a3, a4, a5) { self.text_menu(a0, a1, a2, a3, a4, a5) }
+  h.text_menu_own = fn(a0) { self.text_menu_own(a0) }
+  h.edit_can = fn(a0) { self.edit_can(a0) }
+  h.clipboard_set = fn(a0) { self.clipboard_set(a0) }
+  h.clipboard_set_html = Some(fn(a0, a1) { self.clipboard_set_html(a0, a1) })
+  h.word_at = fn(a0, a1) { self.word_at(a0, a1) }
+  h.open_url = fn(a0) { self.open_url(a0) }
+  h.open_tab = fn(a0) { self.open_tab(a0) }
+  h.back_enabled = fn(a0) { self.back_enabled(a0) }
+  h.wheel_kept = fn(a0) { self.wheel_kept(a0) }
+  h.a11y_on = fn() { self.a11y_on() }
+  h.a11y_tree = fn(a0) { self.a11y_tree(a0) }
+  h.log = fn(a0) { self.log(a0) }
+  h.image_load = fn(a0, a1) { self.image_load(a0, a1) }
+  h.image_load_bytes = fn(a0, a1) { self.image_load_bytes(a0, a1) }
+  h.image_info = fn(a0, a1) { self.image_info(a0, a1) }
+  h.image_pixels = fn(a0, a1) { self.image_pixels(a0, a1) }
+  h.drawn_pixels = fn(a0, a1, a2, a3, a4) { self.drawn_pixels(a0, a1, a2, a3, a4) }
+  h.drawn_pixels_of = fn(a0, a1, a2, a3, a4, a5, a6, a7, a8) { self.drawn_pixels_of(a0, a1, a2, a3, a4, a5, a6, a7, a8) }
+  h.image_free = fn(a0) { self.image_free(a0) }
+  h.view_open = fn(a0, a1) { self.view_open(a0, a1) }
+  h.view_place = fn(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13) { self.view_place(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13) }
+  h.view_close = fn(a0) { self.view_close(a0) }
+  h.view_control = fn(a0, a1, a2) { self.view_control(a0, a1, a2) }
+  h.view_info = fn(a0, a1) { self.view_info(a0, a1) }
+  h.view_site_next = fn(a0) { self.view_site_next(a0) }
+  h.view_tell = fn(a0, a1, a2) { self.view_tell(a0, a1, a2) }
+  h.view_site_body = fn(a0, a1) { self.view_site_body(a0, a1) }
+  h.view_site_head = fn(a0, a1, a2, a3) { self.view_site_head(a0, a1, a2, a3) }
+  h.view_site_chunk = fn(a0, a1, a2) { self.view_site_chunk(a0, a1, a2) }
+  h.view_site_end = fn(a0, a1, a2) { self.view_site_end(a0, a1, a2) }
+  h.view_site_state = fn(a0) { self.view_site_state(a0) }
+  h.view_text = fn(a0, a1) { self.view_text(a0, a1) }
+  h.view_still = fn(a0) { self.view_still(a0) }
+  h.view_site_load = fn(a0, a1) { self.view_site_load(a0, a1) }
+  h.view_read_next = fn(a0, a1) { self.view_read_next(a0, a1) }
+  h.view_read_answer = fn(a0, a1, a2, a3, a4) { self.view_read_answer(a0, a1, a2, a3, a4) }
+  h.pdf_open = fn(a0) { self.pdf_open(a0) }
+  h.pdf_pages = fn(a0) { self.pdf_pages(a0) }
+  h.pdf_page_size = fn(a0, a1, a2) { self.pdf_page_size(a0, a1, a2) }
+  h.pdf_page_load = fn(a0, a1, a2) { self.pdf_page_load(a0, a1, a2) }
+  h.pdf_close = fn(a0) { self.pdf_close(a0) }
+  h.set_cursor = fn(a0) { self.set_cursor(a0) }
+  h.set_badge = fn(a0) { self.set_badge(a0) }
+  h.app_said = fn(a0) { self.app_said(a0) }
+  h.app_tell = fn(a0, a1) { self.app_tell(a0, a1) }
+  h.mods_held = fn() { self.mods_held() }
+  h.pointer_lock = fn(a0) { self.pointer_lock(a0) }
+  h.pointer_locked = fn() { self.pointer_locked() }
+  h.pointer_delta = fn(a0) { self.pointer_delta(a0) }
+  h.gamepads = fn(a0) { self.gamepads(a0) }
+  h.window_drag = fn() { self.window_drag() }
+  h.window_act = fn(a0) { self.window_act(a0) }
+  h.window_zoomed = fn() { self.window_zoomed() }
+  h.window_snap = fn(a0, a1, a2, a3) { self.window_snap(a0, a1, a2, a3) }
+  h.window_snap_state = fn() { self.window_snap_state() }
+  h.window_opens = fn() { self.window_opens() }
+  h.window_open = fn(a0) { self.window_open(a0) }
+  h.window_front = fn(a0) { self.window_front(a0) }
+  h.windows_in_process = fn() { self.windows_in_process() }
+  h.window_open_id = fn(a0) { self.window_open_id(a0) }
+  h.window_set_title = fn(a0, a1) { self.window_set_title(a0, a1) }
+  h.window_front_id = fn(a0) { self.window_front_id(a0) }
+  h.window_close_id = fn(a0) { self.window_close_id(a0) }
+  h.window_current = fn() { self.window_current() }
+  h.shared_in = fn() { self.shared_in() }
+  h.shared_in_file = fn(a0) { self.shared_in_file(a0) }
+  h.share = fn(a0, a1, a2, a3) { self.share(a0, a1, a2, a3) }
+  h.mk_start = fn(a0, a1) { self.mk_start(a0, a1) }
+  h.mk_state = fn(a0) { self.mk_state(a0) }
+  h.mk_png = fn(a0) { self.mk_png(a0) }
+  h.own_clock = fn() { self.own_clock() }
+  h.system_dark = fn() { self.system_dark() }
+  h.font_scale = fn() { self.font_scale() }
+  h.utc_offset_min = fn(a0) { self.utc_offset_min(a0) }
+  h.pointing = fn() { self.pointing() }
+  h.native_pointing = fn() { self.native_pointing() }
+  h.keyboard = fn() { self.keyboard() }
+  h.window_inset = fn() { self.window_inset() }
+  h.full_screen = fn() { self.full_screen() }
+  h.set_full_screen = fn(a0) { self.set_full_screen(a0) }
+  h.window_buttons_down = fn(a0, a1) { self.window_buttons_down(a0, a1) }
+  h.window_corner = fn() { self.window_corner() }
+  h.window_corner_at = Some(fn(a0) { self.window_corner_at(a0) })
+  h.nv_able = fn() { self.nv_able() }
+  h.nv_bar = fn(a0) { self.nv_bar(a0) }
+  h.env = fn(a0) { self.env(a0) }
+  h.app_version = fn() { self.app_version() }
+  h.clipboard_set_secret = fn(a0, a1) { self.clipboard_set_secret(a0, a1) }
+  h.clipboard_secret_off = fn() { self.clipboard_secret_off() }
+  h.clipboard_set_image = fn(a0) { self.clipboard_set_image(a0) }
+  h.present = fn(a0, a1, a2, a3, a4) { self.present(a0, a1, a2, a3, a4) }
+  h.over_done = fn(a0) { self.over_done(a0) }
+  h.hold_words = fn(a0, a1, a2) { self.hold_words(a0, a1, a2) }
+  h.cs_known = fn(a0) { self.cs_known(a0) }
+  h.cs_decode = fn(a0, a1) { self.cs_decode(a0, a1) }
+  h.ga_access = fn() { self.ga_access() }
+  h.ga_read = fn() { self.ga_read() }
+  h.ga_read_state = fn(a0) { self.ga_read_state(a0) }
+  h.ga_read_rows = fn(a0) { self.ga_read_rows(a0) }
+  h.ga_read_end = fn(a0) { self.ga_read_end(a0) }
+  h.pw_able = fn() { self.pw_able() }
+  h.pw_run = fn(a0) { self.pw_run(a0) }
+  h.pw_out = fn(a0) { self.pw_out(a0) }
+  h.pw_end = fn(a0) { self.pw_end(a0) }
+  h.af_able = fn() { self.af_able() }
+  h.af_ask = fn(a0) { self.af_ask(a0) }
+  h.af_take = fn() { self.af_take() }
+  h.af_end = fn() { self.af_end() }
+  h.wa_able = fn() { self.wa_able() }
+  h.wa_get = fn(a0) { self.wa_get(a0) }
+  h.wa_out = fn(a0) { self.wa_out(a0) }
+  h.wa_end = fn(a0) { self.wa_end(a0) }
+  h.dv_haptic = fn(a0) { self.dv_haptic(a0) }
+  h.dv_keep_awake = fn(a0) { self.dv_keep_awake(a0) }
+  h.dv_copy_shown = fn() { self.dv_copy_shown() }
+  h.dv_key_catch = fn(a0) { self.dv_key_catch(a0) }
+  h.dv_ime_inset = fn() { self.dv_ime_inset() }
+  h.dv_ime_action = fn(a0) { self.dv_ime_action(a0) }
+  h.dv_ime_let_go = fn() { self.dv_ime_let_go() }
+  h.cl_set = fn(a0, a1, a2) { self.cl_set(a0, a1, a2) }
+  h.cl_read = fn() { self.cl_read() }
+  h.cl_state = fn(a0) { self.cl_state(a0) }
+  h.cl_text = fn(a0) { self.cl_text(a0) }
+  h.cl_picture = fn(a0) { self.cl_picture(a0) }
+  h.cl_png = fn(a0) { self.cl_png(a0) }
+  h.cl_files = fn(a0) { self.cl_files(a0) }
+  h.cl_file_name = fn(a0, a1) { self.cl_file_name(a0, a1) }
+  h.cl_file = fn(a0, a1) { self.cl_file(a0, a1) }
+  h.nt_show = fn(a0, a1, a2, a3, a4) { self.nt_show(a0, a1, a2, a3, a4) }
+  h.nt_cancel = fn(a0) { self.nt_cancel(a0) }
+  h.nt_state = fn(a0) { self.nt_state(a0) }
+  h.nt_text = fn(a0) { self.nt_text(a0) }
+  h.st_open = fn() { self.st_open() }
+  h.st_h264 = fn(a0, a1, a2, a3) { self.st_h264(a0, a1, a2, a3) }
+  h.st_hevc = fn(a0, a1, a2, a3) { self.st_hevc(a0, a1, a2, a3) }
+  h.st_av1 = fn(a0, a1, a2, a3) { self.st_av1(a0, a1, a2, a3) }
+  h.st_frame = fn(a0, a1, a2, a3) { self.st_frame(a0, a1, a2, a3) }
+  h.st_frame_shown = Some(fn(a0, a1, a2, a3, a4) { self.st_frame_shown(a0, a1, a2, a3, a4) })
+  h.st_flush = fn(a0, a1) { self.st_flush(a0, a1) }
+  h.st_audio_played = fn(a0) { self.st_audio_played(a0) }
+  h.st_audio_queued = fn(a0) { self.st_audio_queued(a0) }
+  h.st_audio_wanted = fn(a0) { self.st_audio_wanted(a0) }
+  h.st_audio_volume = fn(a0, a1) { self.st_audio_volume(a0, a1) }
+  h.st_jpeg = fn(a0, a1, a2) { self.st_jpeg(a0, a1, a2) }
+  h.st_show = fn(a0, a1) { self.st_show(a0, a1) }
+  h.st_codec = fn(a0, a1, a2) { self.st_codec(a0, a1, a2) }
+  h.st_close = fn(a0) { self.st_close(a0) }
+  h.st_direct = fn(a0, a1, a2, a3) { self.st_direct(a0, a1, a2, a3) }
+  h.st_audio = fn(a0, a1) { self.st_audio(a0, a1) }
+  h.st_pointer_named = Some(fn(a0, a1, a2, a3, a4, a5, a6) { self.st_pointer_named(a0, a1, a2, a3, a4, a5, a6) })
+  h.st_pointer_at = fn(a0, a1, a2, a3) { self.st_pointer_at(a0, a1, a2, a3) }
+  h.st_next = fn(a0) { self.st_next(a0) }
+  h.st_h264_here = fn() { self.st_h264_here() }
+  h.st_h265_here = fn() { self.st_h265_here() }
+  h.st_av1_here = fn() { self.st_av1_here() }
+  h.st_feeds = fn() { self.st_feeds() }
+  h.st_layers = fn() { self.st_layers() }
+  h.st_audio_here = fn() { self.st_audio_here() }
+  h.post_take = fn() { self.post_take() }
+  h.post_next = fn() { self.post_next() }
+  h.ncall_call = fn(a0, a1) { self.ncall_call(a0, a1) }
+  h.ncall_state = fn(a0) { self.ncall_state(a0) }
+  h.ncall_result = fn(a0) { self.ncall_result(a0) }
+  h.answers_by_frame = fn(a0) { self.answers_by_frame(a0) }
+  h.set_outside = fn(a0) { self.set_outside(a0) }
+  h.script_step = fn(a0, a1) { self.script_step(a0, a1) }
+  h.groups_here = fn() { self.groups_here() }
+  h.rows_on_pixels = fn() { self.rows_on_pixels() }
+  h.keeps_sources = fn() { self.keeps_sources() }
+  h.lines_on_pixels = Some(fn() { self.lines_on_pixels() })
+  h.tm_open = fn(a0, a1) { self.tm_open(a0, a1) }
+  h.tm_write = fn(a0, a1) { self.tm_write(a0, a1) }
+  h.tm_resize = fn(a0, a1, a2, a3, a4) { self.tm_resize(a0, a1, a2, a3, a4) }
+  h.tm_modes = fn(a0) { self.tm_modes(a0) }
+  h.tm_scroll = fn(a0, a1, a2) { self.tm_scroll(a0, a1, a2) }
+  h.tm_select = fn(a0, a1, a2, a3, a4, a5) { self.tm_select(a0, a1, a2, a3, a4, a5) }
+  h.tm_text = fn(a0, a1) { self.tm_text(a0, a1) }
+  h.tm_mouse = fn(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) { self.tm_mouse(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) }
+  h.tm_frame = fn(a0, a1) { self.tm_frame(a0, a1) }
+  h.tm_close = fn(a0) { self.tm_close(a0) }
+  h
 }

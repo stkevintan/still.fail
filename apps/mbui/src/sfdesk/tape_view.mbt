@@ -1484,7 +1484,7 @@ fn tape_side_ground(side : @view.View) -> Int64 {
 /// its ground, corners and line round what is in it as the page's panel's are (tape_page_pane), the panel's room beside
 /// the system's column its ground alone; its bar over whatever tab is in front (side_bar_node, on the tape's line, a tab
 /// alone its title), none where what is in front has its own (side_own_bar_node); under it an agent's history
-/// (side_history_node), a file in the viewer (side_view_node), a Farview tab (side_farview_node), 任务, agent 往来 and
+/// (side_history_node), a file in the viewer (side_view_node), a station's screen (side_screen_node), 任务, agent 往来 and
 /// 图片、文件和链接 (side_own_node). A new chat's Station 文件 the same panel round its one tab (new_side_bar_node, on the
 /// tape's line, and files_tab_node, as beside the page: new_side_node.mbt).
 fn tape_side_node(pane : @view.View, src : Source) -> Unit {
@@ -1594,7 +1594,7 @@ fn tape_side_node(pane : @view.View, src : Source) -> Unit {
         _ => ""
       }
     }
-    // (a file in the viewer: its tools and stage, as beside the page; a Farview tab, its screen drawn here; 任务, agent
+    // (a file in the viewer: its tools and stage, as beside the page; a station's screen; 任务, agent
     // 往来, 图片、文件和链接 each its nodes, a card across the foot in the panel's corners; 文件 and a station's 文件 the
     // tab's nodes, 添加 in those corners too; a station's page its page's nodes; any other tab its old view)
     q.pick(at_once=true, front, fn(s, agent) {

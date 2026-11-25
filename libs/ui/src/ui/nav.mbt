@@ -565,7 +565,7 @@ fn[P] Nav::go(
     Some(h) => (h.went)()
     None => ()
   }
-  g().moving(self.mover, self as &Moving, what="a stack's slide")
+  g().moving(self.mover, self.as_moving(), what="a stack's slide")
   self.shown_told()
 }
 
@@ -573,7 +573,7 @@ fn[P] Nav::go(
 /// When its slide is over, asked at each frame's end while it slides: read only, the same whoever asks first. Told to
 /// go between frames, it starts at the first frame after that builds it (Ctx::nav sets its start): until then +inf;
 /// not built in that frame, at rest, said to move again as Ctx::nav starts it.
-impl[P] Moving for Nav[P] with rest_at(self, now, frame) {
+fn[P] Nav::rest_at(self : Nav[P], now : Double, frame : Int) -> Double {
   ignore(now)
   if self.t0 == nav_held && self.hosted is Some(_) {
     // held by the window's tree for what its page shows: at rest while it waits, its start a moment there (Nav::held_by),
@@ -582,6 +582,12 @@ impl[P] Moving for Nav[P] with rest_at(self, now, frame) {
   } else {
     self.ends_at(frame)
   }
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn[P] Nav::as_moving(self : Nav[P]) -> Moving {
+  Moving::new(fn(now, frame) { self.rest_at(now, frame) })
 }
 
 ///|
@@ -759,7 +765,7 @@ pub fn[P] Nav::comes_when(self : Nav[P], ready : () -> Bool, most : Double) -> U
       self.t0 = c.clock
       // (its first frame this one, the page built with what it shows)
       self.late_at = -1.0
-      c.moving(self.mover, self as &Moving, what="a stack's slide")
+      c.moving(self.mover, self.as_moving(), what="a stack's slide")
     }
     return
   }
@@ -1263,7 +1269,7 @@ fn[P : Eq] Nav::replace_tab_now(self : Nav[P], page : P, way : Int, dur : Double
     Some(h) => (h.swap_went)()
     None => ()
   }
-  g().moving(self.mover, self as &Moving, what="a stack's tab swap")
+  g().moving(self.mover, self.as_moving(), what="a stack's tab swap")
   self.shown_told()
   wake()
 }
@@ -1546,7 +1552,7 @@ pub fn[P] Ctx::nav(
     if nav.t0 < 0.0 && nav.hosted is None {
       // it starts now: said to move again (not built in the frame it was to start in, it had been let be)
       nav.t0 = self.clock
-      self.moving(nav.mover, nav as &Moving, what="a stack's slide")
+      self.moving(nav.mover, nav.as_moving(), what="a stack's slide")
     }
     // where its pages are is worked out as they are laid out and painted (Nav::at, Ctx::nav_layer): its frames are
     // painted alone (frame_watch.mbt). Its end is a moment, the frame at it built again (over at the end it says,
@@ -1795,7 +1801,7 @@ fn[P] Nav::late_check(self : Nav[P], c : Ctx) -> Unit {
     let late = dmin(h_frame_late(), nav_late_most)
     if late > 0.0 {
       self.t0 = self.t0 + late
-      c.moving(self.mover, self as &Moving, what="a stack's slide")
+      c.moving(self.mover, self.as_moving(), what="a stack's slide")
     }
   }
 }

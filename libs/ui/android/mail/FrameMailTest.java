@@ -86,7 +86,7 @@ public final class FrameMailTest {
     /** A frame the app made and handed over. */
     private static boolean frame(FrameMail<String> m, Native n, long shows, String... g) {
         n.present();
-        return m.handOver(shows, glyphs(g));
+        return m.handOver(shows, glyphs(g), false);
     }
 
     /** The GL thread draws (MBView.drawOnGl): tasks before the frame, the frame, what it retires, the tasks after. */
@@ -118,7 +118,7 @@ public final class FrameMailTest {
         // (one that presents nothing: no frame, its glyphs left for the next, counted as made)
         long made = m.made();
         List<String> placed = glyphs("d");
-        check(!m.handOver(30, placed), "nothing presented, nothing handed over");
+        check(!m.handOver(30, placed, false), "nothing presented, nothing handed over");
         check(placed.equals(List.of("d")) && m.made() == made + 1, "its glyphs kept for the next, a frame made");
     }
 
@@ -160,11 +160,11 @@ public final class FrameMailTest {
         m.task(() -> log.add("t"));
         m.runTasks(m.pendingSeqNow());
         draw(m, log);
-        check(m.redrawAsked(5), "a native view's picture changed");
+        check(m.redrawAsked(5, false), "a native view's picture changed");
         draw(m, log);
         check(log.equals(List.of("draw", "t", "redraw", "redraw")), "not while frame 1 is drawn again: " + log);
         // (and not with a frame that presents nothing)
-        m.handOver(6, glyphs());
+        m.handOver(6, glyphs(), false);
         draw(m, log);
         check(!log.contains("free 42"), "not with a frame that presents nothing: " + log);
         frame(m, n, 7);
@@ -205,7 +205,7 @@ public final class FrameMailTest {
         m.contextTold(m.contextMade());
         frame(m, n, 0, "a");
         long made = m.made();
-        check(m.redrawAsked(1), "a redraw owed");
+        check(m.redrawAsked(1, false), "a redraw owed");
         long gen = m.contextMade();
         check(!m.pending() && n.droppedPending == 1, "the frame waiting let go");
         check(!m.redrawOwed(), "the frame kept owed nothing");
@@ -213,7 +213,7 @@ public final class FrameMailTest {
         // (the app's thread, not told yet, hands over a frame it laid out for the old atlas)
         check(!frame(m, n, 2, "b"), "a frame made before it was told not handed over");
         check(!m.pending() && n.droppedPending == 2 && n.glyphsDropped.equals(List.of("a", "b")), "let go, its glyphs too");
-        check(!m.redrawAsked(3), "the frame kept not drawn again for it");
+        check(!m.redrawAsked(3, false), "the frame kept not drawn again for it");
         check(m.made() == made + 1, "none counted made for the new context");
         check(!m.take().took, "nothing for the GL thread");
         m.contextTold(gen);
@@ -243,13 +243,77 @@ public final class FrameMailTest {
         draw(m, log);
         check(m.takeDropped() == 0, "the newest drawn: none more");
         // (nor one presenting nothing, a redraw of the frame kept, one taken to read back and drawn as owed)
-        m.handOver(4, glyphs());
-        check(m.redrawAsked(5), "a redraw");
+        m.handOver(4, glyphs(), false);
+        check(m.redrawAsked(5, false), "a redraw");
         frame(m, n, 6);
         m.takeForSync();
         frame(m, n, 7);
         draw(m, log);
         check(m.takeDropped() == 0, "none of those dropped");
+    }
+
+    /**
+     * Per-frame paced flag ownership: newer handOver overwrites older pendingPaced (no OR), redrawAsked carries its own
+     * redrawPaced, takeForSync transfers pendingPaced to redrawPaced, took overwrites redrawPaced, and contextMade clears both.
+     */
+    static void pacedOwnership() {
+        List<String> log = new ArrayList<>();
+        Native n = new Native(log);
+        FrameMail<String> m = new FrameMail<>(n);
+        m.contextTold(m.contextMade());
+
+        // A=true overwritten by B=false -> draw B sees paced=false.
+        n.present();
+        check(m.handOver(10, glyphs("a"), true), "A handed over paced=true");
+        n.present();
+        check(m.handOver(20, glyphs("b"), false), "B handed over paced=false");
+        FrameMail.Taken<String> t1 = m.take();
+        check(t1.took && !t1.paced, "A=true overwritten by B=false -> paced=false");
+
+        // A=false overwritten by B=true -> draw B sees paced=true.
+        n.present();
+        check(m.handOver(30, glyphs("c"), false), "A handed over paced=false");
+        n.present();
+        check(m.handOver(40, glyphs("d"), true), "B handed over paced=true");
+        FrameMail.Taken<String> t2 = m.take();
+        check(t2.took && t2.paced, "A=false overwritten by B=true -> paced=true");
+
+        // redrawAsked(true) and redrawAsked(false).
+        check(m.redrawAsked(50, true), "redrawAsked true");
+        FrameMail.Taken<String> t3 = m.take();
+        check(!t3.took && t3.redraw && t3.paced, "redraw takes redrawPaced=true");
+        check(m.redrawAsked(60, false), "redrawAsked false");
+        FrameMail.Taken<String> t4 = m.take();
+        check(!t4.took && t4.redraw && !t4.paced, "redraw takes redrawPaced=false");
+        // Plain expose (!took && !redraw) has paced=false.
+        FrameMail.Taken<String> tIdle = m.take();
+        check(!tIdle.took && !tIdle.redraw && !tIdle.paced, "idle take has paced=false");
+
+        // takeForSync transfers pendingPaced -> redrawPaced.
+        n.present();
+        check(m.handOver(70, glyphs("e"), true), "handed over paced=true for sync");
+        FrameMail.Taken<String> sync = m.takeForSync();
+        check(sync.took, "takeForSync took pending");
+        FrameMail.Taken<String> t5 = m.take();
+        check(!t5.took && t5.redraw && t5.paced, "owed redraw after takeForSync inherits paced=true");
+
+        // took overwrites redrawPaced (redrawPaced=true, then handOver(..., false) -> take sees paced=false).
+        check(m.redrawAsked(80, true), "redrawAsked true before newer frame");
+        n.present();
+        check(m.handOver(90, glyphs("f"), false), "newer non-paced frame");
+        FrameMail.Taken<String> t6 = m.take();
+        check(t6.took && !t6.paced, "took overwrites redrawPaced");
+        FrameMail.Taken<String> t7 = m.take();
+        check(!t7.took && !t7.redraw && !t7.paced, "redrawPaced cleared after took");
+
+        // contextMade drops the pending paced=true frame and redraw; subsequent take() neither takes nor redraws, with paced=false.
+        n.present();
+        check(m.handOver(100, glyphs("g"), true), "pending paced=true before contextMade");
+        check(m.redrawAsked(110, true), "redraw paced=true before contextMade");
+        long gen = m.contextMade();
+        m.contextTold(gen);
+        FrameMail.Taken<String> t8 = m.take();
+        check(!t8.took && !t8.redraw && !t8.paced, "contextMade dropped pending paced frame and redraw (paced=false)");
     }
 
     public static void main(String[] args) {
@@ -258,6 +322,7 @@ public final class FrameMailTest {
         tasksAmongFrames();
         retiredOnceShown();
         contextAnew();
+        pacedOwnership();
         if (failed > 0) {
             System.err.println("FrameMailTest: " + failed + " failed");
             System.exit(1);

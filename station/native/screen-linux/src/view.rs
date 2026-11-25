@@ -3,7 +3,7 @@
 use crate::diff;
 use crate::encode::{self, H264Encoder};
 use crate::input_queue::{InputOp, InputQueue};
-use crate::pace::{self, Gate, KeyClock, StillRefiner};
+use crate::pace::{self, Gate, StillRefiner};
 use crate::protocol::{
     self, Out, IN_BOUNDS, IN_INPUT, IN_KEYFRAME, IN_NEXT, IN_RATE, MAX_IN_MESSAGE, OUT_CONFIG,
     OUT_CURSOR, OUT_CURSOR_IMAGE, OUT_FRAME, OUT_INFO, OUT_REGION,
@@ -294,7 +294,6 @@ pub fn run(request: &Value, out: Out) {
     // Main capture / encode loop.
     let started = Instant::now();
     let mut gate = Gate::new(asked_fps);
-    let mut key_clock = KeyClock::default();
     let mut still_refiner = StillRefiner::default();
     let mut sent_region: Option<Region> = None;
     let mut region_dirty = false;
@@ -511,11 +510,12 @@ pub fn run(request: &Value, out: Out) {
         let ts_us = started.elapsed().as_micros() as u64;
 
         // 10. Encode and emit; only consume `next_pending` once a non-empty frame is actually emitted.
-        let mut emitted_frame = false;
+        let emitted_frame;
         if let Some(ref mut enc) = h264 {
-            let want_key = first_frame || force_key || key_clock.due(now_ms);
+            // On-demand IDR only (no 10 s periodic IDR spikes).
+            let want_key = first_frame || force_key;
             if is_refine {
-                let refine_bps = ((normal_bitrate as u64) * 2).min(encode::MAX_BITRATE as u64) as u32;
+                let refine_bps = ((normal_bitrate as u64) * 115 / 100).min(encode::MAX_BITRATE as u64) as u32;
                 let _ = enc.set_bitrate(refine_bps);
                 refined_bitrate_active = true;
             } else if refined_bitrate_active {
@@ -542,9 +542,6 @@ pub fn run(request: &Value, out: Out) {
                     if !pic.data.is_empty() {
                         out.send(OUT_FRAME, &protocol::encode_frame(pic.key, ts_us, &pic.data));
                         emitted_frame = true;
-                        if pic.key {
-                            key_clock.keyed(now_ms);
-                        }
                         let after_ms = started.elapsed().as_secs_f64() * 1000.0;
                         if is_refine {
                             still_refiner.on_refined();

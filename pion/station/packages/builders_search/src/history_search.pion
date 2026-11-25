@@ -1,0 +1,1347 @@
+// 1:1 port of `station/mb/src/history/history.mbt` + `station/mb/src/reader/main.mbt:936-965`:
+// Resumable `HistoriesStepper` (P10–P12), explicit per-query `text.open`/`text.close` handle lifecycle,
+// single-step temp table materialization + immediate drop before P12, `ActiveQuery` stepper,
+// and `--builder search` round-robin event loop with bounded 64-event stdin drain.
+
+import "base_codec"
+import "builders_core"
+import "host_shim"
+import "js_json"
+import "jscase"
+import "locate"
+import "nodepath"
+import "sql_db"
+
+let HISTORY_BUDGET_MS : Int64 = 15000.to_int64()
+
+let MENTION_OVERLAP : Int = 1024
+
+let MAX_STDIN_DRAIN : Int = 64
+
+// ── Word finder for `mentions` (`history.mbt:178-202`) ──
+
+enum WordMatcher {
+  AsciiLower(Array[String])
+  AlwaysTrue
+  Exact(Array[String])
+}
+
+fn ascii_lower(s : String) -> String {
+  let raw = s.to_bytes()
+  let out = StringBuilder::new()
+  for i in 0..<raw.length() {
+    let c = raw[i].to_int() & 0xFF
+    if c >= 65 && c <= 90 {
+      out.write_byte((c + 32) as Byte)
+    } else {
+      out.write_byte(raw[i])
+    }
+  }
+  out.to_string()
+}
+
+fn is_all_ascii_str(s : String) -> Bool {
+  let raw = s.to_bytes()
+  for i in 0..<raw.length() {
+    if (raw[i].to_int() & 0xFF) >= 0x80 {
+      return false
+    }
+  }
+  true
+}
+
+fn make_word_matcher(word : String) -> WordMatcher {
+  let escaped = js_json::stringify_with_num(jv_str(word), fn(d : Double) -> String { d.to_string() })
+  let json_form = str_slice_bytes(escaped, 1, escaped.to_bytes().length() - 1)
+  let forms = if json_form == word { [word] } else { [word, json_form] }
+  if is_all_ascii_str(word) {
+    let lowered : Array[String] = []
+    for i in 0..<forms.length() {
+      lowered.push(ascii_lower(forms[i]))
+    }
+    return WordMatcher::AsciiLower(lowered)
+  }
+  if jscase::has_cases(word) {
+    return WordMatcher::AlwaysTrue
+  }
+  WordMatcher::Exact(forms)
+}
+
+fn matcher_matches(m : WordMatcher, text : String) -> Bool {
+  match m {
+    WordMatcher::AlwaysTrue => true
+    WordMatcher::AsciiLower(forms) => {
+      let t = ascii_lower(text)
+      for i in 0..<forms.length() {
+        if t.contains(forms[i]) {
+          return true
+        }
+      }
+      false
+    }
+    WordMatcher::Exact(forms) => {
+      for i in 0..<forms.length() {
+        if text.contains(forms[i]) {
+          return true
+        }
+      }
+      false
+    }
+  }
+}
+
+/// Keep the exact trailing `max_units` UTF-16 code units of `units` (matching `history.mbt:235`
+/// `view.view(start_offset=view.length() - overlap)` — when an astral character straddles the boundary,
+/// the trailing low surrogate `0xDC00..0xDFFF` is preserved so the overlap is exactly `max_units` units).
+fn tail_utf16_units(units : Array[Int], max_units : Int) -> Array[Int] {
+  let n = units.length()
+  if n <= max_units {
+    return units
+  }
+  let start = n - max_units
+  let out : Array[Int] = []
+  for i in start..<n {
+    out.push(units[i])
+  }
+  out
+}
+
+/// Concatenate two UTF-16 code-unit arrays.
+fn concat_utf16_units(a : Array[Int], b : Array[Int]) -> Array[Int] {
+  if a.length() == 0 {
+    return b
+  }
+  if b.length() == 0 {
+    return a
+  }
+  let out : Array[Int] = []
+  for i in 0..<a.length() {
+    out.push(a[i])
+  }
+  for i in 0..<b.length() {
+    out.push(b[i])
+  }
+  out
+}
+
+/// Compute the next `max_units` UTF-16 overlap tail in true O(max_units) time & memory with
+/// zero whole-chunk byte copying (no `text.to_bytes()` / `str_slice_bytes` on 8 MiB chunks).
+/// Because every UTF-16 code unit encodes to at most 3 UTF-8 bytes (BMP <= 3 bytes, astral = 4 bytes / 2 units),
+/// scanning at most `4 * max_units` trailing UTF-8 bytes via `text.length()` + `text.code_unit_at(i)`
+/// (stepping forward past UTF-8 continuation bytes `0x80..0xBF`) always covers >= `max_units` UTF-16 units.
+fn next_tail_utf16_units(prev_tail : Array[Int], text : String, max_units : Int) -> Array[Int] {
+  let n = text.length()
+  let max_bytes = 4 * max_units
+  let mut start = if n > max_bytes { n - max_bytes } else { 0 }
+  while start < n && ((text.code_unit_at(start) & 0xC0) == 0x80) {
+    start = start + 1
+  }
+  let sb = StringBuilder::new()
+  for i in start..<n {
+    sb.write_byte(text.code_unit_at(i) as Byte)
+  }
+  let text_u = js_json::utf16_units(sb.to_string())
+  if text_u.length() >= max_units {
+    tail_utf16_units(text_u, max_units)
+  } else {
+    tail_utf16_units(concat_utf16_units(prev_tail, text_u), max_units)
+  }
+}
+
+fn history_text(e : Entry) -> Option[String] {
+  if e.kind == "assistant" || e.kind == "thinking" {
+    return Some(e.text)
+  }
+  if e.kind == "tool_call" {
+    let raw_tool = match e.tool {
+      Some(t) => t
+      None => ""
+    }
+    let tool = if str_has_prefix(raw_tool, "mcp__stillfail__") {
+      str_slice_bytes(raw_tool, 16, raw_tool.to_bytes().length())
+    } else if str_has_prefix(raw_tool, "mcp__ember__") {
+      str_slice_bytes(raw_tool, 12, raw_tool.to_bytes().length())
+    } else {
+      raw_tool
+    }
+    if tool == "chat_post" || tool == "chat_state" {
+      return None
+    }
+    return Some(tool + "\n" + e.text)
+  }
+  if e.kind == "tool_result" {
+    if jscase::trim(e.text) == "" {
+      return None
+    }
+    return Some(e.text)
+  }
+  None
+}
+
+struct HistStep {
+  index : Int
+  entry : String
+  tool : Option[String]
+  at : Option[Double]
+  text_units : Array[Int]
+}
+
+struct FilesWalkState {
+  key : base_codec::Json
+  session : Map[String, base_codec::Json]
+  places : Array[String]
+  sources : Array[Option[(String, String, Option[String])]]
+  mut src_idx : Int
+  mut visited : Int
+  mut any : Bool
+  paths : Array[(String, String)]
+}
+
+struct MentionsState {
+  key : base_codec::Json
+  session : Map[String, base_codec::Json]
+  paths : Array[(String, String)]
+  mut path_idx : Int
+  mut left : Array[WordMatcher]
+  mut tail : Array[Int]
+  mut in_file : Bool
+}
+
+enum HistPhase {
+  HistInit
+  SessionLoop(Int) // sess_idx
+  AfterSessionPause(Int) // resumed after P12
+  InFiles(Int, FilesWalkState) // resumed after P10
+  InMentions(Int, MentionsState) // resumed after P11 (open_text_id may be Some)
+  HistDone
+}
+
+pub enum HistStepResult {
+  Yielded
+  Finished(Option[String]) // Optional serialized history group JSON
+  Failed(String)
+}
+
+pub struct HistoriesStepper {
+  data : String
+  sep : String
+  words : Array[String]
+  asker : Asker
+  limit : Int
+  offset : Int
+  want : Int
+  until : Int64
+  mut stopped : Bool
+  mut expired : Bool
+  mut sessions : Array[Map[String, base_codec::Json]]
+  mut profiles : Array[(String, String)]
+  mut found : Array[String]
+  mut hit_sessions : Array[base_codec::Json]
+  mut looked : Int
+  mut phase : HistPhase
+  /// Explicit active `text.open` handle id; guaranteed closed EXACTLY ONCE on every exit path.
+  mut open_text_id : Option[base_codec::Json]
+}
+
+pub fn HistoriesStepper::new(
+  data : String,
+  sep : String,
+  words : Array[String],
+  asker : Asker,
+  limit : Int,
+  offset : Int,
+  now_ms : Int64,
+) -> HistoriesStepper {
+  HistoriesStepper::{
+    data: data,
+    sep: sep,
+    words: words,
+    asker: asker,
+    limit: limit,
+    offset: offset,
+    want: offset + limit + 1,
+    until: now_ms + HISTORY_BUDGET_MS,
+    stopped: false,
+    expired: false,
+    sessions: [],
+    profiles: [],
+    found: [],
+    hit_sessions: [],
+    looked: 0,
+    phase: HistPhase::HistInit,
+    open_text_id: None,
+  }
+}
+
+/// Injectable I/O & clock driver for `HistoriesStepper` so production runs over real SQLite + ShellClient
+/// + Finder + `host_shim::now_ms`, while pure-Pion unit tests drive the exact same P10/P11/P12 state machine
+/// deterministically with controllable clocks and recording `text.open`/`text.next`/`text.close` handles.
+struct HistDriver {
+  now_ms : () -> Int64
+  init_sessions : () -> Result[Array[Map[String, base_codec::Json]], String]
+  load_profiles : () -> Array[(String, String)]
+  check_visible : (base_codec::Json) -> Result[Unit, String]
+  recheck_hits : (Array[base_codec::Json]) -> Result[Unit, String]
+  history_sources : (base_codec::Json) -> Result[Array[Option[(String, String, Option[String])]], String]
+  find_sources : (String, Array[(String, String)], (String, String, Option[String]), Array[String]) -> Array[(String, String)]
+  text_open : (String, Bool) -> Result[Option[base_codec::Json], String]
+  text_next : (base_codec::Json) -> Result[Option[String], String]
+  text_close : (base_codec::Json) -> Unit
+  thread_of : (base_codec::Json) -> Result[Option[Map[String, base_codec::Json]], String]
+  parse_line : (String, js_json::JValue, ReadState, Array[Entry]) -> Result[Unit, String]
+  format_hit : (Array[(String, base_codec::Json)], Array[Int]) -> String
+  double_to_json : (Double) -> base_codec::Json
+  key_stringify : (base_codec::Json) -> String
+}
+
+/// Idempotently close any active `text.open` handle via `text_close` (exact-once guarantee).
+fn HistoriesStepper::close_text_handle_with(self : HistoriesStepper, text_close : (base_codec::Json) -> Unit) -> Unit {
+  match self.open_text_id {
+    Some(id) => {
+      self.open_text_id = None
+      text_close(id)
+    }
+    None => ()
+  }
+}
+
+/// Idempotently close any active `text.open` handle via `text.close` (exact-once guarantee).
+pub fn hist_close_text_handle(stepper : HistoriesStepper, client : builders_core::ShellClient) -> Unit {
+  stepper.close_text_handle_with(fn(id : base_codec::Json) -> Unit {
+    let _ = client.shell_sync_json("text.close", base_codec::json_obj([("id", id)]))
+  })
+}
+
+fn HistoriesStepper::keep_with(self : HistoriesStepper, driver : HistDriver, is_cancelled : Bool) -> Bool {
+  if self.stopped || self.expired {
+    return false
+  }
+  if is_cancelled {
+    self.stopped = true
+  } else if (driver.now_ms)() > self.until {
+    self.expired = true
+  }
+  !self.stopped && !self.expired
+}
+
+fn hist_visible(asker : Asker, ws : base_codec::Json) -> Bool {
+  sees(json_text_of(ws), None, asker)
+}
+
+fn hist_check_visible(
+  asker : Asker,
+  db : sql_db::Db,
+  key : base_codec::Json,
+) -> Result[Unit, String] {
+  match db_one(db, "SELECT ws FROM sessions WHERE key = ?", [key]) {
+    Ok(Some(row)) => {
+      if hist_visible(asker, row_field(row, "ws")) {
+        Ok(())
+      } else {
+        Err("the session changed while searching; search again")
+      }
+    }
+    Ok(None) => Err("the session changed while searching; search again")
+    Err(e) => Err(e)
+  }
+}
+
+fn hist_load_profiles(data : String, sep : String, client : builders_core::ShellClient) -> Array[(String, String)] {
+  let raw = match shell_read_text(client, data + sep + "config.json", false) {
+    Some(text) => {
+      match js_json::parse(text) {
+        Ok(v) => v
+        Err(_) => js_json::JValue::Obj([])
+      }
+    }
+    None => js_json::JValue::Obj([])
+  }
+  let out : Array[(String, String)] = []
+  let ps = match raw.get("profiles") {
+    Some(js_json::JValue::Arr(arr)) => arr
+    _ => return out
+  }
+  for i in 0..<ps.length() {
+    let p = ps[i]
+    let id = match jv_string_of(p.get("id")) {
+      Some(s) => s
+      None => continue
+    }
+    let home = match jv_string_of(p.get("home")) {
+      Some(s) => s
+      None => continue
+    }
+    let hu = js_json::utf16_units(home)
+    let absolute = str_has_prefix(home, "/") ||
+    (sep == "\\" && (str_has_prefix(home, "\\") || (hu.length() >= 2 && hu[1] == 58)))
+    out.push((id, if absolute { home } else { nodepath::join(sep, [data, home]) }))
+  }
+  out
+}
+
+fn HistoriesStepper::page_raw(self : HistoriesStepper) -> Array[String] {
+  let end = if self.offset + self.limit < self.found.length() {
+    self.offset + self.limit
+  } else {
+    self.found.length()
+  }
+  let out : Array[String] = []
+  if self.offset < end {
+    for i in self.offset..<end {
+      out.push(self.found[i])
+    }
+  }
+  out
+}
+
+fn HistoriesStepper::finish_group_with(
+  self : HistoriesStepper,
+  driver : HistDriver,
+  more : Bool,
+  left : Int,
+) -> HistStepResult {
+  self.close_text_handle_with(driver.text_close)
+  self.phase = HistPhase::HistDone
+  if self.hit_sessions.length() > 0 {
+    match (driver.recheck_hits)(self.hit_sessions) {
+      Ok(_) => ()
+      Err(e) => return HistStepResult::Failed(e)
+    }
+  }
+  let hits = self.page_raw()
+  if hits.length() == 0 && left == 0 {
+    return HistStepResult::Finished(None)
+  }
+  let more_str = if more { "true" } else { "false" }
+  let left_part = if left > 0 { ",\"left\":" + left.to_string() } else { "" }
+  let grp = "{\"kind\":\"history\",\"hits\":" + stringify_raw_array(hits) + ",\"more\":" + more_str + left_part + "}"
+  HistStepResult::Finished(Some(grp))
+}
+
+fn HistoriesStepper::partial_result_with(
+  self : HistoriesStepper,
+  driver : HistDriver,
+  current : base_codec::Json,
+) -> HistStepResult {
+  self.close_text_handle_with(driver.text_close)
+  self.phase = HistPhase::HistDone
+  if self.stopped {
+    return HistStepResult::Failed("the search took too long")
+  }
+  match (driver.check_visible)(current) {
+    Ok(_) => ()
+    Err(e) => return HistStepResult::Failed(e)
+  }
+  self.finish_group_with(driver, true, self.sessions.length() - self.looked)
+}
+
+/// Synchronously extract matching entries from all `paths` of one session (`history.mbt:417-505`).
+fn HistoriesStepper::collect_session_entries_with(
+  self : HistoriesStepper,
+  driver : HistDriver,
+  key : base_codec::Json,
+  session : Map[String, base_codec::Json],
+  paths : Array[(String, String)],
+  is_cancelled : Bool,
+) -> Option[HistStepResult] {
+  let room = self.want - self.found.length()
+  let latest : Array[HistStep] = []
+  let mut oldest = 0
+  let mut entry_idx = 0
+  for pi in 0..<paths.length() {
+    let (fpath, runtime) = paths[pi]
+    let state = ReadState::new()
+    let out : Array[Entry] = []
+    let mut failed : Option[String] = None
+    // Open with lines=true, synchronously consume all chunks, close handle in all paths
+    match (driver.text_open)(fpath, true) {
+      Ok(Some(hid)) => {
+        self.open_text_id = Some(hid)
+        let mut keep_reading = true
+        while keep_reading {
+          match (driver.text_next)(hid) {
+            Ok(Some(text)) => {
+              let lines = str_split_lf(text)
+              for li in 0..<lines.length() {
+                if !self.keep_with(driver, is_cancelled) {
+                  keep_reading = false
+                  break
+                }
+                let line = str_strip_cr(lines[li])
+                if line == "" {
+                  continue
+                }
+                let record = match js_json::parse(line) {
+                  Ok(v) => v
+                  Err(_) => continue
+                }
+                match (driver.parse_line)(runtime, record, state, out) {
+                  Ok(_) => ()
+                  Err(e) => {
+                    failed = Some(e)
+                    keep_reading = false
+                    break
+                  }
+                }
+                for ei in 0..<out.length() {
+                  if !self.keep_with(driver, is_cancelled) {
+                    keep_reading = false
+                    break
+                  }
+                  let e = out[ei]
+                  match history_text(e) {
+                    Some(ht) => {
+                      if has(ht, self.words) {
+                        let at_ms = match e.at {
+                          Some(a) => date_parse(a)
+                          None => None
+                        }
+                        let raw_ex = match e.text_units {
+                          Some(u) => if e.kind == "assistant" || e.kind == "thinking" { excerpt_units_from_utf16(u, self.words) } else { excerpt_units(ht, self.words) }
+                          None => excerpt_units(ht, self.words)
+                        }
+                        let item = HistStep::{
+                          index: entry_idx,
+                          entry: e.kind,
+                          tool: e.tool,
+                          at: at_ms,
+                          text_units: raw_ex,
+                        }
+                        if latest.length() < room {
+                          latest.push(item)
+                        } else {
+                          latest[oldest] = item
+                          oldest = (oldest + 1) % room
+                        }
+                      }
+                    }
+                    None => ()
+                  }
+                  entry_idx = entry_idx + 1
+                }
+                while out.length() > 0 {
+                  let _ = out.pop()
+                }
+                if !keep_reading {
+                  break
+                }
+              }
+            }
+            _ => break
+          }
+        }
+        self.close_text_handle_with(driver.text_close)
+      }
+      _ => ()
+    }
+    match failed {
+      Some(e) => return Some(HistStepResult::Failed(e))
+      None => ()
+    }
+    if !self.keep_with(driver, is_cancelled) {
+      return Some(self.partial_result_with(driver, key))
+    }
+    match (driver.check_visible)(key) {
+      Ok(_) => ()
+      Err(e) => return Some(HistStepResult::Failed(e))
+    }
+  }
+  let thread_row = match (driver.thread_of)(key) {
+    Ok(r) => r
+    Err(e) => return Some(HistStepResult::Failed(e))
+  }
+  let given = match thread_row {
+    Some(t) => {
+      let pick = fn(k : String) -> String {
+        match row_field(t, k) {
+          base_codec::Json::Str(s) => jscase::trim_white(s)
+          _ => ""
+        }
+      }
+      let p1 = pick("title")
+      if p1 != "" {
+        Some(p1)
+      } else {
+        let p2 = pick("auto_title")
+        if p2 != "" { Some(p2) } else { None }
+      }
+    }
+    None => None
+  }
+  let chat_title = match given {
+    Some(g) => g
+    None => {
+      jscase::trim(match json_text_of(row_field(session, "title")) {
+        Some(s) => s
+        None => ""
+      })
+    }
+  }
+  let ordered : Array[HistStep] = []
+  if latest.length() < room {
+    for i in 0..<latest.length() {
+      ordered.push(latest[i])
+    }
+  } else {
+    for i in oldest..<latest.length() {
+      ordered.push(latest[i])
+    }
+    for i in 0..<oldest {
+      ordered.push(latest[i])
+    }
+  }
+  if ordered.length() > 0 {
+    self.hit_sessions.push(key)
+  }
+  // Reverse in place (newest entries first)
+  let mut lo = 0
+  let mut hi = ordered.length() - 1
+  while lo < hi {
+    let tmp = ordered[lo]
+    ordered[lo] = ordered[hi]
+    ordered[hi] = tmp
+    lo = lo + 1
+    hi = hi - 1
+  }
+  let key_str = match json_text_of(key) {
+    Some(s) => s
+    None => (driver.key_stringify)(key)
+  }
+  for i in 0..<ordered.length() {
+    let step = ordered[i]
+    let fields : Array[(String, base_codec::Json)] = [
+      ("session", key),
+      ("index", base_codec::json_int(step.index)),
+      ("entry", base_codec::json_str(step.entry)),
+    ]
+    match step.tool {
+      Some(t) => if t != "" { fields.push(("tool", base_codec::json_str(t))) }
+      None => ()
+    }
+    fields.push(("chat", key))
+    fields.push(("chatTitle", base_codec::json_str(chat_title)))
+    match thread_row {
+      Some(t) => fields.push(("thread", row_field(t, "id")))
+      None => ()
+    }
+    fields.push(("key", base_codec::json_str("h:" + key_str + ":" + step.index.to_string())))
+    fields.push(("kind", base_codec::json_str("history")))
+    fields.push(("title", base_codec::json_str("")))
+    fields.push(("text", base_codec::json_null()))
+    fields.push((
+      "at",
+      match step.at {
+        Some(a) => (driver.double_to_json)(a)
+        None => base_codec::json_null()
+      },
+    ))
+    self.found.push((driver.format_hit)(fields, step.text_units))
+  }
+  self.looked = self.looked + 1
+  None
+}
+
+fn HistoriesStepper::step_files_with(
+  self : HistoriesStepper,
+  driver : HistDriver,
+  sess_idx : Int,
+  fw : FilesWalkState,
+  is_cancelled : Bool,
+) -> HistStepResult {
+  while fw.src_idx < fw.sources.length() {
+    if !self.keep_with(driver, is_cancelled) {
+      return self.partial_result_with(driver, fw.key)
+    }
+    match fw.sources[fw.src_idx] {
+      Some(s) => {
+        fw.any = true
+        let found_paths = (driver.find_sources)(self.data, self.profiles, s, fw.places)
+        for j in 0..<found_paths.length() {
+          fw.paths.push(found_paths[j])
+        }
+      }
+      None => ()
+    }
+    fw.src_idx = fw.src_idx + 1
+    fw.visited = fw.visited + 1
+    if (fw.visited % 64) == 0 {
+      self.phase = HistPhase::InFiles(sess_idx, fw)
+      return HistStepResult::Yielded // P10 (`history.mbt:142`)
+    }
+  }
+  // Align with `history.mbt:392-395`: check keep() after files() exits before `!fw.any`
+  // so a deadline crossing during the final `finder.sources` call with empty paths returns partial_result.
+  if !self.keep_with(driver, is_cancelled) {
+    return self.partial_result_with(driver, fw.key)
+  }
+  if !fw.any {
+    self.looked = self.looked + 1
+    self.phase = HistPhase::SessionLoop(sess_idx + 1)
+    return self.step_with(driver, is_cancelled)
+  }
+  let ms = MentionsState::{
+    key: fw.key,
+    session: fw.session,
+    paths: fw.paths,
+    path_idx: 0,
+    left: [],
+    tail: [],
+    in_file: false,
+  }
+  self.step_mentions_with(driver, sess_idx, ms, is_cancelled)
+}
+
+fn HistoriesStepper::step_mentions_with(
+  self : HistoriesStepper,
+  driver : HistDriver,
+  sess_idx : Int,
+  ms : MentionsState,
+  is_cancelled : Bool,
+) -> HistStepResult {
+  while true {
+    if !ms.in_file {
+      if ms.path_idx >= ms.paths.length() {
+        // None of the session's transcripts mentioned all words
+        self.looked = self.looked + 1
+        self.phase = HistPhase::SessionLoop(sess_idx + 1)
+        return self.step_with(driver, is_cancelled)
+      }
+      if !self.keep_with(driver, is_cancelled) {
+        return self.partial_result_with(driver, ms.key)
+      }
+      let (fpath, _) = ms.paths[ms.path_idx]
+      let left : Array[WordMatcher] = []
+      for wi in 0..<self.words.length() {
+        left.push(make_word_matcher(self.words[wi]))
+      }
+      ms.left = left
+      ms.tail = []
+      // Open file for chunked reading (`lines: false`)
+      match (driver.text_open)(fpath, false) {
+        Ok(Some(hid)) => {
+          self.open_text_id = Some(hid)
+          ms.in_file = true
+        }
+        _ => {
+          // File did not open; move to next path after visibility check
+          if !self.keep_with(driver, is_cancelled) {
+            return self.partial_result_with(driver, ms.key)
+          }
+          match (driver.check_visible)(ms.key) {
+            Ok(_) => ()
+            Err(e) => return HistStepResult::Failed(e)
+          }
+          ms.path_idx = ms.path_idx + 1
+          continue
+        }
+      }
+    }
+    // Currently inside an open `text.open` handle for `ms.paths[ms.path_idx]`
+    let hid = match self.open_text_id {
+      Some(id) => id
+      None => {
+        ms.in_file = false
+        ms.path_idx = ms.path_idx + 1
+        continue
+      }
+    }
+    match (driver.text_next)(hid) {
+      Ok(Some(text)) => {
+        if !self.keep_with(driver, is_cancelled) {
+          return self.partial_result_with(driver, ms.key)
+        }
+        let view = if ms.tail.length() == 0 { text } else { js_json::sanitize_str(ms.tail) + text }
+        let remaining : Array[WordMatcher] = []
+        for i in 0..<ms.left.length() {
+          if !matcher_matches(ms.left[i], view) {
+            remaining.push(ms.left[i])
+          }
+        }
+        ms.left = remaining
+        if ms.left.length() == 0 {
+          // Matched all words! Close handle immediately.
+          self.close_text_handle_with(driver.text_close)
+          ms.in_file = false
+          if !self.keep_with(driver, is_cancelled) {
+            return self.partial_result_with(driver, ms.key)
+          }
+          match (driver.check_visible)(ms.key) {
+            Ok(_) => ()
+            Err(e) => return HistStepResult::Failed(e)
+          }
+          // Collect entries from all paths of this session
+          match self.collect_session_entries_with(driver, ms.key, ms.session, ms.paths, is_cancelled) {
+            Some(res) => return res
+            None => ()
+          }
+          if self.found.length() >= self.want {
+            return self.finish_group_with(driver, self.found.length() > self.offset + self.limit, 0)
+          }
+          self.phase = HistPhase::SessionLoop(sess_idx + 1)
+          return self.step_with(driver, is_cancelled)
+        }
+        ms.tail = next_tail_utf16_units(ms.tail, text, MENTION_OVERLAP)
+        self.phase = HistPhase::InMentions(sess_idx, ms)
+        return HistStepResult::Yielded // P11 (`history.mbt:236`) — handle stays open across yield!
+      }
+      _ => {
+        // EOF or read error: close handle and advance to next path
+        self.close_text_handle_with(driver.text_close)
+        ms.in_file = false
+        if !self.keep_with(driver, is_cancelled) {
+          return self.partial_result_with(driver, ms.key)
+        }
+        match (driver.check_visible)(ms.key) {
+          Ok(_) => ()
+          Err(e) => return HistStepResult::Failed(e)
+        }
+        ms.path_idx = ms.path_idx + 1
+      }
+    }
+  }
+  HistStepResult::Finished(None)
+}
+
+fn HistoriesStepper::step_with(
+  self : HistoriesStepper,
+  driver : HistDriver,
+  is_cancelled : Bool,
+) -> HistStepResult {
+  while true {
+    match self.phase {
+      HistPhase::HistInit => {
+        if is_cancelled {
+          return HistStepResult::Failed("the search took too long")
+        }
+        match (driver.init_sessions)() {
+          Ok(rows) => self.sessions = rows
+          Err(e) => return HistStepResult::Failed(e)
+        }
+        self.profiles = (driver.load_profiles)()
+        self.phase = HistPhase::SessionLoop(0)
+      }
+      HistPhase::SessionLoop(sess_idx) => {
+        if sess_idx >= self.sessions.length() || self.found.length() >= self.want {
+          return self.finish_group_with(driver, self.found.length() > self.offset + self.limit, 0)
+        }
+        let key = row_field(self.sessions[sess_idx], "key")
+        if !self.keep_with(driver, is_cancelled) {
+          return self.partial_result_with(driver, key)
+        }
+        self.phase = HistPhase::AfterSessionPause(sess_idx)
+        return HistStepResult::Yielded // P12 (`history.mbt:381`)
+      }
+      HistPhase::AfterSessionPause(sess_idx) => {
+        let session = self.sessions[sess_idx]
+        let key = row_field(session, "key")
+        if !self.keep_with(driver, is_cancelled) {
+          return self.partial_result_with(driver, key)
+        }
+        match (driver.check_visible)(key) {
+          Ok(_) => ()
+          Err(e) => return HistStepResult::Failed(e)
+        }
+        let cwd = json_text_of(row_field(session, "cwd"))
+        let workspace = match json_text_of(row_field(session, "workspace")) {
+          Some(s) => s
+          None => ""
+        }
+        let places = match cwd {
+          Some(c) => if c != workspace { [c, workspace] } else { [workspace] }
+          None => [workspace]
+        }
+        let sources = match (driver.history_sources)(key) {
+          Ok(ss) => ss
+          Err(e) => return HistStepResult::Failed(e)
+        }
+        let fw = FilesWalkState::{
+          key: key,
+          session: session,
+          places: places,
+          sources: sources,
+          src_idx: 0,
+          visited: 0,
+          any: false,
+          paths: [],
+        }
+        return self.step_files_with(driver, sess_idx, fw, is_cancelled)
+      }
+      HistPhase::InFiles(sess_idx, fw) => {
+        // Resumed after P10
+        if !self.keep_with(driver, is_cancelled) {
+          return self.partial_result_with(driver, fw.key)
+        }
+        match (driver.check_visible)(fw.key) {
+          Ok(_) => ()
+          Err(e) => return HistStepResult::Failed(e)
+        }
+        return self.step_files_with(driver, sess_idx, fw, is_cancelled)
+      }
+      HistPhase::InMentions(sess_idx, ms) => {
+        // Resumed after P11 (`history.mbt:236-237`): check keep() before next `text.next`
+        if !self.keep_with(driver, is_cancelled) {
+          return self.partial_result_with(driver, ms.key)
+        }
+        return self.step_mentions_with(driver, sess_idx, ms, is_cancelled)
+      }
+      HistPhase::HistDone => return HistStepResult::Finished(None)
+    }
+  }
+  HistStepResult::Finished(None)
+}
+
+pub fn hist_step_prod(
+  stepper : HistoriesStepper,
+  db : sql_db::Db,
+  client : builders_core::ShellClient,
+  finder : locate::Finder,
+  is_cancelled : Bool,
+) -> HistStepResult {
+  let driver = HistDriver::{
+    now_ms: fn() -> Int64 { host_shim::now_ms() },
+    init_sessions: fn() -> Result[Array[Map[String, base_codec::Json]], String] {
+      // Materialize candidate sessions synchronously and DROP temp table IMMEDIATELY before P12
+      // (never hold a temp table across yields!).
+      let table = "history_session_snapshot_mb"
+      match db.exec("DROP TABLE IF EXISTS temp." + table) {
+        Ok(_) => ()
+        Err(e) => return Err(e.message)
+      }
+      let create_res = db.run(
+        "CREATE TEMP TABLE " +
+        table +
+        " AS WITH RECURSIVE connects(connect) AS (\n  VALUES ((SELECT connect FROM sessions INDEXED BY sessions_by_connect ORDER BY connect LIMIT 1))\n  UNION ALL SELECT (SELECT connect FROM sessions INDEXED BY sessions_by_connect WHERE connect > c.connect ORDER BY connect LIMIT 1)\n    FROM connects c WHERE c.connect IS NOT NULL\n), workspaces(ws) AS (SELECT ?1 UNION SELECT '*' UNION SELECT NULL WHERE ?2)\nSELECT s.key, s.workspace, s.cwd, s.title FROM connects c CROSS JOIN workspaces w CROSS JOIN sessions s INDEXED BY sessions_by_connect\nWHERE c.connect IS NOT NULL AND s.connect = c.connect AND s.ws IS w.ws\nORDER BY s.last_active_at DESC, s.rowid ASC",
+        [base_codec::json_str(stepper.asker.workspace), base_codec::json_int(if stepper.asker.home { 1 } else { 0 })],
+      )
+      match create_res {
+        Ok(_) => ()
+        Err(e) => {
+          let _ = db.exec("DROP TABLE IF EXISTS temp." + table)
+          return Err(e.message)
+        }
+      }
+      let sel_res = db.all("SELECT key, workspace, cwd, title FROM temp." + table + " ORDER BY rowid", [])
+      let _ = db.exec("DROP TABLE IF EXISTS temp." + table)
+      match sel_res {
+        Ok(rows) => Ok(rows)
+        Err(e) => Err(e.message)
+      }
+    },
+    load_profiles: fn() -> Array[(String, String)] { hist_load_profiles(stepper.data, stepper.sep, client) },
+    check_visible: fn(key : base_codec::Json) -> Result[Unit, String] { hist_check_visible(stepper.asker, db, key) },
+    recheck_hits: fn(hit_sessions : Array[base_codec::Json]) -> Result[Unit, String] {
+      let arr_str = sql_db::stringify_json(base_codec::json_arr(hit_sessions))
+      let rows = match db.all(
+        "SELECT s.key, s.ws FROM json_each(?) j LEFT JOIN sessions s ON s.key = j.value",
+        [base_codec::json_str(arr_str)],
+      ) {
+        Ok(rs) => rs
+        Err(e) => return Err(e.message)
+      }
+      for i in 0..<rows.length() {
+        let row = rows[i]
+        if json_is_null(row_field(row, "key")) || !hist_visible(stepper.asker, row_field(row, "ws")) {
+          return Err("the session changed while searching; search again")
+        }
+      }
+      Ok(())
+    },
+    history_sources: fn(key : base_codec::Json) -> Result[Array[Option[(String, String, Option[String])]], String] {
+      match locate::history_sources(db, key) {
+        Ok(ss) => {
+          let out : Array[Option[(String, String, Option[String])]] = []
+          for i in 0..<ss.length() {
+            match ss[i] {
+              Some(s) => out.push(Some((s.id, s.runtime, s.profile)))
+              None => out.push(None)
+            }
+          }
+          Ok(out)
+        }
+        Err(e) => Err(e.message)
+      }
+    },
+    find_sources: fn(data : String, profiles : Array[(String, String)], s : (String, String, Option[String]), places : Array[String]) -> Array[(String, String)] {
+      let (sid, srt, sprof) = s
+      let (found_paths, _) = finder.sources(
+        data,
+        profiles,
+        [locate::Source::{ id: sid, runtime: srt, profile: sprof }],
+        places,
+        anywhere=true,
+      )
+      found_paths
+    },
+    text_open: fn(fpath : String, lines : Bool) -> Result[Option[base_codec::Json], String] {
+      match client.shell_sync_json(
+        "text.open",
+        base_codec::json_obj([("path", base_codec::json_str(fpath)), ("lines", base_codec::json_bool(lines))]),
+      ) {
+        Ok(opened) => Ok(builders_core::json_get_last(opened, "id"))
+        Err(e) => Err(e.message)
+      }
+    },
+    text_next: fn(hid : base_codec::Json) -> Result[Option[String], String] {
+      match client.shell_sync_json("text.next", base_codec::json_obj([("id", hid)])) {
+        Ok(base_codec::Json::Str(text)) => Ok(Some(text))
+        Ok(_) => Ok(None)
+        Err(e) => Err(e.message)
+      }
+    },
+    text_close: fn(hid : base_codec::Json) -> Unit {
+      let _ = client.shell_sync_json("text.close", base_codec::json_obj([("id", hid)]))
+    },
+    thread_of: fn(key : base_codec::Json) -> Result[Option[Map[String, base_codec::Json]], String] {
+      db_one(
+        db,
+        "SELECT t.id, t.surface, t.title, t.auto_title FROM thread_sessions ts JOIN threads t ON t.id = ts.thread WHERE ts.session = ? AND t.surface = 'chat' ORDER BY ts.joined_at DESC, ts.rowid DESC LIMIT 1",
+        [key],
+      )
+    },
+    parse_line: fn(runtime : String, record : js_json::JValue, state : ReadState, out : Array[Entry]) -> Result[Unit, String] {
+      timeline_of(runtime, record, state, out)
+    },
+    format_hit: fn(fields : Array[(String, base_codec::Json)], units : Array[Int]) -> String {
+      stringify_hit_object(fields, units)
+    },
+    double_to_json: fn(a : Double) -> base_codec::Json { sql_db::double_to_json(a) },
+    key_stringify: fn(k : base_codec::Json) -> String { sql_db::stringify_json(k) },
+  }
+  stepper.step_with(driver, is_cancelled)
+}
+
+// ── ActiveQuery combining ReadingStepper + HistoriesStepper ──
+
+enum QueryStage {
+  Reading
+  History(Array[String], HistoriesStepper)
+}
+
+pub enum QueryStepResult {
+  Yielded
+  Done(String) // serialized groups JSON array
+  Failed(String)
+}
+
+pub struct ActiveQuery {
+  pub id_json : String
+  pub key : String
+  data : String
+  sep : String
+  words : Array[String]
+  asker : Asker
+  limit : Int
+  offset : Int
+  wants_history : Bool
+  reading : ReadingStepper
+  mut reading_yielded : Bool
+  mut stage : QueryStage
+}
+
+pub fn ActiveQuery::new(
+  id : base_codec::Json,
+  data : String,
+  sep : String,
+  told : base_codec::Json,
+  words : Array[String],
+) -> ActiveQuery {
+  let id_json = sql_db::stringify_json(id)
+  let kinds : Option[Array[String]] = match builders_core::json_get_last(told, "kinds") {
+    Some(base_codec::Json::Arr(ks)) => {
+      if ks.length() > 0 {
+        let out : Array[String] = []
+        for i in 0..<ks.length() {
+          match ks[i] {
+            base_codec::Json::Str(s) => out.push(s)
+            _ => ()
+          }
+        }
+        Some(out)
+      } else {
+        None
+      }
+    }
+    _ => None
+  }
+  let wants_history = match kinds {
+    Some(ks) => arr_contains_str(ks, "history")
+    None => false
+  }
+  let asker = Asker::from_json(match builders_core::json_get_last(told, "asker") {
+    Some(v) => v
+    None => base_codec::json_null()
+  })
+  let limit = clamp_limit(builders_core::json_get_last(told, "limit"))
+  let offset = clamp_offset(builders_core::json_get_last(told, "offset"))
+  let archived = match builders_core::json_get_last(told, "archived") {
+    Some(base_codec::Json::Bool(true)) => true
+    _ => false
+  }
+  ActiveQuery::{
+    id_json: id_json,
+    key: id_json,
+    data: data,
+    sep: sep,
+    words: words,
+    asker: asker,
+    limit: limit,
+    offset: offset,
+    wants_history: wants_history,
+    reading: ReadingStepper::new(data, sep, kinds, asker, archived, words, limit, offset),
+    reading_yielded: false,
+    stage: QueryStage::Reading,
+  }
+}
+
+pub fn ActiveQuery::cleanup(self : ActiveQuery, client : builders_core::ShellClient) -> Unit {
+  match self.stage {
+    QueryStage::History(_, hist) => hist_close_text_handle(hist, client)
+    QueryStage::Reading => ()
+  }
+}
+
+pub fn ActiveQuery::step(
+  self : ActiveQuery,
+  db : sql_db::Db,
+  client : builders_core::ShellClient,
+  finder : locate::Finder,
+  cancelled : Map[String, Bool],
+) -> QueryStepResult {
+  let is_cancelled = match cancelled.get(self.key) {
+    Some(true) => true
+    _ => false
+  }
+  match self.stage {
+    QueryStage::Reading => {
+      // Check cancel on resume from a Reading pause (P8: `match.mbt:341`)
+      if self.reading_yielded && is_cancelled {
+        return QueryStepResult::Failed("the search took too long")
+      }
+      match self.reading.step(db, client) {
+        ReadStepResult::Yielded => {
+          self.reading_yielded = true
+          QueryStepResult::Yielded
+        }
+        ReadStepResult::Failed(e) => QueryStepResult::Failed(e)
+        ReadStepResult::Finished => {
+          let groups = self.reading.pages.result_raw()
+          if !self.wants_history {
+            return QueryStepResult::Done(stringify_raw_array(groups))
+          }
+          let hist = HistoriesStepper::new(
+            self.data,
+            self.sep,
+            self.words,
+            self.asker,
+            self.limit,
+            self.offset,
+            host_shim::now_ms(),
+          )
+          self.stage = QueryStage::History(groups, hist)
+          // Immediately take first history step (matches MoonBit continuing without extra pause into Histories::hits)
+          match hist_step_prod(hist, db, client, finder, is_cancelled) {
+            HistStepResult::Yielded => QueryStepResult::Yielded
+            HistStepResult::Failed(e) => {
+              hist_close_text_handle(hist, client)
+              QueryStepResult::Failed(e)
+            }
+            HistStepResult::Finished(grp_opt) => {
+              hist_close_text_handle(hist, client)
+              match grp_opt {
+                Some(g) => groups.push(g)
+                None => ()
+              }
+              QueryStepResult::Done(stringify_raw_array(groups))
+            }
+          }
+        }
+      }
+    }
+    QueryStage::History(groups, hist) => {
+      match hist_step_prod(hist, db, client, finder, is_cancelled) {
+        HistStepResult::Yielded => QueryStepResult::Yielded
+        HistStepResult::Failed(e) => {
+          hist_close_text_handle(hist, client)
+          QueryStepResult::Failed(e)
+        }
+        HistStepResult::Finished(grp_opt) => {
+          hist_close_text_handle(hist, client)
+          match grp_opt {
+            Some(g) => groups.push(g)
+            None => ()
+          }
+          QueryStepResult::Done(stringify_raw_array(groups))
+        }
+      }
+    }
+  }
+}
+
+fn dispatch_search_line(
+  line : String,
+  data : String,
+  sep : String,
+  client : builders_core::ShellClient,
+  cancelled : Map[String, Bool],
+  active : Array[ActiveQuery],
+) -> Unit {
+  if line.length() == 0 || builders_core::has_lone_surrogate(line) {
+    return
+  }
+  // Use `sql_db::parse_json` so `id` formats numbers identically to MoonBit `id.stringify()`
+  // (`1.0` -> `1`, while string `"1"` stays `"\"1\""`), and invalid JSON / lone-surrogate escapes
+  // (`\ud800`) are silently ignored exactly like MoonBit `@json.parse(line) catch { _ => continue }`.
+  let told = match sql_db::parse_json(line) {
+    Ok(j) => j
+    Err(_) => return
+  }
+  let id = match builders_core::json_get_last(told, "id") {
+    Some(v) => v
+    None => return
+  }
+  let key = sql_db::stringify_json(id)
+  match builders_core::json_get_last(told, "type") {
+    Some(base_codec::Json::Str("cancel")) => {
+      // Only record in `cancelled` (no reply sent for unknown/finished/active cancel).
+      cancelled.set(key, true)
+    }
+    Some(base_codec::Json::Str("query")) => {
+      let query_str = match builders_core::json_get_last(told, "query") {
+        Some(base_codec::Json::Str(q)) => q
+        _ => ""
+      }
+      let words = terms(query_str)
+      if words.length() == 0 {
+        // Empty keywords: return [] immediately without pausing or checking cancel (`match.mbt:317`).
+        cancelled.remove(key)
+        let _ = client.say_line("{\"id\":" + key + ",\"groups\":[]}")
+        return
+      }
+      active.push(ActiveQuery::new(id, data, sep, told, words))
+    }
+    _ => ()
+  }
+}
+
+/// Real scheduler stdin-EOF cleanup entrypoint shared by `run_search` and unit tests:
+/// closes every active query's open handles and drains the active queue in place.
+fn dispatch_eof[T](active : Array[T], cleanup_one : (T) -> Unit) -> Unit {
+  for i in 0..<active.length() {
+    cleanup_one(active[i])
+  }
+  while active.length() > 0 {
+    let _ = active.pop()
+  }
+}
+
+/// Production `--builder search --db <db> --data <data> [--sep <sep>]` entrypoint.
+pub fn run_search(db_path : String, data : String, sep : String) -> Int {
+  let shell_dir = builders_core::beside(db_path, "shell")
+  if !host_shim::start(shell_dir, true) {
+    let _ = host_shim::write_stderr_line("the shell did not start")
+    return 1
+  }
+  let db = match sql_db::Db::attach(db_path, wait_ms=5000) {
+    Ok(d) => d
+    Err(e) => {
+      let _ = host_shim::write_stderr_line(e.message)
+      host_shim::stop()
+      return 1
+    }
+  }
+  let queue = builders_core::LineQueue::new()
+  let client = builders_core::ShellClient::from_queue(queue)
+  let finder = locate::Finder::new(client, sep)
+  let cancelled : Map[String, Bool] = Map::new()
+  let mut active : Array[ActiveQuery] = []
+
+  while true {
+    // 1. Bounded stdin drain (up to MAX_STDIN_DRAIN = 64 events, matching `host.mbt:249-262`).
+    if active.length() == 0 {
+      match queue.pop_line() {
+        Some(line) => dispatch_search_line(line, data, sep, client, cancelled, active)
+        None => {
+          if queue.stdin_eof {
+            break
+          }
+          match host_shim::wait((-1).to_int64()) {
+            Some(host_shim::HostEvent::StdinData(chunk)) => queue.enqueue_chunk(chunk)
+            Some(host_shim::HostEvent::StdinEof) => queue.stdin_eof = true
+            _ => ()
+          }
+          let mut drained = 1
+          while drained < MAX_STDIN_DRAIN {
+            match host_shim::wait(0.to_int64()) {
+              None => break
+              Some(host_shim::HostEvent::StdinData(chunk)) => queue.enqueue_chunk(chunk)
+              Some(host_shim::HostEvent::StdinEof) => queue.stdin_eof = true
+              Some(_) => ()
+            }
+            drained = drained + 1
+          }
+          while true {
+            match queue.pop_line() {
+              Some(line) => dispatch_search_line(line, data, sep, client, cancelled, active)
+              None => break
+            }
+          }
+          if queue.stdin_eof && active.length() == 0 {
+            break
+          }
+        }
+      }
+    } else {
+      let mut drained = 0
+      while drained < MAX_STDIN_DRAIN {
+        match host_shim::wait(0.to_int64()) {
+          None => break
+          Some(host_shim::HostEvent::StdinData(chunk)) => queue.enqueue_chunk(chunk)
+          Some(host_shim::HostEvent::StdinEof) => queue.stdin_eof = true
+          Some(_) => ()
+        }
+        drained = drained + 1
+      }
+      while true {
+        match queue.pop_line() {
+          Some(line) => dispatch_search_line(line, data, sep, client, cancelled, active)
+          None => break
+        }
+      }
+      // On stdin EOF (matching `main.mbt:944` + `host.mbt:231`), clean up all active text.* handles and exit.
+      if queue.stdin_eof {
+        dispatch_eof(active, fn(q : ActiveQuery) -> Unit { q.cleanup(client) })
+        break
+      }
+    }
+
+    // 2. Round-robin step the front active query once (FIFO queue matching `@effect.pause`).
+    if active.length() > 0 {
+      let q = active[0]
+      let next_active : Array[ActiveQuery] = []
+      for i in 1..<active.length() {
+        next_active.push(active[i])
+      }
+      active = next_active
+      match q.step(db, client, finder, cancelled) {
+        QueryStepResult::Yielded => active.push(q)
+        QueryStepResult::Done(groups_json) => {
+          q.cleanup(client)
+          cancelled.remove(q.key)
+          let _ = client.say_line("{\"id\":" + q.id_json + ",\"groups\":" + groups_json + "}")
+        }
+        QueryStepResult::Failed(err_msg) => {
+          q.cleanup(client)
+          cancelled.remove(q.key)
+          let _ = client.say_line(
+            "{\"id\":" + q.id_json + ",\"error\":" + sql_db::stringify_json(base_codec::json_str(err_msg)) + "}",
+          )
+        }
+      }
+    }
+  }
+
+  dispatch_eof(active, fn(q : ActiveQuery) -> Unit { q.cleanup(client) })
+  db.close()
+  host_shim::stop()
+  0
+}

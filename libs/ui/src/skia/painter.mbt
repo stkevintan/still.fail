@@ -199,12 +199,12 @@ fn RasterPipelineBlitter::blit_mask(self : RasterPipelineBlitter, image : (Int, 
 }
 
 ///|
-impl Blitter for RasterPipelineBlitter with blit_h(self, x, y, width) {
-  Blitter::blit_rect(self, { x, y, width, height: 1 })
+fn RasterPipelineBlitter::blit_h(self : RasterPipelineBlitter, x : Int, y : Int, width : Int) -> Unit {
+  self.blit_rect({ x, y, width, height: 1 })
 }
 
 ///|
-impl Blitter for RasterPipelineBlitter with blit_anti_h(self, x, y, aa, runs) {
+fn RasterPipelineBlitter::blit_anti_h(self : RasterPipelineBlitter, x : Int, y : Int, aa : FixedArray[Int], runs : FixedArray[Int]) -> Unit {
   let mask_ctx = self.mask_ctx()
   let mut x = x
   let mut offset = 0
@@ -213,7 +213,7 @@ impl Blitter for RasterPipelineBlitter with blit_anti_h(self, x, y, aa, runs) {
     let width = run
     match aa[offset] {
       0 => ()
-      255 => Blitter::blit_h(self, x, y, width)
+      255 => self.blit_h(x, y, width)
       alpha => {
         self.blit_anti_h_rp.ctx.current_coverage = fi(alpha) * (1.0 / 255.0)
         self.blit_anti_h_rp.run({ x, y, width, height: 1 }, aa_mask_none, mask_ctx, self.pixmap_src, self.pixmap)
@@ -226,25 +226,25 @@ impl Blitter for RasterPipelineBlitter with blit_anti_h(self, x, y, aa, runs) {
 }
 
 ///|
-impl Blitter for RasterPipelineBlitter with blit_v(self, x, y, height, alpha) {
+fn RasterPipelineBlitter::blit_v(self : RasterPipelineBlitter, x : Int, y : Int, height : Int, alpha : Int) -> Unit {
   let bounds : ScreenIntRect = { x, y, width: 1, height }
   self.blit_mask((alpha, alpha), bounds, 0, bounds)
 }
 
 ///|
-impl Blitter for RasterPipelineBlitter with blit_anti_h2(self, x, y, alpha0, alpha1) {
+fn RasterPipelineBlitter::blit_anti_h2(self : RasterPipelineBlitter, x : Int, y : Int, alpha0 : Int, alpha1 : Int) -> Unit {
   let bounds : ScreenIntRect = { x, y, width: 2, height: 1 }
   self.blit_mask((alpha0, alpha1), bounds, 2, bounds)
 }
 
 ///|
-impl Blitter for RasterPipelineBlitter with blit_anti_v2(self, x, y, alpha0, alpha1) {
+fn RasterPipelineBlitter::blit_anti_v2(self : RasterPipelineBlitter, x : Int, y : Int, alpha0 : Int, alpha1 : Int) -> Unit {
   let bounds : ScreenIntRect = { x, y, width: 1, height: 2 }
   self.blit_mask((alpha0, alpha1), bounds, 1, bounds)
 }
 
 ///|
-impl Blitter for RasterPipelineBlitter with blit_rect(self, rect) {
+fn RasterPipelineBlitter::blit_rect(self : RasterPipelineBlitter, rect : ScreenIntRect) -> Unit {
   match self.memset2d_color {
     Some(c) => {
       let d = self.pixmap.data
@@ -314,9 +314,9 @@ pub fn Pixmap::fill_rect(self : Pixmap, rect : Rect, paint : Paint, transform : 
     match RasterPipelineBlitter::new(paint, mctx, self.as_subpixmap()) {
       Some(b) =>
         if paint.anti_alias {
-          fill_rect_aa(rect, clip, b)
+          fill_rect_aa(rect, clip, Raster(b))
         } else {
-          fill_rect_nonaa(rect, clip, b)
+          fill_rect_nonaa(rect, clip, Raster(b))
         }
       None => ()
     }
@@ -369,9 +369,9 @@ pub fn Pixmap::fill_path(
             match RasterPipelineBlitter::new(paint, submask, sub) {
               Some(bl) =>
                 if paint.anti_alias {
-                  fill_path_aa(path, fill_rule, clip_rect, bl)
+                  fill_path_aa(path, fill_rule, clip_rect, Raster(bl))
                 } else {
-                  fill_path_nonaa(path, fill_rule, clip_rect, bl)
+                  fill_path_nonaa(path, fill_rule, clip_rect, Raster(bl))
                 }
               None => ()
             }
@@ -395,9 +395,9 @@ pub fn Pixmap::fill_path(
       match RasterPipelineBlitter::new(paint, mctx, self.as_subpixmap()) {
         Some(bl) =>
           if paint.anti_alias {
-            fill_path_aa(path, fill_rule, clip_rect, bl)
+            fill_path_aa(path, fill_rule, clip_rect, Raster(bl))
           } else {
-            fill_path_nonaa(path, fill_rule, clip_rect, bl)
+            fill_path_nonaa(path, fill_rule, clip_rect, Raster(bl))
           }
         None => ()
       }
@@ -502,9 +502,9 @@ fn stroke_hairline_into(path : Path, paint : Paint, line_cap : LineCap, mask : M
   match RasterPipelineBlitter::new(paint, mask, pixmap) {
     Some(b) =>
       if paint.anti_alias {
-        hairline_aa_stroke_path(path, line_cap, clip, b)
+        hairline_aa_stroke_path(path, line_cap, clip, Raster(b))
       } else {
-        hairline_stroke_path(path, line_cap, clip, b)
+        hairline_stroke_path(path, line_cap, clip, Raster(b))
       }
     None => ()
   }

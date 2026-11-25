@@ -1,0 +1,14 @@
+[package]
+name = "builders_search"
+version = "0.1.0"
+
+[dependencies]
+base_codec = { workspace = true }
+builders_core = { workspace = true }
+host_shim = { workspace = true }
+js_json = { workspace = true }
+jscase = { workspace = true }
+locate = { workspace = true }
+nodepath = { workspace = true }
+sql_db = { workspace = true }
+transcript_io = { workspace = true }

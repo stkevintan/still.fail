@@ -83,6 +83,37 @@ fn set(o : JValue, name : String, v : JValue) -> JValue {
 }
 
 ///|
+/// `o` with each of `pairs` set, as `set` of each in turn gives, in one walk of `o` (`pairs` have distinct names).
+fn set_all(o : JValue, pairs : Array[(String, JValue)]) -> JValue {
+  let entries = match o {
+    Obj(entries) => entries
+    _ => if pairs.length() == 0 { return o } else { [] }
+  }
+  let at : Map[String, Int] = Map([])
+  for i, p in pairs {
+    at[p.0] = i
+  }
+  let put = FixedArray::make(pairs.length(), false)
+  let out = []
+  for e in entries {
+    match at.get(e.0) {
+      Some(i) =>
+        if !put[i] {
+          out.push(pairs[i])
+          put[i] = true
+        }
+      None => out.push(e)
+    }
+  }
+  for i, p in pairs {
+    if !put[i] {
+      out.push(p)
+    }
+  }
+  Obj(out)
+}
+
+///|
 /// `o` without `name`.
 fn without(o : JValue, name : String) -> JValue {
   guard o is Obj(entries) else { return o }

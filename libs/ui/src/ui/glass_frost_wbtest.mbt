@@ -48,6 +48,33 @@ test "effective_glass: contrast=true boosts tint alpha and rim/rim_edge highligh
 }
 
 ///|
+test "effective_glass: contrast=true zeroes chroma on dense liquid panel glass so applePanelGate is disabled" {
+  let panel = Glass::liquid(
+    blur=6.0,
+    tint=0xFDFCFDBFL,
+    solid=0xFFFFFFFFL,
+    bezel=20.0,
+    refraction=26.0,
+    rim=0.6,
+    chroma=0.03,
+  )
+  let out = effective_glass(panel, 0.0, true)
+  assert_eq(out.chroma, 0.0)
+  // Regular controls (chroma=0.06, droplet_role=0): contrast=true zeroes chroma, frost=0.5 alone preserves 0.06
+  let ctrl = Glass::liquid(
+    blur=2.0,
+    tint=0xFDFCFD67L,
+    solid=0xFFFFFFFFL,
+    bezel=14.0,
+    refraction=20.0,
+    rim=0.6,
+    chroma=0.06,
+  )
+  assert_eq(effective_glass(ctrl, 0.0, true).chroma, 0.0)
+  assert_eq(effective_glass(ctrl, 0.5, false).chroma, 0.06)
+}
+
+///|
 test "glass_frost: ViewBlock invalidates on frost and contrast changes, and frost=1.0 switches to solid" {
   let t = Tester::tree(w=400.0, h=300.0, fn(root) {
     root.box(fn(b) {

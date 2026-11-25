@@ -25,6 +25,7 @@ void sf_shell_stop(void*) {}
 void sf_shell_set_say(const void*, void (*)(void*, const uint8_t*, size_t, const uint8_t*, size_t), void*) {}
 void sf_shell_set_media(const void*, uint8_t (*)(void*, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, const uint8_t*, size_t), void*) {}
 uint8_t sf_shell_screen_ack(const void*, uint64_t, double) { return 0; }
+uint8_t sf_shell_screen_ack_wait(const void*, uint64_t, double, uint32_t) { return 0; }
 uint8_t sf_shell_screen_input(const void*, uint64_t, const uint8_t*, size_t) { return 0; }
 int32_t sf_utc_offset_min(double) { return 0; }
 }

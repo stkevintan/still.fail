@@ -1317,11 +1317,11 @@ test "wide: words picked with the pointer from a message's heading into its list
   let picked = t.ctx().selected_text()
   assert_true(picked.has_prefix("做了什么\n") && picked.has_suffix("滚动位置记成"), msg=picked)
   // the pill over where the pointer let go: the line of the list's item, not the heading where it went down
-  let (qx, qy) = match t.words().filter(fn(w) { w.0 == "引用" && w.2 < iy && w.2 > iy - 60.0 }) {
+  let (qx_down, qy_down) = match t.words().filter(fn(w) { w.0 == "引用" && w.2 < iy && w.2 > iy - 60.0 }) {
     [w, ..] => (w.1, w.2)
     _ => fail("no 引用 over where the pointer let go")
   }
-  assert_true(qy > hy && (qx - (ix + iw)).abs() < 40.0, msg="引用 at \{Repr((qx, qy))}")
+  assert_true((qx_down - (ix + iw)).abs() < 40.0, msg="引用 at \{Repr((qx_down, qy_down))}")
   // dragged up the other way, over the heading where it let go, at its start
   t.drag(ix + iw - 1.0, iy + ih / 2.0, hx + 1.0, hy + hh / 2.0)
   t.frame()
@@ -1330,7 +1330,7 @@ test "wide: words picked with the pointer from a message's heading into its list
     [w, ..] => (w.1, w.2)
     _ => fail("no 引用 over where the pointer let go")
   }
-  assert_true((qx - hx).abs() < 40.0, msg="引用 at \{Repr((qx, qy))}")
+  assert_true((qx - hx).abs() < 40.0 && ((qy_down - qy) - (iy - hy)).abs() < 2.0, msg="引用 down=\{Repr((qx_down, qy_down))} up=\{Repr((qx, qy))} hy=\{hy} iy=\{iy}")
   t.tap(qx + 4.0, qy + 4.0)
   t.frame()
   let quoted = named(calls, "composer.quote")

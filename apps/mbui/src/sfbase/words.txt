@@ -2370,13 +2370,6 @@ web-pages.errors.inviteCodeExpired
 web-pages.errors.inviteCodeInvalid
 web-pages.errors.inviteCodeRequired
 web-pages.errors.inviteCodeUsed
-web-pages.farview.copyImageLink
-web-pages.farview.downloaded
-web-pages.farview.downloadedOnHost
-web-pages.farview.find
-web-pages.farview.findPlaceholder
-web-pages.farview.openInNewTab
-web-pages.farview.zoomReset
 web-pages.files.applyAll
 web-pages.files.cancelTransfer
 web-pages.files.clash

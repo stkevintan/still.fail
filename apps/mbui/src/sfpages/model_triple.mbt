@@ -227,15 +227,25 @@ fn triple_other_stations(v : Json?) -> Bool {
 
 ///|
 /// What the panel picked changed (`pick.set`): only what is given.
-fn pick_draft(src : Source, station : String, of : String, patch : Map[String, Json]) -> Unit {
+fn pick_draft(
+  src : Source,
+  station : String,
+  of : String,
+  patch : Map[String, Json],
+  on_ok? : () -> Unit = fn() {  },
+  on_err? : () -> Unit = fn() {  },
+) -> Unit {
   let p = pick_params(station, of)
   for k, v in patch {
     p[k] = v
   }
   (src.call)("pick.set", Json::object(p), fn(res) {
     match res {
-      Ok(_) => ()
-      Err(e) => toast_later(@sf.t("web-main.pick.failed", args=[("error", error_words(e))]))
+      Ok(_) => on_ok()
+      Err(e) => {
+        on_err()
+        toast_later(@sf.t("web-main.pick.failed", args=[("error", error_words(e))]))
+      }
     }
   })
 }
@@ -1540,7 +1550,19 @@ fn triple_body_node(
     parent.pick(fn() { options().length() > 8 }, fn(x, finds) {
       if finds {
         @sf.panel_head_node(x, fn() { @sf.t("android-chat.new.model") }, end=fn(e) {
-          triple_find_node(e, contents, on_enter=search_enter, on_step=search_step)
+          @sf.panel_search_input_node(
+            e,
+            contents.field,
+            fn() { @sf.t("web-main.model.search") },
+            edited=fn(_) { contents.search_at.set(0) },
+            submitted=fn(_) { search_enter() },
+            step=fn(d) {
+              search_step(d)
+              true
+            },
+            step_can=fn() { contents.field.text() != "" },
+          )
+          |> ignore
         })
         |> ignore
       } else {
@@ -1551,12 +1573,45 @@ fn triple_body_node(
   // whose models it lists, where another station could lend some: this station's, or every station's (the core's
   // `otherStations`), in the title's place, a choice of two
   let scope_node = fn(parent : @view.View) {
+    let pending : @signals.Signal[Int?] = @signals.signal(None)
+    let req_seq : Ref[Int] = Ref(0)
+    let settled_seq : Ref[Int] = Ref(0)
+    let server_idx = fn() { if flag(v(), "otherStations") { 1 } else { 0 } }
+    parent.reacts(at_start=false, server_idx, fn(srv) {
+      if settled_seq.val == req_seq.val && @signals.untracked(fn() { pending.get() }) == Some(srv) {
+        pending.set(None)
+      }
+    })
     // (the small one, as wide as its two words, not the page's: it stands in a title's place)
     @sf.seg_node(
       parent,
       fn() { [@sf.t("web-main.model.here"), @sf.t("web-main.model.everywhere")] },
-      fn() { if flag(v(), "otherStations") { 1 } else { 0 } },
-      fn(i) { pick_draft(src, station, of, { "otherStations": Json::boolean(i == 1) }) },
+      fn() { pending.get().unwrap_or(server_idx()) },
+      fn(i) {
+        req_seq.val += 1
+        let seq = req_seq.val
+        pending.set(Some(i))
+        pick_draft(
+          src,
+          station,
+          of,
+          { "otherStations": Json::boolean(i == 1) },
+          on_ok=fn() {
+            if req_seq.val == seq {
+              settled_seq.val = seq
+              if @signals.untracked(server_idx) == i {
+                pending.set(None)
+              }
+            }
+          },
+          on_err=fn() {
+            if req_seq.val == seq {
+              settled_seq.val = seq
+              pending.set(None)
+            }
+          },
+        )
+      },
       each_own=true,
     )
     |> ignore
@@ -1579,7 +1634,19 @@ fn triple_body_node(
           |> ignore
           h.show(fn() { options().length() > 8 }, fn(f) {
             f.grow(Is(1.0)).basis(Is(Some(140.0))).shrink(Is(1.0)).min_width(Is(Some(0.0))) |> ignore
-            triple_find_node(f, contents, on_enter=search_enter, on_step=search_step)
+            @sf.panel_search_input_node(
+              f,
+              contents.field,
+              fn() { @sf.t("web-main.model.search") },
+              edited=fn(_) { contents.search_at.set(0) },
+              submitted=fn(_) { search_enter() },
+              step=fn(d) {
+                search_step(d)
+                true
+              },
+              step_can=fn() { contents.field.text() != "" },
+            )
+            |> ignore
           })
         })
         |> ignore
@@ -1665,7 +1732,19 @@ fn triple_body_node(
         if at == "" {
           body.show(fn() { options().length() > 8 }, fn(sb) {
             @sf.style_node(sb, fn() { triple_search })
-            triple_find_node(sb, contents, on_enter=search_enter, on_step=search_step)
+            @sf.panel_search_input_node(
+              sb,
+              contents.field,
+              fn() { @sf.t("web-main.model.search") },
+              edited=fn(_) { contents.search_at.set(0) },
+              submitted=fn(_) { search_enter() },
+              step=fn(d) {
+                search_step(d)
+                true
+              },
+              step_can=fn() { contents.field.text() != "" },
+            )
+            |> ignore
           })
         }
         // (whose models it lists, over them, where another station could lend some: models_head's choice)
@@ -1887,93 +1966,6 @@ fn triple_names_w(v : @view.View, pick : Json?, combos : Array[Json], efforts : 
     )
   })
   .ceil()
-}
-
-///|
-/// The models' search where there are more than 8 of them in node `parent`: round, on the words' tint, no line round it,
-/// its glass before its words, its ground deeper pointed at or typed in (2026-10-30 用户「搜索也优化一下」「感觉它不应该
-/// 单独一行」: beside what opened it, at the end of the panel's head, beside its title), as tall as a small panel's rows.
-fn triple_find_node(
-  parent : @view.View,
-  contents : TriplePanel,
-  on_enter~ : () -> Unit,
-  on_step~ : (Int) -> Unit,
-) -> Unit {
-  parent.box(fn(f) {
-    // (↓/↑ from inside the field come via Finder keymap actions; Escape clears text first before closing the panel)
-    f
-    .key_context("Finder")
-    .on_action("finder.down", fn(_) {
-      if contents.field.text() != "" {
-        on_step(1)
-        true
-      } else {
-        false
-      }
-    })
-    .on_action("finder.up", fn(_) {
-      if contents.field.text() != "" {
-        on_step(-1)
-        true
-      } else {
-        false
-      }
-    })
-    .on_key(fn(k) {
-      if k.code == @ui.key_escape && contents.field.text() != "" {
-        contents.field.set("")
-        contents.search_at.set(0)
-        true
-      } else {
-        false
-      }
-    })
-    |> ignore
-    // (round its words the field's to a press too: a tap its caret and its menu to paste, a long press its 粘贴)
-    @ui.field_backdrop(f, contents.field)
-    @sf.icon_node(f, "search", triple_find_icon, By(fn() { @sf.theme().p.muted })) |> ignore
-    let field = @ui.field(
-      f,
-      contents.field,
-      placeholder=@sf.t("web-main.model.search"),
-      line=@sf.theme().t.ui_line,
-      max_lines=1,
-      enter_sends=true,
-      leaves=[@ui.key_escape],
-      edited=fn(_) { contents.search_at.set(0) },
-      submitted=fn(_) { on_enter() },
-      size_by=fn() { @sf.theme().t.ui },
-      colors_by=fn() {
-        let th = @ui.tree_theme()
-        (th.fg, th.subtle, th.accent)
-      },
-    )
-    field.grow(Is(1.0)).basis(Is(Some(0.0))).shrink(Is(1.0)).min_width(Is(Some(0.0))) |> ignore
-    // (typed into as the panel opens beside its control with keys and a mouse; never on a sheet or by touch, where an
-    // input method raised would cover the models: 2026-11-19 用户「点开模型选择框时，编辑器焦点应该默认聚焦到输入框上」)
-    @sf.panel_search_at_hand_node(field)
-    f.show(at_once=true, fn() { contents.field.text() != "" }, fn(cl) {
-      // (concentric with the pill's right end: same inset from the right edge as from top and bottom)
-      cl.margin(By(fn() { (0.0, 0.0, (@sf.menu_row_min - 20.0) / 2.0 - @ui.Space::px(S3), 0.0) })) |> ignore
-      @sf.icon_button_node(
-        cl,
-        "close",
-        fn() { @sf.t("web-pages.drive.pickClear") },
-        fn() {
-          contents.field.set("")
-          contents.search_at.set(0)
-        },
-        size=20.0,
-        icon_size=12.0,
-      )
-      |> ignore
-    })
-    // (its ground deeper pointed at or typed in)
-    @sf.style_node(f, fn() {
-      (if @sf.hovered_node(f) || field.focused() { triple_find_hot } else { triple_find }).then(@ui.style(h=Fixed(@sf.menu_row_min)))
-    })
-  })
-  |> ignore
 }
 
 ///|
@@ -3185,20 +3177,6 @@ let triple_head : @ui.TextStyle = @ui.text_style(size=Meta, weight=Medium, color
 ///|
 // kept across runs: a value (no field of it changes)
 let triple_search : @ui.Style = @ui.css("w=Full pb=S2")
-
-///|
-/// The search: as tall as the panel's rows (a small panel's search is 34), round, on the words' tint (deeper pointed at or typed in), its glass 12 in and 8 before its
-/// words.
-// kept across runs: a value (no field of it changes)
-let triple_find : @ui.Style = @ui.css("row w=Full px=S3 gap=S2 align=ACenter radius=Full bg=Tint")
-
-///|
-// kept across runs: a value (no field of it changes)
-let triple_find_hot : @ui.Style = @ui.css("row w=Full px=S3 gap=S2 align=ACenter radius=Full bg=TintStrong")
-
-///|
-/// The search's glass.
-let triple_find_icon : Double = 14.0
 
 ///|
 /// A line across (a history's under its figures; the model panel's own are triple_panel_rule_h, over its foot the

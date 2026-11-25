@@ -28,7 +28,7 @@ test("a_beta_feature_follows_the_station_s_channel", () => {
   assert.equal(stationFeature("terminal", { updateChannel: "stable" }, beta), false);
   // what is no station's beta feature is never one here
   assert.equal(stationFeature("board", {}, beta), false);
-  assert.equal(stationFeature("farviewNative", { updateChannel: "beta" }, beta), false);
+  assert.equal(stationFeature("selectionIntent", { updateChannel: "beta" }, beta), false);
 });
 
 test("the_overview_says_what_is_on_and_moving_graduated_on_every_channel_for_apps_from_before", () => {

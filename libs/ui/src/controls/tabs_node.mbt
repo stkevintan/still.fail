@@ -88,7 +88,7 @@ pub fn[K : Eq] tabs_node(
           let n = tabs.length()
           let last_f = if n > 1 { (n - 1).to_double() } else { 0.0 }
           let init_idx = place_of(@signals.untracked(chosen))
-          let dd = @glass.DampedDrag::new(init_idx.to_double(), lo=0.0, hi=last_f, held_scale=1.0 + seg_lens_grow)
+          let dd = @glass.DampedDrag::new(init_idx.to_double(), lo=0.0, hi=last_f, held_scale=@glass.ctrl_seg_held_scale)
           dd.attach(strip)
           let current = Ref(init_idx)
           let strip_origin_x = Ref(0.0)
@@ -154,13 +154,6 @@ pub fn[K : Eq] tabs_node(
             }
           })
           let no_lens = fn() { !(look is Pill) || strip.glass_solid() || @ui.reduced_motion() }
-          let lens = fn() {
-            if no_lens() {
-              0.0
-            } else {
-              dd.pressed(strip)
-            }
-          }
           let pill_stopped = fn() {
             let to = dclamp(dd.target().round(), 0.0, last_f)
             let i = to.to_int()
@@ -197,47 +190,51 @@ pub fn[K : Eq] tabs_node(
               }
             }
           }
-          strip.box(fn(mark) {
-            mark
-            .over(Is(true))
-            .points(Is(false))
-            .width(Is(Some(0.0)))
-            .ground_drawn(By(fn() {
-              let r = if look is Pill { pill_rect(mark) } else { rect() }
-              match r {
-                Some((x, _, w, _)) => {
-                  dx: x,
-                  dy: match look {
-                    Underline => tab_h_now() - tabs_bar_h
-                    Pill => 0.0
-                  },
-                  dw: w,
-                  dh: 0.0,
-                  corners: None,
-                }
-                None => @view.ground_as_laid
-              }
-            }))
-            |> ignore
-            match look {
-              Underline =>
+          let mount_pill_lens = match look {
+            Underline => {
+              strip.box(fn(mark) {
                 mark
+                .over(Is(true))
+                .points(Is(false))
+                .width(Is(Some(0.0)))
                 .height(Is(Some(tabs_bar_h)))
                 .radius(Is(tabs_bar_h / 2.0))
                 .ground(By(fn() { theme().p.text }))
+                .ground_drawn(By(fn() {
+                  match rect() {
+                    Some((x, _, w, _)) => {
+                      dx: x,
+                      dy: tab_h_now() - tabs_bar_h,
+                      dw: w,
+                      dh: 0.0,
+                      corners: None,
+                    }
+                    None => @view.ground_as_laid
+                  }
+                }))
                 |> ignore
-              Pill =>
-                mark
-                .height(By(fn() { Some(tab_h_now()) }))
-                .radius(By(fn() { tab_h_now() / 2.0 }))
-                .ground(By(fn() { @ui.tree_theme().lifted }))
-                .edge(By(fn() { (0.5, theme().p.line) }))
-                .shadow(By(fn() { (1.0, 0.0, theme().p.shadow) }))
-                .alpha(By(fn() { seg_thumb_alpha(lens()) }))
-                |> ignore
+              })
+              |> ignore
+              None
             }
-          })
-          |> ignore
+            Pill =>
+              Some(
+                @glass.liquid_segmented_thumb_look(
+                  strip,
+                  pill_rect,
+                  fn(v) { dd.pressed(v) },
+                  look=@glass.SegThumbLook::default(
+                    glass_track=false,
+                    jelly=fn(v) { dd.jelly(v, 10.0) },
+                    active=fn() { dd.pressing() },
+                    solid=fn() { theme().p.raised },
+                    overhang_x=18.0,
+                    overhang_y=16.0,
+                  ),
+                  loc~,
+                ),
+              )
+          }
           for i, tab in tabs {
             let (key, words) = tab
             let i_f = i.to_double()
@@ -306,15 +303,9 @@ pub fn[K : Eq] tabs_node(
             })
             |> ignore
           }
-          if look is Pill {
-            seg_lens_overlay_node(
-              strip,
-              lens,
-              tab_h_now,
-              fn() { pill_rect(strip) },
-              jelly=fn(l) { dd.jelly(l, 10.0) },
-              active=fn() { !no_lens() && dd.pressing() },
-            )
+          match mount_pill_lens {
+            Some(mount) => mount()
+            None => ()
           }
         })
         |> ignore

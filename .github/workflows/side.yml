@@ -15,9 +15,7 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
-# (Farview's client, apps/mbui/scripts/farview.sh: ci-1 has no GitHub credentials of git's own, as Mini1 had)
 env:
-  FARVIEW_DEPLOY_KEY: ${{ secrets.FARVIEW_DEPLOY_KEY }}
   GH_TOKEN: ${{ github.token }} # read-only API fallback if the public release download fails
 jobs:
   side:

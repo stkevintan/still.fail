@@ -16,7 +16,7 @@ priv enum LineProc {
 }
 
 ///|
-fn LineProc::call(self : LineProc, points : Array[Point], clip : ScreenIntRect?, blitter : &Blitter) -> Unit {
+fn LineProc::call(self : LineProc, points : Array[Point], clip : ScreenIntRect?, blitter : Blitter) -> Unit {
   match self {
     PlainLines => hair_line_rgn(points, clip, blitter)
     AntiLines => anti_hair_line_rgn(points, clip, blitter)
@@ -24,17 +24,17 @@ fn LineProc::call(self : LineProc, points : Array[Point], clip : ScreenIntRect?,
 }
 
 ///|
-fn hairline_stroke_path(path : Path, line_cap : LineCap, clip : ScreenIntRect, blitter : &Blitter) -> Unit {
+fn hairline_stroke_path(path : Path, line_cap : LineCap, clip : ScreenIntRect, blitter : Blitter) -> Unit {
   stroke_path_impl(path, line_cap, clip, PlainLines, blitter)
 }
 
 ///|
-fn hairline_aa_stroke_path(path : Path, line_cap : LineCap, clip : ScreenIntRect, blitter : &Blitter) -> Unit {
+fn hairline_aa_stroke_path(path : Path, line_cap : LineCap, clip : ScreenIntRect, blitter : Blitter) -> Unit {
   stroke_path_impl(path, line_cap, clip, AntiLines, blitter)
 }
 
 ///|
-fn hair_line_rgn(points : Array[Point], clip : ScreenIntRect?, blitter : &Blitter) -> Unit {
+fn hair_line_rgn(points : Array[Point], clip : ScreenIntRect?, blitter : Blitter) -> Unit {
   let max : Float = 32767.0
   let fixed_bounds = Rect::from_ltrb(-max, -max, max, max).unwrap()
   let clip_bounds = match clip {
@@ -122,7 +122,7 @@ fn hair_line_rgn(points : Array[Point], clip : ScreenIntRect?, blitter : &Blitte
 }
 
 ///|
-fn stroke_path_impl(path : Path, line_cap : LineCap, clip : ScreenIntRect, line_proc : LineProc, blitter : &Blitter) -> Unit {
+fn stroke_path_impl(path : Path, line_cap : LineCap, clip : ScreenIntRect, line_proc : LineProc, blitter : Blitter) -> Unit {
   let mut inset_clip : IntRect? = None
   let mut outset_clip : IntRect? = None
   let cap_out : Float = if line_cap == Butt { 1.0 } else { 2.0 }
@@ -286,7 +286,7 @@ fn hair_quad(
   outset_clip : IntRect?,
   level : Int,
   line_proc : LineProc,
-  blitter : &Blitter,
+  blitter : Blitter,
 ) -> Unit {
   let mut clip = clip
   match inset_clip {
@@ -339,7 +339,7 @@ fn geometric_contains(outer : Rect, inner : Rect) -> Bool {
 }
 
 ///|
-fn hair_quad2(points : Array[Point], clip : ScreenIntRect?, level : Int, line_proc : LineProc, blitter : &Blitter) -> Unit {
+fn hair_quad2(points : Array[Point], clip : ScreenIntRect?, level : Int, line_proc : LineProc, blitter : Blitter) -> Unit {
   let coeff = QuadCoeff::from_points(points)
   let lines = 1 << level
   let tmp = Array::make(lines + 1, Point::zero())
@@ -384,7 +384,7 @@ fn hair_cubic(
   inset_clip : IntRect?,
   outset_clip : IntRect?,
   line_proc : LineProc,
-  blitter : &Blitter,
+  blitter : Blitter,
 ) -> Unit {
   let mut clip = clip
   match inset_clip {
@@ -433,7 +433,7 @@ fn lt_90(p0 : Point, pivot : Point, p2 : Point) -> Bool {
 }
 
 ///|
-fn hair_cubic2(points : Array[Point], clip : ScreenIntRect?, line_proc : LineProc, blitter : &Blitter) -> Unit {
+fn hair_cubic2(points : Array[Point], clip : ScreenIntRect?, line_proc : LineProc, blitter : Blitter) -> Unit {
   let lines = compute_cubic_segments(points)
   if lines == 1 {
     line_proc.call([points[0], points[3]], clip, blitter)
@@ -488,7 +488,7 @@ fn alpha_mul(value : Int, alpha256 : Int) -> Int {
 }
 
 ///|
-fn fill_rect_aa(rect : Rect, clip : ScreenIntRect, blitter : &Blitter) -> Unit {
+fn fill_rect_aa(rect : Rect, clip : ScreenIntRect, blitter : Blitter) -> Unit {
   let rect = match rect.intersect(clip.to_rect()) {
     Some(v) => v
     None => return
@@ -504,7 +504,7 @@ fn fill_rect_aa(rect : Rect, clip : ScreenIntRect, blitter : &Blitter) -> Unit {
 }
 
 ///|
-fn fill_dot8(l : Int, t : Int, r : Int, b : Int, fill_inner : Bool, blitter : &Blitter) -> Unit {
+fn fill_dot8(l : Int, t : Int, r : Int, b : Int, fill_inner : Bool, blitter : Blitter) -> Unit {
   if l >= r || t >= b {
     return
   }
@@ -552,7 +552,7 @@ fn fill_dot8(l : Int, t : Int, r : Int, b : Int, fill_inner : Bool, blitter : &B
 }
 
 ///|
-fn do_scanline(l : Int, top : Int, r : Int, alpha : Int, blitter : &Blitter) -> Unit {
+fn do_scanline(l : Int, top : Int, r : Int, alpha : Int, blitter : Blitter) -> Unit {
   if top < 0 {
     return
   }
@@ -582,7 +582,7 @@ fn do_scanline(l : Int, top : Int, r : Int, alpha : Int, blitter : &Blitter) -> 
 }
 
 ///|
-fn call_hline_blitter(x : Int, y : Int?, count : Int, alpha : Int, blitter : &Blitter) -> Unit {
+fn call_hline_blitter(x : Int, y : Int?, count : Int, alpha : Int, blitter : Blitter) -> Unit {
   let buffer = 100
   let runs = FixedArray::make(buffer + 1, 0)
   let aa = FixedArray::make(buffer, 0)
@@ -609,7 +609,7 @@ fn call_hline_blitter(x : Int, y : Int?, count : Int, alpha : Int, blitter : &Bl
 }
 
 ///|
-fn anti_hair_line_rgn(points : Array[Point], clip : ScreenIntRect?, blitter : &Blitter) -> Unit {
+fn anti_hair_line_rgn(points : Array[Point], clip : ScreenIntRect?, blitter : Blitter) -> Unit {
   let max : Float = 32767.0
   let fixed_bounds = Rect::from_ltrb(-max, -max, max, max).unwrap()
   let clip_bounds = match clip {
@@ -676,7 +676,7 @@ priv enum HairKind {
 }
 
 ///|
-fn do_anti_hairline(x0 : Int, y0 : Int, x1 : Int, y1 : Int, clip_opt : ScreenIntRect?, blitter : &Blitter) -> Unit {
+fn do_anti_hairline(x0 : Int, y0 : Int, x1 : Int, y1 : Int, clip_opt : ScreenIntRect?, blitter : Blitter) -> Unit {
   let mut x0 = x0
   let mut y0 = y0
   let mut x1 = x1
@@ -845,8 +845,8 @@ fn do_anti_hairline(x0 : Int, y0 : Int, x1 : Int, y1 : Int, clip_opt : ScreenInt
       None => ()
     }
   }
-  let blitter : &Blitter = match clip_opt {
-    Some(clip) => (({ blitter, clip } : RectClipBlitter) as &Blitter)
+  let blitter = match clip_opt {
+    Some(clip) => RectClip({ blitter, clip })
     None => blitter
   }
   let istart = istart
@@ -888,7 +888,7 @@ fn minus1(v : Int) -> Int {
 }
 
 ///|
-fn hair_draw_cap(kind : HairKind, blitter : &Blitter, x : Int, fy : Int, slope : Int, mod64 : Int) -> Int {
+fn hair_draw_cap(kind : HairKind, blitter : Blitter, x : Int, fy : Int, slope : Int, mod64 : Int) -> Int {
   match kind {
     HLine => {
       let fy = fy + fdot16_one / 2
@@ -942,7 +942,7 @@ fn hair_draw_cap(kind : HairKind, blitter : &Blitter, x : Int, fy : Int, slope :
 }
 
 ///|
-fn hair_draw_line(kind : HairKind, blitter : &Blitter, x : Int, stop : Int, fy : Int, slope : Int) -> Int {
+fn hair_draw_line(kind : HairKind, blitter : Blitter, x : Int, stop : Int, fy : Int, slope : Int) -> Int {
   match kind {
     HLine => {
       let count = stop - x
@@ -1018,7 +1018,7 @@ fn hair_draw_line(kind : HairKind, blitter : &Blitter, x : Int, stop : Int, fy :
 ///|
 /// A blitter that keeps to a rect (RectClipBlitter).
 priv struct RectClipBlitter {
-  blitter : &Blitter
+  blitter : Blitter
   clip : ScreenIntRect
 }
 
@@ -1034,7 +1034,7 @@ fn compute_anti_width(runs : FixedArray[Int]) -> Int {
 }
 
 ///|
-impl Blitter for RectClipBlitter with blit_anti_h(self, x, y, antialias, runs) {
+fn RectClipBlitter::blit_anti_h(self : RectClipBlitter, x : Int, y : Int, antialias : FixedArray[Int], runs : FixedArray[Int]) -> Unit {
   if !(y >= self.clip.y && y - self.clip.y < self.clip.height) || x >= self.clip.right() {
     return
   }
@@ -1061,7 +1061,7 @@ impl Blitter for RectClipBlitter with blit_anti_h(self, x, y, antialias, runs) {
 }
 
 ///|
-impl Blitter for RectClipBlitter with blit_v(self, x, y, height, alpha) {
+fn RectClipBlitter::blit_v(self : RectClipBlitter, x : Int, y : Int, height : Int, alpha : Int) -> Unit {
   if !(x >= self.clip.x && x - self.clip.x < self.clip.width) {
     return
   }
@@ -1079,34 +1079,25 @@ impl Blitter for RectClipBlitter with blit_v(self, x, y, height, alpha) {
 }
 
 ///|
-impl Blitter for RectClipBlitter with blit_anti_h2(self, x, y, alpha0, alpha1) {
+fn RectClipBlitter::blit_anti_h2(self : RectClipBlitter, x : Int, y : Int, alpha0 : Int, alpha1 : Int) -> Unit {
   let aa = FixedArray::make(2, 0)
   aa[0] = alpha0
   aa[1] = alpha1
   let runs = FixedArray::make(3, 0)
   runs[0] = 1
   runs[1] = 1
-  Blitter::blit_anti_h(self, x, y, aa, runs)
+  self.blit_anti_h(x, y, aa, runs)
 }
 
 ///|
-impl Blitter for RectClipBlitter with blit_anti_v2(self, x, y, alpha0, alpha1) {
+fn RectClipBlitter::blit_anti_v2(self : RectClipBlitter, x : Int, y : Int, alpha0 : Int, alpha1 : Int) -> Unit {
   let a0 = FixedArray::make(1, alpha0)
   let r0 = FixedArray::make(2, 0)
   r0[0] = 1
-  Blitter::blit_anti_h(self, x, y, a0, r0)
+  self.blit_anti_h(x, y, a0, r0)
   let a1 = FixedArray::make(1, alpha1)
   let r1 = FixedArray::make(2, 0)
   r1[0] = 1
-  Blitter::blit_anti_h(self, x, y + 1, a1, r1)
+  self.blit_anti_h(x, y + 1, a1, r1)
 }
 
-///|
-impl Blitter for RectClipBlitter with blit_h(_self, _x, _y, _w) {
-  @halt.saying("RectClipBlitter: blit_h")
-}
-
-///|
-impl Blitter for RectClipBlitter with blit_rect(_self, _r) {
-  @halt.saying("RectClipBlitter: blit_rect")
-}

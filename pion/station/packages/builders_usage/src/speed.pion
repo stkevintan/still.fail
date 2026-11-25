@@ -1,0 +1,627 @@
+// 1:1 port of `station/mb/src/usagecount/speed.mbt`:
+// Per-call generation timing for Claude Code, Codex, and Antigravity (`agy`),
+// plus cursor persistence in `usage_files.speed`.
+
+import "base_codec"
+import "js_json"
+import "sql_db"
+
+pub let GEN_MOST : Double = 1800000.0
+
+pub let MAX_SAFE_INT : Double = 9007199254740991.0
+
+pub let AGY_SPEED_PREFIX : String = "v1:"
+
+pub let AGY_MAX_TPS : Double = 500.0
+
+pub let AGY_TOOL_SKEW_MS : Double = 5.0
+
+pub let AGY_MAX_USAGES : Int = 64
+
+pub let AGY_MAX_TOOLS : Int = 2048
+
+pub let AGY_MAX_ID_BYTES : Int = 256
+
+pub let AGY_MAX_SPEED_BYTES : Int = 262144
+
+pub struct AgyPendingUsage {
+  pub id : String
+  pub at : Double
+  pub output : Option[Double]
+}
+
+pub struct AgyToolInterval {
+  pub start : Double
+  pub end : Double
+}
+
+pub struct AgySpeed {
+  pub mut turn_start : Option[Double]
+  pub mut invalid : Bool
+  pub mut usages : Array[AgyPendingUsage]
+  pub mut tools : Array[AgyToolInterval]
+}
+
+pub struct Speed {
+  pub mut since : Option[Double]
+  pub mut open_start : Option[Double]
+  pub mut open_id : Option[String]
+  pub mut ended : Option[Double]
+  pub mut agy : Option[AgySpeed]
+}
+
+pub fn no_speed() -> Speed {
+  Speed::{ since: None, open_start: None, open_id: None, ended: None, agy: None }
+}
+
+pub fn is_timed_runtime(runtime : String) -> Bool {
+  runtime == "claude" || runtime == "codex" || runtime == "agy"
+}
+
+fn str_has_prefix(s : String, prefix : String) -> Bool {
+  let sb = s.to_bytes()
+  let pb = prefix.to_bytes()
+  if sb.length() < pb.length() {
+    return false
+  }
+  for i in 0..<pb.length() {
+    if sb[i] != pb[i] {
+      return false
+    }
+  }
+  true
+}
+
+fn str_slice_bytes(s : String, start : Int, end : Int) -> String {
+  if start >= end {
+    return ""
+  }
+  let raw = s.to_bytes()
+  let sb = StringBuilder::new()
+  for i in start..<end {
+    sb.write_byte(raw[i])
+  }
+  sb.to_string()
+}
+
+pub fn needs_timing(runtime : String, speed : Option[String]) -> Bool {
+  if runtime == "claude" || runtime == "codex" {
+    match speed {
+      None => true
+      Some(_) => false
+    }
+  } else if runtime == "agy" {
+    match speed {
+      None => true
+      Some(t) => !str_has_prefix(t, AGY_SPEED_PREFIX)
+    }
+  } else {
+    false
+  }
+}
+
+pub fn agy_invalidate(agy : AgySpeed) -> Unit {
+  agy.turn_start = None
+  agy.invalid = true
+  agy.usages = []
+  agy.tools = []
+}
+
+pub fn agy_add_tool(agy : AgySpeed, start : Double, end : Double) -> Unit {
+  if end <= start {
+    return
+  }
+  let mut s = start
+  let mut e = end
+  let out : Array[AgyToolInterval] = []
+  let mut inserted = false
+  for i in 0..<agy.tools.length() {
+    let iv = agy.tools[i]
+    if iv.end < s {
+      out.push(iv)
+    } else if e < iv.start {
+      if !inserted {
+        out.push(AgyToolInterval::{ start: s, end: e })
+        inserted = true
+      }
+      out.push(iv)
+    } else {
+      if iv.start < s {
+        s = iv.start
+      }
+      if iv.end > e {
+        e = iv.end
+      }
+    }
+  }
+  if !inserted {
+    out.push(AgyToolInterval::{ start: s, end: e })
+  }
+  if out.length() > AGY_MAX_TOOLS {
+    agy_invalidate(agy)
+  } else {
+    agy.tools = out
+  }
+}
+
+pub fn agy_add_usage(agy : AgySpeed, id : String, at : Double, output : Option[Double]) -> Unit {
+  for i in 0..<agy.usages.length() {
+    if agy.usages[i].id == id {
+      return
+    }
+  }
+  if js_json::utf8_bytes(id).length() > AGY_MAX_ID_BYTES || agy.usages.length() >= AGY_MAX_USAGES {
+    agy_invalidate(agy)
+    return
+  }
+  agy.usages.push(AgyPendingUsage::{ id: id, at: at, output: output })
+}
+
+pub fn agy_segment_gen_ms(tools : Array[AgyToolInterval], from : Double, to : Double) -> Double {
+  if to <= from {
+    return 0.0
+  }
+  let mut cursor = from
+  let mut net = 0.0
+  for i in 0..<tools.length() {
+    let iv = tools[i]
+    if iv.end <= from {
+      continue
+    }
+    if iv.start >= to {
+      break
+    }
+    if iv.start > cursor {
+      let gap = iv.start - cursor
+      if gap > GEN_MOST {
+        return 0.0
+      }
+      net = net + gap
+    }
+    if iv.end > cursor {
+      cursor = min_d(iv.end, to)
+    }
+  }
+  if to > cursor {
+    let gap = to - cursor
+    if gap > GEN_MOST {
+      return 0.0
+    }
+    net = net + gap
+  }
+  net
+}
+
+pub fn agy_speed_text(agy : AgySpeed) -> String {
+  if agy.invalid {
+    return "v1:!"
+  }
+  let ts = match agy.turn_start {
+    Some(v) => v
+    None => return AGY_SPEED_PREFIX
+  }
+  let buf = StringBuilder::new()
+  buf.write_string("v1:{\"s\":")
+  buf.write_string(js_number(ts))
+  buf.write_string(",\"u\":[")
+  for i in 0..<agy.usages.length() {
+    let u = agy.usages[i]
+    if i > 0 {
+      buf.write_byte(44 as Byte)
+    }
+    buf.write_byte(91 as Byte)
+    buf.write_string(base_codec::json_stringify(base_codec::json_str(u.id)))
+    buf.write_byte(44 as Byte)
+    buf.write_string(js_number(u.at))
+    buf.write_byte(44 as Byte)
+    match u.output {
+      Some(o) => buf.write_string(js_number(o))
+      None => buf.write_string("null")
+    }
+    buf.write_byte(93 as Byte)
+  }
+  buf.write_string("],\"t\":[")
+  for i in 0..<agy.tools.length() {
+    let iv = agy.tools[i]
+    if i > 0 {
+      buf.write_byte(44 as Byte)
+    }
+    buf.write_byte(91 as Byte)
+    buf.write_string(js_number(iv.start))
+    buf.write_byte(44 as Byte)
+    buf.write_string(js_number(iv.end))
+    buf.write_byte(93 as Byte)
+  }
+  buf.write_string("]}")
+  let text = buf.to_string()
+  if js_json::utf8_bytes(text).length() > AGY_MAX_SPEED_BYTES {
+    agy_invalidate(agy)
+    return "v1:!"
+  }
+  text
+}
+
+pub fn speed_text(s : Speed) -> Option[String] {
+  match s.agy {
+    Some(agy) => {
+      if agy.invalid {
+        return Some(agy_speed_text(agy))
+      }
+      match agy.turn_start {
+        Some(_) => return Some(agy_speed_text(agy))
+        None => return None
+      }
+    }
+    None => ()
+  }
+  match (s.since, s.open_start, s.open_id, s.ended) {
+    (None, None, None, None) => return None
+    _ => ()
+  }
+  let fmt = fn(v : Option[Double]) -> String {
+    match v {
+      Some(d) => js_number(d)
+      None => ""
+    }
+  }
+  let oid = match s.open_id {
+    Some(id) => id
+    None => ""
+  }
+  Some(fmt(s.since) + "," + fmt(s.open_start) + "," + fmt(s.ended) + "," + oid)
+}
+
+pub fn kept_speed(s : Speed) -> String {
+  match speed_text(s) {
+    Some(t) => t
+    None => ",,,"
+  }
+}
+
+pub fn kept_speed_for(runtime : String, s : Speed) -> String {
+  if runtime == "agy" {
+    match s.agy {
+      Some(agy) => agy_speed_text(agy)
+      None => AGY_SPEED_PREFIX
+    }
+  } else {
+    kept_speed(s)
+  }
+}
+
+pub fn valid_safe_int(v : Option[base_codec::Json]) -> Option[Double] {
+  match v {
+    Some(base_codec::Json::Num(d, _)) => {
+      if !sql_db::is_nan_or_inf(d) && d >= 0.0 && d <= MAX_SAFE_INT && d.to_int64().to_double() == d {
+        Some(d)
+      } else {
+        None
+      }
+    }
+    _ => None
+  }
+}
+
+pub fn valid_time(v : Option[base_codec::Json]) -> Option[Double] {
+  valid_safe_int(v)
+}
+
+fn invalid_agy() -> Option[AgySpeed] {
+  Some(AgySpeed::{ turn_start: None, invalid: true, usages: [], tools: [] })
+}
+
+pub fn agy_speed_of(body : String) -> Option[AgySpeed] {
+  if body == "" {
+    return None
+  }
+  if body == "!" {
+    return invalid_agy()
+  }
+  let r = match parse_line(body) {
+    Some(v) => v
+    None => return invalid_agy()
+  }
+  let rec = Some(r)
+  let ts = match valid_time(jget(rec, "s")) {
+    Some(v) => v
+    None => return invalid_agy()
+  }
+  let agy = AgySpeed::{ turn_start: Some(ts), invalid: false, usages: [], tools: [] }
+  match jget(rec, "u") {
+    Some(base_codec::Json::Arr(items)) => {
+      if items.length() > AGY_MAX_USAGES {
+        return invalid_agy()
+      }
+      for i in 0..<items.length() {
+        let pair = match items[i] {
+          base_codec::Json::Arr(p) => p
+          _ => return invalid_agy()
+        }
+        if pair.length() != 2 && pair.length() != 3 {
+          return invalid_agy()
+        }
+        let id = match jstr(Some(pair[0])) {
+          Some(s) => s
+          None => return invalid_agy()
+        }
+        let at = match valid_time(Some(pair[1])) {
+          Some(t) => t
+          None => return invalid_agy()
+        }
+        if js_json::utf8_bytes(id).length() > AGY_MAX_ID_BYTES {
+          return invalid_agy()
+        }
+        let output : Option[Double] = if pair.length() == 2 {
+          None
+        } else {
+          match pair[2] {
+            base_codec::Json::Null => None
+            other => {
+              match valid_safe_int(Some(other)) {
+                Some(o) => Some(o)
+                None => return invalid_agy()
+              }
+            }
+          }
+        }
+        agy.usages.push(AgyPendingUsage::{ id: id, at: at, output: output })
+      }
+    }
+    None => ()
+    _ => return invalid_agy()
+  }
+  match jget(rec, "t") {
+    Some(base_codec::Json::Arr(items)) => {
+      if items.length() > AGY_MAX_TOOLS {
+        return invalid_agy()
+      }
+      let mut prev_end : Option[Double] = None
+      for i in 0..<items.length() {
+        let pair = match items[i] {
+          base_codec::Json::Arr(p) => p
+          _ => return invalid_agy()
+        }
+        if pair.length() != 2 {
+          return invalid_agy()
+        }
+        let s = match valid_time(Some(pair[0])) {
+          Some(v) => v
+          None => return invalid_agy()
+        }
+        let e = match valid_time(Some(pair[1])) {
+          Some(v) => v
+          None => return invalid_agy()
+        }
+        if !(e > s) {
+          return invalid_agy()
+        }
+        match prev_end {
+          Some(pe) => {
+            if !(pe < s) {
+              return invalid_agy()
+            }
+          }
+          None => ()
+        }
+        agy.tools.push(AgyToolInterval::{ start: s, end: e })
+        prev_end = Some(e)
+      }
+    }
+    None => ()
+    _ => return invalid_agy()
+  }
+  Some(agy)
+}
+
+fn split_by_comma(s : String) -> Array[String] {
+  let raw = s.to_bytes()
+  let n = raw.length()
+  let out : Array[String] = []
+  let mut start = 0
+  for i in 0..<n {
+    if (raw[i].to_int() & 0xFF) == 44 {
+      out.push(str_slice_bytes(s, start, i))
+      start = i + 1
+    }
+  }
+  out.push(str_slice_bytes(s, start, n))
+  out
+}
+
+fn whole_ms(parts : Array[String], idx : Int) -> Option[Double] {
+  if idx >= parts.length() || parts[idx] == "" {
+    return None
+  }
+  let raw = parts[idx].to_bytes()
+  let mut v = 0.0
+  let mut sign = 1.0
+  for i in 0..<raw.length() {
+    let c = raw[i].to_int() & 0xFF
+    if c == 45 {
+      sign = -1.0
+    } else if c >= 48 && c <= 57 {
+      v = v * 10.0 + (c - 48).to_double()
+    } else {
+      return None
+    }
+  }
+  Some(sign * v)
+}
+
+pub fn speed_of(text : Option[String]) -> Speed {
+  let t = match text {
+    Some(v) => v
+    None => return no_speed()
+  }
+  if str_has_prefix(t, AGY_SPEED_PREFIX) {
+    if js_json::utf8_bytes(t).length() > AGY_MAX_SPEED_BYTES {
+      return Speed::{
+        since: None,
+        open_start: None,
+        open_id: None,
+        ended: None,
+        agy: Some(AgySpeed::{ turn_start: None, invalid: true, usages: [], tools: [] }),
+      }
+    }
+    let body = str_slice_bytes(t, AGY_SPEED_PREFIX.length(), t.to_bytes().length())
+    return Speed::{ since: None, open_start: None, open_id: None, ended: None, agy: agy_speed_of(body) }
+  }
+  let parts = split_by_comma(t)
+  let id = if parts.length() > 3 {
+    let sb = StringBuilder::new()
+    for i in 3..<parts.length() {
+      if i > 3 {
+        sb.write_byte(44 as Byte)
+      }
+      sb.write_string(parts[i])
+    }
+    sb.to_string()
+  } else {
+    ""
+  }
+  Speed::{
+    since: whole_ms(parts, 0),
+    open_start: whole_ms(parts, 1),
+    ended: whole_ms(parts, 2),
+    open_id: if id == "" { None } else { Some(id) },
+    agy: None,
+  }
+}
+
+fn timestamp_key() -> Bytes {
+  "\"timestamp\":\"".to_bytes()
+}
+
+fn payload_key() -> Bytes {
+  "\"payload\":{\"type\":\"".to_bytes()
+}
+
+fn api_request_key() -> Bytes {
+  "{\"type\":\"api-request\"".to_bytes()
+}
+
+fn user_entry_key() -> Bytes {
+  "\"type\":\"user\",\"message\":{\"role\":\"user\"".to_bytes()
+}
+
+fn response_item_key() -> Bytes {
+  "\"type\":\"response_item\"".to_bytes()
+}
+
+fn bytes_index_of(b : Bytes, p : Bytes, from : Int) -> Option[Int] {
+  let m = p.length()
+  if m == 0 {
+    return Some(from)
+  }
+  if m > b.length() {
+    return None
+  }
+  let last = b.length() - m
+  let mut i = from
+  while i <= last {
+    let mut j = 0
+    while j < m && b[i + j] == p[j] {
+      j = j + 1
+    }
+    if j == m {
+      return Some(i)
+    }
+    i = i + 1
+  }
+  None
+}
+
+fn quoted_after(line : Bytes, key : Bytes) -> Option[String] {
+  let at = match bytes_index_of(line, key, 0) {
+    Some(v) => v
+    None => return None
+  }
+  let start = at + key.length()
+  let mut end = start
+  while end < line.length() && (line[end].to_int() & 0xFF) != 34 {
+    end = end + 1
+  }
+  if end >= line.length() {
+    return None
+  }
+  Some(sql_db::decode_utf8_lossy_bytes(bytes_slice(line, start, end)))
+}
+
+fn stamp_of(line : Bytes) -> Option[Double] {
+  match quoted_after(line, timestamp_key()) {
+    Some(s) => parse_iso(s)
+    None => None
+  }
+}
+
+pub fn gen_of(start : Option[Double], end : Option[Double]) -> Double {
+  match (start, end) {
+    (Some(s), Some(e)) => {
+      if e > s && e - s <= GEN_MOST {
+        e - s
+      } else {
+        0.0
+      }
+    }
+    _ => 0.0
+  }
+}
+
+fn codex_asked(t : String) -> Bool {
+  t == "task_started" ||
+  t == "user_message" ||
+  t == "function_call_output" ||
+  t == "custom_tool_call_output" ||
+  t == "local_shell_call_output"
+}
+
+fn codex_writes(t : String) -> Bool {
+  t == "reasoning" ||
+  t == "function_call" ||
+  t == "custom_tool_call" ||
+  t == "local_shell_call" ||
+  t == "web_search_call"
+}
+
+pub fn speed_line(runtime : String, line : Bytes, speed : Speed) -> Unit {
+  if runtime == "claude" {
+    if bytes_begins(line, api_request_key()) || bytes_holds(line, user_entry_key()) {
+      match stamp_of(line) {
+        Some(t) => speed.since = Some(t)
+        None => ()
+      }
+    }
+  } else if runtime == "codex" {
+    match quoted_after(line, payload_key()) {
+      Some(t) => {
+        if codex_asked(t) {
+          match stamp_of(line) {
+            Some(at) => speed.since = Some(at)
+            None => ()
+          }
+        } else {
+          let is_write = codex_writes(t) ||
+          (t == "message" &&
+            bytes_holds(line, response_item_key()) &&
+            match jstr(jget(jget(parse_line(sql_db::decode_utf8_lossy_bytes(line)), "payload"), "role")) {
+              Some("assistant") => true
+              _ => false
+          })
+          if is_write {
+            match stamp_of(line) {
+              Some(at) => {
+                match speed.open_start {
+                  None => speed.open_start = speed.since
+                  Some(_) => ()
+                }
+                speed.ended = Some(at)
+              }
+              None => ()
+            }
+          }
+        }
+      }
+      None => ()
+    }
+  }
+}

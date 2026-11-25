@@ -42,6 +42,7 @@
 #include <os/lock.h>
 #include <stdatomic.h>
 #include "avc.h"
+#include "stream_pace.h"
 
 // (linked wherever this is, whatever the app's own link flags say)
 __asm__(".linker_option \"-framework\", \"VideoToolbox\"");
@@ -67,13 +68,49 @@ void mb_host_request_frame(void);
 
 @interface MBStreamInFlight : NSObject
 @property double ts;
+@property double arrivedMs;
 @property uint32_t epoch;
 @property BOOL unseen;
 @end
 @implementation MBStreamInFlight
 @end
 
-@interface MBStream : NSObject
+@interface MBStreamPaced : NSObject
+@property MBStreamFrame *frame;
+@property uint64_t route;
+@property double arrivedMs;
+@property double baseMs;
+@property BOOL immediate;
+@end
+@implementation MBStreamPaced
+@end
+
+#if TARGET_OS_IPHONE
+static void pace_tick(int32_t sid);
+@interface MBStreamDisplayTarget : NSObject
+@property int32_t sid;
+- (void)onDisplayLink:(CADisplayLink *)link;
+@end
+@implementation MBStreamDisplayTarget
+- (void)onDisplayLink:(CADisplayLink *)link {
+  (void)link;
+  pace_tick(self.sid);
+}
+@end
+#else
+typedef struct {
+  int32_t sid;
+  atomic_bool pending;
+} mb_display_link_ctx;
+#endif
+
+@interface MBStream : NSObject {
+@public
+  mb_pace_t _pace;
+#if !TARGET_OS_IPHONE
+  mb_display_link_ctx *_linkCtx;
+#endif
+}
 @property int sid;
 @property dispatch_queue_t queue, jpegQueue;
 // what it says, oldest first (under @synchronized(self)), and the frames decoded and not shown yet
@@ -122,14 +159,20 @@ void mb_host_request_frame(void);
 @property CVPixelBufferRef displayed;  // retained: the last shown, put on a layer attached later
 @property double displayedTs;          // timestamp of the last shown frame
 @property NSMutableArray *onLayer;     // the pixel buffers last put on it (display)
-// (main thread) its frames' pacing on that layer (display_paced): the display's refresh (ms, as the layer was attached),
-// when one was last put there (ms), the newer one held back to the next refresh after it (retained) and the timer that
-// puts it (strict: a wait no longer than asked)
-@property double refreshMs, putAt;
-@property CVPixelBufferRef paced;
-@property dispatch_source_t paceTimer;
-// (under @synchronized(self)) frames of its route decoded and on their way to the main thread, not shown yet
-@property long directQueued;
+// (main thread) adaptive VSync-aligned jitter buffer for routed frames (stream_pace.h): ordered decoded queue
+// (bounded to MB_PACE_QUEUE_CAP), whether a frame was already presented in the current VSync interval, and the
+// display-synced driver (CVDisplayLink on macOS with timer fallback if headless; CADisplayLink on iOS).
+@property NSMutableArray<MBStreamPaced *> *pacedQueue;
+@property BOOL paceDrawnThisTick;
+@property int paceIdleTicks;
+#if TARGET_OS_IPHONE
+@property CADisplayLink *displayLink;
+@property MBStreamDisplayTarget *displayTarget;
+#else
+@property CVDisplayLinkRef displayLink;
+@property BOOL displayLinkRunning;
+@property dispatch_source_t paceFallbackTimer;
+#endif
 // a pointer over its picture on that layer (@hostapi.stream_pointer): its own sublayer, its picture and size (points),
 // its hot spot, where it points (0..1 of the layer's bounds) and whether it shows
 @property CALayer *pointer;
@@ -193,6 +236,7 @@ static mb_route routes[MB_ROUTES];
 static uint64_t routes_used;
 static os_unfair_lock routes_lock = OS_UNFAIR_LOCK_INIT;
 static int (*route_ack)(double route, double ts);
+static int (*route_ack_wait)(double route, double ts, uint32_t wait_us);
 
 // (under routes_lock) route's entry; made where `make` (in a free one, else one routing nothing used least lately)
 static mb_route *route_at(uint64_t route, BOOL make) {
@@ -224,12 +268,18 @@ static BOOL routed(uint64_t route, int32_t sid) {
   return on;
 }
 
-// (main thread) frame ts of route taken, as far as its sender is concerned
+// (main thread) frame ts of route taken, as far as its sender is concerned, with client jitter-buffer wait_us
+static void route_acked_wait(uint64_t route, double ts, uint32_t wait_us) {
+  if (route_ack_wait) route_ack_wait((double)route, ts, wait_us);
+  else if (route_ack) route_ack((double)route, ts);
+}
+
 static void route_acked(uint64_t route, double ts) {
-  if (route_ack) route_ack((double)route, ts);
+  route_acked_wait(route, ts, 0);
 }
 
 void mb_stream_route_acks(int (*ack)(double route, double ts)) { route_ack = ack; }
+void mb_stream_route_acks_wait(int (*ack)(double route, double ts, uint32_t wait_us)) { route_ack_wait = ack; }
 
 // The most frames fed from a route kept as let go (-1 in s.direct, so one the decoder gives after all is not shown):
 // past it the oldest of them forgotten. A decoder holds a few frames, never this many; while it gives none (each
@@ -267,21 +317,25 @@ static void show_frame(MBStream *s, MBStreamFrame *f);
 static void unroute(int32_t sid, int what);
 static void audio_stop(MBStream *s);
 static void audio_drop(MBStream *s);
+static double now_ms(void);
+static void pace_start(MBStream *s);
+static void pace_stop(MBStream *s);
+static void pace_clear(MBStream *s, BOOL ack_remaining);
+static void pace_destroy_link(MBStream *s);
+static void pace_trim(MBStream *s, double now, int draws);
+static void pace_present_item(MBStream *s, MBStreamPaced *item, double now);
 #if TARGET_OS_IPHONE
 // whether the app is in the background (told on the main thread, read on the audio queues: audio_play)
 static atomic_bool app_in_background;
 #endif
 
-// A frame fed from a route decoded (main thread): shown and acknowledged here while the route still goes to it, nothing
-// of the app's run; else said, as the app's are. One with a newer behind it on its way here (a burst the main thread
-// was too busy to take one by one) is acknowledged at once and passed over: the newest shown, none of the backlog
-// played out after it.
-static void direct_shown(MBStream *s, MBStreamFrame *f, uint64_t route) {
-  long behind;
-  @synchronized(s) {
-    behind = --s.directQueued;
+// A frame fed from a route decoded (main thread): enters the VSync-aligned adaptive jitter buffer while the route
+// still goes to it; else handed to the app as a normal decoded frame.
+static void direct_shown(MBStream *s, MBStreamFrame *f, uint64_t route, double arrivedMs) {
+  if (s.closed) {
+    route_acked_wait(route, f.ts, 0);
+    return;
   }
-  if (s.closed) return;
   if (!routed(route, s.sid)) {
     @synchronized(s) {
       [s.decoded addObject:f];
@@ -289,17 +343,37 @@ static void direct_shown(MBStream *s, MBStreamFrame *f, uint64_t route) {
     say(s, [NSString stringWithFormat:@"f %@ %d %d", num(f.ts), f.w, f.h]);
     return;
   }
-  // (what the app said decoded before it and has not shown yet: passed over)
-  @synchronized(s) {
-    NSMutableArray *left = [NSMutableArray new];
-    for (MBStreamFrame *g in s.decoded) {
-      if (g.ts > f.ts) [left addObject:g];
-    }
-    s.decoded = left;
+  double now = now_ms();
+  double obsArrived = arrivedMs > 0.0 ? arrivedMs : now;
+  s.paceIdleTicks = 0;
+  mb_pace_arrival_t obs = mb_pace_observe(&s->_pace, f.ts, obsArrived);
+
+  // Enforce bounded queue capacity so CVPixelBuffers never accumulate unboundedly.
+  while (s.pacedQueue.count >= MB_PACE_QUEUE_CAP) {
+    MBStreamPaced *old = s.pacedQueue[0];
+    [s.pacedQueue removeObjectAtIndex:0];
+    route_acked_wait(old.route, old.frame.ts, mb_pace_wait_us(old.arrivedMs, now));
   }
-  if (behind <= 0) show_frame(s, f);
-  s.directAt = f.ts;
-  route_acked(route, f.ts);
+
+  BOOL wasEmpty = (s.pacedQueue.count == 0);
+  MBStreamPaced *item = [MBStreamPaced new];
+  item.frame = f;
+  item.route = route;
+  item.arrivedMs = obs.arrived_ms;
+  item.baseMs = obs.base_ms;
+  item.immediate = obs.immediate != 0;
+  [s.pacedQueue addObject:item];
+
+  pace_trim(s, now, 0);
+
+  if (wasEmpty && !s.paceDrawnThisTick && s.pacedQueue.count > 0) {
+    MBStreamPaced *head = s.pacedQueue[0];
+    if (mb_pace_is_due(&s->_pace, head.frame.ts, head.baseMs, head.immediate ? 1u : 0u, now)) {
+      [s.pacedQueue removeObjectAtIndex:0];
+      pace_present_item(s, head, now);
+    }
+  }
+  if (s.pacedQueue.count > 0 || s.paceDrawnThisTick) pace_start(s);
 }
 
 // ---- H.264 (the stream's queue) ----
@@ -317,6 +391,7 @@ static void decoded(void *out_ref, void *frame_ref, OSStatus status, VTDecodeInf
   uint32_t gen = (uint32_t)key;
   MBStreamInFlight *inf = (__bridge_transfer MBStreamInFlight *)frame_ref;
   double ts = inf ? inf.ts : 0;
+  double arrivedMs = inf ? inf.arrivedMs : 0;
   uint32_t epoch = inf ? inf.epoch : 0;
   BOOL unseen = inf ? inf.unseen : NO;
   if (image) CVPixelBufferRetain(image);
@@ -366,7 +441,7 @@ static void decoded(void *out_ref, void *frame_ref, OSStatus status, VTDecodeInf
       f.w = (int)CVPixelBufferGetWidth(image);
       f.h = (int)CVPixelBufferGetHeight(image);
       f.pixels = image;
-      // one fed from a route: shown there (none let go already); those before it are done with
+      // one fed from a route: paced on the main thread (none let go already); those before it are done with
       NSNumber *direct = s.direct[@(ts)];
       if (direct) {
         for (NSNumber *t in s.direct.allKeys) {
@@ -374,10 +449,7 @@ static void decoded(void *out_ref, void *frame_ref, OSStatus status, VTDecodeInf
         }
         if (direct.longValue < 0) return;
         uint64_t route = s.directRoute;
-        @synchronized(s) {
-          s.directQueued += 1;
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{ direct_shown(s, f, route); });
+        dispatch_async(dispatch_get_main_queue(), ^{ direct_shown(s, f, route, arrivedMs); });
         return;
       }
       @synchronized(s) {
@@ -410,6 +482,7 @@ static void stop(MBStream *s) {
     uint64_t route = s.directRoute;
     dispatch_async(dispatch_get_main_queue(), ^{ route_acked(route, routed_max); });
   }
+  dispatch_async(dispatch_get_main_queue(), ^{ pace_clear(s, YES); });
   s.needKey = YES;
 }
 
@@ -529,7 +602,7 @@ static void configure_hevc(MBStream *s, NSData *hvcc, int w, int h) {
   else stop(s);
 }
 
-static void feed(MBStream *s, NSData *data, BOOL key, double ts, BOOL unseen) {
+static void feed(MBStream *s, NSData *data, BOOL key, double ts, BOOL unseen, double arrivedMs) {
   if (!s.session || (s.needKey && !key)) {
     let_go(s, ts);
     return;
@@ -565,6 +638,7 @@ static void feed(MBStream *s, NSData *data, BOOL key, double ts, BOOL unseen) {
   [s.inside addObject:@(ts)];
   MBStreamInFlight *inf = [MBStreamInFlight new];
   inf.ts = ts;
+  inf.arrivedMs = arrivedMs;
   inf.epoch = s.flushEpoch;
   inf.unseen = unseen;
   void *frame_ref = (__bridge_retained void *)inf;
@@ -657,6 +731,8 @@ int32_t mb_host_stream_open(void) {
   s.retired = [NSMutableArray new];
   s.inside = [NSMutableArray new];
   s.onLayer = [NSMutableArray new];
+  s.pacedQueue = [NSMutableArray new];
+  mb_pace_init(&s->_pace);
   s.audioQueue = dispatch_queue_create("mbui.stream.audio", DISPATCH_QUEUE_SERIAL);
   s.direct = [NSMutableDictionary new];
   s.directAt = s.directToldAt = -1;
@@ -690,7 +766,7 @@ void mb_host_stream_frame(int32_t sid, moonbit_bytes_t data, int32_t key, double
   MBStream *s = stream_of(sid);
   if (!s) return;
   NSData *d = [NSData dataWithBytes:data length:(NSUInteger)Moonbit_array_length(data)];
-  dispatch_async(s.queue, ^{ feed(s, d, key != 0, ts, NO); });
+  dispatch_async(s.queue, ^{ feed(s, d, key != 0, ts, NO, 0); });
 }
 
 void mb_host_stream_jpeg(int32_t sid, moonbit_bytes_t data, double ts) {
@@ -754,8 +830,6 @@ void mb_host_stream_show(int32_t sid, double ts) {
   show_frame(s, f);
 }
 
-static void display_paced(MBStream *s, CVPixelBufferRef px);
-
 // Frame f shown from now (main thread): on its system video layer and as its texture.
 static void show_frame(MBStream *s, MBStreamFrame *f) {
   s.displayedTs = f.ts;
@@ -763,7 +837,7 @@ static void show_frame(MBStream *s, MBStreamFrame *f) {
   if (f.pixels) {
     if (s.displayed) CVPixelBufferRelease(s.displayed);
     s.displayed = CVPixelBufferRetain(f.pixels);
-    display_paced(s, f.pixels);
+    display(s, f.pixels);
   } else if (s.displayed) {
     CVPixelBufferRelease(s.displayed);
     s.displayed = NULL;
@@ -870,69 +944,209 @@ static void display(MBStream *s, CVPixelBufferRef px) {
   while (s.onLayer.count > 3) [s.onLayer removeObjectAtIndex:0];
 }
 
-// The display's refresh (ms): the screen's most frames a second (60 where it says none).
-static double refresh_ms(void) {
-#if TARGET_OS_IPHONE
-  NSInteger fps = UIScreen.mainScreen.maximumFramesPerSecond;
-#else
-  NSInteger fps = NSScreen.mainScreen.maximumFramesPerSecond;
-#endif
-  return 1000.0 / (double)(fps > 0 ? fps : 60);
-}
-
 static double now_ms(void) {
   static mach_timebase_info_data_t tb;
   if (!tb.denom) mach_timebase_info(&tb);
   return (double)mach_absolute_time() * tb.numer / tb.denom / 1e6;
 }
 
-// at most this long a frame waits to be put on its layer (ms): what pacing may add to what is seen
-#define MB_PACE_MS 4.0
+// ---- VSync-aligned adaptive jitter buffer (main thread, stream_pace.h) ----
 
-// Pixel buffer `px` put on the stream's layer (main thread), paced. Two frames come within a millisecond or two where
-// the network bunched them: put one on the other in the same refresh, the first is never seen and the second shows for
-// two (a jump, then a stall). So one that comes less than half a refresh (at most MB_PACE_MS) after the last put waits
-// out the rest of that, then goes; a third coming meanwhile goes at once in its place (a backlog: the newest shown, no
-// wait added to it). Only what the layer shows waits: the frame is acknowledged (direct_shown) and drawn as the
-// stream's texture as it came, so its sender's pacing measures nothing of this.
-static void pace_drop(MBStream *s) {
-  if (s.paceTimer) dispatch_source_set_timer(s.paceTimer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
-  if (s.paced) CVPixelBufferRelease(s.paced);
-  s.paced = NULL;
+static void pace_present_item(MBStream *s, MBStreamPaced *item, double now) {
+  // (what the app said decoded before it and has not shown yet: passed over)
+  @synchronized(s) {
+    if (s.decoded.count > 0) {
+      NSMutableArray *left = [NSMutableArray new];
+      for (MBStreamFrame *g in s.decoded) {
+        if (g.ts > item.frame.ts) [left addObject:g];
+      }
+      s.decoded = left;
+    }
+  }
+  show_frame(s, item.frame);
+  s.directAt = item.frame.ts;
+  s.paceDrawnThisTick = YES;
+  route_acked_wait(item.route, item.frame.ts, mb_pace_wait_us(item.arrivedMs, now));
 }
 
-static void display_paced(MBStream *s, CVPixelBufferRef px) {
-  if (!s.display || !px) return;
-  double now = now_ms(), gap = fmin(MB_PACE_MS, s.refreshMs / 2);
-  if (s.paced) {
-    pace_drop(s);
-  } else if (now - s.putAt < gap) {
-    if (!s.paceTimer) {
-      dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, DISPATCH_TIMER_STRICT, dispatch_get_main_queue());
-      __weak MBStream *weak = s;
-      dispatch_source_set_event_handler(t, ^{
-        MBStream *live = weak;
-        CVPixelBufferRef held = live.paced;
-        if (!held) return;
-        live.paced = NULL;
-        dispatch_source_set_timer(live.paceTimer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
-        if (!live.closed) {
-          display(live, held);
-          live.putAt = now_ms();
-        }
-        CVPixelBufferRelease(held);
-      });
-      dispatch_source_set_timer(t, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
-      dispatch_activate(t);
-      s.paceTimer = t;
-    }
-    s.paced = CVPixelBufferRetain(px);
-    int64_t wait = (int64_t)((s.putAt + gap - now) * NSEC_PER_MSEC);
-    dispatch_source_set_timer(s.paceTimer, dispatch_time(DISPATCH_TIME_NOW, wait), DISPATCH_TIME_FOREVER, 0);
+static void pace_trim(MBStream *s, double now, int draws) {
+  int due = 0;
+  NSUInteger count = s.pacedQueue.count;
+  while ((NSUInteger)due < count) {
+    MBStreamPaced *it = s.pacedQueue[(NSUInteger)due];
+    if (!mb_pace_is_due(&s->_pace, it.frame.ts, it.baseMs, it.immediate ? 1u : 0u, now)) break;
+    due++;
+  }
+  if (due <= 0) {
+    mb_pace_trim(&s->_pace, 0, draws, 0.0, now, NULL);
     return;
   }
-  display(s, px);
-  s.putAt = now;
+  double headArrived = s.pacedQueue[0].arrivedMs;
+  int drop = mb_pace_trim(&s->_pace, due, draws, headArrived, now, NULL);
+  while (drop > 0 && s.pacedQueue.count > 0) {
+    MBStreamPaced *old = s.pacedQueue[0];
+    [s.pacedQueue removeObjectAtIndex:0];
+    route_acked_wait(old.route, old.frame.ts, mb_pace_wait_us(old.arrivedMs, now));
+    drop--;
+  }
+}
+
+static void pace_tick(int32_t sid) {
+  MBStream *s = stream_of(sid);
+  if (!s || s.closed) return;
+#if !TARGET_OS_IPHONE
+  if (s->_linkCtx) atomic_store_explicit(&s->_linkCtx->pending, false, memory_order_release);
+#endif
+  s.paceDrawnThisTick = NO;
+  double now = now_ms();
+  pace_trim(s, now, 1);
+  BOOL drew = NO;
+  if (s.pacedQueue.count > 0) {
+    MBStreamPaced *head = s.pacedQueue[0];
+    if (mb_pace_is_due(&s->_pace, head.frame.ts, head.baseMs, head.immediate ? 1u : 0u, now)) {
+      [s.pacedQueue removeObjectAtIndex:0];
+      pace_present_item(s, head, now);
+      drew = YES;
+    }
+  }
+  if (drew || s.pacedQueue.count > 0) {
+    s.paceIdleTicks = 0;
+  } else if (++s.paceIdleTicks >= MB_PACE_IDLE_STOP_TICKS) {
+    s.paceIdleTicks = 0;
+    pace_stop(s);
+  }
+}
+
+#if !TARGET_OS_IPHONE
+static CVReturn display_link_cb(CVDisplayLinkRef link, const CVTimeStamp *inNow, const CVTimeStamp *inOutputTime,
+                                CVOptionFlags flagsIn, CVOptionFlags *flagsOut, void *userInfo) {
+  (void)link;
+  (void)inNow;
+  (void)inOutputTime;
+  (void)flagsIn;
+  (void)flagsOut;
+  mb_display_link_ctx *ctx = (mb_display_link_ctx *)userInfo;
+  if (!ctx) return kCVReturnSuccess;
+  if (!atomic_exchange_explicit(&ctx->pending, true, memory_order_acq_rel)) {
+    int32_t sid = ctx->sid;
+    dispatch_async(dispatch_get_main_queue(), ^{ pace_tick(sid); });
+  }
+  return kCVReturnSuccess;
+}
+#endif
+
+static void pace_start(MBStream *s) {
+  if (s.closed) return;
+#if TARGET_OS_IPHONE
+  if (!s.displayLink) {
+    MBStreamDisplayTarget *target = [MBStreamDisplayTarget new];
+    target.sid = s.sid;
+    s.displayTarget = target;
+    CADisplayLink *link = [CADisplayLink displayLinkWithTarget:target selector:@selector(onDisplayLink:)];
+    [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    s.displayLink = link;
+  }
+  s.displayLink.paused = NO;
+#else
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  if (!s.displayLink && !s.paceFallbackTimer) {
+    CVDisplayLinkRef link = NULL;
+    if (CVDisplayLinkCreateWithActiveCGDisplays(&link) == kCVReturnSuccess && link) {
+      mb_display_link_ctx *ctx = (mb_display_link_ctx *)calloc(1, sizeof(mb_display_link_ctx));
+      if (ctx) {
+        ctx->sid = s.sid;
+        atomic_init(&ctx->pending, false);
+        if (CVDisplayLinkSetOutputCallback(link, display_link_cb, ctx) == kCVReturnSuccess) {
+          s->_linkCtx = ctx;
+          s.displayLink = link;
+        } else {
+          free(ctx);
+          CVDisplayLinkRelease(link);
+        }
+      } else {
+        CVDisplayLinkRelease(link);
+      }
+    }
+    if (!s.displayLink) {
+      // Headless fallback if no active CGDisplay is available.
+      dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+      int32_t sid = s.sid;
+      dispatch_source_set_event_handler(t, ^{ pace_tick(sid); });
+      dispatch_source_set_timer(t, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
+      dispatch_activate(t);
+      s.paceFallbackTimer = t;
+    }
+  }
+  if (s.displayLink && !s.displayLinkRunning) {
+    if (CVDisplayLinkStart(s.displayLink) == kCVReturnSuccess) s.displayLinkRunning = YES;
+  } else if (s.paceFallbackTimer) {
+    dispatch_source_set_timer(s.paceFallbackTimer, dispatch_time(DISPATCH_TIME_NOW, 16 * NSEC_PER_MSEC),
+                              16 * NSEC_PER_MSEC, 1 * NSEC_PER_MSEC);
+  }
+#pragma clang diagnostic pop
+#endif
+}
+
+static void pace_stop(MBStream *s) {
+#if TARGET_OS_IPHONE
+  if (s.displayLink) s.displayLink.paused = YES;
+#else
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  if (s.displayLink && s.displayLinkRunning) {
+    CVDisplayLinkStop(s.displayLink);
+    s.displayLinkRunning = NO;
+  }
+  if (s.paceFallbackTimer) {
+    dispatch_source_set_timer(s.paceFallbackTimer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
+  }
+#pragma clang diagnostic pop
+#endif
+}
+
+static void pace_clear(MBStream *s, BOOL ack_remaining) {
+  pace_stop(s);
+  double now = now_ms();
+  if (ack_remaining) {
+    for (MBStreamPaced *item in s.pacedQueue) {
+      route_acked_wait(item.route, item.frame.ts, mb_pace_wait_us(item.arrivedMs, now));
+    }
+  }
+  [s.pacedQueue removeAllObjects];
+  s.paceDrawnThisTick = NO;
+  s.paceIdleTicks = 0;
+  mb_pace_reset(&s->_pace);
+}
+
+static void pace_destroy_link(MBStream *s) {
+#if TARGET_OS_IPHONE
+  if (s.displayLink) {
+    [s.displayLink invalidate];
+    s.displayLink = nil;
+  }
+  s.displayTarget = nil;
+#else
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  if (s.displayLink) {
+    if (s.displayLinkRunning) {
+      CVDisplayLinkStop(s.displayLink);
+      s.displayLinkRunning = NO;
+    }
+    CVDisplayLinkRelease(s.displayLink);
+    s.displayLink = NULL;
+  }
+#pragma clang diagnostic pop
+  if (s->_linkCtx) {
+    free(s->_linkCtx);
+    s->_linkCtx = NULL;
+  }
+  if (s.paceFallbackTimer) {
+    dispatch_source_cancel(s.paceFallbackTimer);
+    s.paceFallbackTimer = nil;
+  }
+#endif
 }
 
 static void pointer_put(MBStream *s);
@@ -941,7 +1155,6 @@ void mb_stream_attach_layer(int sid, CALayer *layer) {
   MBStream *s = stream_of(sid);
   if (!s) return;
   s.display = layer;
-  s.refreshMs = refresh_ms();
   s.placedW = 0;
   s.placedH = 0;
   pointer_put(s);
@@ -967,9 +1180,8 @@ void mb_host_stream_close(int32_t sid) {
   if (s.displayed) CVPixelBufferRelease(s.displayed);
   s.displayed = NULL;
   [s.onLayer removeAllObjects];
-  pace_drop(s);
-  if (s.paceTimer) dispatch_source_cancel(s.paceTimer);
-  s.paceTimer = nil;
+  pace_clear(s, YES);
+  pace_destroy_link(s);
   s.lazy = nil;
   if (s.toSRGB) {
     VTPixelTransferSessionInvalidate(s.toSRGB);
@@ -1348,6 +1560,7 @@ int mb_stream_route_take(uint64_t route, int kind, int key, uint64_t seq, uint64
       s.directBytes += (long)len;
     }
     double t = (double)ts;
+    double arrived = now_ms();
     BOOL k = key != 0;
     dispatch_async(s.queue, ^{
       if (s.closed) {
@@ -1357,7 +1570,7 @@ int mb_stream_route_take(uint64_t route, int kind, int key, uint64_t seq, uint64
       }
       s.directRoute = route;
       s.direct[@(t)] = @((long)d.length);
-      feed(s, d, k, t, NO);
+      feed(s, d, k, t, NO, arrived);
     });
   }
   return 1;
@@ -1385,7 +1598,7 @@ int32_t mb_host_stream_frame_shown(int32_t sid, moonbit_bytes_t data, int32_t ke
   if (!s) return 1;
   NSData *d = [NSData dataWithBytes:data length:(NSUInteger)Moonbit_array_length(data)];
   BOOL k = key != 0, unseen = show == 0;
-  dispatch_async(s.queue, ^{ feed(s, d, k, ts, unseen); });
+  dispatch_async(s.queue, ^{ feed(s, d, k, ts, unseen, 0); });
   return 1;
 }
 

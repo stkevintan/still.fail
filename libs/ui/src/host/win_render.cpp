@@ -117,6 +117,26 @@ static ID3D11ShaderResourceView *gsrv;
 // snapshots (its own vertex buffer still holds it) and to find the runs of each image; the canvas its frames are drawn
 // into and what of it is said to differ (partial redraw, below). Put in place for a window by mb_render_use.
 #define MB_PARTS 8
+#define MB_WIN_GAP_MAX 4
+struct WinDropStats {
+  UINT last_present_count;
+  UINT last_present_refresh;
+  int64_t last_present_qpc;
+  int has_frame_stats;
+  int gap_owed;
+  int gap_unknown_open;   // unsealed unknown gap (GetLastPresentCount failed / OCCLUDED / DISJOINT / init)
+  int has_unknown_until;  // suppress transitions with prev < unknown_until until fs_present >= unknown_until
+  UINT unknown_until;
+  UINT gap_starts[MB_WIN_GAP_MAX];
+  int gap_count;
+};
+
+static void win_drop_stats_reset(WinDropStats *st) {
+  memset(st, 0, sizeof *st);
+  st->gap_owed = 1;
+  st->gap_unknown_open = 1;
+}
+
 struct RenderWin {
   HWND target_hwnd;
   IDXGISwapChain1 *chain;
@@ -147,16 +167,15 @@ struct RenderWin {
   double ad_last_time;
   uint64_t ad_frame_serial;
   int ad_settling;
-  UINT last_present_count;
-  UINT last_sync_refresh;
-  int64_t last_present_qpc;
-  int has_frame_stats;
+  WinDropStats drop_stats;
+  int last_presented;
 };
 static RenderWin render_wins[MB_WINS];
 static RenderWin *rw = &render_wins[0];
 static void render_win_fresh(RenderWin *w) {
   memset(w, 0, sizeof *w);
   w->vw = 800, w->vh = 600, w->vscale = 1;
+  win_drop_stats_reset(&w->drop_stats);
 }
 static struct RenderWinsMade {
   RenderWinsMade() {
@@ -488,13 +507,20 @@ static const char *shader_src =
     "    float u = max(d - 1.20 * hs, 0.0) / (2.80 * hs);\n"
     "    s_cap = 1.28 * 1.847264 * u * u * exp(-u) * medialTaper;\n"
     "    H_opt = 10.6 * hs * refScale;\n"
+    "  } else if (role == 3) {\n"
+    "    float r_lip = 2.15 * hs;\n"
+    "    float L_lip = 0.42 * hs;\n"
+    "    s_lip = 14.5 * exp(-d / L_lip) * (1.0 - smoothstep(0.45 * r_lip, r_lip, d)) * medialTaper;\n"
+    "    float u = max(d - 1.95 * hs, 0.0) / (1.80 * hs);\n"
+    "    float capCut = 1.0 - smoothstep(7.5 * hs, 10.5 * hs, d);\n"
+    "    s_cap = 1.16 * 1.847264 * u * u * exp(-u) * capCut * medialTaper;\n"
+    "    H_opt = 10.6 * hs * refScale;\n"
     "  } else {\n"
     "    float r_lip = 2.15 * hs;\n"
     "    float L_lip = 0.42 * hs;\n"
     "    s_lip = 14.5 * exp(-d / L_lip) * (1.0 - smoothstep(0.45 * r_lip, r_lip, d)) * medialTaper;\n"
     "    float u = max(d - 1.95 * hs, 0.0) / (2.60 * hs);\n"
-    "    float cap_amp = (role == 3) ? 1.16 : 0.56;\n"
-    "    s_cap = cap_amp * 1.847264 * u * u * exp(-u) * medialTaper;\n"
+    "    s_cap = 0.56 * 1.847264 * u * u * exp(-u) * medialTaper;\n"
     "    H_opt = 10.6 * hs * refScale;\n"
     "  }\n"
     "  return float2(mb_snell_intersect(s_lip - s_cap, ior, H_opt), s_lip);\n"
@@ -869,6 +895,8 @@ static const char *shader_src =
     "    float darkMixSaved = 0.0;\n"
     "    float lightExtra = 0.0;\n"
     "    bool hasLightEm = false;\n"
+    "    float colChroma = max(max(col.r, col.g), col.b) - min(min(col.r, col.g), col.b);\n"
+    "    float applePanelGate = smoothstep(0.005, 0.02, abs(I.pd.z)) * (1.0 - smoothstep(0.035, 0.05, abs(I.pd.z))) * (1.0 - smoothstep(0.04, 0.08, colChroma));\n"
     "    if (is_clear) {\n"
     "      // iOS 27 clear liquid glass: col.a == 0.0 keeps crystal-clear zero-veil optical lens\n"
     "      // (lifted tab-bar / toggle / slider thumb & loupe), while Glass::clear() (col.a ~ 0.102)\n"
@@ -929,7 +957,8 @@ static const char *shader_src =
     "        emission = lerp(float3(30.0 / 255.0, 30.0 / 255.0, 30.0 / 255.0), float3(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0), extra);\n"
     "        transmittance = lerp(0.50, 0.0, extra);\n"
     "        lift = lerp(0.24, 0.0, extra);\n"
-    "        chromaGain = lerp(1.05, 0.0, extra);\n"
+    "        float darkChromaFloor = 0.45 * (1.0 - smoothstep(0.72, 0.84, col.a)) * applePanelGate;\n"
+    "        chromaGain = lerp(1.05, darkChromaFloor, extra);\n"
     "        contourStr = 0.88; contourDirAmt = 1.0; bevelShadowStr = 0.036;\n"
     "        glintLum = 1.6; glintFaceGain = 0.0; glintVib = 2.85;\n"
     "      } else {\n"
@@ -964,6 +993,18 @@ static const char *shader_src =
     "      refractColor = lerp(refractColor, lowC, dampW);\n"
     "    }\n"
     "    if (hasLightEm) {\n"
+    "      if (!is_adaptive && lightExtra > 0.001) {\n"
+    "        float brightRelax = smoothstep(0.55, 1.00, luma(lowC)) * (1.0 - smoothstep(0.80, 0.95, col.a)) * applePanelGate;\n"
+    "        if (brightRelax > 0.001) {\n"
+    "          float effExtra = lightExtra * lerp(1.0, 0.45, brightRelax);\n"
+    "          float effDens = 0.30 + 0.70 * effExtra;\n"
+    "          lightEmSaved = float3(253.0 / 255.0, 252.0 / 255.0, 253.0 / 255.0) * effDens;\n"
+    "          lightExtra = effExtra;\n"
+    "          transmittance = lerp(0.70, 0.0, effExtra);\n"
+    "          lift = lerp(0.16, 0.0, effExtra);\n"
+    "          chromaGain = lerp(1.18, 0.0, effExtra);\n"
+    "        }\n"
+    "      }\n"
     "      float bgChroma = max(lowC.r, max(lowC.g, lowC.b)) - min(lowC.r, min(lowC.g, lowC.b));\n"
     "      float lightVeilScale = lerp(1.0, 0.65, smoothstep(0.08, 0.40, bgChroma) * regMix * (1.0 - lightExtra));\n"
     "      emission = lerp(lightEmSaved * lightVeilScale, darkEmSaved, darkMixSaved);\n"
@@ -1011,7 +1052,6 @@ static const char *shader_src =
     "      baseColor = lerp(legacyBase, regProjected, regMix);\n"
     "    }\n"
     "    // Honor explicit chromatic tints (non-neutral) if a caller requests colored liquid glass\n"
-    "    float colChroma = max(max(col.r, col.g), col.b) - min(min(col.r, col.g), col.b);\n"
     "    if (colChroma > 0.08 && col.a > 0.001) {\n"
     "      float tintW = col.a <= 0.45\n"
     "        ? col.a * 0.5\n"
@@ -1093,6 +1133,13 @@ static const char *shader_src =
     "        float regRim = (regRimGain * regLobe * regEase * (0.185 * regCore + 0.020 * regTail) * (1.0 - regHairline * regShadeMask) + spot * 0.10 * regCore) * regMix;\n"
     "        float3 rimTarget = saturate(float3(1.0, 1.0, 1.0) + (refractColor - Y.xxx) * 1.0);\n"
     "        result = lerp(result, rimTarget, saturate(regRim));\n"
+    "        float panelRimGate = smoothstep(0.48, 0.65, col.a) * (1.0 - smoothstep(0.85, 0.98, col.a)) * applePanelGate;\n"
+    "        if (panelRimGate > 0.001) {\n"
+    "          float cushionEnv = smoothstep(0.55, 1.35, inward) * exp(-max(0.0, inward - 1.0) / 3.0);\n"
+    "          float cushionLobe = max(regLobe, 0.42);\n"
+    "          float cushionStr = (is_dark ? 0.06 : 0.62) * cushionLobe * cushionEnv * panelRimGate * regMix;\n"
+    "          result = lerp(result, float3(1.0, 1.0, 1.0), saturate(cushionStr));\n"
+    "        }\n"
     "      }\n"
     "      if (regHairline > 0.001) {\n"
     "        float regShade = (is_dark ? 0.0 : 0.13) * regShadeMask;\n"
@@ -1785,6 +1832,7 @@ static int make_composed(IDXGIDevice1 *xdev, HWND hwnd) {
   if (SUCCEEDED(hr)) {
     fb_w = (int)sd.Width;
     fb_h = (int)sd.Height;
+    win_drop_stats_reset(&rw->drop_stats);
     return 1;
   }
   fprintf(stderr, "no DirectComposition (0x%08lx): the window's own swap chain, no native views\n", (unsigned long)hr);
@@ -1810,13 +1858,20 @@ static int make_own_chain(HWND hwnd) {
   sd.BufferCount = 2;
   sd.Scaling = DXGI_SCALING_NONE;
   sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-  if (flip_chain && SUCCEEDED(dxgi_factory->CreateSwapChainForHwnd(dev, hwnd, &sd, NULL, NULL, &chain))) return 1;
+  if (flip_chain && SUCCEEDED(dxgi_factory->CreateSwapChainForHwnd(dev, hwnd, &sd, NULL, NULL, &chain))) {
+    win_drop_stats_reset(&rw->drop_stats);
+    return 1;
+  }
   // before Windows 10
   sd.Scaling = DXGI_SCALING_STRETCH;
   sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
   sd.BufferCount = 1;
   flip_chain = 0;
-  return SUCCEEDED(dxgi_factory->CreateSwapChainForHwnd(dev, hwnd, &sd, NULL, NULL, &chain));
+  if (SUCCEEDED(dxgi_factory->CreateSwapChainForHwnd(dev, hwnd, &sd, NULL, NULL, &chain))) {
+    win_drop_stats_reset(&rw->drop_stats);
+    return 1;
+  }
+  return 0;
 }
 
 static void make_pipeline(void);
@@ -2643,6 +2698,7 @@ void mb_render_trim(void) {
         float clear[4] = {0, 0, 0, 0};
         ctx->ClearRenderTargetView(rtv, clear);
         chain->Present(0, 0);
+        win_drop_stats_reset(&rw->drop_stats);
       }
     }
     if (dcomp) dcomp->Commit();
@@ -3578,7 +3634,8 @@ static int gpu_q_tail = 0;
 static int gpu_q_init_done = 0;
 static int gpu_q_ok = 0;
 static double last_gpu_ms = -1.0;
-static int32_t present_dropped = 0;
+// Process-wide monotonic dropped-frame total across all windows (swapchain sampling state stays per RenderWin).
+static int32_t present_dropped_total = 0;
 
 static void gpu_q_free(void) {
   for (int i = 0; i < MB_GPU_Q_SLOTS; i++) {
@@ -3673,26 +3730,111 @@ static void gpu_q_end(int idx) {
 }
 
 #define MB_WIN_DROPPED_CLAMP 10
-// Pure logic for counting dropped frames from consecutive DXGI_FRAME_STATISTICS samples. The timestamps are the
-// samples' own SyncQPCTime (DWM's statistics lag the present by a frame or more, so the CPU's time now would pair a
-// short gap with a sync count that spans a whole idle pause). Drops count only when the two syncs are within
-// 2.5 * period_ms (continuous animation or scroll, not idle pauses); a frame is `beats` refreshes (mb_frame_beats:
-// 2 at 240Hz, 3 at 360Hz paced to 120fps), so a present expects `beats` syncs and a drop is a whole frame's worth.
-static int32_t win_count_dropped_step(UINT prev_present, UINT prev_sync, int64_t prev_qpc, int has_prev,
-                                      UINT cur_present, UINT cur_sync, int64_t cur_qpc,
-                                      int64_t qpc_freq, double period_ms, int beats) {
-  if (!has_prev || qpc_freq <= 0 || period_ms <= 0.0 || beats <= 0) return 0;
-  if (prev_qpc <= 0 || cur_qpc <= 0 || cur_qpc <= prev_qpc) return 0;
-  double dt_ms = (double)(cur_qpc - prev_qpc) * 1000.0 / (double)qpc_freq;
-  if (dt_ms >= 2.5 * period_ms) return 0;
-  if (cur_present <= prev_present || cur_sync <= prev_sync) return 0;
-  UINT d_present = cur_present - prev_present;
-  UINT d_sync = cur_sync - prev_sync;
-  uint64_t expected_sync = (uint64_t)d_present * (uint64_t)beats;
-  if ((uint64_t)d_sync <= expected_sync) return 0;
-  uint64_t dropped = ((uint64_t)d_sync - expected_sync) / (uint64_t)beats;
-  if (dropped > MB_WIN_DROPPED_CLAMP) dropped = MB_WIN_DROPPED_CLAMP;
-  return (int32_t)dropped;
+// Updates gap boundary tracking after a Present call (visible_ok: SUCCEEDED(hr) && hr != DXGI_STATUS_OCCLUDED).
+static void win_stats_on_present(WinDropStats *st, int visible_ok, int pc_ok, UINT pc) {
+  if (!visible_ok) {
+    st->has_frame_stats = 0;
+    st->gap_owed = 1;
+    st->gap_unknown_open = 1;
+    st->has_unknown_until = 0;
+    st->gap_count = 0;
+    return;
+  }
+  if (!st->gap_owed) return;
+  if (!pc_ok) {
+    st->gap_unknown_open = 1;
+    return;
+  }
+  st->gap_owed = 0;
+  if (st->gap_unknown_open) {
+    st->gap_unknown_open = 0;
+    if (!st->has_unknown_until || (int32_t)(pc - st->unknown_until) > 0) {
+      st->has_unknown_until = 1;
+      st->unknown_until = pc;
+    }
+    int keep = 0;
+    for (int i = 0; i < st->gap_count; i++) {
+      if ((int32_t)(st->gap_starts[i] - st->unknown_until) > 0) st->gap_starts[keep++] = st->gap_starts[i];
+    }
+    st->gap_count = keep;
+    return;
+  }
+  if (st->has_unknown_until && (int32_t)(pc - st->unknown_until) <= 0) return;
+  for (int i = 0; i < st->gap_count; i++) {
+    if (st->gap_starts[i] == pc) return;
+  }
+  if (st->gap_count < MB_WIN_GAP_MAX) {
+    st->gap_starts[st->gap_count++] = pc;
+  } else {
+    if (!st->has_unknown_until || (int32_t)(pc - st->unknown_until) > 0) {
+      st->has_unknown_until = 1;
+      st->unknown_until = pc;
+    }
+    st->gap_count = 0;
+  }
+}
+
+// Pure state-machine step for counting dropped frames from DXGI_FRAME_STATISTICS samples.
+// Uses PresentRefreshCount (actual display refresh, immune to SyncRefreshCount drift) with 32-bit wrap-safe
+// deltas, a short-interval guard (dt_ms < 2.5 * period_ms) to ignore pauses, and exact gap_starts / unknown_until
+// boundary checks so lagging samples from the previous continuous run still count while cross-gap transitions are
+// suppressed and never permanently lock out subsequent drops.
+static int32_t win_stats_step(WinDropStats *st, int fs_ok, int fs_disjoint,
+                              UINT fs_present, UINT fs_refresh, int64_t fs_qpc,
+                              int64_t qpc_freq, double period_ms, int beats) {
+  if (fs_disjoint) {
+    st->has_frame_stats = 0;
+    st->gap_owed = 1;
+    st->gap_unknown_open = 1;
+    st->has_unknown_until = 0;
+    st->gap_count = 0;
+    return 0;
+  }
+  // Allow 0 on 32-bit wrap-around once history exists (or when DISJOINT/unknown gap sealed right at pc == 0).
+  int cold_zero_ok = st->has_unknown_until && st->unknown_until == 0 && fs_present == 0 && fs_refresh > 0;
+  if (!fs_ok || fs_qpc <= 0 || (!st->has_frame_stats && !cold_zero_ok && (fs_present == 0 || fs_refresh == 0))) {
+    st->has_frame_stats = 0;
+    return 0;
+  }
+  if (st->has_frame_stats && fs_present == st->last_present_count) return 0;
+  int32_t dropped = 0;
+  if (st->has_frame_stats) {
+    int crossed_gap = st->gap_unknown_open ||
+                      (st->has_unknown_until && (int32_t)(st->last_present_count - st->unknown_until) < 0);
+    for (int i = 0; !crossed_gap && i < st->gap_count; i++) {
+      UINT g = st->gap_starts[i];
+      if ((int32_t)(st->last_present_count - g) < 0 && (int32_t)(fs_present - g) >= 0) {
+        crossed_gap = 1;
+      }
+    }
+    if (!crossed_gap && qpc_freq > 0 && period_ms > 0.0 && beats > 0 &&
+        st->last_present_qpc > 0 && fs_qpc > st->last_present_qpc) {
+      double dt_ms = (double)(fs_qpc - st->last_present_qpc) * 1000.0 / (double)qpc_freq;
+      if (dt_ms < 2.5 * period_ms) {
+        int32_t d_present = (int32_t)(fs_present - st->last_present_count);
+        int32_t d_refresh = (int32_t)(fs_refresh - st->last_present_refresh);
+        if (d_present > 0 && d_refresh > 0) {
+          uint64_t expected_refresh = (uint64_t)(uint32_t)d_present * (uint64_t)beats;
+          if ((uint64_t)(uint32_t)d_refresh > expected_refresh) {
+            uint64_t d = ((uint64_t)(uint32_t)d_refresh - expected_refresh) / (uint64_t)beats;
+            if (d > MB_WIN_DROPPED_CLAMP) d = MB_WIN_DROPPED_CLAMP;
+            dropped = (int32_t)d;
+          }
+        }
+      }
+    }
+  }
+  int keep = 0;
+  for (int i = 0; i < st->gap_count; i++) {
+    if ((int32_t)(fs_present - st->gap_starts[i]) < 0) st->gap_starts[keep++] = st->gap_starts[i];
+  }
+  st->gap_count = keep;
+  if (st->has_unknown_until && (int32_t)(fs_present - st->unknown_until) >= 0) st->has_unknown_until = 0;
+  st->last_present_count = fs_present;
+  st->last_present_refresh = fs_refresh;
+  st->last_present_qpc = fs_qpc;
+  st->has_frame_stats = 1;
+  return dropped;
 }
 
 static double win_display_period_ms(int64_t qpc_freq) {
@@ -3860,6 +4002,46 @@ int mb_frame_beats(void) {
 // occluded (a hidden or minimized window does not wait for vsync: paced as if it did)
 static int pace_owed;
 
+// Records DXGI present statistics for the active RenderWin; returns 1 iff visibly presented (not occluded/failed).
+static int win_record_present_stats(HRESULT hr) {
+  int visible_ok = SUCCEEDED(hr) && hr != DXGI_STATUS_OCCLUDED;
+  rw->last_presented = visible_ok;
+  UINT pc = 0;
+  int pc_ok = visible_ok && rw->drop_stats.gap_owed ? SUCCEEDED(chain->GetLastPresentCount(&pc)) : 0;
+  win_stats_on_present(&rw->drop_stats, visible_ok, pc_ok, pc);
+  if (!visible_ok) return 0;
+  DXGI_FRAME_STATISTICS fs = {};
+  HRESULT fs_hr = chain->GetFrameStatistics(&fs);
+  int64_t qpc_freq = 0;
+  double period_ms = 0.0;
+  int beats = 0;
+  if (SUCCEEDED(fs_hr) && rw->drop_stats.has_frame_stats && fs.PresentCount != rw->drop_stats.last_present_count) {
+    LARGE_INTEGER freq_qpc;
+    QueryPerformanceFrequency(&freq_qpc);
+    qpc_freq = freq_qpc.QuadPart;
+    beats = mb_frame_beats();
+    period_ms = win_display_period_ms(qpc_freq);
+  }
+  present_dropped_total += win_stats_step(&rw->drop_stats, SUCCEEDED(fs_hr),
+                                          fs_hr == DXGI_ERROR_FRAME_STATISTICS_DISJOINT,
+                                          fs.PresentCount, fs.PresentRefreshCount,
+                                          fs.SyncQPCTime.QuadPart, qpc_freq, period_ms, beats);
+  return 1;
+}
+
+extern "C" void mb_render_mark_gap(int wid) {
+  if (wid < 0) {
+    for (int k = 0; k < MB_WINS; k++) render_wins[k].drop_stats.gap_owed = 1;
+    return;
+  }
+  if (wid < MB_WINS) render_wins[wid].drop_stats.gap_owed = 1;
+}
+
+extern "C" int mb_render_last_presented(int wid) {
+  if (wid < 0 || wid >= MB_WINS) return 0;
+  return render_wins[wid].last_presented;
+}
+
 int mb_render_present(const double *inst, int32_t count, double r, double g, double b) {
   int n = -1;
   D3D11_RECT parts[MB_PARTS];
@@ -3883,6 +4065,7 @@ int mb_render_present(const double *inst, int32_t count, double r, double g, dou
   }
   glass_idle_tick();
   if (!drawn || !chain) {
+    rw->last_presented = 0;
     commit_presented();
     return 0;
   }
@@ -3901,31 +4084,7 @@ int mb_render_present(const double *inst, int32_t count, double r, double g, dou
     hr = chain->Present(1, 0);
   }
   commit_presented();
-  if (SUCCEEDED(hr) && hr != DXGI_STATUS_OCCLUDED) {
-    DXGI_FRAME_STATISTICS fs = {};
-    if (SUCCEEDED(chain->GetFrameStatistics(&fs)) && fs.PresentCount > 0 && fs.SyncQPCTime.QuadPart > 0) {
-      // DWM may hand back the same lagging sample again before it takes the next present: keep the last one
-      if (!rw->has_frame_stats || fs.PresentCount != rw->last_present_count) {
-        LARGE_INTEGER freq_qpc;
-        QueryPerformanceFrequency(&freq_qpc);
-        int beats = mb_frame_beats();
-        double period_ms = win_display_period_ms(freq_qpc.QuadPart);
-        present_dropped += win_count_dropped_step(rw->last_present_count, rw->last_sync_refresh,
-                                                  rw->last_present_qpc, rw->has_frame_stats,
-                                                  fs.PresentCount, fs.SyncRefreshCount,
-                                                  fs.SyncQPCTime.QuadPart, freq_qpc.QuadPart, period_ms, beats);
-        rw->last_present_count = fs.PresentCount;
-        rw->last_sync_refresh = fs.SyncRefreshCount;
-        rw->last_present_qpc = fs.SyncQPCTime.QuadPart;
-        rw->has_frame_stats = 1;
-      }
-    } else {
-      // no sample, or one the driver left without a sync time: count nothing until a whole one comes
-      rw->has_frame_stats = 0;
-    }
-  } else {
-    rw->has_frame_stats = 0;
-  }
+  win_record_present_stats(hr);
   pace_owed = hr != DXGI_STATUS_OCCLUDED ? 1 : pace_owed ? pace_owed : 2;
   return SUCCEEDED(hr);
 }
@@ -3940,10 +4099,12 @@ int mb_render_adaptive_step(int wid) {
   RenderWin *back = rw;
   rw = &render_wins[wid];
   if (!rw->ad_settling || !last_inst || !rtv || !dev || !ctx || !chain) {
+    rw->last_presented = 0;
     rw = back;
     return 0;
   }
   if (!vbuf && !fill_vbuf(last_inst, last_count, last_bg)) {
+    rw->last_presented = 0;
     rw = back;
     return 0;
   }
@@ -3985,6 +4146,7 @@ int mb_render_adaptive_step(int wid) {
   } else {
     hr = chain->Present(1, 0);
   }
+  win_record_present_stats(hr);
   pace_owed = hr != DXGI_STATUS_OCCLUDED ? 1 : pace_owed ? pace_owed : 2;
   rw = back;
   return SUCCEEDED(hr);
@@ -4409,4 +4571,4 @@ extern "C" double mb_host_gpu_ms(void) {
   return last_gpu_ms;
 }
 // Frames dropped during continuous presentation (DXGI_FRAME_STATISTICS sync-refresh vs present-count delta).
-extern "C" int32_t mb_host_frames_dropped(void) { return present_dropped; }
+extern "C" int32_t mb_host_frames_dropped(void) { return present_dropped_total; }

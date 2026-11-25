@@ -1391,6 +1391,7 @@ pub fn profiles_overview_node(
   frame~ : () -> PageFrame,
   open_profile? : (String, String) -> Unit,
   on_show_accounts? : () -> Unit,
+  tab_chosen? : () -> Int = fn() { 1 },
   tabs_thumb? : @sf.SegThumb,
   bar_actions? : ((@view.View) -> Unit, (@sf.Look) -> Double) -> Unit,
   bar_add? : Bool = true,
@@ -1520,7 +1521,7 @@ pub fn profiles_overview_node(
         @sf.page_choice_node(
           b,
           fn() { if ov_en() { ["Accounts", "Overview"] } else { ["账号", "概览"] } },
-          fn() { 1 },
+          tab_chosen,
           fn(i) {
             if i == 0 {
               match on_show_accounts {

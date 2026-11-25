@@ -19,11 +19,85 @@ pub struct Finder {
   priv elsewhere : Map[String, String?]
   priv rollouts : Map[String, String]
   priv said : Map[String, Map[String, Said]]
+  priv track_failed_dirs : Bool
+  priv failed_dirs : Set[String]
+  priv readdir_err : Set[String]
+  /// Whether what the directories hold is read once and kept for this finder's life (`cache_dirs`): for one pass of
+  /// many lookups (the replica export's), never a finder that lives on across them (the live `Locator`).
+  priv cache_dirs : Bool
+  priv real_cache : Map[String, String?]
+  priv entries_cache : Map[String, Array[String]?]
+  priv rollout_cache : Map[String, Rollouts]
+  priv claude_cache : Map[String, ClaudeIndex?]
+  /// How many times the shell was asked (`fs.stat`, `fs.readdir`, `fs.realpath`): what a test bounds.
+  priv mut asked : Int
 }
 
 ///|
-pub fn Finder::new(host : @host.Host, sep : String) -> Finder {
-  { host, sep, elsewhere: Map([]), rollouts: Map([]), said: Map([]) }
+/// The Codex rollout files under a directory, in the order `Finder::rollout` meets them, and the directories under it
+/// that could not be read (the directory itself among them when it could not).
+priv struct Rollouts {
+  files : Array[(String, String)]
+  failed : Array[String]
+}
+
+///|
+/// A Claude transcripts directory read once: by session id, the first project (in the directory's order) keeping its
+/// transcript, with that project's place in the order and the transcript's path; and the projects that could not be
+/// read, with their places, looked in one by one as before.
+priv struct ClaudeIndex {
+  kept : Map[String, (Int, String)]
+  failed : Array[(Int, String)]
+}
+
+///|
+pub fn Finder::new(
+  host : @host.Host,
+  sep : String,
+  track_failed_dirs? : Bool = false,
+  readdir_err? : Set[String] = Set([]),
+  cache_dirs? : Bool = false,
+) -> Finder {
+  {
+    host,
+    sep,
+    elsewhere: Map([]),
+    rollouts: Map([]),
+    said: Map([]),
+    track_failed_dirs,
+    failed_dirs: Set([]),
+    readdir_err,
+    cache_dirs,
+    real_cache: Map([]),
+    entries_cache: Map([]),
+    rollout_cache: Map([]),
+    claude_cache: Map([]),
+    asked: 0,
+  }
+}
+
+///|
+/// How many times this finder asked the shell about the filesystem.
+pub fn Finder::asked(self : Finder) -> Int {
+  self.asked
+}
+
+///|
+/// Directories that could not be read, met again in what was kept of them: told again, as reading them would.
+fn Finder::failed_again(self : Finder, dirs : Array[String]) -> Unit {
+  if self.track_failed_dirs {
+    for d in dirs {
+      self.failed_dirs.add(d)
+    }
+  }
+}
+
+///|
+/// Returns and clears directories whose `fs.readdir` failed during discovery (for unreadable-path protection).
+pub fn Finder::take_failed_dirs(self : Finder) -> Array[String] {
+  let out = self.failed_dirs.iter().collect()
+  self.failed_dirs.clear()
+  out
 }
 
 ///|
@@ -35,6 +109,7 @@ pub fn Finder::join(self : Finder, parts : Array[String]) -> String {
 ///|
 /// What stat says a path is ("file", "dir", "other"), none when it cannot.
 fn Finder::stat(self : Finder, path : String) -> String? {
+  self.asked += 1
   match (try { Ok(self.host.shell_sync("fs.stat", { "path": Json::string(path) })) } catch { e => Err(e) }) {
     Ok(String(kind)) => Some(kind)
     _ => None
@@ -67,28 +142,69 @@ fn Finder::kept(self : Finder, path : String) -> Bool {
 }
 
 ///|
+fn Finder::readdir_json(self : Finder, dir : String, types : Bool) -> Json? {
+  self.asked += 1
+  if self.readdir_err.contains(dir) {
+    return None
+  }
+  let args : Json = if types {
+    { "path": Json::string(dir), "types": true }
+  } else {
+    { "path": Json::string(dir) }
+  }
+  match (try { Ok(self.host.shell_sync("fs.readdir", args)) } catch { e => Err(e) }) {
+    Ok(Array(_) as arr) => Some(arr)
+    _ => None
+  }
+}
+
+///|
 /// A directory's names, none when it cannot be read.
 fn Finder::entries(self : Finder, dir : String) -> Array[String]? {
-  match (try { Ok(self.host.shell_sync("fs.readdir", { "path": Json::string(dir) })) } catch { e => Err(e) }) {
-    Ok(Array(names)) => Some(names.filter_map(n => if n is String(s) { Some(s) } else { None }))
-    _ => None
+  match self.readdir_json(dir, false) {
+    Some(Array(names)) => Some(names.filter_map(n => if n is String(s) { Some(s) } else { None }))
+    _ => {
+      if self.track_failed_dirs {
+        self.failed_dirs.add(dir)
+      }
+      None
+    }
   }
 }
 
 ///|
 /// A directory's names with their kinds as the directory says them ("file", "dir", "link", "other").
 fn Finder::typed_entries(self : Finder, dir : String) -> Array[(String, String)]? {
-  match (try { Ok(self.host.shell_sync("fs.readdir", { "path": Json::string(dir), "types": true })) } catch { e => Err(e) }) {
-    Ok(Array(entries)) =>
+  match self.readdir_json(dir, true) {
+    Some(Array(entries)) =>
       Some(
         entries.filter_map(e => if e is Array([String(name), String(kind)]) { Some((name, kind)) } else { None }),
       )
-    _ => None
+    _ => {
+      if self.track_failed_dirs {
+        self.failed_dirs.add(dir)
+      }
+      None
+    }
   }
 }
 
 ///|
 fn Finder::real(self : Finder, path : String) -> String? {
+  if self.cache_dirs {
+    if self.real_cache.get(path) is Some(known) {
+      return known
+    }
+    let found = self.real_uncached(path)
+    self.real_cache[path] = found
+    return found
+  }
+  self.real_uncached(path)
+}
+
+///|
+fn Finder::real_uncached(self : Finder, path : String) -> String? {
+  self.asked += 1
   match (try { Ok(self.host.shell_sync("fs.realpath", { "path": Json::string(path) })) } catch { e => Err(e) }) {
     Ok(String(p)) => Some(p)
     _ => None
@@ -177,7 +293,11 @@ fn Finder::transcript_in(self : Finder, runtime : String, dir : String, id : Str
       if !anywhere {
         return None
       }
-      for project in self.entries(dir).unwrap_or([]) {
+      if self.cache_dirs {
+        return self.claude_indexed(dir, id, at, placed)
+      }
+      guard self.entries(dir) is Some(projects) else { return None }
+      for project in projects {
         let path = self.join([dir, project, id + ".jsonl"])
         if self.kept(path) {
           self.elsewhere[at] = Some(path)
@@ -205,6 +325,9 @@ fn Finder::transcript_in(self : Finder, runtime : String, dir : String, id : Str
 ///|
 /// A Codex rollout file under `dir`, through its days' directories, as `transcriptIn`'s `find`.
 fn Finder::rollout(self : Finder, dir : String, id : String) -> String? {
+  if self.cache_dirs {
+    return self.rollout_indexed(dir, id)
+  }
   guard self.typed_entries(dir) is Some(entries) else { return None }
   for entry in entries {
     let (name, kind) = entry
@@ -220,6 +343,170 @@ fn Finder::rollout(self : Finder, dir : String, id : String) -> String? {
     }
   }
   None
+}
+
+///|
+/// `Finder::rollout` over the rollouts under `dir` read once: the same file, the same directories told unreadable.
+fn Finder::rollout_indexed(self : Finder, dir : String, id : String) -> String? {
+  let found = match self.rollout_cache.get(dir) {
+    Some(known) => {
+      self.failed_again(known.failed)
+      known
+    }
+    None => {
+      let r : Rollouts = { files: [], failed: [] }
+      self.gather_rollouts(dir, r)
+      self.rollout_cache[dir] = r
+      r
+    }
+  }
+  let plain = id + ".jsonl"
+  let packed = id + ".jsonl.zst"
+  for file in found.files {
+    let (name, path) = file
+    if name.has_suffix(plain) {
+      return Some(path)
+    } else if name.has_suffix(packed) {
+      return Some(path.view(end_offset=path.length() - 4).to_owned())
+    }
+  }
+  None
+}
+
+///|
+/// Every rollout file under `dir`, through all its directories, in the order `Finder::rollout` goes through them.
+fn Finder::gather_rollouts(self : Finder, dir : String, into : Rollouts) -> Unit {
+  guard self.typed_entries(dir) is Some(entries) else {
+    into.failed.push(dir)
+    return
+  }
+  for entry in entries {
+    let (name, kind) = entry
+    let path = self.join([dir, name])
+    if kind == "dir" || (kind != "file" && self.is_dir(path)) {
+      self.gather_rollouts(path, into)
+    } else if name.has_prefix("rollout-") && (name.has_suffix(".jsonl") || name.has_suffix(".jsonl.zst")) {
+      into.files.push((name, path))
+    }
+  }
+}
+
+///|
+/// Whether `kept(join([dir, name]))`, answered from `dir`'s listing (`kinds`) and asking stat only of a link or an
+/// entry of no kind: a name not listed is not there, one listed a directory is not a file.
+fn Finder::kept_listed(self : Finder, kinds : Map[String, String], dir : String, name : String) -> Bool {
+  let packed = () => match kinds.get(name + ".zst") {
+    Some("file") => true
+    Some("dir") | None => false
+    Some(_) => self.is_file(self.join([dir, name + ".zst"]))
+  }
+  match kinds.get(name) {
+    Some("file") => true
+    Some("dir") => false
+    Some(_) =>
+      match self.stat(self.join([dir, name])) {
+        Some(kind) => kind == "file"
+        None => packed()
+      }
+    None => packed()
+  }
+}
+
+///|
+/// The Claude transcripts directory `dir` read once: each project read, its transcripts' ids kept.
+fn Finder::claude_index(self : Finder, dir : String) -> ClaudeIndex? {
+  match self.claude_cache.get(dir) {
+    Some(Some(known)) => {
+      self.failed_again(known.failed.map(f => f.1))
+      return Some(known)
+    }
+    Some(None) => {
+      self.failed_again([dir])
+      return None
+    }
+    None => ()
+  }
+  guard self.typed_entries(dir) is Some(projects) else {
+    self.claude_cache[dir] = None
+    return None
+  }
+  let index : ClaudeIndex = { kept: Map([]), failed: [] }
+  for i, entry in projects {
+    let (project, pkind) = entry
+    let project_dir = self.join([dir, project])
+    guard pkind == "dir" || (pkind != "file" && self.is_dir(project_dir)) else { continue }
+    guard self.typed_entries(project_dir) is Some(names) else {
+      index.failed.push((i, project_dir))
+      continue
+    }
+    let kinds : Map[String, String] = Map([])
+    for n in names {
+      kinds[n.0] = n.1
+    }
+    for n in names {
+      let name = n.0
+      let fid = if name.has_suffix(".jsonl") {
+        name.view(end_offset=name.length() - 6).to_string()
+      } else if name.has_suffix(".jsonl.zst") {
+        name.view(end_offset=name.length() - 10).to_string()
+      } else {
+        continue
+      }
+      if index.kept.contains(fid) || !self.kept_listed(kinds, project_dir, fid + ".jsonl") {
+        continue
+      }
+      index.kept[fid] = (i, self.join([dir, project, fid + ".jsonl"]))
+    }
+  }
+  self.claude_cache[dir] = Some(index)
+  Some(index)
+}
+
+///|
+/// `transcriptIn`'s look through every Claude project for `id`, over the directory read once: the same first project
+/// keeping it, the projects that could not be read looked in as before, and no answer kept for an id not found while
+/// some could not be read.
+fn Finder::claude_indexed(self : Finder, dir : String, id : String, at : String, placed : Bool) -> String? {
+  guard self.claude_index(dir) is Some(index) else { return None }
+  let hit = index.kept.get(id)
+  for f in index.failed {
+    let (i, project_dir) = f
+    if hit is Some((first, _)) && i > first {
+      break
+    }
+    let path = self.join([project_dir, id + ".jsonl"])
+    if self.kept(path) {
+      self.elsewhere[at] = Some(path)
+      return Some(path)
+    }
+  }
+  if hit is Some((_, path)) {
+    self.elsewhere[at] = Some(path)
+    return Some(path)
+  }
+  if placed && index.failed.is_empty() {
+    self.elsewhere[at] = None
+  }
+  None
+}
+
+///|
+/// A root's names for `dsh` and `grok`, read once when the finder keeps what directories hold.
+fn Finder::root_entries(self : Finder, root : String) -> Array[String]? {
+  guard self.cache_dirs else { return self.entries(root) }
+  match self.entries_cache.get(root) {
+    Some(known) => {
+      if known is None {
+        self.failed_again([root])
+      }
+      known
+    }
+    None => {
+      let found = self.entries(root)
+      self.entries_cache[root] = found
+      found
+    }
+  }
 }
 
 ///|
@@ -241,7 +528,7 @@ fn dsh_version(name : String) -> Double? {
 ///|
 /// transcript.ts `dshTranscript`: the highest version's file (the first of equal ones) in the first directory with one.
 fn Finder::dsh(self : Finder, root : String, id : String) -> String? {
-  for dir in self.entries(root).unwrap_or([]) {
+  for dir in self.root_entries(root).unwrap_or([]) {
     let mut best : (String, Double)? = None
     for name in self.entries(self.join([root, dir, id])).unwrap_or([]) {
       guard dsh_version(name) is Some(v) else { continue }
@@ -260,7 +547,7 @@ fn Finder::dsh(self : Finder, root : String, id : String) -> String? {
 ///|
 /// transcript.ts `grokTranscript`.
 fn Finder::grok(self : Finder, root : String, id : String) -> String? {
-  for dir in self.entries(root).unwrap_or([]) {
+  for dir in self.root_entries(root).unwrap_or([]) {
     let path = self.join([root, dir, id, "chat_history.jsonl"])
     if self.kept(path) {
       return Some(path)

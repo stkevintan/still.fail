@@ -49,7 +49,7 @@ fn person_words_node(
       []
     } else {
       let now = runs()
-      found_now() + ls.map(fn(k) { @sf.passage_marks(now, k) }).flatten() + @sf.passage_marks(now, l)
+      found_now() + ls.map(fn(k) { @sf.passage_marks(now, (k.0, k.1), before?=k.2) }).flatten() + @sf.passage_marks(now, l)
     }
   }
   let words = v.box(fn(w) {

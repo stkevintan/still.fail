@@ -1,7 +1,7 @@
 // Antigravity CLI driver: one `agy acp` per session, spoken to in ACP (acp.ts) with one ACP session in it. See
 //. Beside what ACP says:
 // - its files (sign-in, settings, conversations) are in the profile's, `--gemini-dir`: none of the machine's ~/.gemini,
-//   and on macOS none of the login keychain's (`AGY_FILE_TOKENS`);
+//   and none of the OS keyring's (`AGY_FILE_TOKENS`);
 // - the station's instructions are appended to its system prompt (`_meta.antigravity.systemPrompt.append` of
 //   session/new and session/load, which initialize says it takes);
 // - it runs without approvals (`--dangerously-skip-permissions`), with no telemetry and no updating itself;
@@ -145,21 +145,94 @@ export async function agyNotedEmail(home: string): Promise<string | null> {
   }
 }
 
-/// On macOS, `agy` keeps its sign-in in one login keychain item for the whole user (service `gemini`, account
-/// `antigravity`, through go-keyring's `/usr/bin/security`), which `--gemini-dir` does not separate: it reads that item
-/// before the profile's `agyToken`, and moved the file there, so every profile ran on whichever account was put there
-/// last (2026-11-14: a session moved to another account went on with the first one's quota). Where it thinks it is
-/// in an SSH session it keeps the sign-in in the file alone ("Using file-based token storage because SSH session
-/// detected", 1.5.9), so the station's processes are given that (`agyEnv`, agy-quota.ts).
+/// On desktop OSes, `agy` keeps its sign-in in one OS keyring item for the whole user (service `gemini`, account
+/// `antigravity`, through go-keyring: macOS login keychain, Linux Secret Service, Windows Credential Manager), which
+/// `--gemini-dir` does not separate: it reads that item before the profile's `agyToken`, and moved the file there, so
+/// every profile ran on whichever account was put there last (2026-11-14: a session moved to another account went on
+/// with the first one's quota; on Linux the moved file also left the profile appearing signed out). Where it thinks it
+/// is in an SSH session it keeps the sign-in in the file alone ("Using file-based token storage because SSH session
+/// detected", 1.5.9), so the station's processes are given that (`agyEnv`, agy-quota.ts, `agyRenew`, accounts/login.ts).
 export const AGY_FILE_TOKENS = { SSH_CLIENT: "127.0.0.1 0 0" };
 
-/// The keychain item `agy` kept a sign-in in before `AGY_FILE_TOKENS` (go-keyring's encoding taken off), or null.
-/// Replaced in tests.
+type KeyringExecResult = { error: (Error & { code?: string | number | null }) | null; stdout: string };
+type KeyringExec = (file: string, args: readonly string[], env: NodeJS.ProcessEnv) => Promise<KeyringExecResult>;
+
+const defaultKeyringExec: KeyringExec = (file, args, env) =>
+  new Promise((resolve) => {
+    execFile(file, args, { env, timeout: 5000, killSignal: "SIGKILL" }, (error, stdout) =>
+      resolve({ error, stdout: String(stdout) }),
+    );
+  });
+
+const LINUX_KEYRING_NO_GI = 3;
+const LINUX_KEYRING_PY = [
+  "import sys",
+  "try:",
+  "    from gi.repository import Gio, GLib",
+  "except Exception:",
+  `    sys.exit(${LINUX_KEYRING_NO_GI})`,
+  "bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)",
+  "svc = Gio.DBusProxy.new_sync(bus, Gio.DBusProxyFlags.NONE, None, 'org.freedesktop.secrets', '/org/freedesktop/secrets', 'org.freedesktop.Secret.Service', None)",
+  "_, session = svc.call_sync('OpenSession', GLib.Variant('(sv)', ('plain', GLib.Variant('s', ''))), Gio.DBusCallFlags.NONE, 3000, None).unpack()",
+  "try:",
+  "    unlocked, _ = svc.call_sync('SearchItems', GLib.Variant('(a{ss})', ({'service': 'gemini', 'username': 'antigravity'},)), Gio.DBusCallFlags.NONE, 3000, None).unpack()",
+  "    if not unlocked:",
+  "        sys.exit(1)",
+  "    secrets, = svc.call_sync('GetSecrets', GLib.Variant('(aoo)', ([unlocked[0]], session)), Gio.DBusCallFlags.NONE, 3000, None).unpack()",
+  "    secret = secrets.get(unlocked[0])",
+  "    if secret is None:",
+  "        sys.exit(1)",
+  "    sys.stdout.buffer.write(bytes(secret[2]))",
+  "finally:",
+  "    try:",
+  "        Gio.DBusProxy.new_sync(bus, Gio.DBusProxyFlags.NONE, None, 'org.freedesktop.secrets', session, 'org.freedesktop.Secret.Session', None).call_sync('Close', None, Gio.DBusCallFlags.NONE, 1000, None)",
+  "    except Exception:",
+  "        pass",
+].join("\n");
+
+async function hasLinuxSessionBus(env: NodeJS.ProcessEnv): Promise<boolean> {
+  if (typeof env.DBUS_SESSION_BUS_ADDRESS === "string" && env.DBUS_SESSION_BUS_ADDRESS.trim() !== "") return true;
+  const runtimeDir = typeof env.XDG_RUNTIME_DIR === "string" ? env.XDG_RUNTIME_DIR.trim() : "";
+  if (runtimeDir === "") return false;
+  return stat(join(runtimeDir, "bus")).then(
+    (s) => s.isSocket(),
+    () => false,
+  );
+}
+
+/// Reads the `gemini`/`antigravity` item from Linux Secret Service without prompting to unlock a locked keyring.
+/// Queries unlocked items over D-Bus via PyGObject first, falling back to `secret-tool` only when `python3` or
+/// `gi.repository` is unavailable.
+export async function readLinuxAgyKeyring(env: NodeJS.ProcessEnv = process.env, run: KeyringExec = defaultKeyringExec): Promise<string | null> {
+  if (!(await hasLinuxSessionBus(env))) return null;
+  const py = await run("python3", ["-c", LINUX_KEYRING_PY], env);
+  if (py.error === null) {
+    const text = py.stdout.trim();
+    return text === "" ? null : text;
+  }
+  const code = (py.error as { code?: unknown }).code;
+  if (code !== "ENOENT" && code !== LINUX_KEYRING_NO_GI) return null;
+  const tool = await run("secret-tool", ["lookup", "service", "gemini", "username", "antigravity"], env);
+  if (tool.error !== null) return null;
+  const text = tool.stdout.trim();
+  return text === "" ? null : text;
+}
+
+/// The keyring item `agy` kept a sign-in in before `AGY_FILE_TOKENS`, or null. Replaced in tests.
 export const agyKeychain = {
-  read: () =>
-    new Promise<string | null>((resolve) => {
-      execFile("/usr/bin/security", ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"], { timeout: 5000 }, (error, stdout) => resolve(error ? null : String(stdout).trim()));
-    }),
+  read: (): Promise<string | null> => {
+    if (platform.hasKeychain) {
+      return new Promise<string | null>((resolve) => {
+        execFile("/usr/bin/security", ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"], { timeout: 5000, killSignal: "SIGKILL" }, (error, stdout) => {
+          if (error) return resolve(null);
+          const text = String(stdout).trim();
+          resolve(text === "" ? null : text);
+        });
+      });
+    }
+    if (platform.os === "linux") return readLinuxAgyKeyring();
+    return Promise.resolve(null);
+  },
 };
 
 /// go-keyring's stored value as `agy` wrote it: base64 or hex behind a prefix, else as it is.
@@ -169,16 +242,16 @@ export function goKeyringValue(stored: string): string {
   return stored;
 }
 
-/// Whether the profile has its sign-in in its `agyToken`, moving it back there from the keychain where `agy` moved it
-/// before `AGY_FILE_TOKENS`: only when the item is the account the profile noted (`agyAccountFile`), since the item is
-/// the last account signed in on the machine, not necessarily this profile's. One whose item is another account's
+/// Whether the profile has its sign-in in its `agyToken`, moving it back there from the OS keyring where `agy` moved
+/// it before `AGY_FILE_TOKENS`: only when the item is the account the profile noted (`agyAccountFile`), since the item
+/// is the last account signed in on the machine, not necessarily this profile's. One whose item is another account's
 /// signs in again. The item is left: it may be the user's own `agy`'s.
 export async function agyTakeBack(home: string): Promise<boolean> {
   try {
     await lstat(agyToken(home));
     return true;
   } catch {}
-  if (!platform.hasKeychain) return false;
+  if (!platform.hasKeychain && platform.os !== "linux") return false;
   const noted = await agyNotedEmail(home);
   if (noted === null) return false;
   const stored = await agyKeychain.read();
@@ -188,10 +261,10 @@ export async function agyTakeBack(home: string): Promise<boolean> {
   try {
     await writePrivateSoon(agyToken(home), text);
   } catch (error) {
-    log.warn("agents::agy", "could not move a profile's sign-in out of the keychain", { home, error: String(error) });
+    log.warn("agents::agy", "could not move a profile's sign-in out of the keyring", { home, error: String(error) });
     return false;
   }
-  log.info("agents::agy", "a profile's sign-in moved back from the keychain to its file", { home });
+  log.info("agents::agy", "a profile's sign-in moved back from the keyring to its file", { home });
   return true;
 }
 
@@ -390,7 +463,7 @@ export const agyArgs = (home: string) => ["acp", "--gemini-dir", geminiDir(home)
 export function agyEnv(options: OpenOptions): Record<string, string> {
   const env: Record<string, string> = keepLocal({ ...cleanEnv(SCRUBBED), ...expandRoute(profileEnv(options.profile, "agy"), options.route) });
   env.ANTIGRAVITY_GEMINI_DIR = geminiDir(options.profile.home);
-  if (platform.hasKeychain) Object.assign(env, AGY_FILE_TOKENS);
+  Object.assign(env, AGY_FILE_TOKENS);
   env.AGY_CLI_DISABLE_AUTO_UPDATE = "1";
   env.STILLFAIL_PEER_HTTP = peerHttpBase(options.mcpUrl);
   if (options.instructions === "" || options.textOnly) env.STILLFAIL_REPO_RULES = "0";

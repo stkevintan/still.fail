@@ -1,17 +1,24 @@
 //! Iroh QUIC stream lifecycle (`istream.*`), framed Unix-socket piping (`istream.pipe`, `istream.hand`), and routed
 //! stream handover (`conn.hand`).
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use iroh::endpoint::{RecvStream, SendStream};
+use iroh::endpoint::{Connection, RecvStream, SendStream};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::net::{SocketRead, SocketWrite, open_unix, tell_unix};
-use crate::screen_dgram::{KEYFRAME_FRAME, MediaIn, MediaOut, MediaRx};
+use crate::screen_dgram::{AckRx, KEYFRAME_FRAME, MediaIn, MediaOut, MediaRx};
 use crate::screen_tap::ScreenTap;
 use crate::{Answer, Done, Handle, Inner, err, id_of, str_of, tally};
+
+/// Lock-free target for sending unreliable `KIND_ACK` datagrams directly from `sf_shell_screen_ack_wait`.
+pub(crate) struct AckTarget {
+    pub(crate) conn: Connection,
+    pub(crate) token: u32,
+    pub(crate) peer_capable: Arc<AtomicBool>,
+}
 
 /// The two halves of an iroh stream, and the reads waiting on it: a reset wakes them first (as the addon's).
 pub(crate) struct Halves {
@@ -31,6 +38,11 @@ pub(crate) struct Halves {
     /// A remote screen's view this end receives: its frames that come as datagrams, put back among the stream's
     /// (`istream.receiveMediaDatagrams`).
     pub(crate) media_in: tokio::sync::Mutex<Option<MediaRx>>,
+    /// Client-side datagram ACK fast-path target, set by `istream.receiveMediaDatagrams`.
+    pub(crate) ack_dgram: Mutex<Option<AckTarget>>,
+    /// Station-side datagram ACK receiver, set by `istream.mediaDatagrams` and injected at frame boundaries on read/pipe.
+    pub(crate) ack_in: tokio::sync::Mutex<Option<AckRx>>,
+    pub(crate) ack_ready: tokio::sync::watch::Sender<bool>,
 }
 
 impl Halves {
@@ -359,20 +371,73 @@ impl Inner {
         let down = async {
             let mut write = write.lock().await;
             let mut reset = halves.reset.subscribe();
+            let mut ack_ready = halves.ack_ready.subscribe();
             let mut buf = vec![0u8; 4 + 256 * 1024];
+            let mut out = Vec::new();
             loop {
                 if *reset.borrow() {
                     break;
+                }
+                if *ack_ready.borrow() {
+                    let mut ack_guard = halves.ack_in.lock().await;
+                    if let Some(acks) = ack_guard.as_mut() {
+                        if acks.at_boundary() {
+                            acks.drain_into(&mut out);
+                        }
+                        if !out.is_empty() {
+                            let len = (out.len() as u32).to_be_bytes();
+                            if write.write_all(&len).await.is_err() || write.write_all(&out).await.is_err() {
+                                break;
+                            }
+                            out.clear();
+                            continue;
+                        }
+                        let mut recv = halves.recv.lock().await;
+                        let Some(recv) = recv.as_mut() else { break };
+                        tokio::select! {
+                            read = recv.read(&mut buf[4..]) => match read {
+                                Ok(Some(n)) => {
+                                    let chunk = &buf[4..4 + n];
+                                    match acks.stream(chunk) {
+                                        Some(b) => {
+                                            out.extend_from_slice(&chunk[..b]);
+                                            acks.drain_into(&mut out);
+                                            out.extend_from_slice(&chunk[b..]);
+                                        }
+                                        None => out.extend_from_slice(chunk),
+                                    }
+                                }
+                                Ok(None) => {
+                                    halves.ended.store(true, Ordering::Relaxed);
+                                    let _ = write.write_all(&PIPE_END.to_be_bytes()).await;
+                                    break;
+                                }
+                                Err(e) => {
+                                    let words = e.to_string();
+                                    let mut failed = PIPE_FAILED.to_be_bytes().to_vec();
+                                    failed.extend((words.len() as u32).to_be_bytes());
+                                    failed.extend(words.as_bytes());
+                                    let _ = write.write_all(&failed).await;
+                                    break;
+                                }
+                            },
+                            d = acks.next() => acks.take_waiting(d),
+                            _ = reset.changed() => break,
+                        }
+                        continue;
+                    }
                 }
                 let read = {
                     let mut recv = halves.recv.lock().await;
                     // (one way: nothing comes)
                     let Some(recv) = recv.as_mut() else { break };
                     tokio::select! {
-                        read = recv.read(&mut buf[4..]) => read,
+                        read = recv.read(&mut buf[4..]) => Some(read),
+                        _ = ack_ready.changed() => None,
                         _ = reset.changed() => break,
                     }
                 };
+                let Some(read) = read else { continue };
                 let frame: &[u8] = match read {
                     Ok(Some(n)) => {
                         buf[..4].copy_from_slice(&(n as u32).to_be_bytes());
@@ -576,7 +641,11 @@ impl Inner {
                 let Handle::IStream(halves) = self.handle(id_of(a)?)? else { return Err("not a stream".into()) };
                 let token = a.get("token").and_then(Value::as_u64).filter(|t| *t > 0 && *t <= u32::MAX as u64).ok_or("token: a u32, not 0")? as u32;
                 let Handle::Conn(conn) = self.handle(halves.conn)? else { return Ok(Answer::json(json!(false))) };
-                let Some(media) = MediaOut::new(conn, token) else { return Ok(Answer::json(json!(false))) };
+                let Some(mut media) = MediaOut::new(conn, token) else { return Ok(Answer::json(json!(false))) };
+                if let Some(acks) = media.take_ack_rx() {
+                    *halves.ack_in.lock().await = Some(acks);
+                    let _ = halves.ack_ready.send(true);
+                }
                 *halves.media_out.lock().await = Some(media);
                 tally("dgram.views.sent");
                 Ok(Answer::json(json!(true)))
@@ -595,7 +664,11 @@ impl Inner {
                     demuxes.entry(halves.conn).or_default().clone()
                 };
                 let Some((route, rx)) = crate::screen_dgram::route(&slot, &conn, token) else { return Ok(Answer::json(json!(false))) };
-                *halves.media_in.lock().await = Some(MediaRx { media: MediaIn::new(token, true), rx, rx_done: false, _route: route });
+                let peer_capable = Arc::new(AtomicBool::new(false));
+                let mut media = MediaIn::new(token, true);
+                media.set_peer_ack_cap(peer_capable.clone());
+                *halves.ack_dgram.lock().unwrap() = Some(AckTarget { conn, token, peer_capable });
+                *halves.media_in.lock().await = Some(MediaRx { media, rx, rx_done: false, _route: route });
                 tally("dgram.views.received");
                 Ok(Answer::json(json!(true)))
             }
@@ -652,6 +725,54 @@ impl Inner {
                                 halves.ended.store(true, Ordering::Relaxed);
                                 self.istream_done(id, &halves);
                                 return Ok(Answer::json(json!({ "end": true })));
+                            }
+                        }
+                    }
+                }
+                // station-side stream with mediaDatagrams: inject datagram ACKs at frame boundaries
+                {
+                    let mut acks = halves.ack_in.lock().await;
+                    if let Some(acks) = acks.as_mut() {
+                        let mut buf = vec![0u8; 64 * 1024];
+                        let mut out = Vec::new();
+                        loop {
+                            if acks.at_boundary() {
+                                acks.drain_into(&mut out);
+                            }
+                            if !out.is_empty() {
+                                return Ok(Answer::bytes(json!({}), out));
+                            }
+                            let mut recv = halves.recv.lock().await;
+                            let Some(recv) = recv.as_mut() else { return Ok(Answer::json(json!({ "end": true }))) };
+                            tokio::select! {
+                                read = recv.read(&mut buf) => match read.map_err(err)? {
+                                    Some(n) => {
+                                        let chunk = &buf[..n];
+                                        match acks.stream(chunk) {
+                                            Some(b) => {
+                                                out.extend_from_slice(&chunk[..b]);
+                                                acks.drain_into(&mut out);
+                                                out.extend_from_slice(&chunk[b..]);
+                                            }
+                                            None => out.extend_from_slice(chunk),
+                                        }
+                                    }
+                                    None => {
+                                        if !out.is_empty() {
+                                            return Ok(Answer::bytes(json!({}), out));
+                                        }
+                                        halves.ended.store(true, Ordering::Relaxed);
+                                        self.istream_done(id, &halves);
+                                        return Ok(Answer::json(json!({ "end": true })));
+                                    }
+                                },
+                                d = acks.next() => acks.take_waiting(d),
+                                _ = reset.changed() => {
+                                    if !out.is_empty() {
+                                        return Ok(Answer::bytes(json!({}), out));
+                                    }
+                                    return Ok(Answer::json(json!({ "end": true })));
+                                }
                             }
                         }
                     }
@@ -790,6 +911,9 @@ impl Inner {
                         tap: Mutex::default(),
                         media_out: Default::default(),
                         media_in: Default::default(),
+                        ack_dgram: Mutex::default(),
+                        ack_in: Default::default(),
+                        ack_ready: tokio::sync::watch::channel(false).0,
                     });
                     let id = self.keep(Handle::IStream(halves.clone()));
                     let mut head = on.to_be_bytes().to_vec();
@@ -929,6 +1053,9 @@ mod tests {
                 tap: Mutex::new(Some(ScreenTap::new(call, false))),
                 media_out: Default::default(),
                 media_in: Default::default(),
+                ack_dgram: Mutex::default(),
+                ack_in: Default::default(),
+                ack_ready: tokio::sync::watch::channel(false).0,
             });
             shell.inner.handles.lock().unwrap().insert(900 + call, crate::Handle::IStream(halves.clone()));
             std::mem::forget(station);
@@ -1025,6 +1152,138 @@ mod tests {
         }
         assert!(line.waiting().is_empty());
         eprintln!("4000 inputs sent straight from two threads: {read} frames on the stream ({} moves taken over)", 4000 - read);
+        drop(shell);
+    }
+
+    #[test]
+    fn screen_ack_wait_uses_datagram_fast_path_and_injects_at_frame_boundaries() {
+        use crate::screen_dgram::{FRAME_ACK, MediaIn, MediaOut, MediaRx, route};
+
+        let dir = std::env::temp_dir().join(format!("stillfail-shell-ack-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shell = crate::Shell::start(dir, no_answers, std::ptr::null_mut()).unwrap();
+        shell.runtime.block_on(async {
+            let alpn = b"stillfail/test".to_vec();
+            let bind = |alpns: Vec<Vec<u8>>| Endpoint::builder(Minimal).relay_mode(RelayMode::Disabled).alpns(alpns).bind();
+            let (a, b) = (bind(vec![]).await.unwrap(), bind(vec![alpn.clone()]).await.unwrap());
+            let port = b.bound_sockets().iter().find(|s| s.is_ipv4()).unwrap().port();
+            let addr = crate::iroh_ops::endpoint_addr(&json!({ "id": hex::encode(b.id().as_bytes()), "ips": [format!("127.0.0.1:{port}")] })).unwrap();
+            let taking = b.clone();
+            let taken = tokio::spawn(async move { taking.accept().await.unwrap().await.unwrap() });
+            let client = a.connect(addr, &alpn).await.unwrap();
+            let station = taken.await.unwrap();
+            let (mut csend, crecv) = client.open_bi().await.unwrap();
+            csend.write_all(b"{}\n").await.unwrap();
+            let (mut ssend, mut srecv) = station.accept_bi().await.unwrap();
+            let mut line = [0u8; 3];
+            srecv.read_exact(&mut line).await.unwrap();
+
+            // Station enables mediaDatagrams (creates AckRx) and sends one video frame advertising FLAG_ACK.
+            let token = 42u32;
+            let mut media_out = MediaOut::new(station.clone(), token).unwrap();
+            let mut ack_rx = media_out.take_ack_rx().unwrap();
+
+            // Client enables receiveMediaDatagrams + tap.
+            let slot = Mutex::default();
+            let (rt, rx) = route(&slot, &client, token).unwrap();
+            let peer_capable = Arc::new(AtomicBool::new(false));
+            let mut media_in = MediaIn::new(token, true);
+            media_in.set_peer_ack_cap(peer_capable.clone());
+            let mut media_rx = MediaRx { media: media_in, rx, rx_done: false, _route: rt };
+
+            let halves = Arc::new(Halves {
+                conn: 0,
+                send: tokio::sync::Mutex::new(Some(csend)),
+                recv: tokio::sync::Mutex::new(Some(crecv)),
+                reset: tokio::sync::watch::channel(false).0,
+                ended: Default::default(),
+                finished: Default::default(),
+                tap: Mutex::new(Some(ScreenTap::new(99, false))),
+                media_out: Default::default(),
+                media_in: Default::default(),
+                ack_dgram: Mutex::new(Some(AckTarget { conn: client.clone(), token, peer_capable: peer_capable.clone() })),
+                ack_in: Default::default(),
+                ack_ready: tokio::sync::watch::channel(false).0,
+            });
+            shell.inner.handles.lock().unwrap().insert(999, crate::Handle::IStream(halves.clone()));
+
+            // 1. Before any datagram from station arrives, peer_capable is false -> falls back to reliable stream.
+            assert!(!peer_capable.load(Ordering::Relaxed));
+            assert_eq!(crate::ffi::screen_ack(&shell, 99, 123_456.0, 7_890), 1);
+            let mut head = [0u8; 5];
+            srecv.read_exact(&mut head).await.unwrap();
+            assert_eq!(head[0], FRAME_ACK);
+            assert_eq!(u32::from_be_bytes(head[1..5].try_into().unwrap()), 12);
+            let mut body = [0u8; 12];
+            srecv.read_exact(&mut body).await.unwrap();
+            assert_eq!(u64::from_be_bytes(body[0..8].try_into().unwrap()), 123_456);
+            assert_eq!(u32::from_be_bytes(body[8..12].try_into().unwrap()), 7_890);
+
+            // 2. Station sends reply line + config + 1 video frame as datagram -> client sees FLAG_ACK.
+            media_out.write(&mut ssend, b"{\"status\":200}\n").await.unwrap();
+            let cfg = br#"{"codec":"h264","width":1280,"height":720}"#;
+            let mut f = vec![1u8];
+            f.extend((cfg.len() as u32).to_be_bytes());
+            f.extend(cfg);
+            let mut vbody = vec![1u8];
+            vbody.extend(555_000u64.to_be_bytes());
+            vbody.extend(vec![0xAB; 2000]);
+            f.push(2);
+            f.extend((vbody.len() as u32).to_be_bytes());
+            f.extend(vbody);
+            media_out.write(&mut ssend, &f).await.unwrap();
+
+            let d = tokio::time::timeout(std::time::Duration::from_secs(5), media_rx.next()).await.unwrap();
+            media_rx.take_waiting(d, tokio::time::Instant::now());
+            assert!(peer_capable.load(Ordering::Relaxed), "client learned station supports datagram ACKs");
+
+            // 3. Hold halves.send lock (simulating HoL-blocked reliable stream!): datagram ACK still delivers at once!
+            let _held = halves.send.lock().await;
+            assert_eq!(crate::ffi::screen_ack(&shell, 99, 555_000.0, 14_250), 1);
+            let got = tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx.next()).await.unwrap();
+            assert_eq!(got, Some((555_000, 14_250)));
+
+            // 4. Verify AckRx injects 17-byte KIND.ack at stream frame boundary, never inside a partial stream frame.
+            ack_rx.take_waiting(got);
+            let mut out = Vec::new();
+            let input_frame = input_frame(&checked_input(&json!({"t":"key","kind":"down","key":"a","code":"KeyA","mods":0})).unwrap());
+            // Split the stream frame in half: first half starts at boundary so ACK injects before it, not mid-frame.
+            let split = 7;
+            let b1 = ack_rx.stream(&input_frame[..split]).unwrap();
+            assert_eq!(b1, 0);
+            out.extend_from_slice(&input_frame[..b1]);
+            ack_rx.drain_into(&mut out);
+            out.extend_from_slice(&input_frame[b1..split]);
+            assert!(!ack_rx.at_boundary());
+            // Another ACK arrives mid-frame: must wait until second half finishes!
+            ack_rx.take_waiting(Some((666_000, 3_500)));
+            let b2 = ack_rx.stream(&input_frame[split..]).unwrap();
+            assert_eq!(b2, input_frame.len() - split);
+            out.extend_from_slice(&input_frame[split..split + b2]);
+            ack_rx.drain_into(&mut out);
+            assert!(ack_rx.at_boundary());
+
+            // Parse all 3 frames in `out`: [ACK 555_000/14_250, INPUT, ACK 666_000/3_500]
+            let mut pos = 0;
+            let mut parsed = Vec::new();
+            while pos < out.len() {
+                let kind = out[pos];
+                let len = u32::from_be_bytes(out[pos + 1..pos + 5].try_into().unwrap()) as usize;
+                parsed.push((kind, out[pos + 5..pos + 5 + len].to_vec()));
+                pos += 5 + len;
+            }
+            assert_eq!(parsed.len(), 3);
+            assert_eq!(parsed[0].0, FRAME_ACK);
+            assert_eq!(u64::from_be_bytes(parsed[0].1[0..8].try_into().unwrap()), 555_000);
+            assert_eq!(u32::from_be_bytes(parsed[0].1[8..12].try_into().unwrap()), 14_250);
+            assert_eq!(parsed[1].0, FRAME_INPUT);
+            assert_eq!(parsed[2].0, FRAME_ACK);
+            assert_eq!(u64::from_be_bytes(parsed[2].1[0..8].try_into().unwrap()), 666_000);
+            assert_eq!(u32::from_be_bytes(parsed[2].1[8..12].try_into().unwrap()), 3_500);
+            drop(_held);
+            a.close().await;
+            b.close().await;
+        });
         drop(shell);
     }
 

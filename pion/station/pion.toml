@@ -4,13 +4,20 @@ members = [
   "packages/sqlite_ffi",
   "packages/sql_db",
   "packages/js_json",
+  "packages/jscase",
+  "packages/nodepath",
+  "packages/station_conv",
   "packages/builders_core",
+  "packages/transcript_io",
+  "packages/locate",
+  "packages/builders_search",
   "packages/builders_index",
   "packages/builders_requested",
   "packages/builders_stateful",
   "packages/builders_legacy",
   "packages/builders_recent",
   "packages/builders_vault",
+  "packages/builders_usage",
   "packages/footprint",
   "packages/memory",
   "packages/packed",
@@ -26,13 +33,20 @@ host_shim = { path = "packages/host_shim" }
 sqlite_ffi = { path = "packages/sqlite_ffi" }
 sql_db = { path = "packages/sql_db" }
 js_json = { path = "packages/js_json" }
+jscase = { path = "packages/jscase" }
+nodepath = { path = "packages/nodepath" }
+station_conv = { path = "packages/station_conv" }
 builders_core = { path = "packages/builders_core" }
+transcript_io = { path = "packages/transcript_io" }
+locate = { path = "packages/locate" }
+builders_search = { path = "packages/builders_search" }
 builders_index = { path = "packages/builders_index" }
 builders_requested = { path = "packages/builders_requested" }
 builders_stateful = { path = "packages/builders_stateful" }
 builders_legacy = { path = "packages/builders_legacy" }
 builders_recent = { path = "packages/builders_recent" }
 builders_vault = { path = "packages/builders_vault" }
+builders_usage = { path = "packages/builders_usage" }
 footprint = { path = "packages/footprint" }
 memory = { path = "packages/memory" }
 packed = { path = "packages/packed" }

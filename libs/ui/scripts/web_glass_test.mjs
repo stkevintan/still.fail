@@ -309,7 +309,21 @@ function runGlassVectorsInPage() {
         for (let ch = 0; ch < 3; ch++) textDiff = Math.max(textDiff, Math.abs(a[ch] - b[ch]));
       }
     }
-    roi.v9_seg = { topBR: top[2] - top[0], botBR: bot[2] - bot[0], lftRB: lft[0] - lft[2], rgtRB: rgt[0] - rgt[2], textDiff };
+    let strokeSpan = 0;
+    for (let py = 30 * 3; py <= 50 * 3; py++) {
+      if (lumaOf(pxAt(shot, 62 * 3, py)) < 160) strokeSpan++;
+    }
+    const tp = new Float32Array(3 * INST);
+    rect(tp, 0, 0, 0, VW, VH, 0, 1, 1, 1, 1, 0);
+    rect(tp, INST, 10, 24, 140, 32, 0, 190 / 255, 190 / 255, 190 / 255, 1, 0);
+    rect(tp, 2 * INST, 25, 17.5, 110, 45, 6, 1, 1, 1, 0, -5611);
+    tp[2 * INST + 4] = 22.5; tp[2 * INST + 6] = 1; tp[2 * INST + 7] = -48;
+    tp[2 * INST + 12] = 1; tp[2 * INST + 13] = 9; tp[2 * INST + 15] = 1; tp[2 * INST + 21] = 9; tp[2 * INST + 22] = 0.04;
+    H.present(tp, 3, 1, 1, 1);
+    const shotT = H.renderPixels();
+    const pinchOutL = lumaOf(pxAt(shotT, 80 * 3, Math.floor(25.5 * 3)));
+    const pinchInL = lumaOf(pxAt(shotT, 80 * 3, Math.floor(29.0 * 3)));
+    roi.v9_seg = { topBR: top[2] - top[0], botBR: bot[2] - bot[0], lftRB: lft[0] - lft[2], rgtRB: rgt[0] - rgt[2], textDiff, strokeSpan, pinchOutL, pinchInL };
   }
   // V9e: Switch uniform green center + blue track swap + OFF r9->r4.5 + 5-level press monotonic area
   {
@@ -574,6 +588,87 @@ function runGlassVectorsInPage() {
       lSide: lumaOf(pxAt(shotd, 140 * 2 - 1, 40 * 2)),
       roiFnv1a: '0x' + dh.toString(16).padStart(16, '0'),
     };
+    // V11-Apple-Panel-Glass: Light 0xBF brightRelax chroma & 1..8pt cushion rim, and 0xFF solid zero leak
+    {
+      const pb = new Float32Array(2 * INST);
+      rect(pb, 0, 0, 0, VW, VH, 0, 211 / 255, 232 / 255, 253 / 255, 1, 0);
+      rect(pb, INST, 20, 10, 120, 60, 6, 253 / 255, 252 / 255, 253 / 255, 0xBF / 255, -98);
+      pb[INST + 4] = 22; pb[INST + 6] = 1; pb[INST + 7] = 6.0;
+      pb[INST + 12] = 0.6; pb[INST + 13] = 20; pb[INST + 14] = 0; pb[INST + 15] = 1;
+      pb[INST + 21] = 26; pb[INST + 22] = 0.03;
+      H.present(pb, 2, 211 / 255, 232 / 255, 253 / 255);
+      const s1 = H.renderPixels();
+      const rim = pxAt(s1, 80 * 2, 23), mid = pxAt(s1, 80 * 2, 68);
+      const midBR = mid[2] - mid[0], rimL = lumaOf(rim), midL = lumaOf(mid);
+      pb[INST + 11] = 1.0; pb[INST + 20] = -99;
+      H.present(pb, 2, 211 / 255, 232 / 255, 253 / 255);
+      const s2 = H.renderPixels();
+      const solidDL = Math.abs(lumaOf(pxAt(s2, 80 * 2, 23)) - lumaOf(pxAt(s2, 80 * 2, 68)));
+      rect(pb, 0, 0, 0, VW, VH, 0, 0.60, 0.60, 0.60, 1, 0);
+      pb[INST + 11] = 0xBF / 255; pb[INST + 20] = -100; pb[INST + 22] = 0.03;
+      H.present(pb, 2, 0.60, 0.60, 0.60);
+      const l60 = lumaOf(pxAt(H.renderPixels(), 80 * 2, 68));
+      rect(pb, 0, 0, 0, VW, VH, 0, 0.72, 0.72, 0.72, 1, 0);
+      pb[INST + 20] = -101;
+      H.present(pb, 2, 0.72, 0.72, 0.72);
+      const l72 = lumaOf(pxAt(H.renderPixels(), 80 * 2, 68));
+      rect(pb, 0, 0, 0, VW, VH, 0, 0.60, 0.60, 0.60, 1, 0);
+      pb[INST + 11] = 0xCD / 255; pb[INST + 20] = -105; pb[INST + 22] = 0.03;
+      H.present(pb, 2, 0.60, 0.60, 0.60);
+      const l60CD = lumaOf(pxAt(H.renderPixels(), 80 * 2, 68));
+      rect(pb, 0, 0, 0, VW, VH, 0, 0.72, 0.72, 0.72, 1, 0);
+      pb[INST + 20] = -106;
+      H.present(pb, 2, 0.72, 0.72, 0.72);
+      const l72CD = lumaOf(pxAt(H.renderPixels(), 80 * 2, 68));
+      rect(pb, 0, 0, 0, VW, VH, 0, 60 / 255, 120 / 255, 210 / 255, 1, 0);
+      pb[INST + 8] = 32 / 255; pb[INST + 9] = 32 / 255; pb[INST + 10] = 32 / 255;
+      pb[INST + 11] = 0xA8 / 255; pb[INST + 20] = -102; pb[INST + 22] = 0.03;
+      H.present(pb, 2, 60 / 255, 120 / 255, 210 / 255);
+      const da = pxAt(H.renderPixels(), 80 * 2, 68), a8BR = da[2] - da[0];
+      pb[INST + 20] = -103; pb[INST + 22] = 0.0;
+      H.present(pb, 2, 60 / 255, 120 / 255, 210 / 255);
+      const db = pxAt(H.renderPixels(), 80 * 2, 68), a8BaseBR = db[2] - db[0];
+      pb[INST + 11] = 0xCC / 255; pb[INST + 20] = -104; pb[INST + 22] = 0.0;
+      H.present(pb, 2, 60 / 255, 120 / 255, 210 / 255);
+      const dc = pxAt(H.renderPixels(), 80 * 2, 68), ccBR = dc[2] - dc[0];
+      // Regular controls (chroma=0.06 vs 0.0) bit-exact zero-diff gate under Light 0x85/0xAB & Dark 0xAB
+      let ctrlMaxDiff = 0, ctrlHashEq = true;
+      const ctrlCases = [
+        [false, 0x85 / 255, 211 / 255, 232 / 255, 253 / 255],
+        [false, 0xAB / 255, 211 / 255, 232 / 255, 253 / 255],
+        [true,  0xAB / 255,  60 / 255, 120 / 255, 210 / 255],
+      ];
+      pb[INST + 7] = 2.0; pb[INST + 12] = 0.6; pb[INST + 13] = 14.0; pb[INST + 21] = 20.0;
+      for (let ci = 0; ci < ctrlCases.length; ci++) {
+        const [dk, al, br, bg, bb] = ctrlCases[ci];
+        rect(pb, 0, 0, 0, VW, VH, 0, br, bg, bb, 1, 0);
+        pb[INST + 8] = dk ? 32 / 255 : 253 / 255;
+        pb[INST + 9] = dk ? 32 / 255 : 252 / 255;
+        pb[INST + 10] = dk ? 32 / 255 : 253 / 255;
+        pb[INST + 11] = al;
+        pb[INST + 20] = -110 - ci * 2; pb[INST + 22] = 0.06;
+        H.present(pb, 2, br, bg, bb);
+        const p06 = H.renderPixels();
+        pb[INST + 20] = -111 - ci * 2; pb[INST + 22] = 0.0;
+        H.present(pb, 2, br, bg, bb);
+        const p00 = H.renderPixels();
+        let h06 = 0xcbf29ce484222325n, h00 = 0xcbf29ce484222325n;
+        const m64 = 0xffffffffffffffffn, pr = 0x100000001b3n;
+        for (let ry = 20; ry < 140; ry++) {
+          for (let rx = 40; rx < 280; rx++) {
+            const q06 = pxAt(p06, rx, ry), q00 = pxAt(p00, rx, ry);
+            for (let c = 0; c < 3; c++) {
+              const d = Math.abs(q06[c] - q00[c]);
+              if (d > ctrlMaxDiff) ctrlMaxDiff = d;
+              h06 = ((h06 ^ BigInt(q06[c])) * pr) & m64;
+              h00 = ((h00 ^ BigInt(q00[c])) * pr) & m64;
+            }
+          }
+        }
+        if (h06 !== h00) ctrlHashEq = false;
+      }
+      roi.v11_apple_panel_glass = { midBR, rimL, midL, solidDL, l60, l72, l60CD, l72CD, a8BR, a8BaseBR, ccBR, ctrlMaxDiff, ctrlHashEq };
+    }
   }
   // V11-AA & V11-Wall: Switch ON (Dark & Light, 3x & 2x, shadow-free)
   roi.v11_aa = [];
@@ -903,7 +998,10 @@ check(roi.v9_sw.tipGr < 15, `v9_sw tipGr=${roi.v9_sw.tipGr}`);
 check(roi.v9_sw_off.coreR > roi.v9_sw_off.moatR + 15 && roi.v9_sw_off.rmR > roi.v9_sw_off.h0R, `v9_sw_off=${JSON.stringify(roi.v9_sw_off)}`);
 check(roi.v9_sw_off.rcapBR < 20 && roi.v9_sw_off.rtirBR > 80, `v9_sw_off right cap=${JSON.stringify(roi.v9_sw_off)}`);
 check(roi.v9_half_press[0] >= 4 && roi.v9_half_press[1] >= roi.v9_half_press[0] && roi.v9_half_press[2] > roi.v9_half_press[1], `v9_half_press=${JSON.stringify(roi.v9_half_press)}`);
-check(roi.v9_seg.topBR >= 10 && roi.v9_seg.botBR >= 10 && roi.v9_seg.lftRB >= 20 && roi.v9_seg.rgtRB >= 20 && roi.v9_seg.textDiff === 0, `v9_seg=${JSON.stringify(roi.v9_seg)}`);
+check(roi.v9_seg.topBR >= 10 && roi.v9_seg.botBR >= 10 && roi.v9_seg.lftRB >= 20 && roi.v9_seg.rgtRB >= 20 && roi.v9_seg.textDiff === 0 &&
+  roi.v9_seg.strokeSpan >= 35 && roi.v9_seg.strokeSpan <= 37 &&
+  roi.v9_seg.pinchOutL > 240 && roi.v9_seg.pinchInL < 215,
+  `v9_seg=${JSON.stringify(roi.v9_seg)}`);
 check(Math.abs(roi.v9_sw_green_ctr[0] - 57) <= 2 && Math.abs(roi.v9_sw_green_ctr[1] - 218) <= 2 && Math.abs(roi.v9_sw_green_ctr[2] - 97) <= 2,
   `v9_sw_green_ctr=${JSON.stringify(roi.v9_sw_green_ctr)}`);
 check(roi.v9_sw_blue_caustic[2] - roi.v9_sw_blue_caustic[0] >= 100 && roi.v9_sw_blue_caustic[2] > roi.v9_sw_blue_caustic[1],
@@ -920,6 +1018,13 @@ check(roi.v10_reg_light.maxD2 <= 14.0 && roi.v10_reg_light.sideLmin >= 212.0 && 
   `v10_reg_light=${JSON.stringify(roi.v10_reg_light)}`);
 check(roi.v10_reg_dark.lTop > roi.v10_reg_dark.lMid + 5.0 && roi.v10_reg_dark.lSide >= roi.v10_reg_dark.lMid - 6.0 && roi.v10_reg_dark.lSide <= roi.v10_reg_dark.lMid + 20.0 && roi.v10_reg_dark.roiFnv1a === '0xbf214b492568e589',
   `v10_reg_dark=${JSON.stringify(roi.v10_reg_dark)}`);
+check(roi.v11_apple_panel_glass.midBR >= 22 && roi.v11_apple_panel_glass.rimL >= roi.v11_apple_panel_glass.midL + 4.0 && roi.v11_apple_panel_glass.solidDL <= 3.0 &&
+  roi.v11_apple_panel_glass.l72 >= roi.v11_apple_panel_glass.l60 + 2.0 &&
+  roi.v11_apple_panel_glass.l72CD >= roi.v11_apple_panel_glass.l60CD &&
+  roi.v11_apple_panel_glass.a8BR - roi.v11_apple_panel_glass.a8BaseBR >= 8 &&
+  roi.v11_apple_panel_glass.ccBR >= 43 && roi.v11_apple_panel_glass.ccBR <= 47 &&
+  roi.v11_apple_panel_glass.ctrlMaxDiff === 0 && roi.v11_apple_panel_glass.ctrlHashEq,
+  `v11_apple_panel_glass=${JSON.stringify(roi.v11_apple_panel_glass)}`);
 for (const a of roi.v11_aa) {
   const lim = a.sc === 3 ? (a.isLight ? 12.0 : 10.0) : (a.isLight ? 14.0 : 12.0);
   check(a.d2L <= lim && a.d2R <= lim, `v11_aa=${JSON.stringify(a)} lim=${lim}`);

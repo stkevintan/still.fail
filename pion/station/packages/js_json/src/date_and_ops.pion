@@ -1,0 +1,568 @@
+// Pure-Pion civil-date helpers (`days_from_civil` / `civil_from_days` / `format_iso_ms` aligned
+// 1:1 with `libs/base/src/time/time.mbt`), JS ISO date parsing/formatting (`date.mbt`),
+// UTF-16 collation (`js_compare` / `js_less`), pretty stringification, and `JValue` accessors.
+
+fn floor_div_i64(a : Int64, b : Int64) -> Int64 {
+  let q = a / b
+  if a % b < 0.to_int64() {
+    q - 1.to_int64()
+  } else {
+    q
+  }
+}
+
+/// The date `z` days after 1970-01-01 (negative before it): `(year, month 1..12, day 1..31)`.
+/// 1:1 aligned with `libs/base/src/time/time.mbt:47`.
+pub fn civil_from_days(z : Int64) -> (Int, Int, Int) {
+  let z1 = z + 719468.to_int64()
+  let era = floor_div_i64(z1, 146097.to_int64())
+  let doe = z1 - era * 146097.to_int64()
+  let yoe = (doe - doe / 1460.to_int64() + doe / 36524.to_int64() - doe / 146096.to_int64()) / 365.to_int64()
+  let doy = doe - (365.to_int64() * yoe + yoe / 4.to_int64() - yoe / 100.to_int64())
+  let mp = (5.to_int64() * doy + 2.to_int64()) / 153.to_int64()
+  let day = doy - (153.to_int64() * mp + 2.to_int64()) / 5.to_int64() + 1.to_int64()
+  let month = if mp < 10.to_int64() { mp + 3.to_int64() } else { mp - 9.to_int64() }
+  let year = yoe + era * 400.to_int64() + (if month <= 2.to_int64() { 1.to_int64() } else { 0.to_int64() })
+  (year.to_int(), month.to_int(), day.to_int())
+}
+
+/// Days since 1970-01-01 for `year-month-day` (negative before it).
+/// 1:1 aligned with `libs/base/src/time/time.mbt:64`.
+pub fn days_from_civil(year : Int, month : Int, day : Int) -> Int64 {
+  let y = year.to_int64() - (if month <= 2 { 1.to_int64() } else { 0.to_int64() })
+  let era = floor_div_i64(y, 400.to_int64())
+  let yoe = y - era * 400.to_int64()
+  let mp = (if month > 2 { month - 3 } else { month + 9 }).to_int64()
+  let doy = (153.to_int64() * mp + 2.to_int64()) / 5.to_int64() + day.to_int64() - 1.to_int64()
+  let doe = yoe * 365.to_int64() + yoe / 4.to_int64() - yoe / 100.to_int64() + doy
+  era * 146097.to_int64() + doe - 719468.to_int64()
+}
+
+fn pad_uint(out : StringBuilder, n : Int, width : Int) -> Unit {
+  let digits = n.to_string()
+  let pad = width - digits.length()
+  for _ in 0..<pad {
+    out.write_byte(48 as Byte)
+  }
+  out.write_string(digits)
+}
+
+/// Format `ms` milliseconds since 1970-01-01T00:00:00Z as `YYYY-MM-DDTHH:MM:SS.sssZ`
+/// (or `±YYYYYY-MM-DDTHH:MM:SS.sssZ` outside 0..9999).
+/// 1:1 aligned with `libs/base/src/time/time.mbt:153`.
+pub fn format_iso_ms(ms : Int64) -> String {
+  let ms_per_day = 86400000.to_int64()
+  let days = floor_div_i64(ms, ms_per_day)
+  let of_day = (ms - days * ms_per_day).to_int()
+  let (year, month, day) = civil_from_days(days)
+  let hour = of_day / 3600000
+  let minute = (of_day / 60000) % 60
+  let second = (of_day / 1000) % 60
+  let millis = of_day % 1000
+  let out = StringBuilder::new()
+  if year >= 0 && year <= 9999 {
+    pad_uint(out, year, 4)
+  } else if year < 0 {
+    out.write_byte(45 as Byte) // '-'
+    pad_uint(out, -year, 6)
+  } else {
+    out.write_byte(43 as Byte) // '+'
+    pad_uint(out, year, 6)
+  }
+  out.write_byte(45 as Byte)
+  pad_uint(out, month, 2)
+  out.write_byte(45 as Byte)
+  pad_uint(out, day, 2)
+  out.write_byte(84 as Byte) // 'T'
+  pad_uint(out, hour, 2)
+  out.write_byte(58 as Byte) // ':'
+  pad_uint(out, minute, 2)
+  out.write_byte(58 as Byte)
+  pad_uint(out, second, 2)
+  out.write_byte(46 as Byte) // '.'
+  pad_uint(out, millis, 3)
+  out.write_byte(90 as Byte) // 'Z'
+  out.to_string()
+}
+
+pub fn js_trunc(d : Double) -> Double {
+  if is_nan_or_inf(d) {
+    return d
+  }
+  if d >= -9223372036854775808.0 && d < 9223372036854775808.0 {
+    return d.to_int64().to_double()
+  }
+  d
+}
+
+fn abs_double(d : Double) -> Double {
+  if d < 0.0 { -d } else { d }
+}
+
+/// `new Date(ms).toISOString()`: `None` for NaN, ±Inf, or `|trunc(ms)| > 8.64e15`.
+pub fn js_iso_checked(ms : Double) -> Option[String] {
+  if is_nan_or_inf(ms) {
+    return None
+  }
+  let t = js_trunc(ms)
+  if abs_double(t) > 8.64e15 {
+    return None
+  }
+  Some(format_iso_ms(t.to_int64()))
+}
+
+pub fn js_iso(ms : Double) -> String {
+  format_iso_ms(js_trunc(ms).to_int64())
+}
+
+fn parse_digits_at(raw : Bytes, pos : Int, count : Int) -> Option[Int] {
+  if pos + count > raw.length() {
+    return None
+  }
+  let mut v = 0
+  for k in 0..<count {
+    let c = raw[pos + k].to_int() & 0xFF
+    if c < 48 || c > 57 {
+      return None
+    }
+    v = v * 10 + (c - 48)
+  }
+  Some(v)
+}
+
+/// `Date.parse` for ISO 8601 strings (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or `±YYYYYY…`),
+/// 1:1 aligned with `station/mb/src/jsjson/date.mbt:28-170`.
+pub fn js_parse_iso_with_tz(
+  s : String,
+  tz_offset_ms : Option[(Double) -> Double],
+  strict_day : Bool = false,
+  space_sep : Bool = false,
+) -> Option[Double] {
+  let raw = s.to_bytes()
+  let n = raw.length()
+  let mut i = 0
+  let at = fn(c : Int) -> Bool { i < n && (raw[i].to_int() & 0xFF) == c }
+  let year = if at(43) || at(45) {
+    let neg = at(45)
+    i = i + 1
+    let y = match parse_digits_at(raw, i, 6) {
+      Some(v) => v
+      None => return None
+    }
+    i = i + 6
+    if neg && y == 0 {
+      return None
+    }
+    if neg { -y } else { y }
+  } else {
+    let y = match parse_digits_at(raw, i, 4) {
+      Some(v) => v
+      None => return None
+    }
+    i = i + 4
+    y
+  }
+  let mut month = 1
+  let mut day = 1
+  if at(45) {
+    i = i + 1
+    month = match parse_digits_at(raw, i, 2) {
+      Some(v) => v
+      None => return None
+    }
+    i = i + 2
+    if at(45) {
+      i = i + 1
+      day = match parse_digits_at(raw, i, 2) {
+        Some(v) => v
+        None => return None
+      }
+      i = i + 2
+    }
+  }
+  let mut hour = 0
+  let mut minute = 0
+  let mut second = 0
+  let mut ms = 0
+  let mut offset_ms = 0.0
+  let mut has_time = false
+  let mut has_zone = false
+  if at(84) || at(116) || (space_sep && at(32)) {
+    has_time = true
+    i = i + 1
+    hour = match parse_digits_at(raw, i, 2) {
+      Some(v) => v
+      None => return None
+    }
+    i = i + 2
+    if !at(58) {
+      return None
+    }
+    i = i + 1
+    minute = match parse_digits_at(raw, i, 2) {
+      Some(v) => v
+      None => return None
+    }
+    i = i + 2
+    if at(58) {
+      i = i + 1
+      second = match parse_digits_at(raw, i, 2) {
+        Some(v) => v
+        None => return None
+      }
+      i = i + 2
+      if at(46) || at(44) {
+        i = i + 1
+        let start = i
+        let mut frac = 0
+        let mut count = 0
+        while i < n {
+          let c = raw[i].to_int() & 0xFF
+          if c >= 48 && c <= 57 {
+            if count < 3 {
+              frac = frac * 10 + (c - 48)
+              count = count + 1
+            }
+            i = i + 1
+          } else {
+            break
+          }
+        }
+        if i == start {
+          return None
+        }
+        while count < 3 {
+          frac = frac * 10
+          count = count + 1
+        }
+        ms = frac
+      }
+    }
+    if at(90) || at(122) {
+      has_zone = true
+      i = i + 1
+    } else if at(43) || at(45) {
+      has_zone = true
+      let sg = if at(45) { -1 } else { 1 }
+      i = i + 1
+      let oh = match parse_digits_at(raw, i, 2) {
+        Some(v) => v
+        None => return None
+      }
+      i = i + 2
+      if at(58) {
+        i = i + 1
+      }
+      let om = match parse_digits_at(raw, i, 2) {
+        Some(v) => v
+        None => return None
+      }
+      i = i + 2
+      if oh > 23 || om > 59 {
+        return None
+      }
+      offset_ms = (sg * (oh * 60 + om)).to_double() * 60000.0
+    }
+  }
+  if i != n {
+    return None
+  }
+  if month < 1 || month > 12 || day < 1 || day > 31 || hour > 24 || minute > 59 || second > 59 {
+    return None
+  }
+  if hour == 24 && (minute != 0 || second != 0 || ms != 0) {
+    return None
+  }
+  let days = days_from_civil(year, month, day)
+  if strict_day {
+    let (_, m2, _) = civil_from_days(days)
+    if m2 != month {
+      return None
+    }
+  }
+  let local_ms = days.to_double() * 86400000.0 +
+  hour.to_double() * 3600000.0 +
+  minute.to_double() * 60000.0 +
+  second.to_double() * 1000.0 +
+  ms.to_double()
+  let t = if has_time && !has_zone {
+    match tz_offset_ms {
+      Some(f) => local_ms - f(local_ms)
+      None => local_ms
+    }
+  } else {
+    local_ms - offset_ms
+  }
+  if abs_double(t) > 8.64e15 {
+    None
+  } else {
+    Some(t)
+  }
+}
+
+pub fn js_parse_iso(s : String, strict_day : Bool = false) -> Option[Double] {
+  js_parse_iso_with_tz(s, None, strict_day=strict_day, space_sep=false)
+}
+
+// ── UTF-16 ordering, trimming, UTF-8 length, code points, mentions ──
+
+/// Compare two UTF-16 code-unit arrays in JS code-unit order.
+pub fn units_compare(a : Array[Int], b : Array[Int]) -> Int {
+  let n = if a.length() < b.length() { a.length() } else { b.length() }
+  for i in 0..<n {
+    if a[i] != b[i] {
+      return a[i] - b[i]
+    }
+  }
+  a.length() - b.length()
+}
+
+/// JavaScript `<` string comparison by UTF-16 code units (non-BMP surrogate `0xD83D` < BMP `0xE000`).
+pub fn js_compare(a : String, b : String) -> Int {
+  units_compare(utf16_units(a), utf16_units(b))
+}
+
+/// `a < b` by UTF-16 code units.
+pub fn js_less(a : String, b : String) -> Bool {
+  js_compare(a, b) < 0
+}
+
+/// Whether a UTF-16 code unit / Unicode code point is JS whitespace or line terminator.
+pub fn is_js_space(c : Int) -> Bool {
+  c == 0x09 ||
+  c == 0x0A ||
+  c == 0x0B ||
+  c == 0x0C ||
+  c == 0x0D ||
+  c == 0x20 ||
+  c == 0xA0 ||
+  c == 0x1680 ||
+  (c >= 0x2000 && c <= 0x200A) ||
+  c == 0x2028 ||
+  c == 0x2029 ||
+  c == 0x202F ||
+  c == 0x205F ||
+  c == 0x3000 ||
+  c == 0xFEFF
+}
+
+/// `String.prototype.trim`: JS whitespace and line terminators off both ends.
+pub fn trim_js(s : String) -> String {
+  let u = utf16_units(s)
+  let mut a = 0
+  let mut b = u.length()
+  while a < b && is_js_space(u[a]) {
+    a = a + 1
+  }
+  while b > a && is_js_space(u[b - 1]) {
+    b = b - 1
+  }
+  if a == 0 && b == u.length() {
+    return s
+  }
+  let out : Array[Int] = []
+  for i in a..<b {
+    out.push(u[i])
+  }
+  sanitize_str(out)
+}
+
+/// UTF-8 byte length of a UTF-16 code-unit array (`Buffer.byteLength(s, "utf8")`: lone surrogate = 3 bytes).
+pub fn units_utf8_len(units : Array[Int]) -> Int {
+  let mut n = 0
+  let mut i = 0
+  while i < units.length() {
+    let c = units[i]
+    if c < 0x80 {
+      n = n + 1
+    } else if c < 0x800 {
+      n = n + 2
+    } else if c >= 0xD800 && c <= 0xDBFF && i + 1 < units.length() {
+      let d = units[i + 1]
+      if d >= 0xDC00 && d <= 0xDFFF {
+        n = n + 4
+        i = i + 1
+      } else {
+        n = n + 3
+      }
+    } else {
+      n = n + 3
+    }
+    i = i + 1
+  }
+  n
+}
+
+/// `Buffer.byteLength(s, "utf8")` for a Pion UTF-8 string.
+pub fn js_utf8_len(s : String) -> Int {
+  units_utf8_len(utf16_units(s))
+}
+
+/// Split `s` into its Unicode code points, each as a `String` (`[...s]`).
+pub fn points(s : String) -> Array[String] {
+  let u = utf16_units(s)
+  let out : Array[String] = []
+  let mut i = 0
+  while i < u.length() {
+    let c = u[i]
+    if c >= 0xD800 && c <= 0xDBFF && i + 1 < u.length() {
+      let d = u[i + 1]
+      if d >= 0xDC00 && d <= 0xDFFF {
+        out.push(sanitize_str([c, d]))
+        i = i + 2
+        continue
+      }
+    }
+    out.push(sanitize_str([c]))
+    i = i + 1
+  }
+  out
+}
+
+/// `titles.ts` `withoutMentions`: strip Slack `<@U123>` mentions (`[A-Z0-9]+`).
+pub fn without_mentions(s : String) -> String {
+  let raw = s.to_bytes()
+  let n = raw.length()
+  let out = StringBuilder::new()
+  let mut i = 0
+  while i < n {
+    if i + 2 < n && (raw[i].to_int() & 0xFF) == 60 && (raw[i + 1].to_int() & 0xFF) == 64 {
+      let mut j = i + 2
+      while j < n && (raw[j].to_int() & 0xFF) != 62 {
+        j = j + 1
+      }
+      if j < n && j > i + 2 {
+        let mut all_id = true
+        for k in (i + 2)..<j {
+          let c = raw[k].to_int() & 0xFF
+          if !((c >= 65 && c <= 90) || (c >= 48 && c <= 57)) {
+            all_id = false
+            break
+          }
+        }
+        if all_id {
+          i = j + 1
+          continue
+        }
+      }
+    }
+    out.write_byte(raw[i])
+    i = i + 1
+  }
+  out.to_string()
+}
+
+// ── Pretty stringify & JValue accessors ──
+
+fn write_pretty_pad(sb : StringBuilder, depth : Int, width : Int) -> Unit {
+  sb.write_byte(10 as Byte)
+  let spaces = depth * width
+  for _ in 0..<spaces {
+    sb.write_byte(32 as Byte)
+  }
+}
+
+fn write_pretty_val(
+  sb : StringBuilder,
+  v : JValue,
+  depth : Int,
+  width : Int,
+  fmt_num : (Double) -> String,
+) -> Unit {
+  match v {
+    JValue::Arr(items) => {
+      if items.length() == 0 {
+        sb.write_string("[]")
+        return
+      }
+      sb.write_byte(0x5B as Byte)
+      for i in 0..<items.length() {
+        if i > 0 {
+          sb.write_byte(0x2C as Byte)
+        }
+        write_pretty_pad(sb, depth + 1, width)
+        write_pretty_val(sb, items[i], depth + 1, width, fmt_num)
+      }
+      write_pretty_pad(sb, depth, width)
+      sb.write_byte(0x5D as Byte)
+    }
+    JValue::Obj(entries) => {
+      if entries.length() == 0 {
+        sb.write_string("{}")
+        return
+      }
+      sb.write_byte(0x7B as Byte)
+      let ord = ordered_entries(entries)
+      for i in 0..<ord.length() {
+        if i > 0 {
+          sb.write_byte(0x2C as Byte)
+        }
+        write_pretty_pad(sb, depth + 1, width)
+        let (k, jv) = ord[i]
+        quote_units(sb, k, false)
+        sb.write_string(": ")
+        write_pretty_val(sb, jv, depth + 1, width, fmt_num)
+      }
+      write_pretty_pad(sb, depth, width)
+      sb.write_byte(0x7D as Byte)
+    }
+    other => write_value(sb, other, false, fmt_num)
+  }
+}
+
+pub fn stringify_indent_with_num(v : JValue, width : Int, fmt_num : (Double) -> String) -> String {
+  let sb = StringBuilder::new()
+  write_pretty_val(sb, v, 0, width, fmt_num)
+  sb.to_string()
+}
+
+pub fn stringify_indent(v : JValue, width : Int) -> String {
+  stringify_indent_with_num(v, width, sqlite_ffi::format_js_double)
+}
+
+pub fn stringify_pretty(v : JValue) -> String {
+  stringify_indent(v, 2)
+}
+
+pub fn jval_try_parse(src : String) -> Option[JValue] {
+  match parse(src) {
+    Ok(v) => Some(v)
+    Err(_) => None
+  }
+}
+
+pub fn jval_arr(v : Option[JValue]) -> Array[JValue] {
+  match v {
+    Some(JValue::Arr(xs)) => xs
+    _ => []
+  }
+}
+
+pub fn jval_at(v : Option[JValue], name : String) -> Option[JValue] {
+  match v {
+    Some(o) => o.get(name)
+    None => None
+  }
+}
+
+pub fn jval_num_of(v : Option[JValue]) -> Option[Double] {
+  match v {
+    Some(JValue::Num(d)) => Some(d)
+    _ => None
+  }
+}
+
+pub fn num_text_with(d : Double, fmt_num : (Double) -> String) -> String {
+  if d != d {
+    "NaN"
+  } else if is_nan_or_inf(d) {
+    if d > 0.0 { "Infinity" } else { "-Infinity" }
+  } else {
+    fmt_num(d)
+  }
+}
+
+/// `String(n)` as JavaScript formats a number (`NaN`, `Infinity`, `-Infinity`, or shortest decimal).
+pub fn num_text(d : Double) -> String {
+  num_text_with(d, sqlite_ffi::format_js_double)
+}

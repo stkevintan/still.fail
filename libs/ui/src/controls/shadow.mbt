@@ -136,8 +136,8 @@ pub fn glass_control_shadow() -> (Double, Double, Int64) {
 /// or `sheet_raised`.
 pub fn glass_overlay_shadow() -> (Double, Double, Int64) {
   if theme().dark {
-    (8.0, 4.0, 0x00000042L)
+    (16.0, 6.0, 0x00000048L)
   } else {
-    (8.0, 4.0, 0x00000014L)
+    (14.0, 6.0, 0x00000018L)
   }
 }

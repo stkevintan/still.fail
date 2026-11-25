@@ -168,20 +168,23 @@ test "styles: screens with kit's components (switches, a sheet), drawn as before
   // iOS 27 pressed-lens calibration updated resting Switch shadow/track and Segmented track ground on wide station pages.
   // Narrow pushed page_node screens now use a single-row floating liquid glass top bar (circular < + inline title + glass trailing actions).
   // P0 Regular Liquid Glass optics fix restored recipe blur 2.0/2.2 on narrow bars/pills.
+  // iOS 27.0 resting segmented/pill thumb aligned to #68686E dark fill with zero border/shadow in Light and Dark.
   inspect(out.to_string(), content=(
     #|settings narrow 101820:3e3cf699
-    #|station narrow 97452:5d754271
+    #|station narrow 97467:7101556f
     #|me-reading narrow 31219:805bd8af
     #|settings wide 204457:ab771352
-    #|station wide 275577:348fb345
+    #|station wide 275333:fccdeb64
     #|me-reading wide 199176:3c1c9ea
     #|settings-dark narrow 102088:e3484e7b
-    #|station-dark narrow 97345:e23d1360
+    #|station-dark narrow 97278:a238d196
     #|me-reading-dark narrow 31356:3797369c
     #|settings-dark wide 204349:32841efe
-    #|station-dark wide 275167:12aaf9fc
+    #|station-dark wide 274963:d4d0cfe9
     #|me-reading-dark wide 199134:f5de9219
     #|
+
+
 
 
 

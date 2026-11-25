@@ -13,18 +13,26 @@ import type { StationAddr } from "../src/station/addr.ts";
 import { HostWire, type RequestHead, type StationWire } from "../src/station/wire.ts";
 import type { FakeHost } from "../src/testing.ts";
 import { type Entry, Signer, entryHash, signedBytes } from "../src/lock.ts";
-import { utf8 } from "../src/util.ts";
+import { hex, utf8 } from "../src/util.ts";
+import { lockSeen } from "../src/views/lock.ts";
+import { ed25519 } from "@noble/curves/ed25519.js";
 import { HostError } from "../src/error.ts";
 import { t } from "../src/i18n.ts";
 import {
   type BoxCert, type BrowseAnswer, type Grant, type Item, type Request, type Vault,
   TAG, boxPublic, encryptWith, grantContext, itemContext, keyContext, openSeal, sealWith, sign, signedOk,
 } from "../src/vault/crypto.ts";
-import { BOX_PUB, askAnswers, browseCandidates, readStation, vaultsView } from "../src/views/vault.ts";
+import { BOX_PUB, askAnswers, boxKeyKnown, browseCandidates, readStation, vaultsView } from "../src/views/vault.ts";
 import { call, subscribe } from "./helpers.ts";
 import { base, started, stationReplies, status } from "./station-fixture.ts";
 
 const fill = (b: number, n = 32) => new Uint8Array(n).fill(b);
+
+/// A person's own lock begun by the key of `seed` (personal-lock.ts reads it so), naming the device of `body`.
+function signOwn(seed: Uint8Array, body: unknown): Entry[] {
+  const e = { v: 1 as const, ws: "person:s1", seq: 0, prev: null, at: 1_790_000_000, kind: "genesis", body };
+  return [{ ...e, sig: { key: `ed25519:${hex(ed25519.getPublicKey(seed))}`, alg: "Ed25519" as const, sig: hex(ed25519.sign(signedBytes(entryHash(e as Entry)), seed)) } } as Entry];
+}
 
 function lockOf(ws: string, meSigner: { id: string; signBytes: (b: Uint8Array) => string }, deviceId: string, sub = "s1") {
   const e = {
@@ -778,6 +786,80 @@ test("FB-51: the box key the screen lock taken off ended, read in one workspace:
     await r.ask("vault.lock", { workspace: "ws" });
     assert.equal((await r.ask("vault.open", { workspace: "wsB", item: inB.id })).plain.fields.value, "b");
     assert.equal((await r.ask("vault.open", { workspace: "ws", item: inA.id })).plain.fields.value, "a");
+  } finally {
+    r.core.close();
+  }
+});
+
+for (const kept of [false, true]) {
+  test(`this device's box key not read yet${kept ? "" : ", none kept from a run before"}, set up in the source workspace only: a cross-workspace use and a browse are shown and answered as keyed, and approved`, async () => {
+    const r = await multiWsRig();
+    try {
+      const a = await r.ask("vault.setup", { workspace: "ws" });
+      const it = await r.ask("vault.putItem", { workspace: "ws", vault: a.made, plain: { kind: "token", name: "A", fields: { value: "a" }, domains: [], notes: "" }, listing: { name: "gh", kind: "token", modes: ["proxy"], hosts: ["api.github.com"], lasts: "hour" } });
+      const kp = fill(22);
+      r.stB.keepers.set("rc", kp);
+      r.stB.requests.push({ id: "rc", ws: "wsB", vault: a.made, item: it.id, session: "s1", chat: "CHAT/1.0", mode: "proxy", hosts: ["api.github.com"], reason: "x", owner: "me@x.com", box: boxPublic(kp), at: 1006, status: "pending", cross: { workspace: "ws", workspaceName: "W", vaultName: "P" } } as any);
+      r.stB.requests.push({ id: "rb", ws: "wsB", vault: "", item: "", session: "s1", chat: "CHAT/1.0", mode: "browse", reason: "l", owner: "me@x.com", box: "", at: 1005, status: "pending", browse: {} } as any);
+      await Effect.runPromise(readStation(r.core.inner, "wsB/stB"));
+      const pub = new TextDecoder().decode(r.host.storage.get(BOX_PUB)!);
+      // (as at a start: the box key not read this run, and what an earlier run read kept or not)
+      const unread = () => {
+        boxKeyKnown(r.core.inner, undefined as never);
+        r.core.inner.data.put("keys", "box", kept ? pub : undefined);
+      };
+      unread();
+      const answers = () => askAnswers(r.core.inner, "wsB", [{ request: "rc", save: false, crossWs: "ws" }, { request: "rb", save: false, browse: true }]).map((x) => x.answer);
+      assert.deepEqual(answers(), ["approve", "approve"]);
+      assert.deepEqual((vaultsView(r.core.inner, "wsB") as any).requests.map((x: any) => [x.id, x.noKey ?? false]), [["rb", false], ["rc", false]]);
+      unread();
+      assert.ok((await r.ask("vault.approve", { workspace: "wsB", request: "rb" })) !== undefined);
+      unread();
+      assert.equal((await r.ask("vault.approve", { workspace: "wsB", request: "rc", scope: "once" })).request, "rc");
+    } finally {
+      r.core.close();
+    }
+  });
+}
+
+test("the source workspace with no safe mode, its person's own lock not read from the device yet: the vaults' page waits with a browse asked, and a cross-workspace use and a browse pressed meanwhile wait for that lock and go through by it", async () => {
+  const r = await multiWsRig();
+  try {
+    const a = await r.ask("vault.setup", { workspace: "ws" });
+    const it = await r.ask("vault.putItem", { workspace: "ws", vault: a.made, plain: { kind: "token", name: "A", fields: { value: "a" }, domains: [], notes: "" }, listing: { name: "gh", kind: "token", modes: ["proxy"], hosts: ["api.github.com"], lasts: "hour" } });
+    const kp = fill(23);
+    r.stB.keepers.set("rc", kp);
+    r.stB.requests.push({ id: "rc", ws: "wsB", vault: a.made, item: it.id, session: "s1", chat: "CHAT/1.0", mode: "proxy", hosts: ["api.github.com"], reason: "x", owner: "me@x.com", box: boxPublic(kp), at: 1006, status: "pending", cross: { workspace: "ws", workspaceName: "W", vaultName: "P" } } as any);
+    r.stB.requests.push({ id: "rb", ws: "wsB", vault: "", item: "", session: "s1", chat: "CHAT/1.0", mode: "browse", reason: "l", owner: "me@x.com", box: "", at: 1005, status: "pending", browse: {} } as any);
+    await Effect.runPromise(readStation(r.core.inner, "wsB/stB"));
+    // `ws` with safe mode off (no workspace lock held there): its vault goes by s1's own lock, naming this device as the
+    // workspace lock did.
+    const seed = fill(0x61);
+    const own = signOwn(seed, { sub: "s1", device: { key: `ed25519:${hex(ed25519.getPublicKey(seed))}`, id: r.devId, label: "this", sign_key: r.signerObj.id } });
+    r.core.inner.data.put("lock", "ws", undefined);
+    // (as at a start: that lock read from the device 1.5 s after a press first waits for it, by the core's clock)
+    const p = r.core.inner.adb.personal() as any;
+    let loaded = false;
+    p.loaded = () => loaded;
+    p.whenLoaded = () => (loaded ? Effect.void : Effect.flatMap(Effect.sleep("1500 millis"), () => Effect.sync(() => void (loaded = true))));
+    p.standing = () => (loaded ? "member" : "none");
+    p.pinnedOf = () => (loaded ? own : []);
+    const vaults = await r.watch(97, { topic: "vaults", workspace: "wsB" });
+    assert.equal(vaults(), undefined, "no value yet: the page waits rather than say there is nothing to browse");
+    assert.deepEqual(askAnswers(r.core.inner, "wsB", [{ request: "rc", save: false, crossWs: "ws" }, { request: "rb", save: false, browse: true }]).map((x) => x.answer), ["approve", "approve"]);
+    // Read meanwhile, as `PersonalLock` tells it (core.ts `changed`): the page shows the browse with what it finds.
+    loaded = true;
+    lockSeen(r.core.inner).touch("lock wsB");
+    await r.host.time.pass(100);
+    const rb = vaults().requests.find((x: any) => x.id === "rb");
+    assert.deepEqual([rb.browseItems, rb.noKey], [1, undefined]);
+    loaded = false;
+    assert.deepEqual(await r.ask("vault.approve", { workspace: "wsB", request: "rb" }), { request: "rb", workspaces: 1, items: 1 });
+    assert.equal(loaded, true);
+    loaded = false;
+    assert.equal((await r.ask("vault.approve", { workspace: "wsB", request: "rc", scope: "once" })).request, "rc");
+    assert.equal(loaded, true);
+    assert.equal(r.stB.grants.length, 1);
   } finally {
     r.core.close();
   }

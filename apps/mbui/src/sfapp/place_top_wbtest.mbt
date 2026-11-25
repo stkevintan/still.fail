@@ -6,7 +6,41 @@
 /// window short enough for its list to scroll.
 fn place_tester(place : String) -> @ui.Tester {
   new_run()
-  let src = fixture("home")
+  let base = fixture("home")
+  let src = if place == "stations" {
+    // The compact 2-line stations list fits two stations in 520pt; add enough stations after Willow so the list
+    // overflows the short window and scrolls under its frosted top bar.
+    {
+      ..base,
+      topic_read: fn(name, params) {
+        let r = base.topic(name, params).get().snapshot()
+        if name == "stations" {
+          match r.value {
+            Some(Array(rows)) if rows.length() >= 2 => {
+              let more = rows.copy()
+              for i in 0..<6 {
+                more.push(
+                  Json::object({
+                    "station": Json::string("ws1/extra-\{i}"),
+                    "id": Json::string("extra-\{i}"),
+                    "name": Json::string("Pine-\{i}"),
+                    "summary": Json::string("离线 · 3 天前"),
+                    "online": Json::boolean(false),
+                  }),
+                )
+              }
+              { ..r, value: Some(Json::array(more)) }
+            }
+            _ => r
+          }
+        } else {
+          r
+        }
+      },
+    }
+  } else {
+    base
+  }
   app.nav.replace(Place(place))
   let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=390.0, h=520.0, platform=2)
   t.post(@hostapi.system_channel, "{\"bars\":{\"top\":24,\"bottom\":48,\"left\":0,\"right\":0}}")

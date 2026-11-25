@@ -96,12 +96,15 @@ export { SESSION_COUNTS, SESSION_COUNTS_VISIBLE, SESSION_COUNTS_HOME };
 export const ANY_RUNNING = "SELECT 1 AS r FROM sessions WHERE running = 1 LIMIT 1";
 export const RUNNING_SESSIONS = "SELECT * FROM sessions WHERE running = 1";
 /// The sessions whose latest turn ended asking for a person (Store.waitingForPeople): the turns ended since ?1 asking
-/// for one (turns_waiting), each the latest of its session (turns_by_session), with nothing undelivered (deliveries_pending).
+/// for one (turns_waiting), each of a session not archived (sessions' key), with nothing undelivered
+/// (deliveries_pending), the latest of its session (turns_by_session). Both subqueries are of the session `s` and name
+/// their index: SQLite, asking them of `t`, ran them for archived sessions too, and took deliveries_session, every row
+/// the session was ever delivered read from its table, up to 6 s on the main thread of a busy station.
 export const WAITING_FOR_PEOPLE = `SELECT t.session_key AS key, s.title, t.need, t.ended_at FROM turns t INDEXED BY turns_waiting
   JOIN sessions s ON s.key = t.session_key
   WHERE t.ended_at >= ?1 AND t.declared IN ('block', 'need_help', 'need_human', 'need_decision') AND s.archived_at IS NULL
-    AND t.id = (SELECT u.id FROM turns u WHERE u.session_key = t.session_key ORDER BY u.started_at DESC, u.rowid DESC LIMIT 1)
-    AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.session = t.session_key AND d.delivered_at IS NULL)
+    AND NOT EXISTS (SELECT 1 FROM deliveries d INDEXED BY deliveries_pending WHERE d.session = s.key AND d.delivered_at IS NULL)
+    AND t.id = (SELECT u.id FROM turns u INDEXED BY turns_by_session WHERE u.session_key = s.key ORDER BY u.started_at DESC, u.rowid DESC LIMIT 1)
   ORDER BY t.ended_at DESC LIMIT ?2`;
 /// The closest failure in a notice's time window, breaking ties in listTurns' order.
 export const FAILED_TURN_NEAR = `SELECT * FROM turns INDEXED BY turns_by_end

@@ -97,7 +97,6 @@ fn ListState::catch_up(self : ListState) -> Unit {
       self.over = unrubber(self.over, self.vp_h)
     }
     self.over_state = 1
-    self.over_v = 0.0
   }
 }
 
@@ -129,12 +128,10 @@ fn Ctx::feed(self : Ctx, st : ListState, d : Double, source : Int) -> Unit {
       st.over = left
       if left > 0.0 {
         st.over_state = 1
-        st.over_v = 0.0
         d = 0.0
       } else {
         st.over_state = 0
         st.over_edge = 0
-        st.over_v = 0.0
         d = if d > 0.0 { d - used } else { d + used }
       }
     } else if kind == 1 && st.over_state == 1 {
@@ -171,7 +168,6 @@ fn Ctx::pull(self : Ctx, st : ListState, edge : Int, by : Double) -> Unit {
   }
   st.over_edge = edge
   st.over_state = 1
-  st.over_v = 0.0
   if kind == 2 {
     st.over = dmin(1.0, st.over + by / dmax(st.vp_h, 1.0))
   } else {
@@ -210,7 +206,6 @@ fn Ctx::absorb(self : Ctx, st : ListState, edge : Int, vel : Double) -> Unit {
 /// sets out (Ctx::moving: its path's end is when it is at rest).
 fn Ctx::spring_back(self : Ctx, st : ListState, v : Double, t0 : Double) -> Unit {
   st.over_state = 2
-  st.over_v = v
   let p = BackPath::new()
   p.x0 = st.over
   p.v0 = v
@@ -218,7 +213,7 @@ fn Ctx::spring_back(self : Ctx, st : ListState, v : Double, t0 : Double) -> Unit
   if t0 >= 0.0 {
     self.plan_back(st, t0)
   }
-  self.moving(st.ease_mover, st as &Moving, what="a list's overscroll going back")
+  self.moving(st.ease_mover, st.as_moving(), what="a list's overscroll going back")
 }
 
 ///|
@@ -302,7 +297,7 @@ fn Ctx::release(self : Ctx, st : ListState, v : Double, at : Double) -> Unit {
       st.fling_done = 0.0
       st.fling_from = None
       st.vel = v
-      self.moving(st.ease_mover, st as &Moving, what="a list's fling")
+      self.moving(st.ease_mover, st.as_moving(), what="a list's fling")
     } else if st.over_state == 1 {
       // no fling: a stretch left as it is goes back from now, as it was let go (or called off)
       self.spring_back(st, 0.0, at)
@@ -320,7 +315,7 @@ fn Ctx::release(self : Ctx, st : ListState, v : Double, at : Double) -> Unit {
       st.fling_done = 0.0
       st.fling_from = None
       st.vel = v
-      self.moving(st.ease_mover, st as &Moving, what="a list's fling")
+      self.moving(st.ease_mover, st.as_moving(), what="a list's fling")
     }
   } else if v.abs() >= 0.02 {
     // the desktop's coast sets out as the finger lets go
@@ -330,7 +325,7 @@ fn Ctx::release(self : Ctx, st : ListState, v : Double, at : Double) -> Unit {
     st.fling_done = 0.0
     st.fling_from = None
     st.vel = v
-    self.moving(st.ease_mover, st as &Moving, what="a list's coast")
+    self.moving(st.ease_mover, st.as_moving(), what="a list's coast")
   }
 }
 
@@ -405,18 +400,15 @@ fn Ctx::step_scroll(self : Ctx, st : ListState) -> Unit {
     let p = st.back
     if self.clock >= p.rest {
       st.over = 0.0
-      st.over_v = 0.0
       st.over_state = 0
       st.over_edge = 0
       st.last_scroll = p.rest
     } else if scroll_kind() == 2 {
-      let (x, v) = p.edge_now(dmax(st.vp_h * self.scale, 1.0), self.now())
+      let (x, _) = p.edge_now(dmax(st.vp_h * self.scale, 1.0), self.now())
       st.over = x
-      st.over_v = v
     } else {
-      let (x, v) = rubber_at(p.x0, p.v0, self.now() - p.t0)
+      let (x, _) = rubber_at(p.x0, p.v0, self.now() - p.t0)
       st.over = x
-      st.over_v = v
     }
   }
 }

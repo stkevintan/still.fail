@@ -9,6 +9,7 @@ import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Effect } from "effect";
 import { Data, HEARD_FLUSH_MS, TRANSCRIPT_FLUSH_MS, dbName, type RowChange } from "../src/data.ts";
 import { CHUNK, importFormer } from "../src/db/import.ts";
 import { placesFor, sameTurns } from "../src/db/account.ts";
@@ -97,7 +98,7 @@ function fresh(owners: Record<string, string[]> = { s1: ["w", "w1", "w2"] }) {
     await run(d.open(Object.keys(owners)));
     return d;
   };
-  return { host, runner, data, told, open, db, again, counted };
+  return { host, runner, data, told, open, db, again, counted, owner };
 }
 
 test("each_account_has_its_own_database_made_at_the_current_version", async () => {
@@ -1209,6 +1210,27 @@ test("the_devices_values_are_its_own_not_an_accounts", async () => {
   await run(later.accounts([]));
   assert.equal(later.record("choice", "ws:w:last"), undefined);
   assert.deepEqual(later.get({ topic: "prefs" }), { appearance: "dark" }, "signing out leaves the device's");
+  runner.shutdown();
+});
+
+test("the_devices_values_are_read_in_one_wait_at_a_start_not_one_for_each_table", async () => {
+  const { host, data, open, runner, owner } = fresh();
+  await open();
+  data.set({ topic: "prefs" }, { appearance: "dark" });
+  data.put("choice", "last", "w/s");
+  await host.time.pass(10);
+  // (each read of the device's values answered 200 ms after it is asked, as a disk busy at a start answers)
+  const get = host.storageGet.bind(host);
+  host.storageGet = (k) => (k.startsWith("device/") ? Effect.flatMap(Effect.sleep("200 millis"), () => get(k)) : get(k));
+  const later = new Data(host, runner, { owner });
+  let opened = false;
+  runner.fork(Effect.map(later.open([]), () => void (opened = true)));
+  await host.time.pass(150);
+  assert.equal(opened, false);
+  await host.time.pass(100);
+  assert.equal(opened, true, "its seven tables read in one wait of 200 ms");
+  assert.deepEqual(later.get({ topic: "prefs" }), { appearance: "dark" });
+  assert.equal(later.record("choice", "last"), "w/s");
   runner.shutdown();
 });
 

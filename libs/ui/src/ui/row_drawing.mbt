@@ -49,9 +49,9 @@ priv struct RowDrawing {
   mut hits_y : Double
   mut hits_alpha : Double
   hits_band : Array[Double]
-  hits_said : Array[&SaidAgain]
+  hits_said : Array[SaidAgain]
   owners : Array[(Int, (Double, Double), @view.NodeId?, Int)]
-  said : Array[&SaidAgain]
+  said : Array[SaidAgain]
 }
 
 ///|
@@ -457,7 +457,6 @@ fn Ctx::row_replay(self : Ctx, d : RowDrawing, i : Int, dx : Double, dy : Double
     }
   }
   self.say_again(d.said, {
-    ..unmoved,
     dx,
     dy,
     cut: k,
@@ -744,7 +743,6 @@ fn Ctx::row_targets(self : Ctx, i : Int, alpha : Double) -> Unit {
       said.push(n.item)
     }
     self.say_again(d.hits_said, {
-      ..unmoved,
       dx,
       dy,
       cut: k,
@@ -783,7 +781,6 @@ fn Ctx::row_targets(self : Ctx, i : Int, alpha : Double) -> Unit {
   d.hits_y = n.y
   d.hits_alpha = alpha
   self.say_again(d.hits_said, {
-    ..unmoved,
     dx: 0.0,
     dy: 0.0,
     cut: k,

@@ -672,6 +672,73 @@ pub fn Db::tx[T](self : Db, f : (Db) -> Result[T, SqlError]) -> Result[T, SqlErr
   self.tx_err(f, fn(e : SqlError) -> SqlError { e })
 }
 
+/// Deferred read-snapshot transaction (`BEGIN`, i.e. `DEFERRED`) exclusively for read-only
+/// snapshots on `stillfail.db` (e.g. `locate`, `replica-export`).
+/// FORBIDDEN for writes on `stillfail.db` (use `Db::tx` / `Db::tx_err` with `BEGIN IMMEDIATE`).
+/// - On `BEGIN` failure: returns `Err(map_sql(err))`.
+/// - On `f()` returning `Ok(v)`: runs `COMMIT`; if `COMMIT` fails, cleans up via
+///   `rollback_if_in_tx()` and propagates `Err(map_sql(commit_err))` (never swallows error).
+/// - On `f()` returning `Err(e)`: best-effort `COMMIT` + `rollback_if_in_tx()`, preserving `Err(e)`.
+pub fn Db::deferred_tx_err[T, E](
+  self : Db,
+  map_sql : (SqlError) -> E,
+  f : () -> Result[T, E],
+) -> Result[T, E] {
+  match self.exec("BEGIN") {
+    Ok(_) => ()
+    Err(e) => return Err(map_sql(e))
+  }
+  match f() {
+    Ok(v) => {
+      match self.exec("COMMIT") {
+        Ok(_) => Ok(v)
+        Err(commit_err) => {
+          let _ = self.rollback_if_in_tx()
+          Err(map_sql(commit_err))
+        }
+      }
+    }
+    Err(e) => {
+      let _ = self.exec("COMMIT")
+      let _ = self.rollback_if_in_tx()
+      Err(e)
+    }
+  }
+}
+
+/// Deferred write transaction (`BEGIN`) exclusively for private temporary writable databases
+/// (`Folded` in `replica-export` / `replica-restore`, never `stillfail.db`).
+/// Always finishes with best-effort `COMMIT` (swallowing commit error) + `rollback_if_in_tx()`.
+pub fn Db::with_temp_write_tx[T, E](
+  self : Db,
+  map_sql : (SqlError) -> E,
+  f : () -> Result[T, E],
+) -> Result[T, E] {
+  match self.exec("BEGIN") {
+    Ok(_) => ()
+    Err(e) => return Err(map_sql(e))
+  }
+  let res = f()
+  let _ = self.exec("COMMIT")
+  let _ = self.rollback_if_in_tx()
+  res
+}
+
+/// The anchor session key for `key`'s conversation (`conv ?? key`, aligned with `sql/conversations.mbt:18-26`).
+/// Returns `key` when the row is absent, `conv` is NULL, or `conv` is empty string.
+pub fn conversation_of(db : Db, key : String) -> Result[String, SqlError] {
+  match db.first("SELECT conv FROM sessions WHERE key = ?", [base_codec::json_str(key)]) {
+    Ok(Some(r)) => {
+      match row_val(r, "conv") {
+        base_codec::Json::Str(c) => if c != "" { Ok(c) } else { Ok(key) }
+        _ => Ok(key)
+      }
+    }
+    Ok(None) => Ok(key)
+    Err(e) => Err(e)
+  }
+}
+
 /// Emergency rollback guard: if a transaction is open (`!self.autocommit()`), execute `ROLLBACK`
 /// and verify autocommit is restored. No-op `Ok(())` when already in autocommit mode.
 /// If `ROLLBACK` returns an error (e.g. SQLite already auto-rolled back), re-check `autocommit()`
@@ -1467,6 +1534,135 @@ pub fn run_selftest(temp_db_path : String) -> Result[Unit, String] {
     _ => { fk_db.close(); f2.close(); f1.close(); return Err("fk_db count failed") }
   }
   fk_db.close()
+
+  // 9e. deferred_tx_err WAL non-blocking read snapshot: while f1 holds a deferred read snapshot,
+  // f2 can immediately BEGIN IMMEDIATE + INSERT + COMMIT without blocking, and f1 sees the old snapshot.
+  let snap_res = f1.deferred_tx_err(
+    fn(e : SqlError) -> String { "deferred_sql:" + e.message },
+    fn() -> Result[Int, String] {
+      let before = match f1.first("SELECT COUNT(*) AS n FROM lock_t WHERE id >= 400", []) {
+        Ok(Some(r)) => row_int(r, "n")
+        _ => return Err("deferred_tx_err initial select failed")
+      }
+      // Concurrent writer on WAL DB must succeed immediately without SQLITE_BUSY.
+      match f2.tx(fn(w : Db) -> Result[Unit, SqlError] {
+        let _ = match w.run("INSERT INTO lock_t (id) VALUES (?)", [base_codec::json_int(401)]) {
+          Ok(n) => n
+          Err(e) => return Err(e)
+        }
+        Ok(())
+      }) {
+        Ok(_) => ()
+        Err(e) => return Err("concurrent WAL writer blocked during deferred_tx_err: " + e.message)
+      }
+      // Snapshot still sees `before` (0), not the newly committed row 401.
+      let during = match f1.first("SELECT COUNT(*) AS n FROM lock_t WHERE id >= 400", []) {
+        Ok(Some(r)) => row_int(r, "n")
+        _ => return Err("deferred_tx_err second select failed")
+      }
+      if before != 0 || during != 0 {
+        return Err("deferred_tx_err snapshot isolation failed: before=" + before.to_string() + " during=" + during.to_string())
+      }
+      Ok(during)
+    },
+  )
+  match snap_res {
+    Ok(0) => ()
+    Ok(n) => { f2.close(); f1.close(); return Err("deferred_tx_err expected 0, got " + n.to_string()) }
+    Err(m) => { f2.close(); f1.close(); return Err("deferred_tx_err failed: " + m) }
+  }
+  if !f1.autocommit() {
+    f2.close()
+    f1.close()
+    return Err("f1 autocommit should be true after deferred_tx_err")
+  }
+  // After snapshot release, f1 sees row 401.
+  match f1.first("SELECT COUNT(*) AS n FROM lock_t WHERE id = 401", []) {
+    Ok(Some(r)) => {
+      if row_int(r, "n") != 1 {
+        f2.close()
+        f1.close()
+        return Err("f1 did not see committed row 401 after deferred_tx_err")
+      }
+    }
+    _ => { f2.close(); f1.close(); return Err("f1 post-snapshot query failed") }
+  }
+
+  // 9f. deferred_tx_err COMMIT failure propagation: deferred FK violation fails at COMMIT,
+  // must return Err (never Ok), clean up connection, and allow subsequent queries on same connection.
+  let dfk = match Db::create(":memory:", wait_ms=250) {
+    Ok(d) => d
+    Err(e) => { f2.close(); f1.close(); return Err("dfk create failed: " + e.message) }
+  }
+  match dfk.exec("PRAGMA foreign_keys = ON; CREATE TABLE fp (id INTEGER PRIMARY KEY); CREATE TABLE fc (id INTEGER PRIMARY KEY, pid INTEGER REFERENCES fp(id) DEFERRABLE INITIALLY DEFERRED);") {
+    Ok(_) => ()
+    Err(e) => { dfk.close(); f2.close(); f1.close(); return Err("dfk schema failed: " + e.message) }
+  }
+  let commit_fail = dfk.deferred_tx_err(
+    fn(e : SqlError) -> String { "commit_sql:" + e.message },
+    fn() -> Result[Unit, String] {
+      let _ = match dfk.run("INSERT INTO fc (id, pid) VALUES (?, ?)", [base_codec::json_int(1), base_codec::json_int(999)]) {
+        Ok(n) => n
+        Err(e) => return Err("unexpected insert err: " + e.message)
+      }
+      Ok(())
+    },
+  )
+  match commit_fail {
+    Err(msg) => {
+      if !str_contains(msg, "commit_sql:") || !str_contains(msg, "FOREIGN KEY") {
+        dfk.close(); f2.close(); f1.close()
+        return Err("deferred_tx_err COMMIT failure expected FOREIGN KEY, got: " + msg)
+      }
+    }
+    Ok(_) => { dfk.close(); f2.close(); f1.close(); return Err("deferred_tx_err COMMIT failure must not return Ok") }
+  }
+  if !dfk.autocommit() {
+    dfk.close(); f2.close(); f1.close()
+    return Err("dfk autocommit should be true after deferred_tx_err COMMIT failure")
+  }
+  // Subsequent request on same connection succeeds cleanly.
+  match dfk.run("INSERT INTO fp (id) VALUES (?)", [base_codec::json_int(7)]) {
+    Ok(1) => ()
+    _ => { dfk.close(); f2.close(); f1.close(); return Err("dfk subsequent insert failed") }
+  }
+
+  // 9g. with_temp_write_tx + conversation_of
+  let tw = dfk.with_temp_write_tx(
+    fn(e : SqlError) -> String { e.message },
+    fn() -> Result[Int, String] {
+      let _ = match dfk.run("INSERT INTO fp (id) VALUES (?)", [base_codec::json_int(8)]) {
+        Ok(n) => n
+        Err(e) => return Err(e.message)
+      }
+      Ok(8)
+    },
+  )
+  match tw {
+    Ok(8) => ()
+    _ => { dfk.close(); f2.close(); f1.close(); return Err("with_temp_write_tx failed") }
+  }
+  match dfk.exec("CREATE TABLE sessions (key TEXT PRIMARY KEY, conv TEXT); INSERT INTO sessions (key, conv) VALUES ('s1', 'anchor1'), ('s2', NULL), ('s3', '');") {
+    Ok(_) => ()
+    Err(e) => { dfk.close(); f2.close(); f1.close(); return Err("sessions table failed: " + e.message) }
+  }
+  match conversation_of(dfk, "s1") {
+    Ok(v) => if v != "anchor1" { dfk.close(); f2.close(); f1.close(); return Err("conv s1 mismatch: " + v) }
+    Err(e) => { dfk.close(); f2.close(); f1.close(); return Err(e.message) }
+  }
+  match conversation_of(dfk, "s2") {
+    Ok(v) => if v != "s2" { dfk.close(); f2.close(); f1.close(); return Err("conv s2 mismatch: " + v) }
+    Err(e) => { dfk.close(); f2.close(); f1.close(); return Err(e.message) }
+  }
+  match conversation_of(dfk, "s3") {
+    Ok(v) => if v != "s3" { dfk.close(); f2.close(); f1.close(); return Err("conv s3 mismatch: " + v) }
+    Err(e) => { dfk.close(); f2.close(); f1.close(); return Err(e.message) }
+  }
+  match conversation_of(dfk, "missing") {
+    Ok(v) => if v != "missing" { dfk.close(); f2.close(); f1.close(); return Err("conv missing mismatch: " + v) }
+    Err(e) => { dfk.close(); f2.close(); f1.close(); return Err(e.message) }
+  }
+  dfk.close()
 
   f2.close()
   f1.close()

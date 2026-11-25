@@ -194,17 +194,30 @@ pub fn sought_part(runs : Array[@ui.Run], found : Array[@view.RunsMark], passage
 /// The passage `lit` says (its words, and the ground it is drawn on as lit now: a quote's that led here, as it flashes;
 /// "" or a clear ground none) where words in pieces `runs` have it (find_passage: its spaces and line breaks aside), a
 /// ground a line round at its two ends (the theme's Md corner), as a passage picked in a message is drawn; none where
-/// they do not have it.
+/// they do not have it. `before`: only where they show these words before it (WordsPicked's `first_before`: the one
+/// of the times it is in them that was picked), none elsewhere.
 pub fn passage_marks(
   runs : Array[@ui.Run],
   lit : (String, Int64),
   starts? : Bool = true,
   ends? : Bool = true,
+  before? : String,
 ) -> Array[@view.RunsMark] {
   let (passage, ground) = lit
   guard passage != "" && (ground & 0xFFL) != 0L else { return [] }
-  match find_passage(runs_text(runs), passage) {
-    Some((a, b)) => [{ from: a, to: b, ground, line: 0L, line_w: 0.0, round: ui_theme().corner(Md), starts, ends }]
+  let text = runs_text(runs)
+  let (skip, within) = match before {
+    None => (0, text)
+    Some(b) => {
+      guard text.has_prefix(b) else { return [] }
+      (b.length(), text.clamped_view(start=b.length()).to_owned())
+    }
+  }
+  match find_passage(within, passage) {
+    // (where it is said to be, its words beginning there, spaces aside: not a later time they are in them)
+    Some((a, _)) if before is Some(_) && !within.clamped_view(end=a).iter().all(fn(c) { is_space(c.to_int()) }) => []
+    Some((a, b)) =>
+      [{ from: skip + a, to: skip + b, ground, line: 0L, line_w: 0.0, round: ui_theme().corner(Md), starts, ends }]
     None => []
   }
 }

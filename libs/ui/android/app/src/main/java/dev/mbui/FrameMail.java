@@ -69,6 +69,8 @@ final class FrameMail<G> {
         String ref;
         /** Its frame of a latency run, -1 none. */
         int lat = -1;
+        /** Whether this frame was handed over under an active low-rate paced vote. */
+        boolean paced;
         /** Done once it is drawn: what the frames it took the place of on the screen no longer use. */
         final ArrayList<Runnable> retire = new ArrayList<>();
     }
@@ -98,11 +100,13 @@ final class FrameMail<G> {
     private long pendingShows;
     private String pendingRef;
     private int pendingLat = -1;
+    private boolean pendingPaced;
     // the frame kept owed a drawing, when it is shown then, the picture asked of it, its frame of a latency run
     private boolean redrawOwed;
     private long redrawShows;
     private String redrawRef;
     private int redrawLat = -1;
+    private boolean redrawPaced;
     // what is let go once a frame made after it is shown: asked since the last frame handed over; with the frames
     // handed over and not drawn; owed the next drawn (the frame that no longer uses it taken for a read back)
     private ArrayList<Runnable> retiring = new ArrayList<>();
@@ -129,9 +133,12 @@ final class FrameMail<G> {
 
     /**
      * The frame the app made handed over (as it ends), to be shown at {@code shows}, with the glyphs it put in the
-     * atlases ({@code placed}: taken, the list cleared): whether it presented one, to be drawn.
+     * atlases ({@code placed}: taken, the list cleared) and its {@code paced} ownership: whether it presented one, to
+     * be drawn. {@code pendingPaced} is overwritten per frame (like {@code pendingShows}, never ORed) so an undrawn
+     * paced frame replaced by a newer interactive frame never masks real GPU backpressure; {@link MBView} passes
+     * {@code pacedBefore || pacedNow} to cover the single-frame asynchronous transition entering or leaving 20 Hz.
      */
-    synchronized boolean handOver(long shows, List<G> placed) {
+    synchronized boolean handOver(long shows, List<G> placed, boolean paced) {
         if (appGen != contextGen) {
             // (made before the app's thread was told of the GL context now: its glyphs are in an atlas gone)
             if (f.publish()) f.dropPending();
@@ -153,6 +160,7 @@ final class FrameMail<G> {
         pendingSeq = ++seq;
         pendingShows = shows;
         pendingLat = lat;
+        pendingPaced = paced;
         pendingGlyphs.addAll(placed);
         placed.clear();
         String ref = f.frameName();
@@ -163,12 +171,13 @@ final class FrameMail<G> {
     }
 
     /** Only a native view's picture changed: the frame kept drawn again, at {@code shows}; whether it is to be. */
-    synchronized boolean redrawAsked(long shows) {
+    synchronized boolean redrawAsked(long shows, boolean paced) {
         // (the frame kept is of the GL context before: the app's own for this one comes)
         if (appGen != contextGen) return false;
         int lat = f.built();
         redrawOwed = true;
         redrawShows = shows;
+        redrawPaced = paced;
         if (redrawLat >= 0) f.merged(redrawLat, lat);
         redrawLat = lat;
         made++;
@@ -197,7 +206,9 @@ final class FrameMail<G> {
             pendingRef = null;
             // (its latency run's events the next frame's: pendingLat kept; what it was to let go, the next's)
         }
+        pendingPaced = false;
         redrawOwed = false;
+        redrawPaced = false;
         return ++contextGen;
     }
 
@@ -231,6 +242,9 @@ final class FrameMail<G> {
             pendingRef = null;
             t.lat = pendingLat;
             pendingLat = -1;
+            t.paced = pendingPaced;
+            pendingPaced = false;
+            redrawPaced = false;
         }
         t.redraw = redrawOwed;
         redrawOwed = false;
@@ -238,8 +252,14 @@ final class FrameMail<G> {
             t.shows = redrawShows;
             t.ref = redrawRef;
             t.lat = redrawLat;
-        } else if (redrawLat >= 0) {
-            f.merged(redrawLat, t.lat);
+            t.paced = redrawPaced;
+            redrawPaced = false;
+        } else {
+            if (!t.took) t.paced = false;
+            redrawPaced = false;
+            if (redrawLat >= 0) {
+                f.merged(redrawLat, t.lat);
+            }
         }
         redrawRef = null;
         redrawLat = -1;
@@ -270,6 +290,8 @@ final class FrameMail<G> {
         pendingLat = -1;
         redrawOwed = true;
         redrawShows = pendingShows;
+        redrawPaced = pendingPaced;
+        pendingPaced = false;
         if (pendingRef != null) redrawRef = pendingRef;
         pendingRef = null;
         owedRetire.addAll(pendingRetire);

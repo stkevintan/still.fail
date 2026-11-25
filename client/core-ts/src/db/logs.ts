@@ -12,6 +12,12 @@ const LOG_READ_ALONE = 16;
 /// How many entries a statement reads by their numbers at once (`peopleEntries`): a few hundred parameters, well within
 /// what any SQLite of the hosts binds.
 const PEOPLE_READ_AT_ONCE = 400;
+/// How many searches' messages found are kept (`findSaid`).
+const SAID_FOUND_KEPT = 4;
+/// What a search's messages found were, as of which change of the entries (`#saidRev`).
+type SaidKept = { rev: number; found: { station: string; thread: number; seq: number; at: number | null; text: string }[] };
+/// A search's messages found are kept by: its stations in any order (as its rows are), its words and how many.
+const saidKey = (stations: string[], terms: string[], limit: number) => JSON.stringify([[...stations].sort(), terms, limit]);
 /// How many changes of a log are kept said (`logPutSince`), and of how many logs.
 const LOG_PUTS_KEPT = 64;
 const LOG_PUTS_LOGS = 512;
@@ -33,6 +39,11 @@ export class LogsStore {
   /// a cut or a delete). Of the changes before `from` (a log's, else `#logPutsFrom`) nothing is known.
   #logRev = 0;
   #logPutsFrom = 0;
+  /// What `findSaid` found last and for what, kept while no thread's entries changed (`#saidRev`): a search is made
+  /// again as each station answers and as the sidebar's rows change, and each scan reads the whole of `said`.
+  #saidRev = 0;
+  /// (a few: each search shown, and the one typed before, keeps its own)
+  readonly #saidFound = new Map<string, SaidKept>();
   readonly #logPuts = new Map<string, { from: number; puts: { rev: number; put: number[] | null }[] }>();
 
   constructor(env: DbEnv, slack: SlackSaidStore) {
@@ -69,6 +80,7 @@ export class LogsStore {
   }
 
   onRollback(): void {
+    this.#saidRev++;
     this.#logCache.clear();
     this.#logIndices.clear();
     this.#logSpans.clear();
@@ -80,6 +92,7 @@ export class LogsStore {
   }
 
   forgetStation(station: string): void {
+    this.#saidRev++;
     for (const key of [...this.#evicted]) if (key.split("\u0001")[1] === station) this.#evicted.delete(key);
     this.logPutsForgotten();
     this.#logCache.clear();
@@ -89,6 +102,7 @@ export class LogsStore {
 
   /// A log changed: `put` the numbers put in it, null for anything else.
   tellLog(table: string, station: string, id: string, put: number[] | null = null): void {
+    if (table === "entry") this.#saidRev++;
     this.#logIndices.delete(K(table, station, id));
     this.#logSpans.delete(K(table, station, id));
     this.#env.tellLogChange(K(table, station, id), [table, station, id]);
@@ -134,11 +148,33 @@ export class LogsStore {
   /// The messages of these stations whose latest text has every one of `terms` (case aside), newest first.
   findSaid(stations: string[], terms: string[], limit: number): { station: string; thread: number; seq: number; at: number | null; text: string }[] {
     if (!this.#said || stations.length === 0 || terms.length === 0) return [];
+    const key = saidKey(stations, terms, limit);
+    const kept = this.#saidFound.get(key);
+    if (kept !== undefined && kept.rev === this.#saidRev) return this.#saidUsed(key, kept).found;
     const where = [`s.station IN (${stations.map(() => "?").join(", ")})`, ...terms.map(() => "s.text LIKE ? ESCAPE '\\'")];
     const params: SqlValue[] = [...stations, ...terms.map(like), limit];
-    return this.#env.sql
+    const found = this.#env.sql
       .all(`SELECT s.station, s.thread, s.seq, s.at, s.text FROM said s WHERE ${where.join(" AND ")} ORDER BY s.at IS NULL, s.at DESC, s.seq DESC LIMIT ?`, params)
       .map((r) => ({ station: String(r[0]), thread: Number(r[1]), seq: Number(r[2]), at: typeof r[3] === "number" ? r[3] : null, text: String(r[4]) }));
+    this.#saidFound.delete(key);
+    this.#saidFound.set(key, { rev: this.#saidRev, found });
+    if (this.#saidFound.size > SAID_FOUND_KEPT) this.#saidFound.delete(this.#saidFound.keys().next().value!);
+    return found;
+  }
+
+  /// What `findSaid` found for these last (`now`: nothing said since), null where it was never looked for.
+  saidFoundKept(stations: string[], terms: string[], limit: number): { found: { station: string; thread: number; seq: number; at: number | null; text: string }[]; now: boolean } | null {
+    if (!this.#said || stations.length === 0 || terms.length === 0) return { found: [], now: true };
+    const key = saidKey(stations, terms, limit);
+    const kept = this.#saidFound.get(key);
+    return kept === undefined ? null : { found: this.#saidUsed(key, kept).found, now: kept.rev === this.#saidRev };
+  }
+
+  /// A search's messages found read: the last let go of when room is wanted.
+  #saidUsed(key: string, kept: SaidKept): SaidKept {
+    this.#saidFound.delete(key);
+    this.#saidFound.set(key, kept);
+    return kept;
   }
 
   /// The number of the message of thread `thread` said at `ts` (its `ts`, as a quote names it), where it is held; null

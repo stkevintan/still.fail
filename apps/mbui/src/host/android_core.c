@@ -217,6 +217,12 @@ int mb_core_screen_ack(double call, double ts) {
   return sf_engine_screen_ack(e, (uint64_t)call, ts);
 }
 
+int mb_core_screen_ack_wait(double call, double ts, uint32_t wait_us) {
+  sf_engine *e = A.engine;
+  if (!e || call < 1) return 0;
+  return sf_engine_screen_ack_wait(e, (uint64_t)call, ts, wait_us);
+}
+
 int mb_core_screen_input(double call, const uint8_t *json, size_t len) {
   sf_engine *e = A.engine;
   if (!e || call < 1 || !json || len == 0) return 0;

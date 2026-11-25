@@ -80,6 +80,7 @@ export type MovesDeps = {
   hashMost?: number;
   packMost?: HandoverDeps["packMost"];
   work?: HandoverDeps["work"];
+  readers?: HandoverDeps["readers"];
   /// A test's: what takes a directory away here (a clone a move back removes); none: rm.
   remove?: (dir: string) => Promise<void>;
   fail?: HandoverDeps["fail"];
@@ -266,7 +267,7 @@ export class Moves {
         here: (a) => this.accountHere(a),
         present: (id) => d.profiles().some((p) => p?.id === id),
       },
-      reposDir: d.reposDir, room: d.room, hasGit: d.hasGit, flush: d.flush, boot: d.boot, git: d.git, lackMost: d.lackMost, hashMost: d.hashMost, packMost: d.packMost, work: d.work, told: this.told, fail: d.fail, previous: d.previous, previousPid: d.previousPid,
+      reposDir: d.reposDir, room: d.room, hasGit: d.hasGit, flush: d.flush, boot: d.boot, git: d.git, lackMost: d.lackMost, hashMost: d.hashMost, packMost: d.packMost, work: d.work, readers: d.readers, told: this.told, fail: d.fail, previous: d.previous, previousPid: d.previousPid,
       changed: () => d.changed?.(),
       arrivedStopped: (keys, need, ws) => this.scheduler.noteStopped({ module: "chats", id: keys[0]! }, need, ws),
       // (a chat here again by any route: what was lent for it alone is taken back)
@@ -534,7 +535,7 @@ export class Moves {
 
   /// Sessions sized as a move would gather them (in the sizing's thread, unless a test's).
   #sized(keys: string[], sizing: Sizing): Promise<Sized[]> {
-    return (this.#d.sizes ?? ((k, z) => sizesSoon(this.#d.data, join(this.#d.data, "stillfail.db"), k, z)))(keys, sizing);
+    return (this.#d.sizes ?? ((k, z) => sizesSoon(this.#d.data, join(this.#d.data, "stillfail.db"), k, z, this.#d.readers)))(keys, sizing);
   }
 
   /// What station `to` says of its disk (`move.open`: its free bytes and its volume's): null where it says none (one

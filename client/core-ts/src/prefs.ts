@@ -14,7 +14,7 @@ import { ofAddress } from "./workspace.ts";
 import { equal, isObject } from "./util.ts";
 import { isBuildStale, ownBuiltAt, setOwnBuild, setOwnBuiltAt, STALE_BUILD_MS } from "./station/oldest.ts";
 
-const FIELDS = ["onlyMine", "onlyWatching", "listFilter", "boardViews", "boardGroups", "boardShowEmpty", "boardDrafts", "appearance", "accent", "windowZoom", "terminalZoom", "motion", "glassFrost", "haptics", "dht", "appUpdate", "rowPicture", "absoluteTime", "language", "keys", "workspace", "lastChat", "chatTabs", "dropFiles", "dropAs", "archiveHint", "screenTouch", "screenQuality", "screenFps", "screenCodec", "screenMouse", "driveViews", "filesTabs", "remoteTabs", "driveFavorites", "driveFavoritesHidden", "resume", "invite", "badge", "badgeKinds", "reader", "lockNotice", "rail", "rails", "bars", "barsBy", "fonts", "previewSizes", "sidebars", "trouble", "jobsSeen", "failsGone", "fillOff", "fillMax", "shareLook", "cpuDial", "sendKey", "moveTo", "experimental", "reports"];
+const FIELDS = ["onlyMine", "onlyWatching", "listFilter", "boardViews", "boardGroups", "boardShowEmpty", "boardDrafts", "appearance", "accent", "windowZoom", "terminalZoom", "motion", "glassFrost", "haptics", "dht", "appUpdate", "rowPicture", "absoluteTime", "language", "keys", "workspace", "lastChat", "chatTabs", "dropFiles", "dropAs", "archiveHint", "screenTouch", "screenQuality", "screenFps", "screenCodec", "screenMouse", "driveViews", "filesTabs", "remoteTabs", "driveFavorites", "driveFavoritesHidden", "resume", "invite", "badge", "badgeKinds", "reader", "lockNotice", "rail", "rails", "bars", "barsBy", "fonts", "typography", "previewSizes", "sidebars", "trouble", "jobsSeen", "failsGone", "fillOff", "fillMax", "shareLook", "cpuDial", "sendKey", "moveTo", "experimental", "reports"];
 const MAPS = ["listFilter", "boardViews", "boardGroups", "boardShowEmpty", "boardDrafts", "keys", "lastChat", "chatTabs", "dropFiles", "driveViews", "filesTabs", "remoteTabs", "driveFavorites", "driveFavoritesHidden", "resume", "lockNotice", "rails", "barsBy", "previewSizes", "sidebars", "trouble", "jobsSeen", "failsGone", "moveTo", "experimental"];
 const TABS_KEPT = 200;
 /// At most this many jobs kept as looked at in one workspace's bell.
@@ -82,6 +82,82 @@ export function readerOf(v: unknown): Map_ {
     face: FACES.includes(r.face as string) ? r.face : "sans",
     indent: typeof r.indent === "boolean" ? r.indent : true,
     paper: PAPERS.includes(r.paper as string) ? r.paper : "follow",
+  };
+}
+
+/// How text is set on this device (`typography`, `prefs.set {typography: {…}}`): kept only as chosen, each number a
+/// percent `[min, max, step, default]`; each CJK face's weight a step lighter or heavier (`-100`, `100`).
+const TYPOGRAPHY_NUMBERS = {
+  textSize: [85, 130, 5, 100],
+  codeScale: [85, 110, 5, 100],
+  uiCjkScale: [85, 115, 5, 100],
+  textCjkScale: [85, 115, 5, 100],
+  codeCjkScale: [85, 115, 5, 100],
+} as const;
+const TYPOGRAPHY_WEIGHTS = ["uiCjkWeight", "textCjkWeight", "codeCjkWeight"];
+const CJK_WEIGHTS = [-100, 0, 100];
+const LINE_HEIGHTS = ["compact", "normal", "relaxed"];
+const TYPOGRAPHY_BOOLS = ["cjkAutoSpace", "codeLigatures"];
+
+const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+
+/// Whether `v` is a value `key` of `typography` can be; an unknown key none.
+function typographyValid(key: string, v: unknown): boolean {
+  if (hasOwn(TYPOGRAPHY_NUMBERS, key)) {
+    const [min, max, step] = TYPOGRAPHY_NUMBERS[key as keyof typeof TYPOGRAPHY_NUMBERS];
+    return typeof v === "number" && Number.isInteger(v) && v >= min && v <= max && (v - min) % step === 0;
+  }
+  if (TYPOGRAPHY_WEIGHTS.includes(key)) return CJK_WEIGHTS.includes(v as number);
+  if (key === "lineHeight") return LINE_HEIGHTS.includes(v as string);
+  if (TYPOGRAPHY_BOOLS.includes(key)) return typeof v === "boolean";
+  return false;
+}
+
+/// What is kept of `typography`: the settings chosen, those that are not dropped.
+function typographyKept(v: unknown): Map_ {
+  const out: Map_ = {};
+  if (isObject(v)) for (const key of Object.keys(v)) if (typographyValid(key, v[key])) out[key] = v[key];
+  return out;
+}
+
+/// A change to `typography`: each setting said replaces what is kept (null: back to its default; `fill`: only one not
+/// kept); the rest stays. The key of one that is not a setting or not a value it can be, as an error.
+function typographyPut(kept: unknown, patch: Map_, fill: boolean): Map_ | string {
+  const now = typographyKept(kept);
+  for (const key of Object.keys(patch).sort()) {
+    if (fill && hasOwn(now, key)) continue;
+    const v = patch[key];
+    if (v === null) {
+      if (hasOwn(TYPOGRAPHY_NUMBERS, key) || TYPOGRAPHY_WEIGHTS.includes(key) || key === "lineHeight" || TYPOGRAPHY_BOOLS.includes(key)) delete now[key];
+      else return key;
+    } else if (typographyValid(key, v)) now[key] = v;
+    else return key;
+  }
+  return now;
+}
+
+/// `typography` whole, as text is set: what is not kept takes its default, except text's CJK face's size and weight,
+/// which follow ui's where text's CJK face does (`fonts`: no `textCjk` and a `uiCjk`).
+export function typographyOf(v: unknown, fontsKept: unknown): Map_ {
+  const k = typographyKept(v);
+  const num = (key: keyof typeof TYPOGRAPHY_NUMBERS) => (hasOwn(k, key) ? k[key] : TYPOGRAPHY_NUMBERS[key][3]) as number;
+  const weight = (key: string) => (hasOwn(k, key) ? k[key] : 0) as number;
+  const c = fonts.choicesOf(fontsKept);
+  const follows = c.textCjk === null && c.uiCjk !== null;
+  return {
+    textSize: num("textSize"),
+    codeScale: num("codeScale"),
+    lineHeight: hasOwn(k, "lineHeight") ? k.lineHeight : "normal",
+    uiCjkScale: num("uiCjkScale"),
+    textCjkScale: hasOwn(k, "textCjkScale") || !follows ? num("textCjkScale") : num("uiCjkScale"),
+    textCjkScaleOwn: hasOwn(k, "textCjkScale"),
+    codeCjkScale: num("codeCjkScale"),
+    uiCjkWeight: weight("uiCjkWeight"),
+    textCjkWeight: hasOwn(k, "textCjkWeight") || !follows ? weight("textCjkWeight") : weight("uiCjkWeight"),
+    textCjkWeightOwn: hasOwn(k, "textCjkWeight"),
+    codeCjkWeight: weight("codeCjkWeight"),
+    cjkAutoSpace: hasOwn(k, "cjkAutoSpace") ? k.cjkAutoSpace : true,
+    codeLigatures: hasOwn(k, "codeLigatures") ? k.codeLigatures : true,
   };
 }
 
@@ -160,6 +236,19 @@ export function setCounted(on: boolean): void {
   counted = on;
 }
 
+/// Whether the prefs kept say this device sends no usage statistics, error reports or traces (`reports: off`: set where
+/// the host keeps no switch of its own; none says nothing, a host's switch may be off).
+export function reportsOff(data: Data): boolean {
+  return kept(data).reports === "off";
+}
+
+/// Whether this core sends its traces (trace.ts: one that records any), said with the prefs as `traced`: the app then
+/// tells it whether to (`client.reports`), on any cloud.
+let traced = false;
+export function setTraced(on: boolean): void {
+  traced = on;
+}
+
 /// The prefs as they go out: the current product name, the reader's settings whole, the bottom bars (each workspace's
 /// too), the faces, and the keymap and the rail.
 export function shown(v: unknown, c?: { now: number; reached?: (at: number, later?: boolean) => boolean }): unknown {
@@ -168,7 +257,7 @@ export function shown(v: unknown, c?: { now: number; reached?: (at: number, late
   const test = brand.isTestChannel();
   const built = ownBuiltAt();
   const staleBuild = built > 0 && (c?.reached ? c.reached(built + STALE_BUILD_MS, true) : isBuildStale(built, c?.now ?? 0));
-  return { ...v, productName: brand.name(), product: brand.current().name, testChannel: test, experimental: experimentalOf(v), features: featuresOf(v, test), experimentalItems: experimentalItemsOf(v, test), listFilter: listFiltersOf(v.listFilter), reader: readerOf(v.reader), bars: barsOf(v.bars), barsBy: by, fonts: fonts.chosen(v.fonts), faces: fonts.shown(v.fonts), keymap: keymap.view(v), railView: railView(v), ...(counted ? { counted: true } : {}), ...(staleBuild ? { staleBuild: true } : {}) };
+  return { ...v, productName: brand.name(), product: brand.current().name, testChannel: test, experimental: experimentalOf(v), features: featuresOf(v, test), experimentalItems: experimentalItemsOf(v, test), listFilter: listFiltersOf(v.listFilter), reader: readerOf(v.reader), typography: typographyOf(v.typography, v.fonts), bars: barsOf(v.bars), barsBy: by, fonts: fonts.chosen(v.fonts), faces: fonts.shown(v.fonts), keymap: keymap.view(v), railView: railView(v), ...(counted ? { counted: true } : {}), ...(traced ? { traced: true } : {}), ...(staleBuild ? { staleBuild: true } : {}) };
 }
 
 /// What is kept, as kept (no defaults filled in).
@@ -211,6 +300,12 @@ export function set(data: Data, patch: unknown, fill: boolean, now: number): voi
       if (typeof put === "string") throw CoreError.invalid(t("core-misc.params.invalid", { error: `fonts.${put}` }));
       if (Object.keys(put).length) prefs.fonts = put;
       else delete prefs.fonts;
+    } else if (field === "typography" && value !== null) {
+      // Kept only as chosen (null: a setting back to its default), each checked; none chosen: none kept.
+      const put = isObject(value) ? typographyPut(prefs.typography, value, fill) : "";
+      if (typeof put === "string") throw CoreError.invalid(t("core-misc.params.invalid", { error: put ? `typography.${put}` : "typography" }));
+      if (Object.keys(put).length) prefs.typography = put;
+      else delete prefs.typography;
     } else if (field === "badgeKinds" && isObject(value)) {
       // Kept whole: what is not said stays as the badge counts now (as the older `badge` says, first).
       prefs.badgeKinds = badgeKindsOf({ ...prefs, badgeKinds: { ...(isObject(prefs.badgeKinds) ? prefs.badgeKinds : {}), ...value } });
@@ -317,8 +412,8 @@ export function set(data: Data, patch: unknown, fill: boolean, now: number): voi
   if ("fillMax" in prefs && (typeof prefs.fillMax !== "number" || !Number.isSafeInteger(prefs.fillMax) || prefs.fillMax < 0)) throw CoreError.invalid(t("core-misc.params.invalid", { error: "fillMax" }));
   if ("language" in prefs && !(prefs.language === "zh" || prefs.language === "en")) throw CoreError.invalid(t("core-misc.params.language"));
   withLang(prefs);
-  // The view's reader is whole; the stored choices may omit fields that still follow the default.
-  const shaped = conform("PrefsView", isObject(prefs.reader) ? { ...prefs, reader: readerOf(prefs.reader) } : prefs);
+  // The view's reader and typography are whole; the stored choices may omit fields that still follow the default.
+  const shaped = conform("PrefsView", { ...prefs, ...(isObject(prefs.reader) ? { reader: readerOf(prefs.reader) } : {}), typography: typographyOf(prefs.typography, prefs.fonts) });
   if ("error" in shaped) throw CoreError.invalid(t("core-misc.params.invalid", { error: shaped.error }));
   data.set(PREFS, prefs);
 }

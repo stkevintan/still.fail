@@ -45,6 +45,11 @@ test("a_search_lists_what_the_device_holds_and_what_its_stations_find_each_once"
   const ui = core.connect();
   subscribe(core, ui, 1, { topic: "search", scope: "ws", query: "部署" });
   await host.settle();
+  // The chats the device holds go out first, before its messages are looked through (a scan of all it keeps).
+  const sent = host.emitted.filter(([, m]: J) => m.id === 1).map(([, m]: J) => m);
+  const firstValue = sent.find((m: J) => "value" in m);
+  assert.deepEqual(firstValue.value.items.map((i: J) => i.id), ["a"]);
+  assert.deepEqual(firstValue.value.messages, []);
   const values = new Map();
   apply(host, values);
   // Before the stations answer: what the device holds.
@@ -287,5 +292,66 @@ test("a_non_http_search_failure_ends_waiting_surfaces_the_error_and_retries_when
   assert.equal(retried.wait.reading, false);
   assert.deepEqual(retried.wait.failing, []);
   assert.deepEqual(retried.items.map((i: J) => i.id), ["to1"]);
+  core.close();
+});
+
+for (const topic of ["chatSearch", "search"] as const) {
+  test(`a_${topic}_let_go_before_its_messages_were_looked_for_shows_them_when_shown_again`, async () => {
+    const { host, core } = await started({
+      ...base(),
+      ...chatsOf([{ ...row("a", 7, "部署页"), last: { seq: 1 } }]),
+      "GET /threads/7/entries?limit=50": { first: 1, last: 1, entries: [said(7, 1, "部署 studio", 1000)] },
+    });
+    const ui = core.connect();
+    subscribe(core, ui, 9, { topic: "chats", scope: "ws" });
+    await host.settle();
+    await host.time.pass(5000);
+    await host.settle();
+    const asked = topic === "chatSearch" ? { topic, scope: "ws", query: "部署", messages: 10 } : { topic, scope: "ws", query: "部署" };
+    subscribe(core, ui, 1, asked);
+    // Let go (kept a while) before its turn came, as a word typed on; then the word taken back.
+    core.receive(ui, { kind: "unsubscribe", id: 1, keep: true } as J);
+    await host.settle();
+    subscribe(core, ui, 2, asked);
+    await host.settle();
+    await host.time.pass(SEARCH_SETTLE_MS + 10);
+    await host.settle();
+    const values = new Map();
+    apply(host, values);
+    assert.deepEqual(v(values, 2).messages.map((m: J) => [m.thread, m.seq]), [[7, 1]]);
+    core.close();
+  });
+}
+
+test("a_message_said_while_a_search_shows_keeps_what_it_found_shown_until_it_is_looked_through_again", async () => {
+  const { host, core } = await started({
+    ...base(),
+    ...chatsOf([{ ...row("a", 7, "部署页"), last: { seq: 1 } }]),
+    "GET /threads/7/entries?limit=50": { first: 1, last: 1, entries: [said(7, 1, "部署 studio", 1000)] },
+  });
+  const ui = core.connect();
+  subscribe(core, ui, 9, { topic: "chats", scope: "ws" });
+  await host.settle();
+  await host.time.pass(5000);
+  await host.settle();
+  subscribe(core, ui, 1, { topic: "chatSearch", scope: "ws", query: "部署", messages: 10 });
+  await host.settle();
+  const values = new Map();
+  apply(host, values);
+  assert.equal(v(values, 1).messages.length, 1);
+  core.inner.data.putItems("entry", "ws/st", "7", [[2, said(7, 2, "部署 again", 2000)]]);
+  for (const t of core.inner.store.liveTopics().filter((t: J) => t.topic === "chatSearch")) core.inner.store.invalidate(t);
+  let fewest = Infinity;
+  for (let i = 0; i < 10; i++) {
+    await host.time.pass(50);
+    await host.settle();
+    // (each value sent taken alone: one sent without its messages and made whole again in the same step is seen)
+    for (const one of host.takeEmitted()) {
+      apply({ takeEmitted: () => [one] } as J, values);
+      fewest = Math.min(fewest, v(values, 1).messages.length);
+    }
+  }
+  assert.ok(fewest >= 1, "what it found stays shown while it is looked through again");
+  assert.deepEqual(v(values, 1).messages.map((m: J) => m.seq), [2, 1]);
   core.close();
 });

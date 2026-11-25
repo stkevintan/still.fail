@@ -1591,7 +1591,7 @@ fn sideways_edge_to(c : Ctx, st : Sideways, v : Double) -> Unit {
   st.edge_t = c.clock
   // (a motion while it goes (Sideways' rest_at): frames come, each taking it on and the words under the pointer there)
   if v != 0.0 {
-    c.moving(st.mover, st as &Moving, what="a box scrolled sideways toward words picked past its edge")
+    c.moving(st.mover, st.as_moving(), what="a box scrolled sideways toward words picked past its edge")
   }
 }
 

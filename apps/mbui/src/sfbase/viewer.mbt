@@ -1289,7 +1289,7 @@ priv struct PreviewOut {
 let pv_out_mover : @ui.Mover = @ui.Mover::new()
 
 ///|
-impl @ui.Moving for PreviewOut with rest_at(self, now, frame) {
+fn PreviewOut::rest_at(self : PreviewOut, now : Double, frame : Int) -> Double {
   ignore(now)
   ignore(frame)
   let (fade, tree) = (self.v.fade.ends_at(), self.v.tree_way_end.untracked())
@@ -1298,6 +1298,12 @@ impl @ui.Moving for PreviewOut with rest_at(self, now, frame) {
   } else {
     tree
   }
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn PreviewOut::as_moving(self : PreviewOut) -> @ui.Moving {
+  @ui.Moving::new(fn(now, frame) { self.rest_at(now, frame) })
 }
 
 ///|
@@ -2072,7 +2078,7 @@ pub fn Viewer::shut(self : Viewer, c : @ui.Ctx) -> Unit {
     pv_leaving.set(Some(self))
     // (said to move from its cause on, as what moves is: what waits on it, Tester::moving, and once it is gone a
     // test's preview_rest)
-    c.moving(pv_out_mover, { v: self } as &@ui.Moving, what="the preview's way out")
+    c.moving(pv_out_mover, ({ v: self } : PreviewOut).as_moving(), what="the preview's way out")
     // the views under the canvas go at once (they cannot fade)
     match self.view() {
       // (once the frame's builds are over: closed as the back is taken or the marks are put, once)

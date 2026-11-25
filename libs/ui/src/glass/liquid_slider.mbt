@@ -70,6 +70,412 @@ let slider_stops_lean : Double = 0.25
 let slider_track_held_grow : Double = 0.0
 
 ///|
+/// Visual configuration for `liquid_slider_look`, decoupling track/fill/thumb/lens
+/// painting from gesture and value handling.
+pub(all) struct SliderLook {
+  track_h : Double
+  track_held_grow : Double
+  track_inset : Double
+  travel_inset : Double?
+  thumb_w : Double
+  thumb_h : Double
+  flush : Bool
+  track_color : () -> Int64
+  fill_color : (() -> Int64)?
+  track_image : (() -> (String, String, Int)?)?
+  buffered : (() -> Double)?
+  buffered_color : (() -> Int64)?
+  thumb_color : (() -> Int64)?
+  thumb_edge : (() -> (Double, Int64))?
+  focus_shown : (() -> Bool)?
+  focus_color : (() -> Int64)?
+  lens_enabled : Bool
+  held_mark : ((@view.View) -> Unit)?
+  disabled : () -> Bool
+}
+
+///|
+/// Construct a `SliderLook` with iOS 27 LiquidSlider defaults.
+pub fn SliderLook::new(
+  track_h? : Double = slider_track_h,
+  track_held_grow? : Double = slider_track_held_grow,
+  track_inset? : Double = 0.0,
+  travel_inset? : Double? = None,
+  thumb_w? : Double = slider_thumb_w,
+  thumb_h? : Double = slider_thumb_h,
+  flush? : Bool = false,
+  track_color? : () -> Int64 = fn() { colors().track },
+  fill_color? : (() -> Int64)? = Some(fn() { colors().accent }),
+  track_image? : (() -> (String, String, Int)?)? = None,
+  buffered? : (() -> Double)? = None,
+  buffered_color? : (() -> Int64)? = None,
+  thumb_color? : (() -> Int64)? = None,
+  thumb_edge? : (() -> (Double, Int64))? = None,
+  focus_shown? : (() -> Bool)? = None,
+  focus_color? : (() -> Int64)? = None,
+  lens_enabled? : Bool = true,
+  held_mark? : ((@view.View) -> Unit)? = None,
+  disabled? : () -> Bool = fn() { false },
+) -> SliderLook {
+  {
+    track_h,
+    track_held_grow,
+    track_inset,
+    travel_inset,
+    thumb_w,
+    thumb_h,
+    flush,
+    track_color,
+    fill_color,
+    track_image,
+    buffered,
+    buffered_color,
+    thumb_color,
+    thumb_edge,
+    focus_shown,
+    focus_color,
+    lens_enabled,
+    held_mark,
+    disabled,
+  }
+}
+
+///|
+/// Gesture-free liquid slider painting primitive: renders track (optional image),
+/// optional buffered segment, optional active fill, solid/droplet-lens thumb, and
+/// optional keyboard focus ring. `progress`, `pressed`, and `velocity` take the
+/// painted `@view.View` so motion registers per-node for FPS invariance and idle skipping.
+#callsite(autofill(loc))
+pub fn liquid_slider_look(
+  parent : @view.View,
+  progress : (@view.View) -> Double,
+  pressed : (@view.View) -> Double,
+  look : SliderLook,
+  velocity? : (@view.View) -> Double,
+  loc~ : SourceLoc,
+) -> Unit {
+  liquid_slider_look_core(parent, progress, pressed, look, velocity?, loc~)
+}
+
+///|
+/// Internal shared implementation of `liquid_slider_look` and `liquid_slider_node`.
+#callsite(autofill(loc))
+fn liquid_slider_look_core(
+  parent : @view.View,
+  progress : (@view.View) -> Double,
+  pressed : (@view.View) -> Double,
+  look : SliderLook,
+  velocity? : (@view.View) -> Double,
+  thumb_w_dyn? : (@view.View, () -> Double) -> Double,
+  pressing? : () -> Bool,
+  between_fill_and_thumb? : (@view.View, (Double) -> Double) -> Unit,
+  in_thumb? : (@view.View, () -> Double, (Double, Double) -> Double) -> Unit,
+  after_thumb? : (@view.View, () -> Double, (Double, Double) -> Double) -> Unit,
+  loc~ : SourceLoc,
+) -> Unit {
+  parent.by_room(loc~, fn(inner, room) {
+    inner.alpha(By(fn() { if (look.disabled)() { 0.5 } else { 1.0 } })) |> ignore
+    let w = fn() { room.width() }
+    let glass_on = fn() { look.lens_enabled && !inner.glass_solid() && !@ui.reduced_motion() }
+    let lens = fn(n : @view.View) -> Double { if glass_on() { clamp(pressed(n), 0.0, 1.0) } else { 0.0 } }
+    let vel_of = fn(n : @view.View) -> Double {
+      match velocity {
+        Some(vf) => vf(n)
+        None => 0.0
+      }
+    }
+    let eff_tw = fn() -> Double {
+      match thumb_w_dyn {
+        Some(f) => f(inner, w)
+        None => look.thumb_w
+      }
+    }
+    let middle_at = fn(p : Double) -> Double {
+      match look.travel_inset {
+        Some(inset) => slider_travel_at(w(), inset, p)
+        None =>
+          if look.flush {
+            slider_travel_at(w(), eff_tw() / 2.0, p)
+          } else {
+            w() * p
+          }
+      }
+    }
+    let thumb_x = fn(tw : Double, p : Double) -> Double {
+      match look.travel_inset {
+        Some(inset) => slider_travel_at(w(), inset, p) - tw / 2.0
+        None => slider_thumb_x_for(w(), tw, p, look.flush)
+      }
+    }
+    let ends = look.track_inset
+    let along = fn() { dmax(0.0, w() - 2.0 * ends) }
+    let span_at = fn(raw_at : Double) -> Double {
+      let at = clamp(raw_at, 0.0, 1.0)
+      let raw = match look.travel_inset {
+        Some(_) => middle_at(at) - ends
+        None =>
+          if look.flush {
+            let left_t = clamp(at / 0.04, 0.0, 1.0)
+            dmax(0.0, middle_at(at) - ends) * left_t
+          } else {
+            middle_at(at) - ends
+          }
+      }
+      clamp(raw, 0.0, along())
+    }
+    // 1. Track (with optional track_image, e.g. hue rainbow strip)
+    inner.box(fn(track) {
+      track
+      .over(Is(true))
+      .width(By(fn() { Some(along()) }))
+      .height(Is(Some(look.track_h)))
+      .offset(Is((ends, (look.thumb_h - look.track_h) / 2.0)))
+      .radius(Is(look.track_h / 2.0))
+      .ground(By(look.track_color))
+      .ground_drawn(By(fn() {
+        let dh = look.track_held_grow * dmax(0.0, pressed(track))
+        if dh.abs() < 0.001 {
+          @view.ground_as_laid
+        } else {
+          let rr = (look.track_h + dh) / 2.0
+          { dx: 0.0, dy: -dh / 2.0, dw: 0.0, dh, corners: Some((rr, rr, rr, rr)) }
+        }
+      }))
+      |> ignore
+      match look.track_image {
+        Some(img_fn) => track.clips(Is(true)).image(By(img_fn)) |> ignore
+        None => ()
+      }
+    })
+    |> ignore
+    // 2. Optional buffered segment (between track and active fill)
+    match look.buffered {
+      Some(buf_fn) =>
+        inner.box(fn(buf) {
+          let buf_shown = fn() { span_at(buf_fn()) }
+          buf
+          .over(Is(true))
+          .points(Is(false))
+          .width(By(fn() { Some(along()) }))
+          .height(Is(Some(look.track_h)))
+          .offset(Is((ends, (look.thumb_h - look.track_h) / 2.0)))
+          .alpha(By(fn() { if buf_shown() < 0.5 { 0.0 } else { 1.0 } }))
+          .radius(Is(look.track_h / 2.0))
+          .ground(By(fn() {
+            match look.buffered_color {
+              Some(f) => f()
+              None => (look.track_color)()
+            }
+          }))
+          .ground_drawn(By(fn() {
+            let shown = buf_shown()
+            let dh = look.track_held_grow * dmax(0.0, pressed(buf))
+            if dh.abs() < 0.001 {
+              { ..@view.ground_as_laid, dw: shown - along() }
+            } else {
+              let rr = (look.track_h + dh) / 2.0
+              { dx: 0.0, dy: -dh / 2.0, dw: shown - along(), dh, corners: Some((rr, rr, rr, rr)) }
+            }
+          }))
+          |> ignore
+        })
+        |> ignore
+      None => ()
+    }
+    // 3. Optional active fill (None skips fill so track_image stays unobstructed)
+    match look.fill_color {
+      Some(fc) => {
+        let filled = fn(n : @view.View) { span_at(progress(n)) }
+        inner.box(fn(fill) {
+          fill
+          .over(Is(true))
+          .width(By(fn() { Some(along()) }))
+          .height(Is(Some(look.track_h)))
+          .offset(Is((ends, (look.thumb_h - look.track_h) / 2.0)))
+          .alpha(By(fn() { if filled(fill) < 0.5 { 0.0 } else { 1.0 } }))
+          .radius(Is(look.track_h / 2.0))
+          .ground(By(fc))
+          .ground_drawn(By(fn() {
+            let shown = filled(fill)
+            let dh = look.track_held_grow * dmax(0.0, pressed(fill))
+            if dh.abs() < 0.001 {
+              { ..@view.ground_as_laid, dw: shown - along() }
+            } else {
+              let rr = (look.track_h + dh) / 2.0
+              { dx: 0.0, dy: -dh / 2.0, dw: shown - along(), dh, corners: Some((rr, rr, rr, rr)) }
+            }
+          }))
+          |> ignore
+        })
+        |> ignore
+      }
+      None => ()
+    }
+    match between_fill_and_thumb {
+      Some(f) => f(inner, middle_at)
+      None => ()
+    }
+    // 4. Thumb (solid capsule + optional lazy-mounted clear droplet loupe)
+    inner.box(fn(thumb) {
+      let thumb_shape = fn(n : @view.View) -> @view.GroundShape {
+        let cur_tw = eff_tw()
+        let (tw, th) = if look.lens_enabled {
+          let p = lens(n)
+          let v = if !glass_on() { 0.0 } else { (vel_of(n) / 10.0).abs() }
+          // (stretched along its way and flattened as fast as it goes, whichever way: never taller than held, so never
+          // past the room kept for it; the catalog's signed squeeze made it taller going left)
+          let vel_sx = 1.0 / (1.0 - clamp(v * 0.75, 0.0, 0.2))
+          let vel_sy = 1.0 - clamp(v * 0.25, 0.0, 0.2)
+          (
+            cur_tw * lerp(1.0, 58.0 / 38.0, p) * vel_sx,
+            look.thumb_h * lerp(1.0, slider_thumb_held_scale, p) * vel_sy,
+          )
+        } else {
+          let p = if @ui.reduced_motion() { 0.0 } else { clamp(pressed(n), 0.0, 1.0) }
+          let v = if @ui.reduced_motion() { 0.0 } else { (vel_of(n) / 10.0).abs() }
+          let vel_sx = 1.0 / (1.0 - clamp(v * 0.4, 0.0, 0.12))
+          let vel_sy = 1.0 - clamp(v * 0.15, 0.0, 0.12)
+          let s = lerp(1.0, 1.2, p)
+          (cur_tw * s * vel_sx, look.thumb_h * s * vel_sy)
+        }
+        let x = thumb_x(cur_tw, progress(n))
+        let r = th / 2.0
+        {
+          dx: x + (cur_tw - tw) / 2.0,
+          dy: (look.thumb_h - th) / 2.0,
+          dw: tw - look.thumb_w,
+          dh: th - look.thumb_h,
+          corners: Some((r, r, r, r)),
+        }
+      }
+      thumb
+      .over(Is(true))
+      .width(Is(Some(look.thumb_w)))
+      .height(Is(Some(look.thumb_h)))
+      .radius(Is(look.thumb_h / 2.0))
+      .shadow(By(fn() { thumb_lift_shadow(lens(thumb)) }))
+      .shadow_outside(Is(true))
+      .ground_drawn(By(fn() { thumb_shape(thumb) }))
+      |> ignore
+      thumb.box(fn(solid) {
+        solid
+        .over(Is(true))
+        .width(Is(Some(look.thumb_w)))
+        .height(Is(Some(look.thumb_h)))
+        .radius(Is(look.thumb_h / 2.0))
+        .ground(By(fn() {
+          match look.thumb_color {
+            Some(f) => f()
+            None => white
+          }
+        }))
+        .edge(By(fn() {
+          match look.thumb_edge {
+            Some(f) => f()
+            None => (0.5, if is_dark() { 0xFFFFFF18L } else { 0x00000014L })
+          }
+        }))
+        .alpha(By(fn() {
+          if look.lens_enabled {
+            clamp(1.0 - lens(solid) * 1.8, 0.0, 1.0)
+          } else {
+            1.0
+          }
+        }))
+        .ground_drawn(By(fn() { thumb_shape(solid) }))
+        |> ignore
+      })
+      |> ignore
+      if look.lens_enabled {
+        // Lazy-mount the refraction loupe on first press (0 hidden glass & 0 extra nodes at rest; laid == 0 on release).
+        let lens_mounted : @signals.Signal[Bool] = @signals.signal(false)
+        let is_pressing = match pressing {
+          Some(f) => f
+          None => fn() { false }
+        }
+        thumb.reacts(fn() { glass_on() && (is_pressing() || pressed(thumb) > 0.001) }, fn(active) {
+          if active && !lens_mounted.untracked() {
+            lens_mounted.set(true)
+          }
+        })
+        thumb.show(fn() { lens_mounted.get() }, at_once=true, fn(gl) {
+          gl
+          .over(Is(true))
+          .points(Is(false))
+          .width(Is(Some(look.thumb_w)))
+          .height(Is(Some(look.thumb_h)))
+          .radius(Is(look.thumb_h / 2.0))
+          .glass(By(fn() {
+            let p = lens(gl)
+            if p > 0.001 {
+              Some(slider_glass(p))
+            } else {
+              None
+            }
+          }))
+          .alpha(By(fn() { lens(gl) }))
+          .ground_drawn(By(fn() { thumb_shape(gl) }))
+          |> ignore
+        })
+        match look.held_mark {
+          Some(draw_mark) =>
+            thumb.show(fn() { lens_mounted.get() }, at_once=true, fn(m) {
+              m
+              .over(Is(true))
+              .points(Is(false))
+              .width(By(fn() { Some(eff_tw()) }))
+              .height(Is(Some(look.thumb_h)))
+              .row(Is(true))
+              .lines_up(Is(Some(Middle)))
+              .lies_along(Is(Middle))
+              .shift(By(fn() {
+                let cur_tw = eff_tw()
+                (if cur_tw > 0.0 { thumb_x(cur_tw, progress(m)) / cur_tw } else { 0.0 }, 0.0)
+              }))
+              .alpha(By(fn() { clamp(lens(m), 0.0, 1.0) }))
+              |> ignore
+              draw_mark(m)
+            })
+          None => ()
+        }
+      }
+      match in_thumb {
+        Some(f) => f(thumb, eff_tw, thumb_x)
+        None => ()
+      }
+    })
+    |> ignore
+    match after_thumb {
+      Some(f) => f(inner, eff_tw, thumb_x)
+      None => ()
+    }
+    // 5. Optional keyboard focus ring following thumb
+    match look.focus_shown {
+      Some(shown_fn) =>
+        inner.show(shown_fn, fn(ring) {
+          ring
+          .over(Is(true))
+          .points(Is(false))
+          .width(By(fn() { Some(eff_tw() + 6.0) }))
+          .height(Is(Some(look.thumb_h + 6.0)))
+          .radius(Is(look.thumb_h / 2.0 + 3.0))
+          .offset(By(fn() { (thumb_x(eff_tw(), progress(ring)) - 3.0, -3.0) }))
+          .edge(By(fn() {
+            let col = match look.focus_color {
+              Some(f) => f()
+              None => colors().accent
+            }
+            (2.0, col)
+          }))
+          |> ignore
+        })
+      None => ()
+    }
+  })
+  |> ignore
+}
+
+///|
 /// A LiquidSlider in `parent`, at `value` along `least` … `most`; moved (its thumb dragged, its track tapped, a key, a
 /// screen reader's step), `change` is told the new value. Read out a slider named `label`. As wide as what holds it
 /// gives it, `thumb_h_px` high (default 24pt). Supports discrete `stops`, adaptive `thumb_label`, and floating
@@ -99,6 +505,7 @@ pub fn liquid_slider_node(
   flush? : Bool = false,
   value_bubble? : ((Double) -> String)? = None,
   drag? : DampedDrag,
+  on_commit? : (Double) -> Unit,
   loc~ : SourceLoc,
 ) -> @view.View {
   let dd = match drag {
@@ -295,196 +702,77 @@ pub fn liquid_slider_node(
     disabled~,
     value_text?,
     drag=hand,
+    on_commit?,
     fn(s, sl) {
       dd.attach(s)
-      s.height(Is(Some(thumb_h_px))).alpha(By(fn() { if sl.disabled() { 0.5 } else { 1.0 } })) |> ignore
+      s.height(Is(Some(thumb_h_px))) |> ignore
       // (moved by what is not this hand's drag: its value followed, LaunchedEffect's updateValue)
       s.reacts(at_start=false, value, fn(v) {
         if !(has_stops && on_thumb.val) && dd.target() != v {
           dd.update_value(v)
         }
       })
-      s.by_room(fn(inner, room) {
-        let w = fn() { room.width() }
-        let no_lens = fn() { inner.glass_solid() || @ui.reduced_motion() }
-        let lens = fn(n : @view.View) -> Double { if no_lens() { 0.0 } else { dd.pressed(n) } }
-        let eff_tw = fn() -> Double {
+      let look = SliderLook::new(
+        track_h~,
+        track_held_grow~,
+        // (a flush thumb meets the track's ends at the first and last stop: the track's round ends drawn in from them by
+        // as much as their own round and a point, so they stay under the thumb's round ends, never peeking past its rim)
+        track_inset=if eff_flush { track_h / 2.0 + 1.0 } else { 0.0 },
+        thumb_w=thumb_w_px,
+        thumb_h=thumb_h_px,
+        flush=eff_flush,
+        track_color=match track_color {
+          Some(f) => f
+          None => fn() { colors().track }
+        },
+        fill_color=Some(match fill_color {
+          Some(f) => f
+          None => fn() { colors().accent }
+        }),
+        thumb_color=if has_label {
+          Some(fn() { if is_dark() { 0x2C2C2EFFL } else { white } })
+        } else {
+          None
+        },
+        focus_shown=Some(fn() { sl.focus_shown() }),
+        lens_enabled=true,
+        disabled=fn() { sl.disabled() },
+      )
+      liquid_slider_look_core(
+        s,
+        fn(n) { dd.progress(n) },
+        fn(n) { dd.pressed(n) },
+        look,
+        velocity=fn(n) { dd.velocity(n) },
+        thumb_w_dyn=fn(inner, w) {
           if thumb_label is Some(_) {
             inner.words_redone() |> ignore
           }
           thumb_w_at(w(), live_val())
-        }
-        // (where its middle is at `progress`: a flush thumb's between its ends, another's along the whole track)
-        let middle_at = fn(progress : Double) {
-          if eff_flush {
-            slider_travel_at(w(), eff_tw() / 2.0, progress)
-          } else {
-            w() * progress
-          }
-        }
-        let thumb_x = fn(tw : Double, progress : Double) { slider_thumb_x_for(w(), tw, progress, eff_flush) }
-        // (a flush thumb meets the track's ends at the first and last stop: the track's round ends drawn in from them by
-        // as much as their own round and a point, so they stay under the thumb's round ends, never peeking past its rim)
-        let ends = if eff_flush { track_h / 2.0 + 1.0 } else { 0.0 }
-        let along = fn() { dmax(0.0, w() - 2.0 * ends) }
-        inner.box(fn(track) {
-          track
-          .over(Is(true))
-          .width(By(fn() { Some(along()) }))
-          .height(Is(Some(track_h)))
-          .offset(Is((ends, (thumb_h_px - track_h) / 2.0)))
-          .radius(Is(track_h / 2.0))
-          .ground(By(fn() {
-            match track_color {
-              Some(f) => f()
-              None => colors().track
-            }
-          }))
-          .ground_drawn(By(fn() {
-            let dh = track_held_grow * dmax(0.0, dd.pressed(track))
-            if dh.abs() < 0.001 {
-              @view.ground_as_laid
-            } else {
-              let rr = (track_h + dh) / 2.0
-              { dx: 0.0, dy: -dh / 2.0, dw: 0.0, dh, corners: Some((rr, rr, rr, rr)) }
-            }
-          }))
-          |> ignore
-        })
-        |> ignore
-        // (how far along the track the fill goes: a flush thumb's under the thumb, from where it starts at the first stop
-        // (none) to its middle at the last, so no fill shows at the first stop and no track between the fill and the
-        // thumb at the last)
-        let filled = fn(n : @view.View) {
-          let at = clamp(dd.progress(n), 0.0, 1.0)
-          if eff_flush {
-            dmax(0.0, middle_at(at) - eff_tw() / 2.0 * (1.0 - at) - ends)
-          } else {
-            middle_at(at)
-          }
-        }
-        inner.box(fn(fill) {
-          fill
-          .over(Is(true))
-          .width(By(fn() { Some(along()) }))
-          .height(Is(Some(track_h)))
-          .offset(Is((ends, (thumb_h_px - track_h) / 2.0)))
-          .alpha(By(fn() { if filled(fill) < 0.5 { 0.0 } else { 1.0 } }))
-          .radius(Is(track_h / 2.0))
-          .ground(By(fn() {
-            match fill_color {
-              Some(f) => f()
-              None => colors().accent
-            }
-          }))
-          .ground_drawn(By(fn() {
-            let shown = filled(fill)
-            let dh = track_held_grow * dmax(0.0, dd.pressed(fill))
-            if dh.abs() < 0.001 {
-              { ..@view.ground_as_laid, dw: shown - along() }
-            } else {
-              let rr = (track_h + dh) / 2.0
-              { dx: 0.0, dy: -dh / 2.0, dw: shown - along(), dh, corners: Some((rr, rr, rr, rr)) }
-            }
-          }))
-          |> ignore
-        })
-        |> ignore
-        // Interior detent markers for discrete stops mode
-        if has_stops {
-          let dot_side = 4.0
-          for i in 1..<(stops - 1) {
-            let frac = i.to_double() / (stops - 1).to_double()
-            inner.box(fn(dot) {
-              dot
-              .over(Is(true))
-              .points(Is(false))
-              .width(Is(Some(dot_side)))
-              .height(Is(Some(dot_side)))
-              .radius(Is(dot_side / 2.0))
-              .offset(By(fn() { (middle_at(frac) - dot_side / 2.0, (thumb_h_px - dot_side) / 2.0) }))
-              .ground(By(fn() { if is_dark() { 0xFFFFFF55L } else { 0x00000038L } }))
+        },
+        pressing=fn() { dd.pressing() },
+        between_fill_and_thumb=fn(inner, middle_at) {
+          // Interior detent markers for discrete stops mode
+          if has_stops {
+            let dot_side = 4.0
+            for i in 1..<(stops - 1) {
+              let frac = i.to_double() / (stops - 1).to_double()
+              inner.box(fn(dot) {
+                dot
+                .over(Is(true))
+                .points(Is(false))
+                .width(Is(Some(dot_side)))
+                .height(Is(Some(dot_side)))
+                .radius(Is(dot_side / 2.0))
+                .offset(By(fn() { (middle_at(frac) - dot_side / 2.0, (thumb_h_px - dot_side) / 2.0) }))
+                .ground(By(fn() { if is_dark() { 0xFFFFFF55L } else { 0x00000038L } }))
+                |> ignore
+              })
               |> ignore
-            })
-            |> ignore
-          }
-        }
-        inner.box(fn(thumb) {
-          let thumb_shape = fn(n : @view.View) -> @view.GroundShape {
-            let cur_tw = eff_tw()
-            let p = clamp(lens(n), 0.0, 1.0)
-            let v = if no_lens() { 0.0 } else { dd.velocity(n) / 10.0 }
-            // (stretched along its way and flattened as fast as it goes, whichever way: never taller than held, so never
-            // past the room kept for it; the catalog's signed squeeze made it taller going left)
-            let v = v.abs()
-            let vel_sx = 1.0 / (1.0 - clamp(v * 0.75, 0.0, 0.2))
-            let vel_sy = 1.0 - clamp(v * 0.25, 0.0, 0.2)
-            let tw = cur_tw * lerp(1.0, 58.0 / 38.0, p) * vel_sx
-            let th = thumb_h_px * lerp(1.0, slider_thumb_held_scale, p) * vel_sy
-            let x = thumb_x(cur_tw, dd.progress(n))
-            let r = th / 2.0
-            {
-              dx: x + (cur_tw - tw) / 2.0,
-              dy: (thumb_h_px - th) / 2.0,
-              dw: tw - thumb_w_px,
-              dh: th - thumb_h_px,
-              corners: Some((r, r, r, r)),
             }
           }
-          thumb
-          .over(Is(true))
-          .width(Is(Some(thumb_w_px)))
-          .height(Is(Some(thumb_h_px)))
-          .radius(Is(thumb_h_px / 2.0))
-          .shadow(By(fn() { thumb_lift_shadow(clamp(lens(thumb), 0.0, 1.0)) }))
-          .shadow_outside(Is(true))
-          .ground_drawn(By(fn() { thumb_shape(thumb) }))
-          |> ignore
-          thumb.box(fn(solid) {
-            solid
-            .over(Is(true))
-            .width(Is(Some(thumb_w_px)))
-            .height(Is(Some(thumb_h_px)))
-            .radius(Is(thumb_h_px / 2.0))
-            .ground(By(fn() {
-              if has_label && is_dark() {
-                0x2C2C2EFFL
-              } else {
-                white
-              }
-            }))
-            .edge(By(fn() { (0.5, if is_dark() { 0xFFFFFF18L } else { 0x00000014L }) }))
-            .alpha(By(fn() { clamp(1.0 - clamp(lens(solid), 0.0, 1.0) * 1.8, 0.0, 1.0) }))
-            .ground_drawn(By(fn() { thumb_shape(solid) }))
-            |> ignore
-          })
-          |> ignore
-          // Lazy-mount the refraction loupe on first press (0 hidden glass & 0 extra nodes at rest; laid == 0 on release).
-          let lens_mounted : @signals.Signal[Bool] = @signals.signal(false)
-          thumb.reacts(fn() { !no_lens() && (dd.pressing() || dd.pressed(thumb) > 0.001) }, fn(active) {
-            if active && !lens_mounted.untracked() {
-              lens_mounted.set(true)
-            }
-          })
-          thumb.show(fn() { lens_mounted.get() }, at_once=true, fn(gl) {
-            gl
-            .over(Is(true))
-            .points(Is(false))
-            .width(Is(Some(thumb_w_px)))
-            .height(Is(Some(thumb_h_px)))
-            .radius(Is(thumb_h_px / 2.0))
-            .glass(By(fn() {
-              let p = clamp(lens(gl), 0.0, 1.0)
-              if p > 0.001 {
-                Some(slider_glass(p))
-              } else {
-                None
-              }
-            }))
-            .alpha(By(fn() { clamp(lens(gl), 0.0, 1.0) }))
-            .ground_drawn(By(fn() { thumb_shape(gl) }))
-            |> ignore
-          })
+        },
+        in_thumb=fn(thumb, eff_tw, thumb_x) {
           match thumb_label {
             Some(lbl_fn) =>
               thumb.box(fn(lbl) {
@@ -508,54 +796,45 @@ pub fn liquid_slider_node(
               |> ignore
             None => ()
           }
-        })
-        |> ignore
-        // Compact floating value bubble above the thumb while held/dragged (unmounted when settled)
-        match value_bubble {
-          Some(fmt_fn) =>
-            inner.show(fn() { dd.pressing() || dd.pressed(inner) > 0.001 }, at_once=true, fn(bub) {
-              bub
-              .over(Is(true))
-              .points(Is(false))
-              .row(Is(true))
-              .lines_up(Is(Some(Middle)))
-              .lies_along(Is(Middle))
-              .padding(Is((8.0, 3.0, 8.0, 3.0)))
-              .radius(Is(11.0))
-              .ground(By(fn() { colors().content }))
-              .alpha(By(fn() { clamp(dd.pressed(bub), 0.0, 1.0) }))
-              .scale(By(fn() { lerp(0.92, 1.0, clamp(dd.pressed(bub), 0.0, 1.0)) }), about=At(0.5, 1.0))
-              .moved_by(
-                fn(bw, bh, _at) {
-                  let cur_tw = eff_tw()
-                  let tx = thumb_x(cur_tw, dd.progress(bub))
-                  (tx + cur_tw / 2.0 - bw / 2.0, -bh - 10.0)
-                },
-                fn(_bw, _bh) { dd.value.end() },
-              )
-              |> ignore
-              bub.box(fn(wt) {
-                wt
-                .words(By(fn() { fmt_fn(live_val()) }), look=words_at(ctrl_type_caption, weight=weight_medium))
-                .ink(By(fn() { if is_dark() { black } else { white } }))
+        },
+        after_thumb=fn(inner, eff_tw, thumb_x) {
+          // Compact floating value bubble above the thumb while held/dragged (unmounted when settled)
+          match value_bubble {
+            Some(fmt_fn) =>
+              inner.show(fn() { dd.pressing() || dd.pressed(inner) > 0.001 }, at_once=true, fn(bub) {
+                bub
+                .over(Is(true))
+                .points(Is(false))
+                .row(Is(true))
+                .lines_up(Is(Some(Middle)))
+                .lies_along(Is(Middle))
+                .padding(Is((8.0, 3.0, 8.0, 3.0)))
+                .radius(Is(11.0))
+                .ground(By(fn() { colors().content }))
+                .alpha(By(fn() { clamp(dd.pressed(bub), 0.0, 1.0) }))
+                .scale(By(fn() { lerp(0.92, 1.0, clamp(dd.pressed(bub), 0.0, 1.0)) }), about=At(0.5, 1.0))
+                .moved_by(
+                  fn(bw, bh, _at) {
+                    let cur_tw = eff_tw()
+                    let tx = thumb_x(cur_tw, dd.progress(bub))
+                    (tx + cur_tw / 2.0 - bw / 2.0, -bh - 10.0)
+                  },
+                  fn(_bw, _bh) { dd.value.end() },
+                )
+                |> ignore
+                bub.box(fn(wt) {
+                  wt
+                  .words(By(fn() { fmt_fn(live_val()) }), look=words_at(ctrl_type_caption, weight=weight_medium))
+                  .ink(By(fn() { if is_dark() { black } else { white } }))
+                  |> ignore
+                })
                 |> ignore
               })
-              |> ignore
-            })
-          None => ()
-        }
-        inner.show(fn() { sl.focus_shown() }, fn(ring) {
-          ring
-          .over(Is(true))
-          .width(By(fn() { Some(eff_tw() + 6.0) }))
-          .height(Is(Some(thumb_h_px + 6.0)))
-          .radius(Is(thumb_h_px / 2.0 + 3.0))
-          .offset(By(fn() { (thumb_x(eff_tw(), dd.progress(ring)) - 3.0, -3.0) }))
-          .edge(By(fn() { (2.0, colors().accent) }))
-          |> ignore
-        })
-      })
-      |> ignore
+            None => ()
+          }
+        },
+        loc~,
+      )
     },
   )
 }

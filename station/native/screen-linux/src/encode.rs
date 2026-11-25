@@ -4,18 +4,35 @@
 
 use crate::avc;
 use openh264::encoder::{
-    BitRate, Encoder, EncoderConfig, FrameRate, Profile, RateControlMode, UsageType,
+    BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Profile, QpRange,
+    RateControlMode, UsageType,
 };
 use openh264::formats::YUVSlices;
 use openh264_sys2::{
-    ENCODER_OPTION_BITRATE, ENCODER_OPTION_MAX_BITRATE, ENCODER_OPTION_TRACE_LEVEL, SBitrateInfo,
-    SPATIAL_LAYER_0, SPATIAL_LAYER_ALL, WELS_LOG_QUIET,
+    ENCODER_OPTION_BITRATE, ENCODER_OPTION_MAX_BITRATE, ENCODER_OPTION_SVC_ENCODE_PARAM_EXT,
+    ENCODER_OPTION_TRACE_LEVEL, SBitrateInfo, SEncParamExt, SPATIAL_LAYER_0, SPATIAL_LAYER_ALL,
+    WELS_LOG_QUIET,
 };
 use std::ffi::c_void;
 
 pub const DEFAULT_BITRATE: u32 = 2_000_000;
 pub const MIN_BITRATE: u32 = 150_000;
 pub const MAX_BITRATE: u32 = 25_000_000;
+const MIN_QP: u8 = 20;
+
+fn max_qp(bps: u32) -> u8 {
+    if bps >= 3_000_000 {
+        38
+    } else if bps >= 1_500_000 {
+        42
+    } else {
+        48
+    }
+}
+
+fn tight_max_bitrate(bps: u32) -> i32 {
+    ((bps as u64 * 115 / 100).min(MAX_BITRATE as u64)) as i32
+}
 
 pub struct H264Encoder {
     encoder: Encoder,
@@ -40,6 +57,9 @@ impl H264Encoder {
             .rate_control_mode(RateControlMode::Bitrate)
             .profile(Profile::Baseline)
             .skip_frames(false)
+            .qp(QpRange::new(MIN_QP, max_qp(bps)))
+            .intra_frame_period(IntraFramePeriod::from_num_frames(0))
+            .scene_change_detect(false)
             .debug(false);
 
         let mut encoder = Encoder::with_api_config(openh264::OpenH264API::from_source(), config)
@@ -83,7 +103,7 @@ impl H264Encoder {
             return Ok(());
         }
         let target = clamped as i32;
-        let max_bps = ((clamped as u64 * 12 / 10).min(MAX_BITRATE as u64)) as i32;
+        let max_bps = tight_max_bitrate(clamped);
         unsafe {
             let raw = self.encoder.raw_api();
             let set = |opt, layer, bps| -> i32 {
@@ -118,6 +138,26 @@ impl H264Encoder {
                     return Err(format!("openh264 set max bitrate failed: all={rc_m_all} l0={rc_m_0}"));
                 }
             }
+            // Sync adaptive max QP when crossing bitrate tiers without resetting the encoder.
+            let new_max_qp = max_qp(clamped);
+            if new_max_qp != max_qp(prev) {
+                let mut param = SEncParamExt::default();
+                if raw.get_option(
+                    ENCODER_OPTION_SVC_ENCODE_PARAM_EXT,
+                    (&mut param as *mut SEncParamExt).cast::<c_void>(),
+                ) == 0
+                {
+                    param.iMaxQp = new_max_qp as i32;
+                    param.iTargetBitrate = target;
+                    param.iMaxBitrate = max_bps;
+                    param.sSpatialLayers[0].iSpatialBitrate = target;
+                    param.sSpatialLayers[0].iMaxSpatialBitrate = max_bps;
+                    let _ = raw.set_option(
+                        ENCODER_OPTION_SVC_ENCODE_PARAM_EXT,
+                        (&mut param as *mut SEncParamExt).cast::<c_void>(),
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -149,9 +189,26 @@ impl H264Encoder {
             .encoder
             .encode(&yuv)
             .map_err(|e| format!("openh264 encode: {e}"))?;
+        let was_initialized = self.initialized;
         self.initialized = true;
         self.buf.clear();
         bs.write_vec(&mut self.buf);
+        if !was_initialized {
+            let max_bps = tight_max_bitrate(self.bitrate);
+            unsafe {
+                let raw = self.encoder.raw_api();
+                for layer in [SPATIAL_LAYER_ALL, SPATIAL_LAYER_0] {
+                    let mut info = SBitrateInfo {
+                        iLayer: layer,
+                        iBitrate: max_bps,
+                    };
+                    let _ = raw.set_option(
+                        ENCODER_OPTION_MAX_BITRATE,
+                        (&mut info as *mut SBitrateInfo).cast::<c_void>(),
+                    );
+                }
+            }
+        }
         let pic = avc::picture(&self.buf);
         let mut config_changed = false;
         if let Some(ref sps) = pic.sps {
@@ -258,6 +315,46 @@ mod tests {
         // Forced keyframe works cleanly.
         let (p2, _) = enc.encode_i420(&y, &u, &v, true).unwrap();
         assert!(p2.key, "forced keyframe must be IDR");
+    }
+
+    #[test]
+    fn h264_infinite_gop_emits_no_unrequested_periodic_idr() {
+        let (w, h) = (320usize, 180usize);
+        let mut enc = H264Encoder::new(w as u32, h as u32, 1_500_000, 30).unwrap();
+        let (mut y, mut u, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        let base = test_frame(w, h, 0);
+
+        for i in 0..60usize {
+            let mut frame = base.clone();
+            let bx = (i * 4) % (w - 48);
+            let by = (i * 2) % (h - 48);
+            for py in by..by + 48 {
+                for px in bx..bx + 48 {
+                    let off = (py * w + px) * 4;
+                    frame[off] = 220;
+                    frame[off + 1] = 60;
+                    frame[off + 2] = 30;
+                }
+            }
+            bgra_to_i420(&frame, w, h, &mut y, &mut u, &mut v);
+            let (pic, _) = enc.encode_i420(&y, &u, &v, false).unwrap();
+            assert!(!pic.data.is_empty(), "frame {i} must not be skipped");
+            if i == 0 {
+                assert!(pic.key, "first frame must be IDR");
+            } else {
+                assert!(!pic.key, "frame {i} should be P-frame (no periodic IDR)");
+            }
+        }
+    }
+
+    #[test]
+    fn max_qp_adapts_to_bitrate_tiers() {
+        assert_eq!(max_qp(500_000), 48);
+        assert_eq!(max_qp(1_499_999), 48);
+        assert_eq!(max_qp(1_500_000), 42);
+        assert_eq!(max_qp(2_999_999), 42);
+        assert_eq!(max_qp(3_000_000), 38);
+        assert_eq!(max_qp(10_000_000), 38);
     }
 
     #[test]

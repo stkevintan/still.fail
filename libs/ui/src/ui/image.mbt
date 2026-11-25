@@ -39,10 +39,16 @@ priv struct ImageEntry {
 
 ///|
 /// An image fading in is at rest image_fade_ms after it was ready.
-impl Moving for ImageEntry with rest_at(self, now, frame) {
+fn ImageEntry::rest_at(self : ImageEntry, now : Double, frame : Int) -> Double {
   ignore(now)
   ignore(frame)
   self.ready_at + image_fade_ms
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn ImageEntry::as_moving(self : ImageEntry) -> Moving {
+  Moving::new(fn(now, frame) { self.rest_at(now, frame) })
 }
 
 ///|
@@ -826,7 +832,7 @@ fn Ctx::draw_image(
   }
   if fade < 1.0 && !e.fade_told {
     e.fade_told = true
-    self.moving(e.mover, e, what="image \"\{src}\" fading in")
+    self.moving(e.mover, e.as_moving(), what="image \"\{src}\" fading in")
   }
   let (x, y, w, h, u0, v0, du, dv) = match fit {
     FitFill => (bx, by, bw, bh, 0.0, 0.0, 1.0, 1.0)

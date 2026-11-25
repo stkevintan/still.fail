@@ -48,6 +48,7 @@ import { OwnHeld, marksOf, rowShared, rowWords, rowsShared, sharedPlace, sharedW
 import { timed } from "../spent.ts";
 import { MOVE_PAGE, moveLimit } from "../move.ts";
 import { isOwnSurface } from "../titles.ts";
+import { keepOs } from "../station-os.ts";
 
 export { HOST_KEY, LINK_KEY, LONG_MISSES, MISSES, OFFLINE_RETRY_MS, RECONNECT_MAX_MS, RECONNECT_MS, STREAM_IDLE_MS, STREAM_QUIET_MS, Link } from "./link.ts";
 export type { EventsFor, LiveView } from "./link.ts";
@@ -1953,6 +1954,9 @@ export class StationsSync {
         const link = this.#links.get(address);
         if (link) {
           link.memory.set("host", data);
+          // (the system it runs on, kept: what shows it where it has no mark, station-os.ts)
+          const at = address.lastIndexOf("/");
+          if (at > 0) keepOs(this.#core.data, address.slice(0, at), address.slice(at + 1), get(data, "os"));
           this.onChange(address, "host");
           const unreadable = !present.hostFits(data);
           if (unreadable !== link.hostUnreadable) {

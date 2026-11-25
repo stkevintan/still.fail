@@ -228,3 +228,114 @@ let toggle_chip_chevron : Double = 12.0
 ///|
 // kept across runs: a value (no field of it changes)
 let toggle_chip_words : @ui.TextStyle = @ui.text_style(size=Meta, wrap=false)
+
+///|
+/// A selectable content-slot checkbox chip in `parent` over `@headless.toggle(..., Checkbox, ...)`:
+/// full capsule with soft tint ground (stronger while selected or hovered), press feel, focus ring,
+/// caller-provided `content` slot, and trailing accent check mark while `on()`.
+#callsite(autofill(loc))
+pub fn check_chip_node(
+  parent : @view.View,
+  label : () -> String,
+  on : () -> Bool,
+  turn : (Bool) -> Unit,
+  content : (@view.View) -> Unit,
+  disabled? : () -> Bool = fn() { false },
+  loc~ : SourceLoc,
+) -> @view.View {
+  @headless.toggle(made_for=loc, parent, Checkbox, label, on, turn, disabled~, fn(v, _) {
+    select_chip_look(v, on, disabled, content)
+  })
+}
+
+///|
+/// A horizontal radio group of selectable chips in `parent` over `@headless.radio_group`:
+/// `look` builds the container layout and registers items with `radio_chip_item`.
+#callsite(autofill(loc))
+pub fn[K : Eq] radio_chip_group(
+  parent : @view.View,
+  label : () -> String,
+  chosen : () -> K,
+  choose : (K) -> Unit,
+  look : (@view.View, @headless.RadioGroup[K]) -> Unit,
+  disabled? : () -> Bool = fn() { false },
+  loc~ : SourceLoc,
+) -> @view.View {
+  @headless.radio_group(made_for=loc, parent, label, chosen, choose, look, kind=Radio, axis=Horizontal, disabled~)
+}
+
+///|
+/// One selectable radio chip inside a `@headless.RadioGroup[K]`, sharing `select_chip_look` with
+/// `check_chip_node`: true `Radio` role, arrow-key navigation, and re-pressing the chosen item keeps it chosen.
+#callsite(autofill(loc))
+pub fn[K : Eq] radio_chip_item(
+  group : @headless.RadioGroup[K],
+  parent : @view.View,
+  key : () -> K,
+  label : () -> String,
+  content : (@view.View) -> Unit,
+  disabled? : () -> Bool = fn() { false },
+  loc~ : SourceLoc,
+) -> @view.View {
+  group.item(made_for=loc, parent, key, label, disabled~, fn(v, it) {
+    select_chip_look(v, fn() { it.chosen() }, fn() { it.disabled() }, content)
+  })
+}
+
+///|
+/// Shared capsule appearance for `check_chip_node` and `radio_chip_item`.
+fn select_chip_look(
+  v : @view.View,
+  on : () -> Bool,
+  disabled : () -> Bool,
+  content : (@view.View) -> Unit,
+) -> Unit {
+  let hand = @motion.NodeWay::new(0.0)
+  v.reacts(fn() { !disabled() && (v.pointed() || v.pressed() || v.focus_shown()) }, fn(lit) {
+    hand.go_ms(v, if lit { 1.0 } else { 0.0 }, dur_ms)
+  })
+  v
+  .row(Is(true))
+  .min_height(Is(Some(select_chip_h)))
+  .padding(Is((select_chip_pad_x, 0.0, select_chip_pad_x, 0.0)))
+  .gap(Is(select_chip_gap))
+  .lines_up(Is(Some(Middle)))
+  .radius(Is(1.0e6))
+  .ground(By(fn() {
+    let t = @ui.tree_theme()
+    if on() {
+      t.color(TintStrong)
+    } else {
+      let p = hand.shown(v)
+      if p <= 0.0 {
+        t.color(Tint)
+      } else if p >= 1.0 {
+        t.color(TintStrong)
+      } else {
+        over(t.color(Tint), alpha(t.color(TintStrong), p))
+      }
+    }
+  }))
+  .alpha(By(fn() { if disabled() { chip_off } else { 1.0 } }))
+  .shrink(Is(0.0))
+  .bone_whole(Is(true))
+  |> ignore
+  @motion.press_feel(v, live=fn() { !disabled() }, hovers=false) |> ignore
+  focus_ring_node(v)
+  content(v)
+  v.show(at_once=true, on, fn(t) {
+    icon_node(t, "check", select_chip_tick, By(fn() { theme().p.accent_text })) |> ignore
+  })
+}
+
+///|
+let select_chip_h : Double = 28.0
+
+///|
+let select_chip_pad_x : Double = 10.0
+
+///|
+let select_chip_gap : Double = 6.0
+
+///|
+let select_chip_tick : Double = 12.0

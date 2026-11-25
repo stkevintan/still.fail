@@ -1,18 +1,19 @@
 // The workspace's stations (settings/Stations.kt StationsScreen) made once as nodes of the window's tree in every frame,
-// laid out by its width (page_node): a card each with its mark and what it is doing, what of its load runs low and how
-// this device reaches it, a press away from its page; those that only run tasks after them, then the workspace's
-// devices under their heading; none yet, the first to add. Its owners and admins add one (its ＋ at its title's end, or
-// the frame's: a place's notch, the tape's bar).
+// laid out by its width (page_node): compact grouped cards (stations in stable order—this machine first, then join
+// order—task-only rigs under their heading, and devices under their heading), each row a press away from its page; none
+// yet, the first to add. Its owners and admins add one (its ＋ at its title's end, or the frame's: a place's notch, the
+// tape's bar).
 
 ///|
 /// The stations' list (StationsScreen) in node `v`, laid out by the `width` its frame gives it (narrow where none is
 /// given), in the frame it is given: its blocks as the core's stations, the workspace's rigs and its devices say them
-/// now, each card by what it is of (a station by its address, one that only runs tasks by its id, a device by its
-/// station and id) so one joining or leaving comes and goes where it is. Adding one (an owner's and an admin's, a
-/// member's that only runs tasks) at its title's end, where the frame does not hold it itself (a place's notch names
-/// the page: `frame().named`), or in a frame's bar (`bar_actions`). `here`: who and where, as that changes. `shown`:
-/// whether the page shows now (a stack keeps a page made once while another is over it): how each station is reached
-/// is sampled of it, so read only while it does, let go of as it is covered, as the old page's was.
+/// now, each row a piece of its group's card by what it is of (a station by its address, one that only runs tasks by
+/// its id, a device by its station and id) so one joining or leaving comes and goes where it is. Adding one (an
+/// owner's and an admin's, a member's that only runs tasks) at its title's end, where the frame does not hold it itself
+/// (a place's notch names the page: `frame().named`), or in a frame's bar (`bar_actions`). `here`: who and where, as
+/// that changes. `shown`: whether the page shows now (a stack keeps a page made once while another is over it): how
+/// each station is reached is sampled of it, so read only while it does, let go of as it is covered, as the old page's
+/// was.
 pub fn stations_list_node(
   v : @view.View,
   core : Core,
@@ -26,7 +27,7 @@ pub fn stations_list_node(
   shown? : () -> Bool = fn() { true },
 ) -> Unit {
   let topic = fn() { @settings.stations_of(core, here()) }
-  // (each list worked out once for each change of what it reads, read by the blocks and by each card)
+  // (each list worked out once for each change of what it reads, read by the blocks and by each row)
   // (this machine's station first, the rest as the workspace lists them, as they joined it: the user, 2026-11-16)
   let stations_now : @signals.Computed[Array[Json]?] = @signals.computed(fn(_) {
     match topic().value {
@@ -38,20 +39,25 @@ pub fn stations_list_node(
     }
   })
   let stations = fn() { stations_now.get() }
-  // (each station by its address, as the list has them)
-  let addresses_now = @signals.computed(fn(_) {
-    match stations() {
-      Some(a) => a.map(fn(st) { text(Some(st), "station") })
-      None => []
-    }
-  })
-  let addresses = fn() { addresses_now.get() }
-  // (the stations' cards as last shown: a station joining or leaving a list already shown comes or goes its way, a
-  // live cause told within the page (its card's own changes at once: transitions_only on each); the first answer, the
-  // last one gone or the first one come, there at once, as the page's blocks put another set in their place then)
-  let shown_addresses = @signals.signal(@signals.untracked(addresses), same=fn(a, b) { a == b })
+  // (station addresses in stable order—this machine first, then workspace join order—compared by value so online/offline
+  // flapping and metric/name updates update in place without jumping rows or re-running other rows' card-piece bindings)
+  let addresses_now : @signals.Computed[Array[String]] = @signals.computed(
+    fn(_) {
+      match stations() {
+        Some(a) => a.map(fn(st) { text(Some(st), "station") })
+        None => []
+      }
+    },
+    same=fn(a, b) { a == b },
+  )
+  // (the stations' addresses as last shown: a station joining or leaving a list already shown moves its way within the
+  // page; the first answer, the last one gone or the first one come settle at once)
+  let shown_addresses = @signals.signal(
+    @signals.untracked(fn() { addresses_now.get() }),
+    same=fn(a, b) { a == b },
+  )
   v.reacts(
-    addresses,
+    fn() { addresses_now.get() },
     fn(next) {
       if !@view.answering_now() {
         @view.transition(within=v, fn() { shown_addresses.set(next) })
@@ -61,10 +67,26 @@ pub fn stations_list_node(
     },
     at_start=false,
   )
-  // (the list kept by address once, so a station's card is told only as its own station changes: View::keyed_by)
+  let station_keys = @signals.computed(
+    fn(_) {
+      let shown = shown_addresses.get()
+      if shown.is_empty() {
+        addresses_now.get()
+      } else {
+        shown
+      }
+    },
+    same=fn(a, b) { a == b },
+  )
+  // (the list kept by address once, so a station's row is told only as its own station changes: View::keyed_by)
   let stations_by = v.keyed_by(fn() { stations().unwrap_or([]) }, fn(st) { text(Some(st), "station") })
   let rigs_now = @signals.computed(fn(_) { if stations() is Some(_) { @settings.rigs_listed(core, here()) } else { [] } }, same=jsons_same)
   let devices_now = @signals.computed(fn(_) { if stations() is Some(_) { @settings.devices_listed(core, here()) } else { [] } }, same=jsons_same)
+  let rig_ids_now = @signals.computed(fn(_) { rigs_now.get().map(fn(x) { text(Some(x), "id") }) }, same=fn(a, b) { a == b })
+  let device_keys_now = @signals.computed(
+    fn(_) { devices_now.get().map(fn(x) { "device/" + text(Some(x), "station") + "/" + text(Some(x), "id") }) },
+    same=fn(a, b) { a == b },
+  )
   // (the rigs and the devices kept by their keys once, so a row is told only as its own one changes: View::keyed_by)
   let rigs_by = v.keyed_by(fn() { rigs_now.get() }, fn(x) { text(Some(x), "id") })
   let devices_by = v.keyed_by(fn() { devices_now.get() }, fn(x) { "device/" + text(Some(x), "station") + "/" + text(Some(x), "id") })
@@ -90,23 +112,26 @@ pub fn stations_list_node(
       match stations() {
         None => ["waiting"]
         Some(a) => {
-          // (a block each station, by its address, so the page's list makes only the cards in sight and near it
-          // (View::scrolls_window), not all of them as it opens; none shown yet, those the list has now, at once)
+          // (a block each station, by its address, so the page's list makes only the rows in sight and near it
+          // (View::scrolls_window), not all of them as it opens)
           let out : Array[String] = if a.length() == 0 {
             ["first"]
           } else {
-            let shown = shown_addresses.get()
-            (if shown.length() == 0 { addresses() } else { shown }).map(fn(addr) { "station/" + addr })
+            station_keys.get().map(fn(addr) { "station/" + addr })
           }
-          for r in rigs_now.get() {
-            out.push("rig/" + text(Some(r), "id"))
+          let rigs = rig_ids_now.get()
+          if !rigs.is_empty() {
+            out.push("rigs")
           }
-          let devices = devices_now.get()
-          if devices.length() > 0 {
+          for id in rigs {
+            out.push("rig/" + id)
+          }
+          let devices = device_keys_now.get()
+          if !devices.is_empty() {
             out.push("devices")
           }
-          for d in devices {
-            out.push("device/" + text(Some(d), "station") + "/" + text(Some(d), "id"))
+          for k in devices {
+            out.push(k)
           }
           out
         }
@@ -118,8 +143,19 @@ pub fn stations_list_node(
           @sf.waiting_node(
             b,
             fn(s) {
-              s.each(fn() { stations_sample }, fn(st) { text(Some(st), "station") }, fn(row, st) {
-                sl_station_card_node(row, core.quiet(), fn() { Some(st.get()) }, fn() {  })
+              let n = stations_sample.length()
+              s.each(fn() { Array::makei(n, fn(i) { i }) }, fn(i) { i }, fn(row, i) {
+                let idx = i.untracked()
+                let st = stations_sample[idx]
+                sl_station_row_node(
+                  row,
+                  core.quiet(),
+                  fn() { Some(st) },
+                  fn() { @sf.card_piece_of(idx, n) },
+                  fn() {  },
+                  fn() { false },
+                  sample=true,
+                )
               })
             },
             error=fn() {
@@ -130,14 +166,20 @@ pub fn stations_list_node(
             },
           )
         "first" => sl_first_node(b, core, here, add, adding)
+        "rigs" => @sf.section_heading_node(b, fn() { @sf.t("web-pages.rigs.mode.tasks") })
         "devices" => @sf.section_heading_node(b, fn() { @sf.t("web-pages.devices.title") })
         k if k.has_prefix("station/") => {
           let address = k.exact_view(start=8).to_owned()
+          let group_keys = fn() { station_keys.get() }
           // (its own station of the list, read by its address: told only as that one changes; while the block leaves
-          // after its address is dropped, keep the last known station so the leaving card does not blank or snap its
-          // height)
+          // after its address leaves the list, keep the last known station and piece so the leaving row does not
+          // blank, flip height or snap its corners mid-transition)
+          let in_group = @signals.computed(fn(_) { group_keys().contains(address) })
           let last_station : Ref[Json?] = Ref(None)
           let station = fn() {
+            if !in_group.get() && last_station.val is Some(_) {
+              return last_station.val
+            }
             match stations_by.get(address) {
               Some(v) => {
                 last_station.val = Some(v)
@@ -146,51 +188,48 @@ pub fn stations_list_node(
               None => last_station.val
             }
           }
-          b.box(fn(row) {
-            row.box(fn(card) {
-              card.transitions_only() |> ignore
-              sl_station_card_node(card, core, station, fn() { (core.push)(Station(address)) }, shown~)
-            })
-            |> ignore
-            // (its menu where the pointer's other button is pressed on it: opened, its name or its address copied)
-            row.on_menu(fn(m) {
-              let name = text(@signals.untracked(fn() { stations_by.get(address) }), "name")
-              @sf.menu(
-                [
-                  Some(@sf.menu_item_of(@sf.t("web-pages.rowMenu.open"), fn() { (core.push)(Station(address)) }, icon="arrow-up-right")),
-                  copy_item("web-pages.rowMenu.copyName", name),
-                  copy_item("web-pages.rowMenu.copyAddress", address),
-                ].filter(fn(i) { i is Some(_) }),
-                from=@sf.at_point(m.wx, m.wy),
-              )
-            })
-            |> ignore
-          })
-          |> ignore
+          let piece = sl_piece_of(group_keys, address)
+          sl_station_row_node(b, core, station, piece, fn() { (core.push)(Station(address)) }, shown, menu_address=address)
         }
         k if k.has_prefix("rig/") => {
           let id = k.exact_view(start=4).to_owned()
-          let r = fn() { rigs_by.get(id) }
-          @sfbase.summary_mark_card_node(
-            b,
-            fn(m) { @sf.icon_node(m, "boxes", @sfbase.summary_mark_side, By(fn() { @sf.theme().p.text })) |> ignore },
-            fn() { text(r(), "name") },
-            fn() { @settings.rig_said(r()) },
-            fn() { (core.push)(Station(here().workspace + "/" + id)) },
-          )
+          let in_group = @signals.computed(fn(_) { rig_ids_now.get().contains(id) })
+          let last_rig : Ref[Json?] = Ref(None)
+          let r = fn() {
+            if !in_group.get() && last_rig.val is Some(_) {
+              return last_rig.val
+            }
+            match rigs_by.get(id) {
+              Some(v) => {
+                last_rig.val = Some(v)
+                Some(v)
+              }
+              None => last_rig.val
+            }
+          }
+          let piece = sl_piece_of(fn() { rig_ids_now.get() }, id)
+          sl_rig_row_node(b, r, piece, fn() { (core.push)(Station(here().workspace + "/" + id)) })
         }
         k if k.has_prefix("device/") => {
-          let d = fn() { devices_by.get(k) }
-          @sfbase.summary_mark_card_node(
-            b,
-            fn(m) { @sf.icon_node(m, "", @sfbase.summary_mark_side, By(fn() { @sf.theme().p.text }), name_now=fn() { @settings.device_icon(d()) }) |> ignore },
-            fn() { text(d(), "name") },
-            fn() { @settings.device_said(d()) },
-            fn() {
-              let dv = @signals.untracked(fn() { d() })
-              @settings.open_device(core, @signals.untracked(here), text(dv, "station"), text(dv, "id"), Unanchored)
-            },
-          )
+          let in_group = @signals.computed(fn(_) { device_keys_now.get().contains(k) })
+          let last_dev : Ref[Json?] = Ref(None)
+          let d = fn() {
+            if !in_group.get() && last_dev.val is Some(_) {
+              return last_dev.val
+            }
+            match devices_by.get(k) {
+              Some(v) => {
+                last_dev.val = Some(v)
+                Some(v)
+              }
+              None => last_dev.val
+            }
+          }
+          let piece = sl_piece_of(fn() { device_keys_now.get() }, k)
+          sl_device_row_node(b, d, piece, fn() {
+            let dv = @signals.untracked(fn() { d() })
+            @settings.open_device(core, @signals.untracked(here), text(dv, "station"), text(dv, "id"), Unanchored)
+          })
         }
         _ => ()
       }
@@ -205,6 +244,24 @@ pub fn stations_list_node(
 }
 
 ///|
+/// The `CardPiece` of `target` in `keys()`, keeping its last known piece while a leaving block exits.
+fn sl_piece_of(keys : () -> Array[String], target : String) -> () -> @sf.CardPiece {
+  let last : Ref[@sf.CardPiece] = Ref(@sf.CardPiece::CardWhole)
+  let c = @signals.computed(fn(_) {
+    let arr = keys()
+    match arr.search_by(fn(x) { x == target }) {
+      Some(idx) => {
+        let p = @sf.card_piece_of(idx, arr.length())
+        last.val = p
+        p
+      }
+      None => last.val
+    }
+  })
+  fn() { c.get() }
+}
+
+///|
 /// The stations to come while they are read: three made up, as the list shows them, in their bones.
 // kept across runs: a value (no field of it changes)
 let stations_sample : Array[Json] = [5, 3, 7].mapi(fn(i, n) {
@@ -212,7 +269,7 @@ let stations_sample : Array[Json] = [5, 3, 7].mapi(fn(i, n) {
     "station": Json::string("sample/" + i.to_string()),
     "name": Json::string(@sf.sample_words(n)),
     "online": true,
-    "summary": Json::string(@sf.sample_words(12)),
+    "summary": Json::string(@sf.sample_words(10)),
   })
 })
 
@@ -281,69 +338,492 @@ fn copy_item(label : String, words : String) -> @sf.MenuItem? {
 }
 
 ///|
-/// A station's card (station_card's) in node `b`, as `s` says it now: its mark (a server's where it has none), its name,
-/// where it joined from and what is said of it, reconnecting before its chevron; 加入安全模式 under that where its
-/// workspace's safe mode does not name it and the viewer could protect it from here; then its body.
-fn sl_station_card_node(
+/// Hairline separator above non-first rows inside a grouped card, aligned with row content edges.
+fn sl_card_sep_node(card : @view.View, piece : () -> @sf.CardPiece) -> Unit {
+  card.show(at_once=true, fn() { piece() is (CardBetween | CardFoot) }, fn(sep) {
+    @sf.style_node(sep, fn() { sl_sep_line })
+    sep.height(Is(Some(@sf.rule_w))).ground(By(fn() { @ui.tree_theme().color(@sf.rule_ink) })) |> ignore
+  })
+}
+
+///|
+/// A compact station row inside its group's card (`card_piece_node`):
+/// - Line 1: 18pt mark + single-line station name + optional 本机 pill + right-aligned live state (green dot +
+///   running count, reconnecting spinner, or grey offline ring), flush right with no trailing chevron.
+/// - Line 2 (constant height online & offline so flapping never shifts rows below): compact idle/remaining CPU/RAM/Disk
+///   figures on the left (warning items highlighted and kept first under tight widths) and network path + latency flush
+///   right; offline rows show their summary full-width on line 2.
+/// - Optional extra lines: cross-workspace origin (`joined`), offline block reason (`blocked`), and `加入安全模式`
+///   action row (`protect`).
+fn sl_station_row_node(
   b : @view.View,
   core : Core,
   s : () -> Json?,
+  piece : () -> @sf.CardPiece,
   press : () -> Unit,
-  shown? : () -> Bool = fn() { true },
+  shown : () -> Bool,
+  menu_address? : String = "",
+  sample? : Bool = false,
 ) -> Unit {
-  @sfbase.summary_mark_card_node(
-    b,
-    fn(m) {
-      m.pick(fn() { @sf.has_station_mark(text(s(), "emoji"), text(s(), "icon")) }, fn(x, marked) {
-        if marked {
-          @sf.station_mark_node(x, fn() { text(s(), "emoji") }, fn() { text(s(), "icon") }, @sfbase.summary_mark_side, fn() { @sf.theme().p.text }, fn() { 0 })
-        } else {
-          @sf.icon_node(x, "server", @sfbase.summary_mark_side, By(fn() { @sf.theme().p.text })) |> ignore
-        }
-      })
-    },
-    fn() { text(s(), "name") },
-    fn() { join([sl_joined(s()), text(s(), "summary")], " · ") },
-    press,
-    tag=fn() { if @settings.is_this_machine(s()) { @sf.t("web-pages.stations.thisMachine") } else { "" } },
-    end=fn(e) {
-      e.show(fn() { flag(s(), "reconnecting") }, fn(r) {
-        @sf.style_node(r, fn() { sl_reconnecting }, in_row=true)
-        @sf.spinner_node(r, size=12.0) |> ignore
-        @sf.words_node(r, fn() { @sf.t("common.reconnecting") }, fn() { sl_reconnecting_words }) |> ignore
-      })
-    },
-    body=fn(card) {
-      card.show(fn() { flag(s(), "protect") }, fn(p) {
-        @sf.style_node(p, fn() { sl_protect })
-        let address = fn() { text(s(), "station") }
-        let ws = fn() {
-          match address().find("/") {
-            Some(i) => address().unsafe_substring(start=0, end=i)
-            None => ""
-          }
-        }
-        let joining = fn() { is_doing(core, ["lock.joinStation"], [("workspace", ws()), ("station", text(s(), "id"))]) }
-        @sf.button_node(
-          p,
-          fn() { @sf.t("web-pages.security.joinShort") },
-          fn() {
-            let sv = @signals.untracked(s)
-            @settings.join_dialog(core, @signals.untracked(ws), text(sv, "id"), text(sv, "name"))
-          },
-          busy=joining,
-          disabled=joining,
-          icon="shield-check",
-        )
+  let online = fn() { flag(s(), "online") }
+  let unreadable = fn() { items(s(), "problems").iter().any(fn(p) { text(Some(p), "key") == "incompatible" }) }
+  let busy = @signals.computed(fn(_) { @settings.cpu_busy(core) })
+  let host = fn() {
+    match field(s(), "host") {
+      Some(Object(_)) as h if online() => h
+      _ => None
+    }
+  }
+  let meters = @signals.computed(fn(_) { @settings.meters_said(items(host(), "meters"), busy.get()) })
+  let has_meters = fn() { !meters.get().is_empty() }
+  let net = fn() {
+    if sample || !online() || !shown() {
+      return None
+    }
+    match (core.topic)("stationNet", { "station": str(text(s(), "station")) }).get().value {
+      Some(Object(_)) as n => n
+      _ => None
+    }
+  }
+  b.grow(Is(1.0)) |> ignore
+  @sf.card_piece_node(b, piece, wide_group=true, fn(card) {
+    sl_card_sep_node(card, piece)
+    card.box(fn(row) {
+      row.transitions_only() |> ignore
+      @sf.style_node(row, fn() { sl_row_multi })
+      row.radius(Is(@sf.row_corner)) |> ignore
+      if !sample {
+        @sf.hover_ground_node(row)
+        @sf.rippled_node(row, press, @sf.row_corner, fn() { text(s(), "name") })
+      }
+      if menu_address != "" {
+        row.on_menu(fn(m) {
+          let name = text(@signals.untracked(s), "name")
+          @sf.menu(
+            [
+              Some(@sf.menu_item_of(@sf.t("web-pages.rowMenu.open"), press, icon="arrow-up-right")),
+              copy_item("web-pages.rowMenu.copyName", name),
+              copy_item("web-pages.rowMenu.copyAddress", menu_address),
+            ].filter(fn(i) { i is Some(_) }),
+            from=@sf.at_point(m.wx, m.wy),
+          )
+        })
         |> ignore
+      }
+      // Line 1: mark, name, optional 本机 tag, and right-aligned status
+      row.box(fn(head) {
+        @sf.style_node(head, fn() { sl_head })
+        head.box(fn(m) {
+          @sf.style_node(m, fn() { sl_mark_box }, in_row=true)
+          let ink = fn() { if online() { @sf.theme().p.text } else { @sf.theme().p.muted } }
+          m.pick(fn() { @sf.has_station_mark(text(s(), "emoji"), text(s(), "icon")) }, fn(x, marked) {
+            if marked {
+              @sf.station_mark_node(x, fn() { text(s(), "emoji") }, fn() { text(s(), "icon") }, sl_mark_side, ink, fn() { 0 })
+            } else {
+              @sf.icon_node(x, "server", sl_mark_side, By(ink)) |> ignore
+            }
+          })
+        })
+        |> ignore
+        head.box(fn(n) {
+          @sf.style_node(n, fn() { sl_name_row })
+          n.grow(Is(1.0)).shrink(Is(1.0)).min_width(Is(Some(0.0))) |> ignore
+          @sf.words_node(n, fn() { text(s(), "name") }, fn() {
+            if online() { sl_name } else { sl_name_off }
+          })
+          .shrink(Is(1.0))
+          .min_width(Is(Some(0.0)))
+          |> ignore
+          n.show(fn() { @settings.is_this_machine(s()) }, fn(x) {
+            @sf.pill_node(x, fn() { @sf.t("web-pages.stations.thisMachine") }) |> ignore
+          })
+        })
+        |> ignore
+        if !sample {
+          head.pick(
+            fn() {
+              if !online() {
+                0
+              } else if flag(s(), "reconnecting") {
+                1
+              } else {
+                2
+              }
+            },
+            at_once=true,
+            fn(x, kind) {
+              match kind {
+                0 => @sf.state_dot_node(x, fn() { "offline" }, size=station_dot_side)
+                1 => {
+                  @sf.style_node(x, fn() { sl_reconnecting })
+                  @sf.spinner_node(x, size=12.0) |> ignore
+                  @sf.words_node(x, fn() { @sf.t("common.reconnecting") }, fn() { sl_reconnecting_words }) |> ignore
+                }
+                _ => station_state_node(x, s)
+              }
+            },
+          )
+        }
       })
-      sl_station_body_node(card, core, s, shown)
+      |> ignore
+      // Line 2 (constant height online & offline so online/offline flapping never shifts rows below):
+      // offline shows its full summary; online shows incompatible warning, compact meters + network, or fallback summary.
+      row.pick(
+        fn() {
+          if !online() {
+            5
+          } else if sample {
+            0
+          } else if unreadable() {
+            1
+          } else if has_meters() {
+            2
+          } else if text(s(), "summary") != "" {
+            3
+          } else {
+            4
+          }
+        },
+        at_once=true,
+        fn(sub, mode) {
+          match mode {
+            0 => @sf.styled_words(sub, fn() { text(s(), "summary") }, fn() { sl_meta_muted_cut }) |> ignore
+            1 => @sf.styled_words(sub, fn() { text(s(), "summary") }, fn() { sl_meta_amber_cut }) |> ignore
+            2 => {
+              sub.alpha(By(fn() { if flag(s(), "reconnecting") { 0.45 } else { 1.0 } })) |> ignore
+              sl_metrics_net_line_node(sub, fn() { meters.get() }, net)
+            }
+            3 => {
+              sub.alpha(By(fn() { if flag(s(), "reconnecting") { 0.45 } else { 1.0 } })) |> ignore
+              @sf.style_node(sub, fn() { sl_sub_row })
+              @sf.words_node(sub, fn() { text(s(), "summary") }, fn() { sl_meta_muted_cut })
+              .grow(Is(1.0))
+              .shrink(Is(1.0))
+              .min_width(Is(Some(0.0)))
+              |> ignore
+              sl_net_tail_node(sub, net)
+            }
+            4 =>
+              @sf.waiting_node(sub, fn(w) {
+                @sf.styled_words(w, fn() { @sf.sample_words(8) }, fn() { sl_meta_muted_cut }) |> ignore
+              })
+            _ =>
+              @sf.styled_words(
+                sub,
+                fn() {
+                  let sum = text(s(), "summary")
+                  if sum != "" {
+                    sum
+                  } else {
+                    let blk = text(s(), "blocked")
+                    if blk != "" { blk } else { @sf.t("web-pages.stations.offline") }
+                  }
+                },
+                fn() { sl_meta_muted_cut },
+              )
+              |> ignore
+          }
+        },
+      )
+      // Cross-workspace origin (joined station)
+      row.show(fn() { sl_joined(s()) != "" }, at_once=true, fn(j) {
+        @sf.styled_words(j, fn() { sl_joined(s()) }, fn() { sl_meta_muted_cut }) |> ignore
+      })
+      // Offline block reason (e.g. safe mode) when distinct from line 2 summary
+      row.show(
+        fn() {
+          if online() {
+            return false
+          }
+          let blk = text(s(), "blocked")
+          blk != "" && blk != text(s(), "summary") && text(s(), "summary") != ""
+        },
+        at_once=true,
+        fn(bl) {
+          @sf.styled_words(bl, fn() { text(s(), "blocked") }, fn() { sl_blocked_words }) |> ignore
+        },
+      )
+    })
+    |> ignore
+    // Safe mode join action when station is unprotected and viewer may protect it: a sibling action row below the
+    // station row inside card_piece_node, sharing its row_corner (concentric with card_piece_node), content left edge
+    // (rule 8), and separated from the station row by 2pt (rule 1).
+    card.show(fn() { !sample && flag(s(), "protect") }, fn(p) {
+      let address = fn() { text(s(), "station") }
+      let ws = fn() {
+        match address().find("/") {
+          Some(i) => address().unsafe_substring(start=0, end=i)
+          None => ""
+        }
+      }
+      let joining = fn() { is_doing(core, ["lock.joinStation"], [("workspace", ws()), ("station", text(s(), "id"))]) }
+      p.padding(Is((0.0, 2.0, 0.0, 0.0))).width_share(Is(1.0)) |> ignore
+      @sf.button_while_node(
+        p,
+        fn() { !joining() },
+        fn() { @sf.t("web-pages.security.joinShort") },
+        fn(_) {
+          let sv = @signals.untracked(s)
+          @settings.join_dialog(core, @signals.untracked(ws), text(sv, "id"), text(sv, "name"))
+        },
+        fn(btn, live) {
+          btn.transitions_only() |> ignore
+          @sf.style_node(btn, fn() { sl_protect_row })
+          btn.radius(Is(@sf.row_corner)) |> ignore
+          if live {
+            @sf.hover_ground_node(btn)
+          }
+          btn.box(fn(m) {
+            @sf.style_node(m, fn() { sl_mark_box }, in_row=true)
+            if !live {
+              @sf.spinner_node(m, size=14.0) |> ignore
+            } else {
+              @sf.icon_node(m, "shield-check", 16.0, By(fn() { @sf.theme().p.accent_text })) |> ignore
+            }
+          })
+          |> ignore
+          @sf.words_node(btn, fn() { @sf.t("web-pages.security.joinShort") }, fn() { sl_protect_words }) |> ignore
+        },
+        fills=true,
+      )
+    })
+  })
+}
+
+///|
+/// Compact meter words preserving the core's idle/busy/remaining semantics (e.g. "CPU 空闲 72%", "CPU 占用 28%",
+/// "内存剩 5.8 G", "磁盘剩 420 G", "CPU 72% idle"), never stripping "空闲/剩" so low-headroom red figures stay clear.
+fn sl_meter_words(m : Json?) -> String {
+  let short = text(m, "short")
+  let rem = text(m, "remaining")
+  if short != "" && rem != "" {
+    if @sf.chip_joined(short, rem) {
+      short + rem
+    } else {
+      short + " " + rem
+    }
+  } else if rem != "" {
+    rem
+  } else {
+    sp_meter_compact(m)
+  }
+}
+
+///|
+/// Line 2 of an online station row: compact CPU / memory / disk figures on the left and network path + latency flush
+/// right. When width is tight, non-warning meters drop first (disk -> mem -> cpu), then network path drops before any
+/// amber/red warning meter so all three warnings fit alongside latency on a 390pt phone screen.
+fn sl_metrics_net_line_node(r : @view.View, meters : () -> Array[Json], net : () -> Json?) -> Unit {
+  @sf.style_node(r, fn() { sl_sub_row })
+  r.fits(Is(true)) |> ignore
+  for kind in [0, 1, 2] {
+    let m = fn() { sp_meter_of(meters(), kind) }
+    r.show(at_once=true, fn() { m() is Some(_) }, fn(mb) {
+      let drop_rank = fn() {
+        let lvl = text(m(), "level")
+        let is_low = lvl == "amber" || lvl == "red"
+        match kind {
+          2 => if is_low { 5 } else { 1 }
+          1 => if is_low { 6 } else { 2 }
+          _ => if is_low { 0 } else { 3 }
+        }
+      }
+      mb.shrink(Is(0.0)).fit_whole(Is(true)).drops(By(drop_rank)) |> ignore
+      @sf.styled_words(mb, fn() { sl_meter_words(m()) }, fn() {
+        match text(m(), "level") {
+          "red" => sl_meta_red
+          "amber" => sl_meta_amber
+          _ => sl_meta_muted
+        }
+      })
+      |> ignore
+    })
+  }
+  r.box(fn(sp) { sp.grow(Is(1.0)).shrink(Is(1.0)).min_width(Is(Some(0.0))) |> ignore }) |> ignore
+  let has_net = fn() { net() is Some(Object(_)) }
+  r.show(at_once=true, fn() { has_net() && text(net(), "path") != "" }, fn(pw) {
+    let long_path = fn() { text(net(), "path").length() > 6 }
+    pw
+    .shrink(By(fn() { if long_path() { 1.0 } else { 0.0 } }))
+    .min_width(By(fn() { if long_path() { Some(0.0) } else { None } }))
+    .fit_whole(Is(true))
+    .drops(Is(4))
+    |> ignore
+    @sf.styled_words(pw, fn() { text(net(), "path") }, fn() {
+      if long_path() { sl_meta_muted_cut } else { sl_meta_muted }
+    })
+    |> ignore
+  })
+  r.show(at_once=true, fn() { has_net() && field(net(), "loss") is Some(Object(_)) }, fn(x) {
+    x.shrink(Is(0.0)).fit_whole(Is(true)) |> ignore
+    @sf.styled_words(x, fn() { text(field(net(), "loss"), "text") }, fn() {
+      @sfbase.level_figure_style(text(field(net(), "loss"), "level"), sl_meta_fig)
+    })
+    |> ignore
+  })
+  r.show(at_once=true, fn() { has_net() && field(net(), "rtt") is Some(Object(_)) }, fn(x) {
+    x.shrink(Is(0.0)).fit_whole(Is(true)) |> ignore
+    @sf.styled_words(x, fn() { text(field(net(), "rtt"), "text") }, fn() {
+      @sfbase.level_figure_style(text(field(net(), "rtt"), "level"), sl_meta_fig)
+    })
+    |> ignore
+  })
+  r.show(at_once=true, fn() { !has_net() }, fn(nb) {
+    nb.shrink(Is(0.0)).fit_whole(Is(true)) |> ignore
+    @sf.waiting_node(nb, fn(w) {
+      @sf.style_node(w, fn() { sl_net_tail })
+      @sf.words_node(w, fn() { @sf.sample_words(2) }, fn() { sl_meta_muted }) |> ignore
+      @sf.words_node(w, fn() { @sf.sample_words(3) }, fn() { sl_meta_fig }) |> ignore
+    })
+  })
+}
+
+///|
+/// Right-aligned compact network status (`path`, optional packet `loss`, and `rtt`) when `net()` is known,
+/// or a compact skeleton placeholder while `stationNet` is still being sampled for an online station.
+fn sl_net_tail_node(r : @view.View, net : () -> Json?, waiting? : Bool = false) -> Unit {
+  r.pick(
+    fn() {
+      match net() {
+        Some(Object(_)) => 1
+        _ => if waiting { 2 } else { 0 }
+      }
+    },
+    at_once=true,
+    fn(nb, kind) {
+      match kind {
+        1 => {
+          nb.shrink(Is(1.0)).min_width(Is(Some(0.0))).fit_whole(Is(true)) |> ignore
+          @sf.style_node(nb, fn() { sl_net_tail })
+          nb.box(fn(pw) {
+            let long_path = fn() { text(net(), "path").length() > 6 }
+            pw
+            .shrink(By(fn() { if long_path() { 1.0 } else { 0.0 } }))
+            .min_width(By(fn() { if long_path() { Some(0.0) } else { None } }))
+            |> ignore
+            @sf.styled_words(pw, fn() { text(net(), "path") }, fn() {
+              if long_path() { sl_meta_muted_cut } else { sl_meta_muted }
+            })
+            |> ignore
+          })
+          |> ignore
+          nb.show(fn() { field(net(), "loss") is Some(Object(_)) }, at_once=true, fn(x) {
+            @sf.styled_words(x, fn() { text(field(net(), "loss"), "text") }, fn() {
+              @sfbase.level_figure_style(text(field(net(), "loss"), "level"), sl_meta_fig)
+            })
+            |> ignore
+          })
+          nb.show(fn() { field(net(), "rtt") is Some(Object(_)) }, at_once=true, fn(x) {
+            @sf.styled_words(x, fn() { text(field(net(), "rtt"), "text") }, fn() {
+              @sfbase.level_figure_style(text(field(net(), "rtt"), "level"), sl_meta_fig)
+            })
+            |> ignore
+          })
+        }
+        2 => {
+          nb.shrink(Is(0.0)).fit_whole(Is(true)) |> ignore
+          @sf.waiting_node(nb, fn(w) {
+            @sf.style_node(w, fn() { sl_net_tail })
+            @sf.words_node(w, fn() { @sf.sample_words(2) }, fn() { sl_meta_muted }) |> ignore
+            @sf.words_node(w, fn() { @sf.sample_words(3) }, fn() { sl_meta_fig }) |> ignore
+          })
+        }
+        _ => ()
+      }
     },
   )
 }
 
 ///|
-/// Where a station this workspace joined is at home, as grey words before what is said of it.
+/// Compact grouped row for a task-only station (rig).
+fn sl_rig_row_node(
+  b : @view.View,
+  r : () -> Json?,
+  piece : () -> @sf.CardPiece,
+  press : () -> Unit,
+) -> Unit {
+  b.grow(Is(1.0)) |> ignore
+  @sf.card_piece_node(b, piece, wide_group=true, fn(card) {
+    sl_card_sep_node(card, piece)
+    card.box(fn(row) {
+      row.transitions_only() |> ignore
+      @sf.style_node(row, fn() { sl_row_multi })
+      row.radius(Is(@sf.row_corner)) |> ignore
+      @sf.hover_ground_node(row)
+      @sf.rippled_node(row, press, @sf.row_corner, fn() { text(r(), "name") })
+      row.box(fn(head) {
+        @sf.style_node(head, fn() { sl_head })
+        head.box(fn(m) {
+          @sf.style_node(m, fn() { sl_mark_box }, in_row=true)
+          @sf.icon_node(m, "boxes", sl_mark_side, By(fn() { @sf.theme().p.text })) |> ignore
+        })
+        |> ignore
+        @sf.words_node(head, fn() { text(r(), "name") }, fn() { sl_name })
+        .grow(Is(1.0))
+        .shrink(Is(1.0))
+        .min_width(Is(Some(0.0)))
+        |> ignore
+        @sf.state_dot_node(
+          head,
+          fn() {
+            match field(r(), "reached") {
+              Some(True) if flag(r(), "vouched") => "up"
+              _ => "offline"
+            }
+          },
+          size=station_dot_side,
+        )
+      })
+      |> ignore
+      @sf.words_node(row, fn() { @settings.rig_said(r()) }, fn() { sl_meta_muted_cut }) |> ignore
+    })
+    |> ignore
+  })
+}
+
+///|
+/// Compact grouped row for a workspace device.
+fn sl_device_row_node(
+  b : @view.View,
+  d : () -> Json?,
+  piece : () -> @sf.CardPiece,
+  press : () -> Unit,
+) -> Unit {
+  let online = fn() { !(field(d(), "online") is Some(False)) }
+  b.grow(Is(1.0)) |> ignore
+  @sf.card_piece_node(b, piece, wide_group=true, fn(card) {
+    sl_card_sep_node(card, piece)
+    card.box(fn(row) {
+      row.transitions_only() |> ignore
+      @sf.style_node(row, fn() { sl_row_multi })
+      row.radius(Is(@sf.row_corner)) |> ignore
+      @sf.hover_ground_node(row)
+      @sf.rippled_node(row, press, @sf.row_corner, fn() { text(d(), "name") })
+      row.box(fn(head) {
+        @sf.style_node(head, fn() { sl_head })
+        head.box(fn(m) {
+          @sf.style_node(m, fn() { sl_mark_box }, in_row=true)
+          let ink = fn() { if online() { @sf.theme().p.text } else { @sf.theme().p.muted } }
+          @sf.icon_node(m, "", sl_mark_side, By(ink), name_now=fn() { @settings.device_icon(d()) }) |> ignore
+        })
+        |> ignore
+        @sf.words_node(head, fn() { text(d(), "name") }, fn() {
+          if online() { sl_name } else { sl_name_off }
+        })
+        .grow(Is(1.0))
+        .shrink(Is(1.0))
+        .min_width(Is(Some(0.0)))
+        |> ignore
+      })
+      |> ignore
+      @sf.words_node(row, fn() { @settings.device_said(d()) }, fn() { sl_meta_muted_cut }) |> ignore
+    })
+    |> ignore
+  })
+}
+
+///|
+/// Where a station this workspace joined is at home, as grey words.
 fn sl_joined(s : Json?) -> String {
   if !flag(s, "joined") {
     return ""
@@ -354,102 +834,6 @@ fn sl_joined(s : Json?) -> String {
   }
 }
 
-///|
-/// Under a station's name (StationBody's, as nodes): what of its load runs low and how this device reaches it, in the
-/// same room whatever state it is in; offline, its picture asleep and a line saying so over that room; not read yet,
-/// those in their bones; reconnecting, faded as last heard. How it is reached read only while the page shows (`shown`,
-/// stations_list_node's).
-fn sl_station_body_node(card : @view.View, core : Core, s : () -> Json?, shown : () -> Bool) -> Unit {
-  // (its chips as this device says a CPU: idle or busy, @settings.meters_said; told again only as what they say changes)
-  let busy = @signals.computed(fn(_) { @settings.cpu_busy(core) })
-  let online = fn() { flag(s(), "online") }
-  let host = fn() {
-    match field(s(), "host") {
-      Some(Object(_)) as h if online() => h
-      _ => None
-    }
-  }
-  let meters = @signals.computed(fn(_) { @settings.meters_said(items(host(), "meters"), busy.get()) })
-  // (how this device reaches it, while it is up: the core's `stationNet`, sampled while shown)
-  let net = fn() {
-    if !online() || !shown() {
-      return None
-    }
-    match (core.topic)("stationNet", { "station": str(text(s(), "station")) }).get().value {
-      Some(Object(_)) as n => n
-      _ => None
-    }
-  }
-  let faded = fn() { flag(s(), "reconnecting") }
-  let seen = fn(known : Bool) {
-    if !online() {
-      0.0
-    } else if !known {
-      0.0
-    } else if faded() {
-      0.45
-    } else {
-      1.0
-    }
-  }
-  let unreadable = fn() { items(s(), "problems").iter().any(fn(p) { text(Some(p), "key") == "incompatible" }) }
-  card.box(fn(body) {
-    @sf.style_node(body, fn() { sl_body })
-    // its load's boxes, a chip's room kept whatever it shows (none read, or away); not read yet while up, grey bars over
-    // their room
-    body.box(fn(m) {
-      m.min_height(Is(Some(@sf.fill_chip_h))) |> ignore
-      m.box(fn(x) {
-        x.alpha(By(fn() { seen(host() is Some(_)) })) |> ignore
-        @sf.meter_line_node(x, fn() { meters.get() })
-      })
-      |> ignore
-      m.show(fn() { online() && host() is None && !unreadable() }, fn(o) {
-        o.over(Is(true)) |> ignore
-        @sf.waiting_node(o, fn(w) { @sf.meter_line_node(w, fn() { sl_meters_sample }) })
-      })
-    })
-    |> ignore
-    // its network 10 under them; not read yet while up, grey bars over its line's room (the made-up one it keeps the
-    // room of, unseen)
-    body.box(fn(n) {
-      n.box(fn(x) {
-        x.alpha(By(fn() { seen(net() is Some(_)) })) |> ignore
-        @sfbase.station_net_line_node(x, net, egress=fn() { text(host(), "egressText") })
-      })
-      |> ignore
-      n.show(fn() { online() && net() is None }, fn(o) {
-        o.over(Is(true)) |> ignore
-        @sf.waiting_node(o, fn(w) { @sfbase.station_net_line_node(w, fn() { None }, egress=fn() { text(host(), "egressText") }) })
-      })
-    })
-    |> ignore
-    // offline: its picture and a line saying so, across the room
-    body.show(fn() { !online() }, fn(o) {
-      o.over(Is(true)) |> ignore
-      @sf.style_node(o, fn() { sl_offline })
-      o.pick(fn() { @sf.theme().dark }, fn(x, dark) {
-        let pic = if dark { "illus_station_offline_dark" } else { "illus_station_offline" }
-        if @sf.has_drawable(pic) {
-          @sf.drawable_node(x, pic, sl_offline_picture_w) |> ignore
-        }
-      })
-      @sf.words_node(o, fn() { @sf.t("android-settings.stations.silent") }, fn() { sl_offline_words })
-      .grow(Is(1.0))
-      .min_width(Is(Some(0.0)))
-      |> ignore
-    })
-  })
-  |> ignore
-}
-
-///|
-/// A machine's CPU, memory and disk made up, for what shows while they are read (in their bones).
-// kept across runs: a value (no field of it changes)
-let sl_meters_sample : Array[Json] = ["CPU", "RAM", "Disk"].map(fn(n) {
-  Json::object({ "key": Json::string(n), "label": Json::string(n), "text": "00%", "level": "ok" })
-})
-
 // ── styles ─────────────────────────────────────────
 
 ///|
@@ -457,12 +841,51 @@ let sl_meters_sample : Array[Json] = ["CPU", "RAM", "Disk"].map(fn(n) {
 let sl_first_art_w : Double = 240.0
 
 ///|
-/// The offline picture's width on a card: the room's height (the load's 20, 10, the network's two lines of 18 2 apart:
-/// 68) times the picture's 2:1 (stations.mbt's offline_picture_w).
-let sl_offline_picture_w : Double = 136.0
+/// Station, rig and device mark size on a compact row.
+let sl_mark_side : Double = 18.0
 
 ///|
-/// Reconnecting before the chevron: the ring and its word, 5 apart.
+/// Hairline separator inset matching the row's 12pt horizontal padding inside card_piece_node.
+// kept across runs: a value (no field of it changes)
+let sl_sep_line : @ui.Style = @ui.css("mx=S3")
+
+///|
+/// Compact two-line row: symmetric 12pt horizontal and 10pt vertical padding, 4pt line gap.
+// kept across runs: a value (no field of it changes)
+let sl_row_multi : @ui.Style = @ui.css("w=Full px=S3 py=S2_5 gap=S1")
+
+///|
+/// Line 1 of a row: mark, name/tag, and right-aligned status.
+// kept across runs: a value (no field of it changes)
+let sl_head : @ui.Style = @ui.css("row w=Full gap=S2 align=ACenter")
+
+///|
+// kept across runs: a value (no field of it changes)
+let sl_mark_box : @ui.Style = @ui.css("w=S5 h=S5 align=ACenter justify=JCenter")
+
+///|
+// kept across runs: a value (no field of it changes)
+let sl_name_row : @ui.Style = @ui.css("row gap=S1_5 align=ACenter")
+
+///|
+// kept across runs: a value (no field of it changes)
+let sl_name : @ui.TextStyle = @ui.text_style(size=Body, weight=Medium, color=Fg, wrap=false, w=Cut)
+
+///|
+// kept across runs: a value (no field of it changes)
+let sl_name_off : @ui.TextStyle = @ui.text_style(size=Body, weight=Medium, color=Muted, wrap=false, w=Cut)
+
+///|
+/// Line 2 of an online row: compact metrics on the left and network on the right.
+// kept across runs: a value (no field of it changes)
+let sl_sub_row : @ui.Style = @ui.css("row w=Full gap=S2 align=ACenter")
+
+///|
+// kept across runs: a value (no field of it changes)
+let sl_net_tail : @ui.Style = @ui.css("row gap=S1 align=ACenter")
+
+///|
+/// Reconnecting status at the right end of line 1: spinner and words, 4pt apart.
 // kept across runs: a value (no field of it changes)
 let sl_reconnecting : @ui.Style = @ui.css("row gap=S1 align=ACenter")
 
@@ -471,23 +894,41 @@ let sl_reconnecting : @ui.Style = @ui.css("row gap=S1 align=ACenter")
 let sl_reconnecting_words : @ui.TextStyle = @ui.text_style(size=Caption, color=Muted, wrap=false)
 
 ///|
-/// 加入安全模式's line, under the head.
 // kept across runs: a value (no field of it changes)
-let sl_protect : @ui.Style = @ui.css("row w=Full")
-
-///|
-/// The body, under the head: its load, and 10 under that its network.
-// kept across runs: a value (no field of it changes)
-let sl_body : @ui.Style = @ui.css("w=Full gap=S2_5")
-
-///|
-/// Offline: its picture and a line saying so, across the body's room, 12 apart.
-// kept across runs: a value (no field of it changes)
-let sl_offline : @ui.Style = @ui.css("row w=Full h=Full gap=S3 align=ACenter")
+let sl_meta_muted : @ui.TextStyle = @ui.text_style(size=Meta, leading=L5, color=Muted, wrap=false)
 
 ///|
 // kept across runs: a value (no field of it changes)
-let sl_offline_words : @ui.TextStyle = @ui.text_style(size=Meta, leading=L5, color=Muted, max_lines=3, w=Full)
+let sl_meta_muted_cut : @ui.TextStyle = @ui.text_style(size=Meta, leading=L5, color=Muted, wrap=false, w=Cut)
+
+///|
+// kept across runs: a value (no field of it changes)
+let sl_meta_fig : @ui.TextStyle = @ui.text_style(size=Meta, leading=L5, weight=Medium, color=Fg, wrap=false)
+
+///|
+// kept across runs: a value (no field of it changes)
+let sl_meta_amber : @ui.TextStyle = @ui.text_style(size=Meta, leading=L5, weight=Medium, color=WarnInk, wrap=false)
+
+///|
+// kept across runs: a value (no field of it changes)
+let sl_meta_amber_cut : @ui.TextStyle = @ui.text_style(size=Meta, leading=L5, weight=Medium, color=WarnInk, wrap=false, w=Cut)
+
+///|
+// kept across runs: a value (no field of it changes)
+let sl_meta_red : @ui.TextStyle = @ui.text_style(size=Meta, leading=L5, weight=Medium, color=Danger, wrap=false)
+
+///|
+// kept across runs: a value (no field of it changes)
+let sl_blocked_words : @ui.TextStyle = @ui.text_style(size=Meta, leading=L5, color=Muted, max_lines=2, w=Full)
+
+///|
+/// Action row below an unprotected station row inside card_piece_node.
+// kept across runs: a value (no field of it changes)
+let sl_protect_row : @ui.Style = @ui.css("row w=Full px=S3 py=S2 min_h=S11 gap=S2 align=ACenter")
+
+///|
+// kept across runs: a value (no field of it changes)
+let sl_protect_words : @ui.TextStyle = @ui.text_style(size=Meta, leading=L5, weight=Medium, color=AccentText, wrap=false)
 
 ///|
 /// What adds the first, 30 in from the screen's sides as first_station's was (the page's own 12 and 18 more).

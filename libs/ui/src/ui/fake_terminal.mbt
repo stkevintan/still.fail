@@ -505,7 +505,7 @@ fn fake_push_u32(out : Array[Byte], v : Int) -> Unit {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with tm_open(_, cols, rows) {
+fn FakeHost::tm_open(_ : FakeHost, cols : Int, rows : Int) -> Int {
   let cols = if cols > 0 { cols } else { 80 }
   let rows = if rows > 0 { rows } else { 24 }
   fake_terminal_next.val += 1
@@ -549,7 +549,7 @@ impl @hostapi.Host for FakeHost with tm_open(_, cols, rows) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with tm_write(_, id, data) {
+fn FakeHost::tm_write(_ : FakeHost, id : Int, data : Bytes) -> Unit {
   guard fake_terminals.get(id) is Some(t) else { return }
   let text = @utf8.decode_lossy(data)
   let cs = text.to_array()
@@ -719,7 +719,7 @@ impl @hostapi.Host for FakeHost with tm_write(_, id, data) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with tm_resize(_, id, cols, rows, _cw, _ch) {
+fn FakeHost::tm_resize(_ : FakeHost, id : Int, cols : Int, rows : Int, _cw : Int, _ch : Int) -> Unit {
   guard fake_terminals.get(id) is Some(t) else { return }
   let cols = if cols > 0 { cols } else { 1 }
   let rows = if rows > 0 { rows } else { 1 }
@@ -758,7 +758,7 @@ impl @hostapi.Host for FakeHost with tm_resize(_, id, cols, rows, _cw, _ch) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with tm_modes(_, id) {
+fn FakeHost::tm_modes(_ : FakeHost, id : Int) -> Int {
   match fake_terminals.get(id) {
     Some(t) => fake_modes_bits(t)
     None => 0
@@ -766,7 +766,7 @@ impl @hostapi.Host for FakeHost with tm_modes(_, id) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with tm_scroll(_, id, kind, value) {
+fn FakeHost::tm_scroll(_ : FakeHost, id : Int, kind : Int, value : Int) -> Unit {
   guard fake_terminals.get(id) is Some(t) && !t.alt_screen else { return }
   let max_top = fake_active_top(t)
   let next = match kind {
@@ -799,7 +799,7 @@ fn fake_is_word_char(s : String) -> Bool {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with tm_select(_, id, kind, x0, y0, x1, y1) {
+fn FakeHost::tm_select(_ : FakeHost, id : Int, kind : Int, x0 : Int, y0 : Int, x1 : Int, y1 : Int) -> Int {
   guard fake_terminals.get(id) is Some(t) else { return 0 }
   let g = fake_active_grid(t)
   let top = if t.alt_screen { 0 } else { t.vp_top }
@@ -902,7 +902,7 @@ fn fake_row_slice_trimmed(row : Array[FakeCell], a : Int, b : Int) -> String {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with tm_text(_, id, sel_only) {
+fn FakeHost::tm_text(_ : FakeHost, id : Int, sel_only : Int) -> String {
   guard fake_terminals.get(id) is Some(t) else { return "" }
   let g = fake_active_grid(t)
   if sel_only != 0 {
@@ -939,7 +939,7 @@ impl @hostapi.Host for FakeHost with tm_text(_, id, sel_only) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with tm_mouse(_, id, action, button, mods, x, y, _w, _h, cw, ch) {
+fn FakeHost::tm_mouse(_ : FakeHost, id : Int, action : Int, button : Int, mods : Int, x : Int, y : Int, _w : Int, _h : Int, cw : Int, ch : Int) -> Bytes {
   guard fake_terminals.get(id) is Some(t) && t.mouse_mode != 0 else { return Bytes::make(0, b'\x00') }
   let cw = if cw > 0 { cw } else { 8 }
   let ch = if ch > 0 { ch } else { 16 }
@@ -994,7 +994,7 @@ impl @hostapi.Host for FakeHost with tm_mouse(_, id, action, button, mods, x, y,
 }
 
 ///|
-impl @hostapi.Host for FakeHost with tm_frame(_, id, flags) {
+fn FakeHost::tm_frame(_ : FakeHost, id : Int, flags : Int) -> Bytes {
   guard fake_terminals.get(id) is Some(t) else { return Bytes::make(0, b'\x00') }
   let g = fake_active_grid(t)
   let top = if t.alt_screen { 0 } else { t.vp_top }
@@ -1124,6 +1124,6 @@ impl @hostapi.Host for FakeHost with tm_frame(_, id, flags) {
 }
 
 ///|
-impl @hostapi.Host for FakeHost with tm_close(_, id) {
+fn FakeHost::tm_close(_ : FakeHost, id : Int) -> Unit {
   fake_terminals.remove(id)
 }

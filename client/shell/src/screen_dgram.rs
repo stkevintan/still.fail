@@ -37,6 +37,7 @@
 //! asked for a key frame (`KEYFRAME`, on the stream) instead of a picture made of a frame's missing references.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -59,6 +60,8 @@ const FRAME_CONFIG: u8 = 1;
 const FRAME_VIDEO: u8 = 2;
 const FRAME_AUDIO_CONFIG: u8 = 5;
 const FRAME_AUDIO: u8 = 6;
+/// Client -> station frame kind for acknowledging a decoded/displayed video frame (screen-frames.ts ACK).
+pub(crate) const FRAME_ACK: u8 = 17;
 /// What the client asks of the station when a frame could not be had (client/core-ts screen-frames.ts KEYFRAME).
 pub(crate) const KEYFRAME_FRAME: [u8; 5] = [18, 0, 0, 0, 0];
 /// A frame longer than this is no frame (screen-frames.ts MAX_FRAME): the stream is out of step, nothing is taken off it.
@@ -66,31 +69,43 @@ const FRAME_MAX: usize = 64 * 1024 * 1024;
 
 const FLAG_KEY: u8 = 0x08;
 const FLAG_RED: u8 = 0x10;
+/// Bit 5 of `Head` flags: sender understands `KIND_ACK` datagrams (older `Head::of` ignores bits 5..7).
+const FLAG_ACK: u8 = 0x20;
 
 /// Frames of a kind kept while not yet given (the newest; the oldest goes first).
-const WINDOW: usize = 8;
-/// How long a frame's successor waits, whole, for the frame before it before that one is given up (datagrams of one
-/// connection come out of order by well under 1.5 ms; a shard lost the parity makes again).
-const GAP_WAIT: Duration = Duration::from_millis(3);
-/// How long a frame not yet whole is waited for at most when nothing after it came (its shards come within ~4 ms).
-const STALE: Duration = Duration::from_millis(40);
+const WINDOW: usize = 16;
+/// Adaptive wait bounds for an in-flight frame when a later frame arrives whole: starts at `GAP_WAIT_MIN` on a clean
+/// link and expands up to `GAP_WAIT_MAX` under metro-network reordering/jitter.
+const GAP_WAIT_MIN: Duration = Duration::from_millis(12);
+const GAP_WAIT_MAX: Duration = Duration::from_millis(45);
+/// How long an incomplete frame with no new shards arriving is waited for when nothing after it came.
+const STALE: Duration = Duration::from_millis(80);
+/// Hard upper bound on total time an incomplete frame may be waited for even if shards trickle in.
+const STALE_MAX: Duration = Duration::from_millis(120);
 /// A config came but no frame of it arrived at all. With no shards there is no other way to detect its loss.
 const FIRST_FRAME_WAIT: Duration = Duration::from_secs(2);
-/// Key frames asked for no more often than this.
-const KEYFRAME_EVERY: Duration = Duration::from_millis(200);
+/// Key frames asked for no more often than this (prevents keyframe storms under transient jitter).
+const KEYFRAME_EVERY: Duration = Duration::from_millis(300);
 /// A key frame asked for and not come whole this long after (lost itself, and the screen still: no frame after it to
 /// ask again on) is asked for again.
 const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
-/// A frame's datagrams go without sleeping: every `PACE_EVERY` the task only yields (tokio's timer counts whole
-/// milliseconds, 15.6 on Windows, so a pause of 250 µs every 8 cost a 40-shard frame 8 to 15 ms). Only a frame of more
-/// than `PACE_BURST` (a key frame's 120 at once fills a shallow router's queue and loses its tail) pauses `PACE_GAP`
-/// every `PACE_BURST`, no longer than `PACE_MOST` in all.
+/// Smooth micro-pacing for medium/large frames: small frames (`<= PACE_SMALL` shards) go immediately with zero delay;
+/// larger frames spread in micro-batches of `PACE_BATCH` shards across a linear time budget (`PACE_US_PER_SHARD` per
+/// shard, capped at `PACE_MOST` for P-frames and `PACE_MOST_KEY` for keyframes) using deadline pacing so actual
+/// `send_datagram_wait` latency is deducted automatically.
+const PACE_SMALL: usize = 8;
+const PACE_BATCH: usize = 6;
+const PACE_US_PER_SHARD: u64 = 75;
+const PACE_MOST: Duration = Duration::from_millis(6);
+const PACE_MOST_KEY: Duration = Duration::from_millis(10);
 const PACE_EVERY: usize = 32;
-const PACE_BURST: usize = 64;
-const PACE_GAP: Duration = Duration::from_micros(500);
-const PACE_MOST: Duration = Duration::from_millis(4);
+#[cfg(test)]
+const PACE_BEFORE_MOST: Duration = Duration::from_millis(4);
 /// How often the link's loss is read again for the parity a frame gets.
 const LOSS_EVERY: Duration = Duration::from_millis(200);
+/// Unreliable client -> station ACK datagram: `[MAGIC, KIND_ACK, token(4 BE), ts_us(8 BE), wait_us(4 BE)]`.
+const KIND_ACK: u8 = 5;
+pub(crate) const ACK_LEN: usize = 18;
 /// The receiving end's report of the loss its frames' shards had (the module's head).
 const KIND_REPORT: u8 = 7;
 pub(crate) const REPORT_LEN: usize = 16;
@@ -246,6 +261,7 @@ pub(crate) struct Head {
     pub(crate) kind: u8,
     pub(crate) key: bool,
     pub(crate) red: bool,
+    pub(crate) ack_cap: bool,
     pub(crate) token: u32,
     pub(crate) epoch: u8,
     pub(crate) seq: u32,
@@ -259,7 +275,7 @@ pub(crate) struct Head {
 impl Head {
     fn put(&self, out: &mut Vec<u8>) {
         out.push(MAGIC);
-        out.push((self.kind & 7) | if self.key { FLAG_KEY } else { 0 } | if self.red { FLAG_RED } else { 0 });
+        out.push((self.kind & 7) | if self.key { FLAG_KEY } else { 0 } | if self.red { FLAG_RED } else { 0 } | if self.ack_cap { FLAG_ACK } else { 0 });
         out.extend(self.token.to_be_bytes());
         out.push(self.epoch);
         out.extend(self.seq.to_be_bytes());
@@ -275,6 +291,7 @@ impl Head {
             kind: d[1] & 7,
             key: d[1] & FLAG_KEY != 0,
             red: d[1] & FLAG_RED != 0,
+            ack_cap: d[1] & FLAG_ACK != 0,
             token: u32::from_be_bytes([d[2], d[3], d[4], d[5]]),
             epoch: d[6],
             seq: u32::from_be_bytes([d[7], d[8], d[9], d[10]]),
@@ -360,6 +377,43 @@ pub(crate) fn report_of(d: &[u8]) -> Option<(u32, u32)> {
     let token = u32::from_be_bytes([d[2], d[3], d[4], d[5]]);
     let ppm = u32::from_be_bytes([d[6], d[7], d[8], d[9]]);
     (token != 0 && ppm <= 1_000_000).then_some((token, ppm))
+}
+
+/// An unreliable client -> station ACK datagram (`KIND_ACK`), carrying frame timestamp `ts` (µs) and viewer hold time
+/// `wait_us` (µs). Older receivers pass it over (`Head::of` rejects `kind == 5`, `report_of` rejects length/kind).
+#[allow(dead_code)] // Used by stillfail-shell (client side); station's stillfail-mesh only reads KIND_ACK.
+pub(crate) fn ack_bytes(token: u32, ts: u64, wait_us: u32) -> [u8; ACK_LEN] {
+    let mut d = [0u8; ACK_LEN];
+    d[0] = MAGIC;
+    d[1] = KIND_ACK;
+    d[2..6].copy_from_slice(&token.to_be_bytes());
+    d[6..14].copy_from_slice(&ts.to_be_bytes());
+    d[14..18].copy_from_slice(&wait_us.to_be_bytes());
+    d
+}
+
+/// Parses a `KIND_ACK` datagram into `(token, ts_us, wait_us)`.
+pub(crate) fn ack_of(d: &[u8]) -> Option<(u32, u64, u32)> {
+    if d.len() != ACK_LEN || d[0] != MAGIC || d[1] != KIND_ACK {
+        return None;
+    }
+    let token = u32::from_be_bytes([d[2], d[3], d[4], d[5]]);
+    if token == 0 {
+        return None;
+    }
+    let ts = u64::from_be_bytes([d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13]]);
+    let wait_us = u32::from_be_bytes([d[14], d[15], d[16], d[17]]);
+    Some((token, ts, wait_us))
+}
+
+/// Standard stream wire format for `KIND.ack` carrying `(ts, wait_us)`: 17 bytes `[17, 0,0,0,12, ts(8 BE), wait_us(4 BE)]`.
+pub(crate) fn ack_frame_bytes(ts: u64, wait_us: u32) -> [u8; 17] {
+    let mut f = [0u8; 17];
+    f[0] = FRAME_ACK;
+    f[1..5].copy_from_slice(&12u32.to_be_bytes());
+    f[5..13].copy_from_slice(&ts.to_be_bytes());
+    f[13..17].copy_from_slice(&wait_us.to_be_bytes());
+    f
 }
 
 /// The loss a view's receiving end said last, and when it was heard.
@@ -471,7 +525,7 @@ pub(crate) fn datagrams_of(token: u32, kind: u8, key: bool, epoch: u8, seq: u32,
     if cap == 0 {
         return None;
     }
-    let head = |block: u8, blocks: u8, k: u8, m: u8, shard: u8, red: bool| Head { kind, key, red, token, epoch, seq, block, blocks, k, m, shard };
+    let head = |block: u8, blocks: u8, k: u8, m: u8, shard: u8, red: bool| Head { kind, key, red, ack_cap: true, token, epoch, seq, block, blocks, k, m, shard };
     if kind == FRAME_AUDIO && body.len() <= cap {
         let red = prev.filter(|p| body.len() + p.len() <= cap);
         let mut d = Vec::with_capacity(HEADER_LEN + 2 + body.len() + red.map_or(0, <[u8]>::len));
@@ -559,6 +613,26 @@ impl LossMeter {
     }
 }
 
+/// Target send deadline for shard `index` of a `total`-shard frame started at `start`.
+/// Small frames (`total <= PACE_SMALL`) return `None` (zero-delay direct send). Medium/large frames spread in
+/// micro-batches of `PACE_BATCH` shards across a linear budget capped at `PACE_MOST` (P-frame) or `PACE_MOST_KEY`
+/// (keyframe). Using an absolute deadline from `start` deducts actual `send_datagram_wait` time automatically.
+pub(crate) fn pace_deadline(start: Instant, index: usize, total: usize, key: bool) -> Option<Instant> {
+    if total <= PACE_SMALL || index == 0 || index % PACE_BATCH != 0 {
+        return None;
+    }
+    let batches = total.div_ceil(PACE_BATCH);
+    if batches <= 1 {
+        return None;
+    }
+    let intervals = (batches - 1) as u64;
+    let batch_idx = ((index / PACE_BATCH) as u64).min(intervals);
+    let cap = if key { PACE_MOST_KEY } else { PACE_MOST };
+    let budget_us = (total as u64).saturating_mul(PACE_US_PER_SHARD).min(cap.as_micros() as u64);
+    let offset_us = budget_us.saturating_mul(batch_idx) / intervals;
+    Some(start + Duration::from_micros(offset_us))
+}
+
 /// A view's stream, sending: what is written on it taken apart into its frames, its video and audio frames sent as
 /// datagrams on its connection, the rest written on the stream as it came (the reply's head line first, whole).
 pub(crate) struct MediaOut {
@@ -580,6 +654,8 @@ pub(crate) struct MediaOut {
     loss: LossMeter,
     /// What the receiving end says of the loss its frames have (None: not heard; an end from before says nothing).
     heard: Option<Heard>,
+    /// Datagram ACKs arriving for this view's token, handed to the stream reader via `take_ack_rx`.
+    ack_rx: Option<AckRx>,
     /// A test's: datagrams dropped before they go (each one with this chance, by a seeded draw), the loss the parity is
     /// made for, and no parity at all (to compare with).
     #[cfg(test)]
@@ -608,7 +684,14 @@ impl MediaOut {
             return None;
         }
         let heard = hear(&conn, token);
-        Some(MediaOut { token, conn, line_done: false, buf: Vec::new(), raw: false, video_epoch: 0, audio_epoch: 0, video_seq: 0, audio_seq: 0, video_off: false, audio_off: false, prev_audio: None, loss: LossMeter::default(), heard, #[cfg(test)] lose: None, #[cfg(test)] assumed_loss: None, #[cfg(test)] no_parity: false, #[cfg(test)] before: false, #[cfg(test)] burst: 1, #[cfg(test)] took: Vec::new(), #[cfg(test)] shards: (0, 0) })
+        let ack_rx = hear_acks(&conn, token);
+        Some(MediaOut { token, conn, line_done: false, buf: Vec::new(), raw: false, video_epoch: 0, audio_epoch: 0, video_seq: 0, audio_seq: 0, video_off: false, audio_off: false, prev_audio: None, loss: LossMeter::default(), heard, ack_rx, #[cfg(test)] lose: None, #[cfg(test)] assumed_loss: None, #[cfg(test)] no_parity: false, #[cfg(test)] before: false, #[cfg(test)] burst: 1, #[cfg(test)] took: Vec::new(), #[cfg(test)] shards: (0, 0) })
+    }
+
+    /// Takes the datagram ACK receiver for this view so the stream's read half can inject `KIND.ack` frames at
+    /// stream frame boundaries.
+    pub(crate) fn take_ack_rx(&mut self) -> Option<AckRx> {
+        self.ack_rx.take()
     }
 
     /// `bytes` written: on the stream, or as datagrams where they are a frame of a picture or of sound.
@@ -757,19 +840,23 @@ impl MediaOut {
         for (i, d) in datagrams.into_iter().enumerate() {
             #[cfg(test)]
             if self.before {
-                if i > 0 && i % 8 == 0 && total > 8 && start.elapsed() < PACE_MOST {
+                if i > 0 && i % 8 == 0 && total > 8 && start.elapsed() < PACE_BEFORE_MOST {
                     tokio::time::sleep(Duration::from_micros(250)).await;
                 }
-            } else if i > 0 && total > PACE_BURST && i % PACE_BURST == 0 && start.elapsed() < PACE_MOST {
-                tokio::time::sleep(PACE_GAP).await;
-            } else if i > 0 && i % PACE_EVERY == 0 {
-                tokio::task::yield_now().await;
+            } else if let Some(deadline) = pace_deadline(start, i, total, key) {
+                if Instant::now() < deadline {
+                    tokio::time::sleep_until(deadline).await;
+                } else if i % PACE_EVERY == 0 {
+                    tokio::task::yield_now().await;
+                }
             }
             #[cfg(not(test))]
-            if i > 0 && total > PACE_BURST && i % PACE_BURST == 0 && start.elapsed() < PACE_MOST {
-                tokio::time::sleep(PACE_GAP).await;
-            } else if i > 0 && i % PACE_EVERY == 0 {
-                tokio::task::yield_now().await;
+            if let Some(deadline) = pace_deadline(start, i, total, key) {
+                if Instant::now() < deadline {
+                    tokio::time::sleep_until(deadline).await;
+                } else if i % PACE_EVERY == 0 {
+                    tokio::task::yield_now().await;
+                }
             }
             match self.conn.send_datagram_wait(Bytes::from(d)).await {
                 Ok(()) => {}
@@ -810,6 +897,10 @@ struct Pending {
     blocks: Vec<Option<Block>>,
     done: usize,
     first: Instant,
+    /// Most recent time any valid shard of this frame arrived.
+    last_activity: Instant,
+    /// Whether this frame spans more than one shard (used to avoid pulling jitter EWMA to 0 on 1-shard frames).
+    multi_shard: bool,
     whole: Option<(Vec<u8>, Instant)>,
     /// The audio packet before it, carried along.
     prev: Option<Vec<u8>>,
@@ -817,7 +908,17 @@ struct Pending {
 
 impl Pending {
     fn new(h: &Head, now: Instant) -> Pending {
-        Pending { key: h.key, epoch: h.epoch, blocks: (0..h.blocks).map(|_| None).collect(), done: 0, first: now, whole: None, prev: None }
+        Pending {
+            key: h.key,
+            epoch: h.epoch,
+            blocks: (0..h.blocks).map(|_| None).collect(),
+            done: 0,
+            first: now,
+            last_activity: now,
+            multi_shard: h.blocks > 1 || h.k > 1,
+            whole: None,
+            prev: None,
+        }
     }
 
     /// A shard taken in; whether the frame is whole now (a block had counted in `count`).
@@ -830,6 +931,7 @@ impl Pending {
         if block.k != k || block.m != m || block.data.is_some() || block.shards[h.shard as usize].is_some() || shard.len() < 2 {
             return false;
         }
+        self.last_activity = now;
         let i = h.shard as usize;
         block.got += 1;
         block.top = block.top.max(i + 1);
@@ -967,6 +1069,10 @@ pub(crate) struct MediaIn {
     pub(crate) loss: LossCount,
     /// The time last told (a datagram's, a tick's): when what is let go between is counted.
     clock: Option<Instant>,
+    /// EWMA of observed video shard arrival span / reorder wait in microseconds, driving adaptive `gap_wait()`.
+    jitter_us: f64,
+    /// Shared flag flipped true once any datagram from the sender carries `FLAG_ACK`.
+    peer_ack_cap: Option<Arc<AtomicBool>>,
 }
 
 /// `[kind, length (u32, big-endian), body]`.
@@ -1003,7 +1109,30 @@ impl MediaIn {
             counts: Counts::default(),
             loss: LossCount::default(),
             clock: None,
+            jitter_us: 0.0,
+            peer_ack_cap: None,
         }
+    }
+
+    /// Registers a shared atomic flag that will be set to `true` once any datagram for this view advertises `FLAG_ACK`.
+    #[allow(dead_code)] // Used by stillfail-shell (client side); station's stillfail-mesh only reads KIND_ACK.
+    pub(crate) fn set_peer_ack_cap(&mut self, cap: Arc<AtomicBool>) {
+        self.peer_ack_cap = Some(cap);
+    }
+
+    /// Adaptive reorder/gap wait: `GAP_WAIT_MIN` (12 ms) on a clean link, expanding up to `GAP_WAIT_MAX` (45 ms)
+    /// when shard arrival span or inter-frame reordering jitter is observed.
+    pub(crate) fn gap_wait(&self) -> Duration {
+        let target_us = (self.jitter_us * 2.0).round() as u64;
+        Duration::from_micros(target_us).clamp(GAP_WAIT_MIN, GAP_WAIT_MAX)
+    }
+
+    fn record_jitter(&mut self, sample: Duration) {
+        let sample_us = sample.as_micros() as f64;
+        // Envelope-tracking EWMA: fast rise on jitter spikes (0.35), slow decay when calm (0.03) so periodic
+        // metro/Wi-Fi jitter spikes keep `gap_wait` above the spike tail without staying high forever.
+        let alpha = if sample_us > self.jitter_us { 0.35 } else { 0.03 };
+        self.jitter_us += alpha * (sample_us - self.jitter_us);
     }
 
     /// Whether what the stream carried so far ends between two of its frames.
@@ -1112,6 +1241,11 @@ impl MediaIn {
         if h.token != self.token {
             return;
         }
+        if h.ack_cap {
+            if let Some(cap) = &self.peer_ack_cap {
+                cap.store(true, Ordering::Relaxed);
+            }
+        }
         self.clock = Some(now);
         let shard = &d[HEADER_LEN..];
         let video = h.kind == FRAME_VIDEO;
@@ -1120,12 +1254,29 @@ impl MediaIn {
             return;
         }
         let whole = kind.pending.entry(h.seq).or_insert_with(|| Pending::new(&h, now)).take(&h, shard, now, &mut self.loss);
+        let jitter_sample = if whole && video {
+            let p = kind.pending.get(&h.seq);
+            let span = p.map(|p| now.saturating_duration_since(p.first)).unwrap_or(Duration::ZERO);
+            let multi = p.is_some_and(|p| p.multi_shard);
+            let reorder = if h.seq == kind.last.wrapping_add(1) {
+                self.wait_from.map(|wf| now.saturating_duration_since(wf)).unwrap_or(Duration::ZERO)
+            } else {
+                Duration::ZERO
+            };
+            let sample = span.max(reorder);
+            (multi || !sample.is_zero()).then_some(sample)
+        } else {
+            None
+        };
         // the oldest let go past the window
         let mut lost_next = false;
         while kind.pending.len() > WINDOW {
             let (oldest, p) = kind.pending.pop_first().unwrap();
             self.loss.let_go(&p, now);
             lost_next |= video && oldest == kind.last.wrapping_add(1) && !kind.broken;
+        }
+        if let Some(sample) = jitter_sample {
+            self.record_jitter(sample);
         }
         if lost_next {
             self.give_up();
@@ -1184,18 +1335,39 @@ impl MediaIn {
             return;
         }
         let next = self.video.last.wrapping_add(1);
+        let gap_wait = self.gap_wait();
+        let next_p = self.video.pending.get(&next);
+        let next_active = next_p.is_some_and(|p| {
+            now.saturating_duration_since(p.last_activity) < gap_wait
+                && now.saturating_duration_since(p.first) < STALE_MAX
+        });
         let after = self.video.pending.iter().filter(|(s, p)| **s > next && p.whole.is_some()).map(|(s, p)| (*s, p.whole.as_ref().unwrap().1)).last();
         match after {
-            Some((s, _)) if s >= next.wrapping_add(2) => self.give_up(),
+            Some((s, _)) if s > next.wrapping_add(4) => self.give_up(),
+            Some((s, at)) if s >= next.wrapping_add(2) => {
+                if !next_active {
+                    self.give_up();
+                } else {
+                    let from = *self.wait_from.get_or_insert(at);
+                    if now.saturating_duration_since(from) >= gap_wait {
+                        self.give_up();
+                    }
+                }
+            }
             Some((_, at)) => {
                 let from = *self.wait_from.get_or_insert(at);
-                if now.duration_since(from) >= GAP_WAIT {
+                if now.saturating_duration_since(from) >= gap_wait
+                    || next_p.is_some_and(|p| now.saturating_duration_since(p.first) >= STALE_MAX)
+                {
                     self.give_up();
                 }
             }
             None => {
                 self.wait_from = None;
-                if self.video.pending.get(&next).is_some_and(|p| now.duration_since(p.first) >= STALE) {
+                if next_p.is_some_and(|p| {
+                    now.saturating_duration_since(p.last_activity) >= STALE
+                        || now.saturating_duration_since(p.first) >= STALE_MAX
+                }) {
                     self.give_up();
                 }
             }
@@ -1261,9 +1433,19 @@ impl MediaIn {
                 self.asked_keyframe.map(|at| at + KEYFRAME_RETRY)
             };
         }
-        let wait = self.wait_from.map(|w| w + GAP_WAIT);
-        let stale = self.video.pending.get(&self.video.last.wrapping_add(1)).filter(|p| p.whole.is_none()).map(|p| p.first + STALE);
-        [wait, stale, self.first_frame.map(|(_, at)| at)].into_iter().flatten().min()
+        let gap_wait = self.gap_wait();
+        let wait = self.wait_from.map(|w| w + gap_wait);
+        let next = self.video.last.wrapping_add(1);
+        let next_p = self.video.pending.get(&next).filter(|p| p.whole.is_none());
+        let active_expire = if self.wait_from.is_some()
+            && self.video.pending.iter().any(|(s, p)| *s >= next.wrapping_add(2) && p.whole.is_some())
+        {
+            next_p.map(|p| p.last_activity + gap_wait)
+        } else {
+            None
+        };
+        let stale = next_p.map(|p| (p.last_activity + STALE).min(p.first + STALE_MAX));
+        [wait, active_expire, stale, self.first_frame.map(|(_, at)| at)].into_iter().flatten().min()
     }
 
     pub(crate) fn tick(&mut self, now: Instant) {
@@ -1320,15 +1502,20 @@ impl MediaIn {
 /// The datagrams a view's token is given at most while not taken (a reader that stopped): the newest are dropped.
 const ROUTE_QUEUE: usize = 4096;
 
-/// A connection's datagrams read once views ask for them (`route`, `hear`), each frame's given to the view its token
-/// names and each report to the view sending under it; others (`conn.answers`' one byte, a view's gone) passed over.
-/// Read until the last view lets go. One a connection, whoever asks (the shell's or the addon's slot, or a view sent).
+/// Maximum buffered datagram ACKs per view before newest are dropped.
+const ACK_QUEUE: usize = 256;
+
+/// A connection's datagrams read once views ask for them (`route`, `hear`, `hear_acks`), each frame's given to the view
+/// its token names, each report to the view sending under it, and each datagram ACK to its view's read half; others
+/// (`conn.answers`' one byte, a view's gone) passed over. Read until the last view lets go. One a connection, whoever
+/// asks (the shell's or the addon's slot, or a view sent).
 pub(crate) struct Demux {
     /// The connection's `stable_id` (its entry in `demuxes`).
     id: usize,
     conn: Connection,
     routes: StdMutex<HashMap<u32, mpsc::Sender<Bytes>>>,
     reports: StdMutex<HashMap<u32, Arc<PeerLoss>>>,
+    acks: StdMutex<HashMap<u32, mpsc::Sender<(u64, u32)>>>,
     task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -1361,7 +1548,7 @@ fn demux_of(slot: Option<&StdMutex<Weak<Demux>>>, conn: &Connection) -> Arc<Demu
     let d = match all.get(&id).and_then(Weak::upgrade) {
         Some(d) => d,
         None => {
-            let d = Arc::new(Demux { id, conn: conn.clone(), routes: StdMutex::default(), reports: StdMutex::default(), task: StdMutex::default() });
+            let d = Arc::new(Demux { id, conn: conn.clone(), routes: StdMutex::default(), reports: StdMutex::default(), acks: StdMutex::default(), task: StdMutex::default() });
             let (weak, conn) = (Arc::downgrade(&d), conn.clone());
             let task = tokio::spawn(async move {
                 while let Ok(datagram) = conn.read_datagram().await {
@@ -1371,6 +1558,14 @@ fn demux_of(slot: Option<&StdMutex<Weak<Demux>>>, conn: &Connection) -> Arc<Demu
                         if let Some(to) = to {
                             to.heard(ppm, Instant::now());
                             crate::tally("dgram.loss.heard");
+                        }
+                        continue;
+                    }
+                    if let Some((token, ts, wait_us)) = ack_of(&datagram) {
+                        let to = demux.acks.lock().unwrap().get(&token).cloned();
+                        if let Some(to) = to {
+                            let _ = to.try_send((ts, wait_us));
+                            crate::tally("dgram.ack.heard");
                         }
                         continue;
                     }
@@ -1456,6 +1651,127 @@ impl MediaRx {
         }
         self.rx.recv().await
     }
+}
+
+/// Tracks client -> station binary frame boundaries so datagram ACKs are only injected between frames, never inside one.
+#[derive(Default)]
+pub(crate) struct AckFraming {
+    head: [u8; 5],
+    head_have: usize,
+    rem: usize,
+    out_of_step: bool,
+}
+
+impl AckFraming {
+    pub(crate) fn at_boundary(&self) -> bool {
+        !self.out_of_step && self.rem == 0 && self.head_have == 0
+    }
+
+    /// Advances over `chunk` and returns the last offset in `chunk` that lies between two frames (if any).
+    pub(crate) fn stream(&mut self, chunk: &[u8]) -> Option<usize> {
+        if self.out_of_step {
+            return None;
+        }
+        let mut at = 0;
+        let mut boundary = self.at_boundary().then_some(0);
+        while at < chunk.len() {
+            if self.rem > 0 {
+                let take = self.rem.min(chunk.len() - at);
+                at += take;
+                self.rem -= take;
+                if self.rem == 0 {
+                    boundary = Some(at);
+                }
+                continue;
+            }
+            self.head[self.head_have] = chunk[at];
+            self.head_have += 1;
+            at += 1;
+            if self.head_have == 5 {
+                self.head_have = 0;
+                let len = u32::from_be_bytes([self.head[1], self.head[2], self.head[3], self.head[4]]) as usize;
+                if len > FRAME_MAX {
+                    self.out_of_step = true;
+                    return None;
+                }
+                self.rem = len;
+                if len == 0 {
+                    boundary = Some(at);
+                }
+            }
+        }
+        boundary
+    }
+}
+
+struct AckRoute {
+    demux: Arc<Demux>,
+    token: u32,
+    tx: mpsc::Sender<(u64, u32)>,
+}
+
+impl Drop for AckRoute {
+    fn drop(&mut self) {
+        let mut acks = self.demux.acks.lock().unwrap();
+        if acks.get(&self.token).is_some_and(|tx| tx.same_channel(&self.tx)) {
+            acks.remove(&self.token);
+        }
+    }
+}
+
+/// Station-side receiver for unreliable `KIND_ACK` datagrams of a view, injecting standard 17-byte `KIND.ack` frames
+/// into the stream's read half at frame boundaries.
+pub(crate) struct AckRx {
+    framing: AckFraming,
+    rx: mpsc::Receiver<(u64, u32)>,
+    rx_done: bool,
+    ready: VecDeque<(u64, u32)>,
+    _route: AckRoute,
+}
+
+impl AckRx {
+    pub(crate) fn at_boundary(&self) -> bool {
+        self.framing.at_boundary()
+    }
+
+    pub(crate) fn stream(&mut self, chunk: &[u8]) -> Option<usize> {
+        self.framing.stream(chunk)
+    }
+
+    pub(crate) fn take_waiting(&mut self, first: Option<(u64, u32)>) {
+        match first {
+            Some(a) => self.ready.push_back(a),
+            None => self.rx_done = true,
+        }
+        while let Ok(a) = self.rx.try_recv() {
+            self.ready.push_back(a);
+        }
+    }
+
+    pub(crate) fn drain_into(&mut self, out: &mut Vec<u8>) {
+        while let Some((ts, wait_us)) = self.ready.pop_front() {
+            out.extend_from_slice(&ack_frame_bytes(ts, wait_us));
+        }
+    }
+
+    pub(crate) async fn next(&mut self) -> Option<(u64, u32)> {
+        if self.rx_done {
+            return std::future::pending().await;
+        }
+        self.rx.recv().await
+    }
+}
+
+/// Registers datagram ACK reception for `token` on `conn` (sharing the connection's `Demux`). None outside a tokio runtime.
+pub(crate) fn hear_acks(conn: &Connection, token: u32) -> Option<AckRx> {
+    if token == 0 {
+        return None;
+    }
+    tokio::runtime::Handle::try_current().ok()?;
+    let demux = demux_of(None, conn);
+    let (tx, rx) = mpsc::channel(ACK_QUEUE);
+    demux.acks.lock().unwrap().insert(token, tx.clone());
+    Some(AckRx { framing: AckFraming::default(), rx, rx_done: false, ready: VecDeque::new(), _route: AckRoute { demux, token, tx } })
 }
 
 /// Until `at` (forever where it is none: `MediaIn::deadline`).
@@ -1716,16 +2032,16 @@ mod tests {
         for d in sent[2].iter().skip(2) {
             media.datagram(d, t);
         }
-        // 4 comes whole: waited 3 ms for 3
+        // 4 comes whole: waited GAP_WAIT_MIN (12 ms) for 3
         take(&mut media, 3, t + Duration::from_millis(1));
         assert_eq!(given(&mut media).len(), 2);
-        assert_eq!(media.deadline(), Some(t + Duration::from_millis(4)));
-        media.tick(t + Duration::from_millis(4));
+        assert_eq!(media.deadline(), Some(t + Duration::from_millis(1) + GAP_WAIT_MIN));
+        media.tick(t + Duration::from_millis(1) + GAP_WAIT_MIN);
         assert_eq!(media.counts.given_up, 1);
-        assert!(media.take_keyframe(t + Duration::from_millis(4)));
+        assert!(media.take_keyframe(t + Duration::from_millis(1) + GAP_WAIT_MIN));
         // (asked once in KEYFRAME_EVERY)
-        take(&mut media, 4, t + Duration::from_millis(8));
-        assert!(!media.take_keyframe(t + Duration::from_millis(8)));
+        take(&mut media, 4, t + Duration::from_millis(20));
+        assert!(!media.take_keyframe(t + Duration::from_millis(20)));
         assert!(media.ready.is_empty(), "nothing given that lost its reference");
         // the key frame: given at once, and on from it
         take(&mut media, 5, t + Duration::from_millis(30));
@@ -1742,24 +2058,24 @@ mod tests {
         let frames: Vec<(u8, bool, Vec<u8>)> = (0..5).map(|i| (FRAME_VIDEO, i == 0 || i >= 3, video_body(i == 0 || i >= 3, i, 3000, i as u8))).collect();
         let sent = send(5, &frames, 1, 0.0);
         sent[0].iter().for_each(|d| media.datagram(d, t));
-        // 2 loses two shards with one parity, 3 comes whole: 2 given up 3 ms on, a key frame asked for
+        // 2 loses two shards with one parity, 3 comes whole: 2 given up GAP_WAIT_MIN on, a key frame asked for
         sent[1].iter().skip(2).for_each(|d| media.datagram(d, t));
         sent[2].iter().for_each(|d| media.datagram(d, t));
-        media.tick(ms(7));
+        media.tick(ms(15));
         assert_eq!(media.counts.given_up, 1);
-        assert!(media.take_keyframe(ms(7)));
+        assert!(media.take_keyframe(ms(15)));
         // the key frame sent for it loses past its two parity shards too, and then the screen is still: nothing more comes
         for d in sent[3].iter().skip(3) {
-            media.datagram(d, ms(20));
+            media.datagram(d, ms(25));
         }
-        assert!(!media.take_keyframe(ms(20)));
-        assert_eq!(media.deadline(), Some(ms(507)), "asked again KEYFRAME_RETRY after");
+        assert!(!media.take_keyframe(ms(25)));
+        assert_eq!(media.deadline(), Some(ms(515)), "asked again KEYFRAME_RETRY after");
         media.tick(ms(400));
         assert!(!media.take_keyframe(ms(400)));
-        media.tick(ms(507));
+        media.tick(ms(515));
         assert_eq!(media.deadline(), None, "nothing waited for until it is asked");
-        assert!(media.take_keyframe(ms(507)));
-        assert_eq!(media.deadline(), Some(ms(1007)));
+        assert!(media.take_keyframe(ms(515)));
+        assert_eq!(media.deadline(), Some(ms(1015)));
         // the next key frame comes whole: given, and nothing more to wait for
         sent[4].iter().for_each(|d| media.datagram(d, ms(530)));
         assert_eq!(given(&mut media).into_iter().map(|g| g.1).collect::<Vec<_>>(), vec![frames[0].2.clone(), frames[4].2.clone()]);
@@ -1778,18 +2094,18 @@ mod tests {
         sent[0].iter().for_each(|d| media.datagram(d, t));
         sent[1].iter().skip(2).for_each(|d| media.datagram(d, t));
         sent[2].iter().for_each(|d| media.datagram(d, t));
-        media.tick(ms(4));
-        assert!(media.take_keyframe(ms(4)));
+        media.tick(ms(12));
+        assert!(media.take_keyframe(ms(12)));
         sent[3].iter().for_each(|d| media.datagram(d, ms(30)));
         assert!(!media.video.broken);
         sent[4].iter().skip(2).for_each(|d| media.datagram(d, ms(40)));
         sent[5].iter().for_each(|d| media.datagram(d, ms(40)));
-        media.tick(ms(44));
-        assert!(!media.take_keyframe(ms(44)), "the next request is rate-limited");
-        assert_eq!(media.deadline(), Some(ms(204)), "wake when the limit expires even if no more frames arrive");
-        media.tick(ms(204));
-        assert!(media.take_keyframe(ms(204)));
-        sent[6].iter().for_each(|d| media.datagram(d, ms(220)));
+        media.tick(ms(52));
+        assert!(!media.take_keyframe(ms(52)), "the next request is rate-limited");
+        assert_eq!(media.deadline(), Some(ms(312)), "wake when the limit expires even if no more frames arrive");
+        media.tick(ms(312));
+        assert!(media.take_keyframe(ms(312)));
+        sent[6].iter().for_each(|d| media.datagram(d, ms(330)));
         assert!(!media.video.broken);
         assert_eq!(media.deadline(), None);
     }
@@ -1971,5 +2287,364 @@ mod tests {
             media.datagram(d, t);
         }
         assert!(media.ready.is_empty());
+    }
+
+    #[test]
+    fn ack_datagram_roundtrip_and_backward_compatibility() {
+        let a = ack_bytes(19, 1_234_567_890, 4_321);
+        assert_eq!(a.len(), ACK_LEN);
+        assert_eq!(ack_of(&a), Some((19, 1_234_567_890, 4_321)));
+        // Older receivers ignore KIND_ACK (Head::of rejects kind == 5, report_of rejects len/kind).
+        assert!(Head::of(&a).is_none());
+        assert!(report_of(&a).is_none());
+        assert_eq!(ack_of(&ack_bytes(0, 1, 0)), None);
+        assert_eq!(ack_of(&a[..ACK_LEN - 1]), None);
+
+        // Stream wire format for injected KIND.ack.
+        let f = ack_frame_bytes(1_234_567_890, 4_321);
+        assert_eq!(f.len(), 17);
+        assert_eq!(f[0], FRAME_ACK);
+        assert_eq!(u32::from_be_bytes(f[1..5].try_into().unwrap()), 12);
+        assert_eq!(u64::from_be_bytes(f[5..13].try_into().unwrap()), 1_234_567_890);
+        assert_eq!(u32::from_be_bytes(f[13..17].try_into().unwrap()), 4_321);
+
+        // FLAG_ACK bit 5 is set on outgoing media datagrams and parsed by Head::of without breaking kind/key/red.
+        let sent = send(7, &[(FRAME_VIDEO, true, video_body(true, 1, 100, 1))], 1, 0.0);
+        let h = Head::of(&sent[0][0]).unwrap();
+        assert!(h.ack_cap);
+        assert!(h.key);
+        assert_eq!(h.kind, FRAME_VIDEO);
+        // Clearing FLAG_ACK (old station) still parses cleanly with ack_cap = false.
+        let mut old_dgram = sent[0][0].clone();
+        old_dgram[1] &= !FLAG_ACK;
+        let h_old = Head::of(&old_dgram).unwrap();
+        assert!(!h_old.ack_cap);
+        assert!(h_old.key);
+    }
+
+    #[test]
+    fn micro_pacing_zero_delay_for_small_and_smooth_for_large_frames() {
+        let start = Instant::now();
+        // Small frames (<= 8 shards): zero pacing deadlines.
+        for total in 1..=PACE_SMALL {
+            for i in 0..total {
+                assert_eq!(pace_deadline(start, i, total, false), None);
+                assert_eq!(pace_deadline(start, i, total, true), None);
+            }
+        }
+        // Medium P-frame (36 shards): budget = 36 * 75us = 2.7ms, 6 batches of 6 -> 5 even intervals.
+        let p_deadlines: Vec<Duration> = (0..36).filter_map(|i| pace_deadline(start, i, 36, false).map(|d| d - start)).collect();
+        assert_eq!(p_deadlines.len(), 5);
+        assert_eq!(*p_deadlines.last().unwrap(), Duration::from_micros(36 * PACE_US_PER_SHARD));
+        assert!(*p_deadlines.last().unwrap() <= PACE_MOST);
+        // Large P-frame (120 shards): capped at PACE_MOST (6 ms).
+        let big_p: Vec<Duration> = (0..120).filter_map(|i| pace_deadline(start, i, 120, false).map(|d| d - start)).collect();
+        assert_eq!(*big_p.last().unwrap(), PACE_MOST);
+        // Keyframe (140 shards): capped at PACE_MOST_KEY (10 ms), micro-batched every PACE_BATCH (6) shards.
+        let key_deadlines: Vec<Duration> = (0..140).filter_map(|i| pace_deadline(start, i, 140, true).map(|d| d - start)).collect();
+        assert_eq!(key_deadlines.len(), 140usize.div_ceil(PACE_BATCH) - 1);
+        assert_eq!(*key_deadlines.last().unwrap(), PACE_MOST_KEY);
+        // Monotonic and evenly spaced (~0.43 ms per 6-shard batch vs old 64-shard burst!).
+        for w in key_deadlines.windows(2) {
+            let gap = w[1] - w[0];
+            assert!(gap >= Duration::from_micros(350) && gap <= Duration::from_micros(550), "gap {gap:?}");
+        }
+    }
+
+    #[test]
+    fn active_next_frame_tolerates_up_to_four_frames_ahead_and_adapts_gap_wait() {
+        let t = Instant::now();
+        let ms = |n: u64| t + Duration::from_millis(n);
+        let mut media = MediaIn::new(5, false);
+        stream_at(&mut media, &config(1), t);
+        let frames: Vec<(u8, bool, Vec<u8>)> = (0..8).map(|i| (FRAME_VIDEO, i == 0, video_body(i == 0, i, 6_000, i as u8))).collect();
+        let sent = send(5, &frames, 1, 0.0);
+        // Frame 1 (key) arrives cleanly.
+        sent[0].iter().for_each(|d| media.datagram(d, t));
+        assert_eq!(given(&mut media).len(), 1);
+        assert_eq!(media.gap_wait(), GAP_WAIT_MIN);
+
+        // Frame 2 (next) receives its first shard at t=0, while frames 3 and 4 (next+1, next+2) finish at t=4ms.
+        // Because frame 2 is actively receiving shards (`now - last_activity < gap_wait`) and s <= next+4, do NOT give_up!
+        media.datagram(&sent[1][0], t);
+        sent[2].iter().for_each(|d| media.datagram(d, ms(4)));
+        sent[3].iter().for_each(|d| media.datagram(d, ms(4)));
+        assert_eq!(media.counts.given_up, 0, "active next frame must not be killed by next+2");
+        assert!(!media.video.broken);
+
+        // Remaining shards of frame 2 arrive at t=10ms -> all 3 frames (2, 3, 4) delivered in order!
+        for d in &sent[1][1..] {
+            media.datagram(d, ms(10));
+        }
+        assert_eq!(media.counts.given_up, 0);
+        assert_eq!(given(&mut media).len(), 3);
+        // Observed 10ms span raised jitter EWMA; now feed frames with 24ms span and verify gap_wait adapts up to ~20-45ms.
+        for idx in 4..8 {
+            media.datagram(&sent[idx][0], ms(20 + idx as u64 * 30));
+            for d in &sent[idx][1..] {
+                media.datagram(d, ms(44 + idx as u64 * 30));
+            }
+        }
+        assert!(media.gap_wait() > GAP_WAIT_MIN && media.gap_wait() <= GAP_WAIT_MAX, "adaptive gap_wait {:?}", media.gap_wait());
+    }
+
+    #[test]
+    fn stale_tracks_last_activity_with_hard_cap() {
+        let t = Instant::now();
+        let ms = |n: u64| t + Duration::from_millis(n);
+        let mut media = MediaIn::new(5, false);
+        stream_at(&mut media, &config(1), t);
+        let frames: Vec<(u8, bool, Vec<u8>)> = (0..2).map(|i| (FRAME_VIDEO, i == 0, video_body(i == 0, i, 20_000, i as u8))).collect();
+        let sent = send(5, &frames, 1, 0.0);
+        sent[0].iter().for_each(|d| media.datagram(d, t));
+        let _ = given(&mut media);
+
+        // Shard 0 arrives at t=0, shard 1 arrives at t=50ms -> last_activity resets STALE (80ms) past t=80ms,
+        // but hard cap STALE_MAX (120ms from first) still gives up at t=120ms.
+        media.datagram(&sent[1][0], ms(0));
+        media.datagram(&sent[1][1], ms(50));
+        media.tick(ms(85));
+        assert_eq!(media.counts.given_up, 0, "activity at 50ms keeps frame alive past 80ms");
+        assert_eq!(media.deadline(), Some(ms(120)), "capped at first + STALE_MAX");
+        media.tick(ms(120));
+        assert_eq!(media.counts.given_up, 1, "hard cap STALE_MAX prevents infinite stall");
+    }
+
+    /// Deterministic metro-network simulation comparing before (WINDOW=8, GAP_WAIT=3ms, STALE=40ms, immediate give_up at
+    /// next+2, PACE_BURST=64) vs after (WINDOW=16, adaptive gap_wait 12..45ms, STALE=80/120ms, active next tolerance up
+    /// to next+4, smooth 6-shard micro-pacing) under 20ms RTT, ±15ms shard reordering/jitter, 1.5% loss with 2-shard
+    /// bursts, and mixed 120KB keyframes + 8KB P-frames.
+    #[test]
+    fn metro_network_simulation_before_and_after() {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        struct OldMediaIn {
+            inner: MediaIn,
+        }
+        impl OldMediaIn {
+            fn new(token: u32) -> Self {
+                Self { inner: MediaIn::new(token, false) }
+            }
+            fn datagram(&mut self, d: &[u8], now: Instant) {
+                let Some(h) = Head::of(d) else { return };
+                if h.token != self.inner.token || h.kind != FRAME_VIDEO {
+                    return;
+                }
+                self.inner.clock = Some(now);
+                if self.inner.video.closed || h.seq <= self.inner.video.last {
+                    return;
+                }
+                let whole = self.inner.video.pending.entry(h.seq).or_insert_with(|| Pending::new(&h, now)).take(&h, &d[HEADER_LEN..], now, &mut self.inner.loss);
+                let mut lost_next = false;
+                while self.inner.video.pending.len() > 8 {
+                    let (oldest, p) = self.inner.video.pending.pop_first().unwrap();
+                    self.inner.loss.let_go(&p, now);
+                    lost_next |= oldest == self.inner.video.last.wrapping_add(1) && !self.inner.video.broken;
+                }
+                if lost_next {
+                    self.inner.give_up();
+                }
+                if whole {
+                    self.advance_old(now);
+                    if self.inner.video.broken {
+                        self.inner.want_keyframe = true;
+                    }
+                }
+            }
+            fn advance_old(&mut self, now: Instant) {
+                loop {
+                    let next = self.inner.video.last.wrapping_add(1);
+                    if !self.inner.video.broken && self.inner.video.pending.get(&next).is_some_and(|p| p.whole.is_some()) {
+                        let p = self.inner.video.pending.remove(&next).unwrap();
+                        self.inner.give_video(next, p);
+                        continue;
+                    }
+                    let key = self.inner.video.pending.iter().find(|(s, p)| p.key && p.whole.is_some() && **s > self.inner.video.last).map(|(s, _)| *s);
+                    match key {
+                        Some(s) => {
+                            let p = self.inner.video.pending.remove(&s).unwrap();
+                            retain_counted(&mut self.inner.video.pending, &mut self.inner.loss, now, |q, _| q > s);
+                            self.inner.video.broken = false;
+                            self.inner.want_keyframe = false;
+                            self.inner.give_video(s, p);
+                        }
+                        None => break,
+                    }
+                }
+                if self.inner.video.broken {
+                    return;
+                }
+                let next = self.inner.video.last.wrapping_add(1);
+                let after = self.inner.video.pending.iter().filter(|(s, p)| **s > next && p.whole.is_some()).map(|(s, p)| (*s, p.whole.as_ref().unwrap().1)).last();
+                match after {
+                    Some((s, _)) if s >= next.wrapping_add(2) => self.inner.give_up(),
+                    Some((_, at)) => {
+                        let from = *self.inner.wait_from.get_or_insert(at);
+                        if now.saturating_duration_since(from) >= Duration::from_millis(3) {
+                            self.inner.give_up();
+                        }
+                    }
+                    None => {
+                        self.inner.wait_from = None;
+                        if self.inner.video.pending.get(&next).is_some_and(|p| now.saturating_duration_since(p.first) >= Duration::from_millis(40)) {
+                            self.inner.give_up();
+                        }
+                    }
+                }
+            }
+            fn deadline_old(&self) -> Option<Instant> {
+                if self.inner.video.closed || self.inner.video.broken {
+                    return None;
+                }
+                let wait = self.inner.wait_from.map(|w| w + Duration::from_millis(3));
+                let stale = self.inner.video.pending.get(&self.inner.video.last.wrapping_add(1)).filter(|p| p.whole.is_none()).map(|p| p.first + Duration::from_millis(40));
+                [wait, stale].into_iter().flatten().min()
+            }
+            fn tick_old(&mut self, now: Instant) {
+                self.inner.clock = Some(now);
+                if !self.inner.video.broken {
+                    self.advance_old(now);
+                }
+            }
+        }
+
+        // Measure pacing burst distribution on a 120KB keyframe (~126 shards with parity).
+        let t0 = Instant::now();
+        let key_dgrams = datagrams_of(1, FRAME_VIDEO, true, 1, 1, &video_body(true, 1, 120_000, 1), None, 1200, 0.015).unwrap();
+        let n_key = key_dgrams.len();
+        // Old pacing: 64 shards at t=0, 64 shards at t=500us, remaining at t=1000us (max burst = 128 in 1ms).
+        let mut old_buckets = BTreeMap::<u64, usize>::new();
+        let mut new_buckets = BTreeMap::<u64, usize>::new();
+        for i in 0..n_key {
+            let old_ms = ((i / 64) as u64 * 500).min(4000) / 1000;
+            *old_buckets.entry(old_ms).or_default() += 1;
+            let batch_start = (i / PACE_BATCH) * PACE_BATCH;
+            let new_ms = pace_deadline(t0, batch_start, n_key, true).map_or(0, |d| (d - t0).as_millis() as u64);
+            *new_buckets.entry(new_ms).or_default() += 1;
+        }
+        let old_max_per_ms = *old_buckets.values().max().unwrap();
+        let new_max_per_ms = *new_buckets.values().max().unwrap();
+        assert!(old_max_per_ms >= 64 && new_max_per_ms <= 24, "old_max_per_ms={old_max_per_ms} new_max_per_ms={new_max_per_ms}");
+
+        // Simulate 120 frames at 60fps (16.67ms/frame) over a metro link:
+        // - 20ms base RTT (10ms one-way)
+        // - Per-shard jitter: 0..4ms baseline + 15% of shards hit by 15..22ms metro/Wi-Fi jitter spike (reordering across
+        //   adjacent frames, especially when a 120KB keyframe overlaps following 8KB P-frames)
+        // - 1.5% packet loss (mix of single drops and 2-shard bursts)
+        // Tested both without egress queue drops (isolating receiver anti-jitter) and with a 48-pkt/ms shallow queue
+        // (evaluating combined sender micro-pacing + receiver anti-jitter).
+        const FRAMES: u32 = 120;
+        let run_sim = |use_new: bool, queue_cap_per_ms: Option<usize>| -> (u64, u64, u64) {
+            let mut seed = 0x5EED_CAFE_BABE_1234u64;
+            let mut next_u64 = || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed
+            };
+            let mut events: BinaryHeap<Reverse<(u64, usize, Vec<u8>)>> = BinaryHeap::new();
+            let mut ev_id = 0usize;
+            let mut burst_drop = 0usize;
+            let mut egress_ms_counts: HashMap<u64, usize> = HashMap::new();
+            for f in 0..FRAMES {
+                let seq = f + 1;
+                let key = f % 30 == 0;
+                let size = if key { 120_000 } else { 8_000 };
+                let body = video_body(key, f as u64 * 16_667, size, f as u8);
+                let dgrams = datagrams_of(7, FRAME_VIDEO, key, 1, seq, &body, None, 1200, 0.015).unwrap();
+                let frame_start_us = f as u64 * 16_667;
+                let total = dgrams.len();
+                for (i, d) in dgrams.into_iter().enumerate() {
+                    let pace_us = if use_new {
+                        let batch_start = (i / PACE_BATCH) * PACE_BATCH;
+                        pace_deadline(t0, batch_start, total, key).map_or(0, |dl| (dl - t0).as_micros() as u64)
+                    } else {
+                        ((i / 64) as u64 * 500).min(4000)
+                    };
+                    let send_us = frame_start_us + pace_us;
+                    if let Some(cap) = queue_cap_per_ms {
+                        let bucket = egress_ms_counts.entry(send_us / 1000).or_default();
+                        *bucket += 1;
+                        if *bucket > cap {
+                            continue;
+                        }
+                    }
+                    if burst_drop > 0 {
+                        burst_drop -= 1;
+                        continue;
+                    }
+                    // 1.5% random loss; 50% of loss events are 2-shard bursts.
+                    if (next_u64() % 10_000) < 150 {
+                        if (next_u64() & 1) == 1 {
+                            burst_drop = 1;
+                        }
+                        continue;
+                    }
+                    // 10ms one-way + 0..4ms normal jitter + 15% chance of 15..22ms metro/Wi-Fi reordering spike.
+                    let base_jitter = next_u64() % 4_000;
+                    let spike = if (next_u64() % 100) < 15 { 15_000 + (next_u64() % 7_000) } else { 0 };
+                    let arrive_us = send_us + 10_000 + base_jitter + spike;
+                    ev_id += 1;
+                    events.push(Reverse((arrive_us, ev_id, d)));
+                }
+            }
+            if use_new {
+                let mut media = MediaIn::new(7, false);
+                stream_at(&mut media, &config(1), t0);
+                while let Some(Reverse((at_us, _, d))) = events.pop() {
+                    let now = t0 + Duration::from_micros(at_us);
+                    while let Some(dl) = media.deadline() {
+                        if now >= dl {
+                            media.tick(dl);
+                        } else {
+                            break;
+                        }
+                    }
+                    media.datagram(&d, now);
+                }
+                media.tick(t0 + Duration::from_secs(5));
+                (media.counts.video, media.counts.given_up, media.gap_wait().as_millis() as u64)
+            } else {
+                let mut old = OldMediaIn::new(7);
+                stream_at(&mut old.inner, &config(1), t0);
+                while let Some(Reverse((at_us, _, d))) = events.pop() {
+                    let now = t0 + Duration::from_micros(at_us);
+                    while let Some(dl) = old.deadline_old() {
+                        if now >= dl {
+                            old.tick_old(dl);
+                        } else {
+                            break;
+                        }
+                    }
+                    old.datagram(&d, now);
+                }
+                old.tick_old(t0 + Duration::from_secs(5));
+                (old.inner.counts.video, old.inner.counts.given_up, 3)
+            }
+        };
+
+        // Scenario A: Pure metro reordering + 1.5% burst loss (no egress queue drops).
+        let (old_a_del, old_a_gu, _) = run_sim(false, None);
+        let (new_a_del, new_a_gu, new_a_gap) = run_sim(true, None);
+        eprintln!(
+            "METRO SIM [A: jitter+loss]: BEFORE delivered={old_a_del}/120 ({:.1}%), given_up={old_a_gu} | AFTER delivered={new_a_del}/120 ({:.1}%), given_up={new_a_gu}, adaptive_gap_wait={new_a_gap}ms",
+            old_a_del as f64 * 100.0 / FRAMES as f64,
+            new_a_del as f64 * 100.0 / FRAMES as f64,
+        );
+        assert!(new_a_gu < old_a_gu, "Scenario A expected fewer keyframe storms: new={new_a_gu} vs old={old_a_gu}");
+        assert!(new_a_del > old_a_del && new_a_del >= 115, "Scenario A expected >=95% delivery vs old: new={new_a_del} vs old={old_a_del}");
+        assert!(new_a_gu <= 1, "Scenario A expected at most genuine unrecoverable burst loss, got {new_a_gu}");
+
+        // Scenario B: Same metro link + shallow 48-pkt/ms Wi-Fi/router egress queue.
+        let (old_b_del, old_b_gu, _) = run_sim(false, Some(48));
+        let (new_b_del, new_b_gu, new_b_gap) = run_sim(true, Some(48));
+        eprintln!(
+            "METRO SIM [B: +48-pkt/ms queue]: BEFORE delivered={old_b_del}/120 ({:.1}%), given_up={old_b_gu}, keyframe_max_burst={old_max_per_ms}/ms | AFTER delivered={new_b_del}/120 ({:.1}%), given_up={new_b_gu}, adaptive_gap_wait={new_b_gap}ms, keyframe_max_burst={new_max_per_ms}/ms",
+            old_b_del as f64 * 100.0 / FRAMES as f64,
+            new_b_del as f64 * 100.0 / FRAMES as f64,
+        );
+        assert!(new_b_del >= 115 && new_b_del > old_b_del, "Scenario B expected >=95% delivery vs old: new={new_b_del} vs old={old_b_del}");
+        assert!(new_b_gu <= 1, "Scenario B expected at most genuine unrecoverable burst loss, got {new_b_gu}");
     }
 }

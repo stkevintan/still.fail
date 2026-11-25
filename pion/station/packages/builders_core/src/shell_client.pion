@@ -1,0 +1,846 @@
+// Unified synchronous & asynchronous `libstillfail_shell.a` client (`ShellClient`) over the
+// single process-wide unbounded `LineQueue`, 1:1 aligned with `station/mb/src/wire/wire.mbt:94-123`.
+// Never uses `host_shim::LineReader` (which has a 16 MiB line cap).
+
+import "base_codec"
+import "host_shim"
+import "nodepath"
+import "sql_db"
+
+pub struct ShellError {
+  pub message : String
+}
+
+pub fn shell_error(msg : String) -> ShellError {
+  ShellError::{ message: msg }
+}
+
+struct JsonErrScanner {
+  raw : Bytes
+  n : Int
+  mut pos : Int
+  mut line : Int
+  mut col : Int
+}
+
+fn JsonErrScanner::new(s : String) -> JsonErrScanner {
+  let b = s.to_bytes()
+  JsonErrScanner::{ raw: b, n: b.length(), pos: 0, line: 1, col: 0 }
+}
+
+fn JsonErrScanner::decode_at(self : JsonErrScanner, i : Int) -> (Int, Int) {
+  let b0 = self.raw[i].to_int() & 0xFF
+  if b0 < 0x80 {
+    return (b0, i + 1)
+  }
+  if b0 >= 0xC2 && b0 <= 0xDF && i + 1 < self.n {
+    let b1 = self.raw[i + 1].to_int() & 0xFF
+    if (b1 & 0xC0) == 0x80 {
+      return (((b0 & 0x1F) << 6) | (b1 & 0x3F), i + 2)
+    }
+  }
+  if b0 >= 0xE0 && b0 <= 0xEF && i + 2 < self.n {
+    let b1 = self.raw[i + 1].to_int() & 0xFF
+    let b2 = self.raw[i + 2].to_int() & 0xFF
+    if (b1 & 0xC0) == 0x80 && (b2 & 0xC0) == 0x80 {
+      return (((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F), i + 3)
+    }
+  }
+  if b0 >= 0xF0 && b0 <= 0xF4 && i + 3 < self.n {
+    let b1 = self.raw[i + 1].to_int() & 0xFF
+    let b2 = self.raw[i + 2].to_int() & 0xFF
+    let b3 = self.raw[i + 3].to_int() & 0xFF
+    if (b1 & 0xC0) == 0x80 && (b2 & 0xC0) == 0x80 && (b3 & 0xC0) == 0x80 {
+      let cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+      return (cp, i + 4)
+    }
+  }
+  (0xFFFD, i + 1)
+}
+
+fn JsonErrScanner::advance_byte(self : JsonErrScanner) -> Unit {
+  if self.pos < self.n {
+    let b = self.raw[self.pos].to_int() & 0xFF
+    self.pos = self.pos + 1
+    if b == 10 {
+      self.line = self.line + 1
+      self.col = 0
+    } else {
+      self.col = self.col + 1
+    }
+  }
+}
+
+fn JsonErrScanner::advance_cp(self : JsonErrScanner) -> Int {
+  let (cp, next) = self.decode_at(self.pos)
+  self.pos = next
+  if cp == 10 {
+    self.line = self.line + 1
+    self.col = 0
+  } else if cp >= 0x10000 {
+    self.col = self.col + 2
+  } else {
+    self.col = self.col + 1
+  }
+  cp
+}
+
+fn JsonErrScanner::skip_ws(self : JsonErrScanner) -> Unit {
+  while self.pos < self.n {
+    let b = self.raw[self.pos].to_int() & 0xFF
+    if b == 32 || b == 9 || b == 13 || b == 10 {
+      self.advance_byte()
+    } else {
+      break
+    }
+  }
+}
+
+fn write_cp_utf8(sb : StringBuilder, cp : Int) -> Unit {
+  if cp < 0x80 {
+    sb.write_byte(cp as Byte)
+  } else if cp < 0x800 {
+    sb.write_byte((0xC0 | (cp >> 6)) as Byte)
+    sb.write_byte((0x80 | (cp & 0x3F)) as Byte)
+  } else if cp < 0x10000 {
+    sb.write_byte((0xE0 | (cp >> 12)) as Byte)
+    sb.write_byte((0x80 | ((cp >> 6) & 0x3F)) as Byte)
+    sb.write_byte((0x80 | (cp & 0x3F)) as Byte)
+  } else {
+    sb.write_byte((0xF0 | (cp >> 18)) as Byte)
+    sb.write_byte((0x80 | ((cp >> 12) & 0x3F)) as Byte)
+    sb.write_byte((0x80 | ((cp >> 6) & 0x3F)) as Byte)
+    sb.write_byte((0x80 | (cp & 0x3F)) as Byte)
+  }
+}
+
+fn hex_char_lower(v : Int) -> Byte {
+  if v < 10 { (48 + v) as Byte } else { (87 + v) as Byte }
+}
+
+/// Aligns with MoonBit `core` `Char::is_printable` for `ParseError::Show` character formatting.
+fn is_mb_printable(cp : Int) -> Bool {
+  if cp < 0x20 || cp > 0x10FFFF {
+    return false
+  }
+  if cp >= 0x7F && cp <= 0x9F {
+    return false
+  }
+  if cp == 0x00AD || cp == 0x061C || cp == 0x06DD || cp == 0x070F || cp == 0x08E2 || cp == 0x180E || cp == 0xFEFF {
+    return false
+  }
+  if (cp >= 0x0600 && cp <= 0x0605) || (cp >= 0x0890 && cp <= 0x0891) {
+    return false
+  }
+  if (cp >= 0x200B && cp <= 0x200F) || (cp >= 0x2028 && cp <= 0x202E) || (cp >= 0x2060 && cp <= 0x2064) || (cp >= 0x2066 && cp <= 0x206F) {
+    return false
+  }
+  if (cp >= 0xD800 && cp <= 0xF8FF) || (cp >= 0xFDD0 && cp <= 0xFDEF) || (cp >= 0xFFF9 && cp <= 0xFFFB) {
+    return false
+  }
+  if (cp & 0xFFFF) >= 0xFFFE {
+    return false
+  }
+  if cp == 0x110BD || cp == 0x110CD || (cp >= 0x13430 && cp <= 0x1343F) || (cp >= 0x1BCA0 && cp <= 0x1BCA3) || (cp >= 0x1D173 && cp <= 0x1D17A) {
+    return false
+  }
+  if cp == 0xE0001 || (cp >= 0xE0020 && cp <= 0xE007F) || cp >= 0xF0000 {
+    return false
+  }
+  true
+}
+
+fn write_mb_unicode_escape(sb : StringBuilder, cp : Int) -> Unit {
+  sb.write_string("\\u{")
+  let digits = if cp <= 0xFF { 2 } else if cp <= 0xFFFF { 4 } else { 6 }
+  let mut shift = (digits - 1) * 4
+  while shift >= 0 {
+    sb.write_byte(hex_char_lower((cp >> shift) & 0xF))
+    shift = shift - 4
+  }
+  sb.write_string("}")
+}
+
+fn JsonErrScanner::invalid_here(self : JsonErrScanner) -> String {
+  if self.pos >= self.n {
+    return "Unexpected end of file"
+  }
+  let (cp, _) = self.decode_at(self.pos)
+  let sb = StringBuilder::new()
+  sb.write_string("Invalid character '")
+  // Exact 6 short escapes from MoonBit `Char::escape`; everything else non-printable uses `\u{...}`.
+  if cp == 39 {
+    sb.write_string("\\'")
+  } else if cp == 92 {
+    sb.write_string("\\\\")
+  } else if cp == 10 {
+    sb.write_string("\\n")
+  } else if cp == 13 {
+    sb.write_string("\\r")
+  } else if cp == 8 {
+    sb.write_string("\\b")
+  } else if cp == 9 {
+    sb.write_string("\\t")
+  } else if !is_mb_printable(cp) {
+    write_mb_unicode_escape(sb, cp)
+  } else {
+    write_cp_utf8(sb, cp)
+  }
+  sb.write_string("' at line ")
+  sb.write_string(self.line.to_string())
+  sb.write_string(", column ")
+  sb.write_string(self.col.to_string())
+  sb.to_string()
+}
+
+fn JsonErrScanner::expect_kw(self : JsonErrScanner, kw : String) -> Option[String] {
+  let kb = kw.to_bytes()
+  for i in 0..<kb.length() {
+    if self.pos >= self.n {
+      return Some("Unexpected end of file")
+    }
+    if self.raw[self.pos] != kb[i] {
+      return Some(self.invalid_here())
+    }
+    self.advance_byte()
+  }
+  None
+}
+
+fn JsonErrScanner::check_string(self : JsonErrScanner) -> Option[String] {
+  if self.pos >= self.n {
+    return Some("Unexpected end of file")
+  }
+  if (self.raw[self.pos].to_int() & 0xFF) != 34 {
+    return Some(self.invalid_here())
+  }
+  self.advance_byte()
+  while self.pos < self.n {
+    let b = self.raw[self.pos].to_int() & 0xFF
+    if b == 34 {
+      self.advance_byte()
+      return None
+    }
+    if b < 0x20 {
+      return Some(self.invalid_here())
+    }
+    if b == 92 {
+      let bs_pos = self.pos
+      let bs_line = self.line
+      let bs_col = self.col
+      self.advance_byte()
+      if self.pos >= self.n {
+        return Some("Unexpected end of file")
+      }
+      let esc = self.raw[self.pos].to_int() & 0xFF
+      if esc == 34 || esc == 92 || esc == 47 || esc == 98 || esc == 102 || esc == 110 || esc == 114 || esc == 116 {
+        self.advance_byte()
+      } else if esc == 117 {
+        self.advance_byte()
+        let mut u1 = 0
+        for _ in 0..<4 {
+          if self.pos >= self.n {
+            return Some("Unexpected end of file")
+          }
+          match base_codec::hex_digit(self.raw[self.pos].to_int() & 0xFF) {
+            Some(d) => {
+              u1 = (u1 << 4) | d
+              self.advance_byte()
+            }
+            None => return Some(self.invalid_here())
+          }
+        }
+        // Reject lone low surrogate or unpaired high surrogate at the originating `\` position.
+        // Intentionally does not enforce MoonBit's 128-level nesting depth limit.
+        if u1 >= 0xDC00 && u1 <= 0xDFFF {
+          self.pos = bs_pos
+          self.line = bs_line
+          self.col = bs_col
+          return Some(self.invalid_here())
+        }
+        if u1 >= 0xD800 && u1 <= 0xDBFF {
+          if self.pos >= self.n {
+            return Some("Unexpected end of file")
+          }
+          if (self.raw[self.pos].to_int() & 0xFF) == 92 {
+            self.advance_byte()
+            if self.pos >= self.n {
+              return Some("Unexpected end of file")
+            }
+            if (self.raw[self.pos].to_int() & 0xFF) == 117 {
+              self.advance_byte()
+              let mut u2 = 0
+              for _ in 0..<4 {
+                if self.pos >= self.n {
+                  return Some("Unexpected end of file")
+                }
+                match base_codec::hex_digit(self.raw[self.pos].to_int() & 0xFF) {
+                  Some(d) => {
+                    u2 = (u2 << 4) | d
+                    self.advance_byte()
+                  }
+                  None => return Some(self.invalid_here())
+                }
+              }
+              if u2 < 0xDC00 || u2 > 0xDFFF {
+                self.pos = bs_pos
+                self.line = bs_line
+                self.col = bs_col
+                return Some(self.invalid_here())
+              }
+            } else {
+              self.pos = bs_pos
+              self.line = bs_line
+              self.col = bs_col
+              return Some(self.invalid_here())
+            }
+          } else {
+            self.pos = bs_pos
+            self.line = bs_line
+            self.col = bs_col
+            return Some(self.invalid_here())
+          }
+        }
+      } else {
+        return Some(self.invalid_here())
+      }
+    } else {
+      let _ = self.advance_cp()
+    }
+  }
+  Some("Unexpected end of file")
+}
+
+fn is_ascii_digit(b : Int) -> Bool {
+  b >= 48 && b <= 57
+}
+
+fn JsonErrScanner::check_number(self : JsonErrScanner) -> Option[String] {
+  if self.pos < self.n && (self.raw[self.pos].to_int() & 0xFF) == 45 {
+    self.advance_byte()
+  }
+  if self.pos >= self.n {
+    return Some("Unexpected end of file")
+  }
+  let first = self.raw[self.pos].to_int() & 0xFF
+  if first == 48 {
+    self.advance_byte()
+  } else if first >= 49 && first <= 57 {
+    self.advance_byte()
+    while self.pos < self.n && is_ascii_digit(self.raw[self.pos].to_int() & 0xFF) {
+      self.advance_byte()
+    }
+  } else {
+    return Some(self.invalid_here())
+  }
+  if self.pos < self.n && (self.raw[self.pos].to_int() & 0xFF) == 46 {
+    self.advance_byte()
+    if self.pos >= self.n {
+      return Some("Unexpected end of file")
+    }
+    if !is_ascii_digit(self.raw[self.pos].to_int() & 0xFF) {
+      return Some(self.invalid_here())
+    }
+    while self.pos < self.n && is_ascii_digit(self.raw[self.pos].to_int() & 0xFF) {
+      self.advance_byte()
+    }
+  }
+  if self.pos < self.n {
+    let e = self.raw[self.pos].to_int() & 0xFF
+    if e == 101 || e == 69 {
+      self.advance_byte()
+      if self.pos < self.n {
+        let sgn = self.raw[self.pos].to_int() & 0xFF
+        if sgn == 43 || sgn == 45 {
+          self.advance_byte()
+        }
+      }
+      if self.pos >= self.n {
+        return Some("Unexpected end of file")
+      }
+      if !is_ascii_digit(self.raw[self.pos].to_int() & 0xFF) {
+        return Some(self.invalid_here())
+      }
+      while self.pos < self.n && is_ascii_digit(self.raw[self.pos].to_int() & 0xFF) {
+        self.advance_byte()
+      }
+    }
+  }
+  None
+}
+
+fn JsonErrScanner::check_value(self : JsonErrScanner) -> Option[String] {
+  self.skip_ws()
+  if self.pos >= self.n {
+    return Some("Unexpected end of file")
+  }
+  let b = self.raw[self.pos].to_int() & 0xFF
+  if b == 110 {
+    return self.expect_kw("null")
+  }
+  if b == 116 {
+    return self.expect_kw("true")
+  }
+  if b == 102 {
+    return self.expect_kw("false")
+  }
+  if b == 34 {
+    return self.check_string()
+  }
+  if b == 45 || is_ascii_digit(b) {
+    return self.check_number()
+  }
+  if b == 91 {
+    self.advance_byte()
+    self.skip_ws()
+    if self.pos >= self.n {
+      return Some("Unexpected end of file")
+    }
+    if (self.raw[self.pos].to_int() & 0xFF) == 93 {
+      self.advance_byte()
+      return None
+    }
+    while true {
+      match self.check_value() {
+        Some(e) => return Some(e)
+        None => ()
+      }
+      self.skip_ws()
+      if self.pos >= self.n {
+        return Some("Unexpected end of file")
+      }
+      let next = self.raw[self.pos].to_int() & 0xFF
+      if next == 44 {
+        self.advance_byte()
+      } else if next == 93 {
+        self.advance_byte()
+        return None
+      } else {
+        return Some(self.invalid_here())
+      }
+    }
+    return None
+  }
+  if b == 123 {
+    self.advance_byte()
+    self.skip_ws()
+    if self.pos >= self.n {
+      return Some("Unexpected end of file")
+    }
+    if (self.raw[self.pos].to_int() & 0xFF) == 125 {
+      self.advance_byte()
+      return None
+    }
+    while true {
+      self.skip_ws()
+      match self.check_string() {
+        Some(e) => return Some(e)
+        None => ()
+      }
+      self.skip_ws()
+      if self.pos >= self.n {
+        return Some("Unexpected end of file")
+      }
+      if (self.raw[self.pos].to_int() & 0xFF) != 58 {
+        return Some(self.invalid_here())
+      }
+      self.advance_byte()
+      match self.check_value() {
+        Some(e) => return Some(e)
+        None => ()
+      }
+      self.skip_ws()
+      if self.pos >= self.n {
+        return Some("Unexpected end of file")
+      }
+      let next = self.raw[self.pos].to_int() & 0xFF
+      if next == 44 {
+        self.advance_byte()
+      } else if next == 125 {
+        self.advance_byte()
+        return None
+      } else {
+        return Some(self.invalid_here())
+      }
+    }
+    return None
+  }
+  Some(self.invalid_here())
+}
+
+fn format_mb_json_error(raw : String, fallback : String) -> String {
+  let sc = JsonErrScanner::new(raw)
+  match sc.check_value() {
+    Some(e) => return e
+    None => ()
+  }
+  sc.skip_ws()
+  if sc.pos < sc.n {
+    return sc.invalid_here()
+  }
+  fallback
+}
+
+fn has_unicode_escape(raw : String) -> Bool {
+  let bs = raw.to_bytes()
+  let n = bs.length()
+  let mut i = 0
+  while i + 1 < n {
+    if (bs[i].to_int() & 0xFF) == 92 && (bs[i + 1].to_int() & 0xFF) == 117 {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+/// Parse a synchronous `sth_shell_sync` JSON envelope, 1:1 aligned with `wire/wire.mbt:115-123`:
+/// 1. Non-JSON, empty string, or lone surrogate `\uD800`..`\uDFFF` escape ->
+///    `Err(ShellError("the shell's answer is not JSON: ..."))` (no 128-level depth cap)
+/// 2. Object with `"error": String(e)` (takes precedence over `"value"`) -> `Err(ShellError(e))` verbatim
+/// 3. Object with `"value": v` -> `Ok(v)`
+/// 4. Any other valid JSON -> `Ok(Json::Null)`
+pub fn parse_shell_sync_answer(raw : String) -> Result[base_codec::Json, ShellError] {
+  let parsed = match sql_db::parse_json(raw) {
+    base_codec::JsonParseResult::Ok(j) => {
+      // `base_codec::json_parse` silently replaces lone surrogate escapes with U+FFFD;
+      // validate `\uXXXX` surrogate pairs strictly before accepting `Ok`.
+      if has_unicode_escape(raw) {
+        let sc = JsonErrScanner::new(raw)
+        match sc.check_value() {
+          Some(err_msg) => return Err(shell_error("the shell's answer is not JSON: " + err_msg))
+          None => ()
+        }
+      }
+      j
+    }
+    base_codec::JsonParseResult::Err(err) => {
+      return Err(shell_error("the shell's answer is not JSON: " + format_mb_json_error(raw, err)))
+    }
+  }
+  match json_get_last(parsed, "error") {
+    Some(base_codec::Json::Str(msg)) => return Err(shell_error(msg))
+    _ => ()
+  }
+  match json_get_last(parsed, "value") {
+    Some(v) => Ok(v)
+    None => Ok(base_codec::json_null())
+  }
+}
+
+pub struct ShellClient {
+  pub queue : LineQueue
+  mut next_id : Int64
+  mut tmp_seq : Int
+}
+
+pub fn ShellClient::new() -> ShellClient {
+  ShellClient::{ queue: LineQueue::new(), next_id: 0.to_int64(), tmp_seq: 0 }
+}
+
+pub fn ShellClient::from_queue(queue : LineQueue) -> ShellClient {
+  ShellClient::{ queue: queue, next_id: 0.to_int64(), tmp_seq: 0 }
+}
+
+pub fn ShellClient::stdin_eof(self : ShellClient) -> Bool {
+  self.queue.stdin_eof
+}
+
+pub fn ShellClient::shell_sync_json(
+  self : ShellClient,
+  op : String,
+  args : base_codec::Json,
+) -> Result[base_codec::Json, ShellError] {
+  let raw = host_shim::shell_sync(op, sql_db::stringify_json(args))
+  parse_shell_sync_answer(raw)
+}
+
+/// Core testable wait loop for an in-flight async shell call (`wire/wire.mbt:94-107`):
+/// - Matches `HostEvent::ShellDone` strictly by `call_id`, discarding stale/mismatched completions.
+/// - Buffers every `HostEvent::StdinData` chunk in order into `self.queue` (never drops bytes)
+///   and records `HostEvent::StdinEof` into `self.queue.stdin_eof`.
+/// - Independently decodes `error` / `json` (empty or invalid JSON -> `Some(Json::Null)`, matching
+///   `wire.mbt:107`) / `bytes` (preserving `None` vs `Some(empty_bytes)`).
+pub fn ShellClient::shell_call_wait_with(
+  self : ShellClient,
+  call_id : Int64,
+  wait_event : () -> Option[host_shim::HostEvent],
+) -> Result[(Option[base_codec::Json], Option[Bytes]), ShellError] {
+  while true {
+    match wait_event() {
+      None => ()
+      Some(host_shim::HostEvent::StdinData(chunk)) => self.queue.enqueue_chunk(chunk)
+      Some(host_shim::HostEvent::StdinEof) => self.queue.stdin_eof = true
+      Some(host_shim::HostEvent::ShellDone(done)) => {
+        if done.id != call_id {
+          continue
+        }
+        if done.error.length() > 0 {
+          return Err(shell_error(done.error))
+        }
+        let j_opt : Option[base_codec::Json] = if done.json.length() == 0 {
+          Some(base_codec::json_null())
+        } else {
+          match sql_db::parse_json(done.json) {
+            base_codec::JsonParseResult::Ok(j) => Some(j)
+            base_codec::JsonParseResult::Err(_) => Some(base_codec::json_null())
+          }
+        }
+        return Ok((j_opt, done.bytes))
+      }
+      Some(_) => ()
+    }
+  }
+  Err(shell_error("shell wait loop exited unexpectedly"))
+}
+
+pub fn ShellClient::shell_call_wait(
+  self : ShellClient,
+  op : String,
+  args : base_codec::Json,
+  payload : Option[Bytes],
+) -> Result[(Option[base_codec::Json], Option[Bytes]), ShellError] {
+  self.next_id = self.next_id + 1.to_int64()
+  let call_id = self.next_id
+  host_shim::shell_call(call_id, op, sql_db::stringify_json(args), payload)
+  self.shell_call_wait_with(call_id, fn() -> Option[host_shim::HostEvent] {
+    host_shim::wait((-1).to_int64())
+  })
+}
+
+/// Read the next complete `\n`-terminated line from `self.queue`, or `None` on EOF.
+/// Trailing unterminated partial bytes at EOF are NOT synthesized into a line.
+pub fn ShellClient::next_line_with(
+  self : ShellClient,
+  wait_event : () -> Option[host_shim::HostEvent],
+) -> Option[String] {
+  while true {
+    match self.queue.pop_line() {
+      Some(line) => return Some(line)
+      None => ()
+    }
+    if self.queue.stdin_eof {
+      return None
+    }
+    match wait_event() {
+      None => ()
+      Some(host_shim::HostEvent::StdinData(chunk)) => self.queue.enqueue_chunk(chunk)
+      Some(host_shim::HostEvent::StdinEof) => self.queue.stdin_eof = true
+      Some(_) => ()
+    }
+  }
+  None
+}
+
+pub fn ShellClient::next_line(self : ShellClient) -> Option[String] {
+  self.next_line_with(fn() -> Option[host_shim::HostEvent] {
+    host_shim::wait((-1).to_int64())
+  })
+}
+
+/// Write a single JSON line to stdout with U+2028/U+2029 escaped.
+pub fn ShellClient::say_line(self : ShellClient, line : String) -> Bool {
+  host_shim::write_stdout_line(escape_line_separators(line))
+}
+
+/// Sibling path in the same directory as `path`, 1:1 aligned with `main.mbt:544-553` `beside`.
+pub fn beside(path : String, name : String) -> String {
+  let raw = path.to_bytes()
+  let mut cut = -1
+  let mut i = raw.length() - 1
+  while i >= 0 {
+    let b = raw[i].to_int() & 0xFF
+    if b == 47 || b == 92 {
+      cut = i
+      break
+    }
+    i = i - 1
+  }
+  if cut < 0 {
+    return name
+  }
+  let sb = StringBuilder::new()
+  for j in 0..<(cut + 1) {
+    sb.write_byte(raw[j])
+  }
+  sb.write_string(name)
+  sb.to_string()
+}
+
+/// Generate a unique temporary sibling path for a given `pid` (`<path>.<pid>.<n>.tmp`),
+/// 1:1 aligned with `station/mb/src/host/fs.mbt:13-16`.
+pub fn ShellClient::tmp_beside(self : ShellClient, path : String, pid : Int) -> String {
+  self.tmp_seq = self.tmp_seq + 1
+  path + "." + pid.to_string() + "." + self.tmp_seq.to_string() + ".tmp"
+}
+
+/// Generate a unique temporary sibling path for atomic writes (`<path>.<pid>.<n>.tmp`),
+/// 1:1 aligned with `station/mb/src/host/fs.mbt:21-23`.
+pub fn ShellClient::unique_tmp(self : ShellClient, path : String) -> String {
+  self.tmp_beside(path, host_shim::pid())
+}
+
+fn decode_hex_bytes(hex : String) -> Option[Bytes] {
+  let n = hex.length()
+  if (n % 2) != 0 {
+    return None
+  }
+  let out = Bytes::new(n / 2)
+  let mut i = 0
+  while i < n {
+    let hi = match base_codec::hex_digit(hex.code_unit_at(i)) {
+      Some(v) => v
+      None => return None
+    }
+    let lo = match base_codec::hex_digit(hex.code_unit_at(i + 1)) {
+      Some(v) => v
+      None => return None
+    }
+    out[i / 2] = ((hi << 4) | lo) as Byte
+    i = i + 2
+  }
+  Some(out)
+}
+
+fn bytes_answered(path : String, said : base_codec::Json) -> Result[Option[Bytes], ShellError] {
+  match said {
+    base_codec::Json::Str(hex) => {
+      match decode_hex_bytes(hex) {
+        Some(b) => Ok(Some(b))
+        None => Err(shell_error("the shell's bytes of " + path + " are not hex"))
+      }
+    }
+    _ => Ok(None)
+  }
+}
+
+/// Read raw bytes of `path` via synchronous `fs.bytes` (returns `Ok(None)` when absent).
+pub fn ShellClient::read_bytes(
+  self : ShellClient,
+  path : String,
+) -> Result[Option[Bytes], ShellError] {
+  let args = base_codec::json_obj([
+    ("path", base_codec::json_str(path)),
+    ("from", base_codec::json_int(0)),
+  ])
+  match self.shell_sync_json("fs.bytes", args) {
+    Ok(v) => bytes_answered(path, v)
+    Err(e) => Err(e)
+  }
+}
+
+/// Read raw bytes of `path` (optional `from` offset and `length`) via async `fs.bytes`,
+/// 1:1 aligned with `station/mb/src/host/fs.mbt:41-51`.
+pub fn ShellClient::read_bytes_range(
+  self : ShellClient,
+  path : String,
+  from? : Int,
+  length? : Int,
+) -> Result[Option[Bytes], ShellError] {
+  let fields : Array[(String, base_codec::Json)] = [("path", base_codec::json_str(path))]
+  match from {
+    Some(f) => fields.push(("from", base_codec::json_int(f)))
+    None => ()
+  }
+  match length {
+    Some(n) => fields.push(("length", base_codec::json_int(n)))
+    None => ()
+  }
+  match self.shell_call_wait("fs.bytes", base_codec::json_obj(fields), None) {
+    Ok((Some(said), _)) => bytes_answered(path, said)
+    Ok((None, _)) => Ok(None)
+    Err(e) => Err(e)
+  }
+}
+
+fn is_transient_rename_error(msg : String) -> Bool {
+  msg.contains("EPERM") ||
+  msg.contains("EBUSY") ||
+  msg.contains("EACCES") ||
+  msg.contains("(os error 1)") ||
+  msg.contains("(os error 13)") ||
+  msg.contains("(os error 16)") ||
+  msg.contains("(os error 32)") ||
+  msg.contains("(os error 33)") ||
+  msg.contains("Permission denied") ||
+  msg.contains("Access is denied") ||
+  msg.contains("Operation not permitted") ||
+  msg.contains("Device or resource busy") ||
+  msg.contains("Resource busy") ||
+  msg.contains("being used by another process") ||
+  msg.contains("locked a portion")
+}
+
+fn ShellClient::sleep_draining_stdin(self : ShellClient, ms : Int) -> Unit {
+  let deadline = host_shim::now_ms() + ms.to_int64()
+  while true {
+    let rem = deadline - host_shim::now_ms()
+    if rem <= 0.to_int64() {
+      return
+    }
+    match host_shim::wait(rem) {
+      Some(host_shim::HostEvent::StdinData(chunk)) => self.queue.enqueue_chunk(chunk)
+      Some(host_shim::HostEvent::StdinEof) => self.queue.stdin_eof = true
+      _ => ()
+    }
+  }
+}
+
+/// Atomically write `data` to `path` via async `fs.mkdir` + `fs.put` (binary payload) +
+/// `fs.rename` (with Windows transient lock backoff `[20, 40, 80, 160]` ms), cleaning up
+/// the temp file via `fs.remove` on any `put` or `rename` error.
+/// 1:1 aligned with `station/mb/src/host/fs.mbt:146-229`.
+pub fn ShellClient::write_atomic(
+  self : ShellClient,
+  path : String,
+  data : Bytes,
+  mode : Int = 438,
+  sync : Bool = false,
+  mkdir : Bool = true,
+  sep : String = "/",
+) -> Result[Unit, ShellError] {
+  if mkdir {
+    let dir = nodepath::dirname(sep, path)
+    if dir != "" && dir != "." && dir != path {
+      match self.shell_call_wait("fs.mkdir", base_codec::json_obj([("path", base_codec::json_str(dir))]), None) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+    }
+  }
+  let tmp = self.unique_tmp(path)
+  let put_args = base_codec::json_obj([
+    ("path", base_codec::json_str(tmp)),
+    ("offset", base_codec::json_int(0)),
+    ("truncate", base_codec::json_bool(true)),
+    ("mode", base_codec::json_int(mode)),
+    ("sync", base_codec::json_bool(sync)),
+  ])
+  match self.shell_call_wait("fs.put", put_args, Some(data)) {
+    Ok(_) => ()
+    Err(e) => {
+      let _ = self.shell_call_wait("fs.remove", base_codec::json_obj([("path", base_codec::json_str(tmp))]), None)
+      return Err(e)
+    }
+  }
+  let ren_args = base_codec::json_obj([
+    ("from", base_codec::json_str(tmp)),
+    ("to", base_codec::json_str(path)),
+  ])
+  let backoff = [20, 40, 80, 160]
+  let mut attempt = 0
+  while true {
+    match self.shell_call_wait("fs.rename", ren_args, None) {
+      Ok(_) => return Ok(())
+      Err(e) => {
+        if attempt >= backoff.length() || !is_transient_rename_error(e.message) {
+          let _ = self.shell_call_wait("fs.remove", base_codec::json_obj([("path", base_codec::json_str(tmp))]), None)
+          return Err(e)
+        }
+        self.sleep_draining_stdin(backoff[attempt])
+        attempt = attempt + 1
+      }
+    }
+  }
+  Ok(())
+}

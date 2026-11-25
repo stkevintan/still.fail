@@ -255,9 +255,9 @@ pub fn Mask::fill_path(self : Mask, path : Path, fill_rule : FillRule, anti_alia
           Some(sub) => {
             let blitter = RasterPipelineBlitter::new_mask(sub)
             if anti_alias {
-              fill_path_aa(path, fill_rule, clip_rect, blitter)
+              fill_path_aa(path, fill_rule, clip_rect, Raster(blitter))
             } else {
-              fill_path_nonaa(path, fill_rule, clip_rect, blitter)
+              fill_path_nonaa(path, fill_rule, clip_rect, Raster(blitter))
             }
           }
           None => ()
@@ -272,9 +272,9 @@ pub fn Mask::fill_path(self : Mask, path : Path, fill_rule : FillRule, anti_alia
       let clip_rect = self.size().to_screen_int_rect(0, 0)
       let blitter = RasterPipelineBlitter::new_mask(self.as_subpixmap())
       if anti_alias {
-        fill_path_aa(path, fill_rule, clip_rect, blitter)
+        fill_path_aa(path, fill_rule, clip_rect, Raster(blitter))
       } else {
-        fill_path_nonaa(path, fill_rule, clip_rect, blitter)
+        fill_path_nonaa(path, fill_rule, clip_rect, Raster(blitter))
       }
     }
   }

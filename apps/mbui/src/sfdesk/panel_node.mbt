@@ -21,14 +21,13 @@ fn side_history_tab(front : String) -> Bool {
 
 ///|
 /// Whether `front` is one the window's tree shows under the panel's bar rather than the panel's old view: an agent's
-/// history, a file in the viewer, a Farview tab, a station's 共享调试, 文件 and a station's 文件 (side_files_tab), a
+/// history, a file in the viewer, a station's screen, a station's 共享调试, 文件 and a station's 文件 (side_files_tab), a
 /// station's page (side_station_tab), 任务, agent 往来, 图片、文件和链接 (side_own_tab).
 fn side_node_tab(front : String) -> Bool {
   side_history_tab(front) ||
   @sfbase.view_tab_file(front) is Some(_) ||
   tab_service(front) is Some(_) ||
   tab_file(front) is Some(_) ||
-  side_farview_tab(front) is Some(_) ||
   side_screen_tab(front) is Some(_) ||
   side_adb_tab(front) is Some(_) ||
   side_files_tab(front) is Some(_) ||
@@ -49,18 +48,7 @@ fn side_own_tab(front : String) -> Bool {
 }
 
 ///|
-/// The station and the screen of `front` where it is a Farview tab, which this app draws itself (sfpages'
-/// farview_tab_node).
-fn side_farview_tab(front : String) -> (String, String)? {
-  match station_tab(front) {
-    Some(("screen", station, screen)) if @sfpages.farview_native_screen(screen) => Some((station, screen))
-    _ => None
-  }
-}
-
-///|
-/// The station and the screen of `front` where it is a station's screen (side_screen_node: as its page shows it, or a
-/// Farview tab drawn natively).
+/// The station and the screen of `front` where it is a station's screen (side_screen_node).
 fn side_screen_tab(front : String) -> (String, String)? {
   match station_tab(front) {
     Some(("screen", station, screen)) => Some((station, screen))
@@ -556,35 +544,6 @@ fn side_adb_node(q : @view.View, src : Source, station : String) -> Unit {
 }
 
 ///|
-/// A Farview tab, `station`'s `screen`, in a chat's panel, in node `q` (as large as the panel under its bar,
-/// side_bar_node): the tab drawn here (sfpages' farview_tab_node).
-fn side_farview_node(
-  q : @view.View,
-  src : Source,
-  r : ChatRef,
-  tab : String,
-  station : String,
-  screen : String,
-) -> Unit {
-  q.box(fn(s) {
-    s.grow(Is(1.0)).shrink(Is(1.0)).basis(Is(Some(0.0))).min_height(Is(Some(0.0))) |> ignore
-    @sfpages.farview_pane_node(
-      s,
-      src,
-      station,
-      screen,
-      on_switch=fn(next) {
-        if !station_page_beside(src, r, next) {
-          @sfbase.open_page(next)
-        }
-      },
-      on_close=fn() { side_change(src, r, "close", Some(tab)) },
-    )
-  })
-  |> ignore
-}
-
-///|
 /// A station terminal tab in chat `r`'s side panel, rendered as a pure node (`sfpages.terminal_node`).
 fn side_terminal_node(q : @view.View, src : Source, r : ChatRef, tab : String) -> Unit {
   guard station_terminal_at(r, tab) is Some(at) else { return }
@@ -642,10 +601,9 @@ fn side_terminal_node(q : @view.View, src : Source, r : ChatRef, tab : String) -
 
 ///|
 /// Station screen tab `tab` in chat `r`'s panel (`tabs` the panel's as they are now; `on_tape`: a panel of its own on the
-/// tape), in node `q` (as large as the panel under its bar): a Farview tab drawn here while 实验性功能's Farview 原生标签页渲染
-/// is on (side_farview_node), else its page (sfpages' screen_node) beside its chat, its × the tab's, alone in the panel
-/// upright the panel's bar its own (side_own_bar_node), its view let go of as the tab goes (closed, another in front,
-/// its chat left) unless it is the page on top over all of it; made again as that is turned on or off.
+/// tape), in node `q` (as large as the panel under its bar): its page (sfpages' screen_node) beside its chat, its × the
+/// tab's, alone in the panel upright the panel's bar its own (side_own_bar_node), its view let go of as the tab goes
+/// (closed, another in front, its chat left) unless it is the page on top over all of it.
 fn side_screen_node(
   q : @view.View,
   src : Source,
@@ -656,14 +614,7 @@ fn side_screen_node(
   shows? : () -> Bool = fn() { true },
 ) -> Unit {
   guard station_tab_page(r, tab) is Some(Screen(at)) else { return }
-  q.pick(at_once=true, fn() { @sfpages.farview_native_screen(at.screen) }, fn(n, native) {
-    n.grow(Is(1.0)).shrink(Is(1.0)).basis(Is(Some(0.0))).min_height(Is(Some(0.0))) |> ignore
-    if native {
-      side_farview_node(n, src, r, tab, at.station, at.screen)
-    } else {
-      side_screen_page_node(n, src, r, tab, at, tabs, on_tape, shows)
-    }
-  })
+  side_screen_page_node(q, src, r, tab, at, tabs, on_tape, shows)
 }
 
 ///|
@@ -719,16 +670,16 @@ fn side_screen_page_node(
 }
 
 ///|
-/// Whether the side panel of the chat on the stack (the last there) shows `station`'s `screen` in front, drawn as its
-/// page (not a Farview tab): what lets that screen's view go as a page of it leaves the stack keeps it for the panel
-/// (sfapp's pages_left: its 全屏 from the panel, gone back to it).
+/// Whether the side panel of the chat on the stack (the last there) shows `station`'s `screen` in front: what lets that
+/// screen's view go as a page of it leaves the stack keeps it for the panel (sfapp's pages_left: its 全屏 from the panel,
+/// gone back to it).
 pub fn side_screen_shown(src : Source, station : String, screen : String) -> Bool {
   let pages = app.nav.pages()
   for i = pages.length() - 1; i >= 0; i = i - 1 {
     match pages[i] {
       Chat(r) | History(r, _, _) => {
         let front = side_shown(src, r).1
-        return side_screen_tab(front) == Some((station, screen)) && !@sfpages.farview_native_screen(screen)
+        return side_screen_tab(front) == Some((station, screen))
       }
       _ => ()
     }

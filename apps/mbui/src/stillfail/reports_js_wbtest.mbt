@@ -17,6 +17,11 @@ test "UI fault reporting uses fixed categories even for unknown text" {
   assert_eq(ui_fault_category("scene: a frame put together round layers drawn again where they were not kept: private"), "scene layer conflict")
   assert_eq(ui_fault_category("presented beside a node of the tree, drawn by the old frame: a kind of panel panel_node does not take yet"), "panel cannot be presented")
   assert_eq(ui_fault_category("unknown /private/secret.txt"), "UI fault")
+  assert_eq(
+    ui_fault_category("chat sent unseen: listed=1 row=0 staged=1 held=0 sending=0"),
+    "chat sent unseen: listed=1 row=0 staged=1 held=0 sending=0",
+  )
+  assert_eq(ui_fault_category("chat sent unseen: listed=1 /private/secret.txt"), "chat sent unseen")
 }
 
 ///|

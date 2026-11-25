@@ -358,7 +358,8 @@ fn ten_frames() -> (@ui.Tester, Double, Double, Double) raise {
   t.draw()
   guard t.all(@ui.Role::Slider, label="播放进度") is [line] else { fail("its timeline") }
   let (x, y, w, h) = line.rect
-  (t, x + @sf.player_track_inset, w - 2.0 * @sf.player_track_inset, y + h / 2.0)
+  let inset = @sf.player_track_inset
+  (t, x + inset, w - 2.0 * inset, y + h / 2.0)
 }
 
 ///|
@@ -387,7 +388,13 @@ test "a video's timeline dragged: paused, the player told a finger is on it, a s
     t
     .drawn_rects()
     .iter()
-    .any(fn(r) { (r.2 - 12.0).abs() < 0.5 && (r.3 - 12.0).abs() < 0.5 && (r.0 + 6.0 - (x0 + span * 0.7)).abs() < 0.5 }),
+    .any(fn(r) {
+      r.4 == @sf.media_dark_text &&
+      r.3 >= 4.5 &&
+      r.3 <= 10.5 &&
+      (r.0 - x0).abs() < 0.5 &&
+      (r.0 + r.2 - (x0 + span * 0.7)).abs() < 0.5
+    }),
   )
   assert_true(!t.views().contains("control 1 9 0"))
   // let go further on than its last move (the two in one frame): to the frame there first (900 ms), then told so, and

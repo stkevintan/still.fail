@@ -150,19 +150,29 @@ class ScreenView: NSObject, SCStreamOutput, SCStreamDelegate {
   var latest: CVPixelBuffer?
   var latestAt: Int64 = 0
   var fresh = false
-  /// Frames asked for and not given yet; one is being encoded.
+  /// Frames asked for and not given yet; how many are currently in flight in VideoToolbox (up to `maxInFlight`).
   var wanted = 0
-  var encoding = false
+  var inFlight = 0
+  static let maxInFlight = 2
   var forceKey = true
   /// Its display's mode changes are followed (`followDisplay`), until it stops.
   var following = false
   /// The key frame asked is of the picture last encoded (the screen at rest, sent again sharper: docs/remote-screens.md
-  /// "Still"), and whether the session encodes finer now: its QP at most `stillQP`, at twice the bit rate, where that is
-  /// `stillFrom` or more (a narrow link's would take seconds to go). The next moving picture as before.
+  /// "Still"), and whether the session encodes finer now: its QP tightened to `stillQP` (moving frames capped adaptively
+  /// by `maxQP(for:)`) with at most a gentle `finerRateFactor` rate bump, never blowing the VBV bucket.
   var still = false
   var finer = false
   let stillQP = 28
+  static let finerRateFactor = 1.15
   let stillFrom = 4_000_000
+
+  /// Adaptive QP ceiling by target bitrate: prevents QP 48–51 mosaic at normal/high rates while still letting the
+  /// encoder stay within budget on genuinely narrow (< 1.5 Mbps) links.
+  static func maxQP(for bits: Int) -> Int {
+    if bits >= 3_000_000 { return 38 }
+    if bits >= 1_500_000 { return 42 }
+    return 48
+  }
   var lastTs: Int64 = 0
   var lastConfig = Data()
   var tick = 0
@@ -699,10 +709,15 @@ class ScreenView: NSObject, SCStreamOutput, SCStreamDelegate {
       }
       let rate = bitrate ?? max(1_000_000, width * height * 3)
       ScreenView.setRate(made, rate)
+      // Cap frame QP adaptively by bitrate so high/medium links avoid mosaic while narrow links stay within budget.
+      _ = set(kVTCompressionPropertyKey_MaxAllowedFrameQP, ScreenView.maxQP(for: rate))
       // As many a second as asked (at 120 set for 60, each picture was sized for 60 and twice the rate went).
       _ = set(kVTCompressionPropertyKey_ExpectedFrameRate, fps)
-      // A key frame when asked for, and at least every 10 s besides.
-      _ = set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 10)
+      // Explicit large GOP (~1h / 999999 frames): on Apple Silicon VideoToolbox, leaving these unset or 0
+      // falls back to a 0.5-2s automatic IDR interval (8-30 IDR spikes in 15s); explicit large values yield
+      // true on-demand keyframes (only on start, config change, or explicit request).
+      _ = set(kVTCompressionPropertyKey_MaxKeyFrameInterval, 999_999)
+      _ = set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 3600)
       // The pictures' colours in the stream's VUI (as each picture is tagged: `colors`).
       for (key, value) in colors { _ = set(key, value) }
       VTCompressionSessionPrepareToEncodeFrames(made)
@@ -720,45 +735,54 @@ class ScreenView: NSObject, SCStreamOutput, SCStreamDelegate {
   /// Encodes the latest picture when one is wanted and it is new (or a key frame was asked for).
   func pump() {
     if jpeg { return pumpJPEG() }
-    guard !ended, wanted > 0, !encoding, fresh, let current = session, let got = framed() else { return }
+    guard !ended, wanted > 0, inFlight < ScreenView.maxInFlight, fresh, let current = session, let got = framed() else { return }
     let (picture, part) = got
     let width = CVPixelBufferGetWidth(picture), height = CVPixelBufferGetHeight(picture)
     if (width, height) != size {
+      // Wait for any in-flight frame to finish before invalidating and recreating the session.
+      if inFlight > 0 { return }
       if !makeSession(width, height) { return }
       forceKey = true
       return pump()
     }
     // Another part of the display: from a key frame (the client's config says the part).
-    if part != pushedRegion { forceKey = true }
+    let key = forceKey || part != pushedRegion
+    let wantFiner = key && still && (bitrate ?? 0) >= stillFrom
+    // Wait for in-flight frames to drain before toggling QP/rate settings on the session.
+    if wantFiner != finer && inFlight > 0 { return }
     pushedRegion = part
     wanted -= 1
-    encoding = true
+    inFlight += 1
     fresh = false
-    let key = forceKey
     forceKey = false
-    setFiner(key && still && (bitrate ?? 0) >= stillFrom, current)
+    setFiner(wantFiner, current)
     still = false
-    let ts = max(lastTs + 1, latestAt)
+    let prevTs = lastTs
+    let ts = max(prevTs + 1, latestAt)
     lastTs = ts
+    // Clamp VFR frame duration to [1/fps, 2/fps] so idle gaps never fool VideoToolbox's rate controller into a burst.
+    let nominalUs = Int64(max(1, 1_000_000 / max(1, fps)))
+    let durUs = prevTs > 0 ? min(nominalUs * 2, max(nominalUs, ts - prevTs)) : nominalUs
+    let duration = CMTime(value: durUs, timescale: 1_000_000)
     let properties = key ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue!] as CFDictionary : nil
     // The encoder writes the VUI from the picture's own tags over the session's: each the same (a part scaled is
     // tagged BT.709's transfer by the transfer session, the colours left as they are).
     for (key, value) in colorTags { CVBufferSetAttachment(picture, key, value, .shouldPropagate) }
     let status = VTCompressionSessionEncodeFrame(
-      current, imageBuffer: picture, presentationTimeStamp: CMTime(value: ts, timescale: 1_000_000), duration: .invalid,
+      current, imageBuffer: picture, presentationTimeStamp: CMTime(value: ts, timescale: 1_000_000), duration: duration,
       frameProperties: properties, infoFlagsOut: nil
     ) { status, _, sample in
       self.queue.async { self.encoded(status, sample, ts, key, part) }
     }
     if status != noErr {
-      encoding = false
+      inFlight = max(0, inFlight - 1)
       wanted += 1
       forceKey = forceKey || key
     }
   }
 
   func encoded(_ status: OSStatus, _ sample: CMSampleBuffer?, _ ts: Int64, _ asked: Bool, _ part: [Double]?) {
-    encoding = false
+    inFlight = max(0, inFlight - 1)
     if ended { return }
     guard status == noErr, let sample, let block = CMSampleBufferGetDataBuffer(sample) else {
       // Dropped: still owed, and from a key frame if one was asked for (as the part it showed was not said).
@@ -1040,32 +1064,40 @@ class ScreenView: NSObject, SCStreamOutput, SCStreamDelegate {
   /// From the next frame on, about this many bits a second.
   func rate(_ bits: Int) {
     queue.async {
-      self.bitrate = max(100_000, bits)
+      let clamped = max(100_000, bits)
+      self.bitrate = clamped
       if let session = self.session {
-        ScreenView.setRate(session, self.finer ? self.bitrate! * 2 : self.bitrate!)
+        let target = self.finer ? Int(Double(clamped) * ScreenView.finerRateFactor) : clamped
+        ScreenView.setRate(session, target)
+        VTSessionSetProperty(
+          session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP,
+          value: (self.finer ? self.stillQP : ScreenView.maxQP(for: clamped)) as CFTypeRef)
       }
     }
   }
 
-  /// The pictures from the next on encoded finer (a still one's key frame) or as the moving ones are. An encoder that
-  /// takes no QP bound keeps its own (the bit rate's rise alone).
+  /// The pictures from the next on encoded finer (a still one's key frame) or as the moving ones are. Keeps the VBV
+  /// bucket intact with an adaptive QP ceiling (`stillQP` vs `maxQP(for:)`) and at most a gentle `finerRateFactor` bump.
   func setFiner(_ on: Bool, _ session: VTCompressionSession) {
     if on == finer { return }
     finer = on
-    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: (on ? stillQP : 51) as CFTypeRef)
+    let base = bitrate ?? max(1_000_000, size.0 * size.1 * 3)
+    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: (on ? stillQP : ScreenView.maxQP(for: base)) as CFTypeRef)
     if let bitrate {
-      ScreenView.setRate(session, on ? bitrate * 2 : bitrate)
+      ScreenView.setRate(session, on ? Int(Double(bitrate) * ScreenView.finerRateFactor) : bitrate)
     }
   }
 
-  /// The bit rate a session encodes at, and the most any second of it may carry: `ratePeak` times it. A scene cut's key
-  /// frame (a game's, a window's) came at many times a moving picture's size, held the pictures behind it in front of
-  /// the link, and the station's pace took that for a slower link.
-  static let ratePeak = 1.5
+  /// Tight short-window VBV (`rateWindow` = 0.25s, `ratePeak` = 1.15×) so a single frame cannot burst 1 s of budget
+  /// and starve the next 30 frames into mosaic.
+  static let ratePeak = 1.15
+  static let rateWindow = 0.25
+  static let minVbvBytes = 64_000.0
   static func setRate(_ session: VTCompressionSession, _ bits: Int) {
     VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bits as CFTypeRef)
     // [bytes, seconds] (an encoder that takes no such limit keeps the average alone).
-    let limits = [NSNumber(value: Double(bits) / 8 * ratePeak), NSNumber(value: 1.0)] as CFArray
+    let vbvBytes = max(Double(bits) / 8.0 * rateWindow * ratePeak, minVbvBytes)
+    let limits = [NSNumber(value: vbvBytes), NSNumber(value: rateWindow)] as CFArray
     VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits)
   }
 

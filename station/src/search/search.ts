@@ -18,7 +18,8 @@ export type Told = { type: "query"; id: number; query: string; asker: Asker; kin
 export type Answered = { id: number; groups?: Group[]; error?: string } | { scopePending: true } | { sessionListPending: true };
 import { SearchScopeBuilder } from "./scope-builder.ts";
 import { SessionListBuilder } from "../read/session-list-builder.ts";
-import { type BackfillOptions, MbProcess, readerBinary } from "../read/mb-reader.ts";
+import { type BackfillOptions, MbProcess, resolveReaderSelectionAsync, resolveReaderSelectionOrPending } from "../read/mb-reader.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 
 /// How long a search may take before it is answered with nothing.
 const QUERY_MS = 30_000;
@@ -39,9 +40,11 @@ export interface Looker {
 
 export class Search {
   #data: string;
-  /// What starts a looker: the program, else a test's reference.
-  readonly #start: () => Looker;
+  /// Test reference looker if provided; otherwise spawns `--builder search` via `resolveReaderSelection`.
+  readonly #reference: ((data: string) => Looker) | undefined;
+  readonly #readers: ReaderSelectConfig | (() => ReaderSelectConfig) | undefined;
   #looker: Looker | null = null;
+  #spawning: Promise<Looker | null> | null = null;
   #next = 0;
   #waiting = new Map<number, { resolve: (found: Found) => void; reject: (error: Error) => void; timer: () => void }>();
   #closed = false;
@@ -60,9 +63,8 @@ export class Search {
   constructor(options: { data: string; files?: FileSearch | null; backfill?: BackfillOptions; reference?: (data: string) => Looker; after?: (ms: number, f: () => void) => () => void }) {
     this.#data = options.data;
     this.#after = options.after ?? wall.after;
-    const reference = options.reference;
-    this.#start = reference !== undefined ? () => reference(options.data)
-      : () => new MbProcess(readerBinary(), ["--builder", "search", "--db", join(options.data, "stillfail.db"), "--data", options.data, "--sep", sep]);
+    this.#reference = options.reference;
+    this.#readers = options.backfill?.readers;
     this.#files = options.files ?? null;
     this.#scope = new SearchScopeBuilder(join(options.data, "stillfail.db"), options.backfill);
     this.#sessionList = new SessionListBuilder(join(options.data, "stillfail.db"), options.backfill);
@@ -84,7 +86,7 @@ export class Search {
   /// The looker let go at once if no search is under way: 1, else 0 (the station short of memory: read/pool.ts
   /// `trimIdle`). The next search starts it again.
   trimIdle(): number {
-    if (this.#closed || this.#waiting.size > 0 || !this.running) return 0;
+    if (this.#closed || this.#waiting.size > 0 || this.#spawning !== null || !this.running) return 0;
     this.#letGo();
     return 1;
   }
@@ -107,12 +109,41 @@ export class Search {
     });
   }
 
-  #spawn(): Looker | null {
-    if (this.#closed) return null;
-    const looker = this.#start();
+  #spawnWith(looker: Looker): Looker {
     this.#looker = looker;
     this.#listen(looker, () => { if (this.#looker === looker) this.#looker = null; });
     return looker;
+  }
+
+  #spawnLooker(binary: string): Looker | null {
+    if (this.#closed) return null;
+    if (this.#looker !== null) return this.#looker;
+    const looker = new MbProcess(binary, ["--builder", "search", "--db", join(this.#data, "stillfail.db"), "--data", this.#data, "--sep", sep]);
+    return this.#spawnWith(looker);
+  }
+
+  #looked(query: string, asker: Asker, options: { kinds?: string[]; limit?: number; offset?: number; archived?: boolean }): Promise<Found> {
+    if (this.#closed) return Promise.reject(new Error("the search is stopped"));
+    if (this.#looker !== null) return this.#ask(this.#looker, query, asker, options);
+    if (this.#reference !== undefined) return this.#ask(this.#spawnWith(this.#reference(this.#data)), query, asker, options);
+    if (this.#spawning === null) {
+      let sync;
+      try {
+        sync = resolveReaderSelectionOrPending("search", { config: this.#readers, logAt: "search" });
+      } catch (e) {
+        return Promise.reject(e);
+      }
+      if (!sync.pending) {
+        return this.#ask(this.#spawnLooker(sync.primaryBinary), query, asker, options);
+      }
+      const pending = resolveReaderSelectionAsync("search", { config: this.#readers, logAt: "search" }).then(
+        (resolved) => this.#spawnLooker(resolved.primaryBinary),
+      ).finally(() => {
+        if (this.#spawning === pending) this.#spawning = null;
+      });
+      this.#spawning = pending;
+    }
+    return this.#spawning.then((looker) => this.#ask(looker, query, asker, options));
   }
 
   /// A looker's answers: each to the search it is for; its end ends the searches waiting on it.
@@ -176,13 +207,6 @@ export class Search {
     void pending.catch((error: unknown) => {
       if (!this.#closed) log.warn("search", "the session list could not be prepared", { error: (error as Error).message });
     }).finally(() => { if (this.#preparingSessions === pending) this.#preparingSessions = null; });
-  }
-
-  #looked(query: string, asker: Asker, options: { kinds?: string[]; limit?: number; offset?: number; archived?: boolean }): Promise<Found> {
-    let looker: Looker | null;
-    try { looker = this.#looker ?? this.#spawn(); }
-    catch (error) { return Promise.reject(error); }
-    return this.#ask(looker, query, asker, options);
   }
 
   #ask(looker: Looker | null, query: string, asker: Asker, options: { kinds?: string[]; limit?: number; offset?: number; archived?: boolean }): Promise<Found> {

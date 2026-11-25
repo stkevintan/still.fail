@@ -8,19 +8,13 @@ struct Page {
 }
 
 ///|
-impl @hostapi.Host for Page with app_said(self, name) {
-  self.said.get(name).unwrap_or("")
-}
-
-///|
-impl @hostapi.Host for Page with app_tell(self, name, arg) {
-  self.told.push((name, arg))
-}
-
-///|
 fn page() -> Page {
-  let p = { said: {}, told: [] }
-  @hostapi.set_host(p)
+  let p : Page = { said: {}, told: [] }
+  @hostapi.set_host({
+    ..@hostapi.Host::noop(),
+    app_said: fn(name) { p.said.get(name).unwrap_or("") },
+    app_tell: fn(name, arg) { p.told.push((name, arg)) },
+  })
   p
 }
 

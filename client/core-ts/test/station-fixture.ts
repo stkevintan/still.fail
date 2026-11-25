@@ -346,7 +346,7 @@ export function base(): Answers {
 export async function started(answers = base(), sample = 0, wire?: (host: FakeHost) => StationWire, before?: (s: ReturnType<typeof stationHost>) => void) {
   const s = stationHost(answers);
   before?.(s);
-  const core = await Core.create(s.host, { clock: s.host.time.clock, sample, wire: () => (wire ? wire(s.host) : new HostWire(s.host)) });
+  const core = await Core.create(s.host, { clock: s.host.time.clock, sample, ...(sample > 0 ? { reports: true } : {}), wire: () => (wire ? wire(s.host) : new HostWire(s.host)) });
   await s.host.time.pass(500);
   return { ...s, core };
 }

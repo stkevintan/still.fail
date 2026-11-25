@@ -568,6 +568,8 @@ pub fn[K : Hash + Eq] View::scrolls_window(
   keys : () -> Array[K],
   make : (View, K) -> Unit,
   est? : Double = 80.0,
+  est_by? : () -> Double,
+  heights_version? : () -> Int = fn() { 0 },
   slop? : Double,
   bar? : ScrollBar,
   top_covered? : () -> Double = fn() { 0.0 },
@@ -632,6 +634,8 @@ pub fn[K : Hash + Eq] View::scrolls_window(
       _ => fn(v, i) { make(v, k(i)) }
     },
     est~,
+    est_by?,
+    heights_version~,
     slop?=slop,
     bar?=bar,
     top_covered~,
@@ -707,6 +711,8 @@ pub fn[K : Hash + Eq] View::scrolls_reused(
   shape? : (K) -> Int = fn(_) { 0 },
   reuses? : (K) -> Bool = fn(_) { true },
   est? : Double = 80.0,
+  est_by? : () -> Double,
+  heights_version? : () -> Int = fn() { 0 },
   slop? : Double,
   bar? : ScrollBar,
   top_covered? : () -> Double = fn() { 0.0 },
@@ -750,6 +756,8 @@ pub fn[K : Hash + Eq] View::scrolls_reused(
       make(v, fn() { key })
     },
     est~,
+    est_by?,
+    heights_version~,
     slop?=slop,
     bar?=bar,
     top_covered~,
@@ -839,6 +847,8 @@ fn View::scrolls_window_ids(
   keys : () -> Array[Int],
   make : (View, Int) -> Unit,
   est~ : Double,
+  est_by? : () -> Double,
+  heights_version? : () -> Int = fn() { 0 },
   slop? : Double,
   bar? : ScrollBar,
   top_covered~ : () -> Double,
@@ -1146,7 +1156,13 @@ fn View::scrolls_window_ids(
   }
   // (how wide what it holds is given to be, as it is laid out: View::scrolls' fill)
   let room_w : @signals.Signal[Double?] = @signals.signal(None, same=fn(a, b) { a == b })
-  self.reacts(fn() { (room_w.get(), self.words_redone()) }, fn(_) {
+  let est_now = fn() {
+    match est_by {
+      Some(f) => f()
+      None => est
+    }
+  }
+  self.reacts(fn() { (room_w.get(), self.words_redone(), heights_version()) }, fn(_) {
     let gone = heights.keys().filter(fn(k) { !showing.contains(k) }).collect()
     if gone.length() > 0 {
       for k in gone {
@@ -1210,7 +1226,7 @@ fn View::scrolls_window_ids(
   let height_of = fn(k : Int) {
     match heights.get(k) {
       Some(h) => (h, true)
-      None => (est, false)
+      None => (est_now(), false)
     }
   }
   let column : Column[Int] = Column::new()
@@ -3862,7 +3878,7 @@ fn View::scrolls_window_ids(
           if tall.get(k) is Some(c) {
             c.set(Some(bh))
           }
-          if first && rows_slot_on(bh, g) == rows_slot_on(est, g) && k != held_key {
+          if first && rows_slot_on(bh, g) == rows_slot_on(est_now(), g) && k != held_key {
             told_only = true
           } else {
             again = true
@@ -4850,7 +4866,7 @@ fn View::scrolls_window_ids(
                   self.tree.laid_now() |> ignore
                   let mut came = 0.0
                   for k in flip_takes.val {
-                    came = came + heights.get(k).unwrap_or(est)
+                    came = came + heights.get(k).unwrap_or(est_now())
                   }
                   flip_takes.val = []
                   let left = dmax(0.0, foot_room.untracked() - came)

@@ -280,14 +280,17 @@ final class Host {
      * past it (MBView.wakeAt), asked for two display frames before.
      */
     static void wakeAfter(double ms) {
-        MBView v = view;
+        scheduleWake(view, ms, false);
+    }
+
+    static void scheduleWake(MBView v, double ms, boolean pacedOnly) {
         if (v == null) return;
         double base = v.buildingFor >= 0 ? v.buildingFor : System.nanoTime() / 1e6;
         double at = base + ms;
-        if (v.wakeFor >= 0 && v.wakeFor <= at) return;
-        v.wakeFor = at;
+        FramePacer.WakeReq req = v.scheduleWakeReq(at, pacedOnly);
+        if (req == null) return;
         double lead = at - System.nanoTime() / 1e6 - 2 * v.framePeriodMs();
-        main.postDelayed(() -> v.wakeAt(at), (long) Math.max(0, lead));
+        main.postDelayed(() -> v.wakeAt(req), (long) Math.max(0, lead));
     }
 
     /**

@@ -2075,8 +2075,6 @@ web-pages.stations.screensAndTerminals
 web-pages.experimental.title
 web-pages.experimental.lead
 web-pages.experimental.enabledCount
-web-pages.experimental.farviewNative.title
-web-pages.experimental.farviewNative.description
 web-pages.experimental.board.title
 web-pages.experimental.board.description
 web-pages.experimental.selectionIntent.title

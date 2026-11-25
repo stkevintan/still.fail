@@ -466,86 +466,6 @@ fn station_few_picker_node(n : @view.View, src : Source, w : Workspace, v : Json
 }
 
 ///|
-/// Search input for the many-station picker (used in both wide modal top bar and narrow drawer).
-fn sp_find_node(
-  parent : @view.View,
-  field : @ui.Field,
-  placeholder : () -> String,
-  search_at : @signals.Signal[Int],
-  navigated : @signals.Signal[Bool],
-  on_enter~ : () -> Unit,
-  on_step~ : (Int) -> Unit,
-) -> Unit {
-  parent.box(fn(f) {
-    f
-    .key_context("Finder")
-    .on_action("finder.down", fn(_) {
-      on_step(1)
-      true
-    })
-    .on_action("finder.up", fn(_) {
-      on_step(-1)
-      true
-    })
-    .on_key(fn(k) {
-      if k.code == @ui.key_escape && field.text() != "" {
-        field.set("")
-        search_at.set(0)
-        navigated.set(false)
-        true
-      } else {
-        false
-      }
-    })
-    |> ignore
-    // (round its words the field's to a press too: a tap its caret and its menu to paste, a long press its 粘贴)
-    @ui.field_backdrop(f, field)
-    @sf.icon_node(f, "search", 14.0, By(fn() { @sf.theme().p.muted })) |> ignore
-    let inp = @ui.field(
-      f,
-      field,
-      placeholder=placeholder(),
-      line=@sf.theme().t.ui_line,
-      max_lines=1,
-      enter_sends=true,
-      leaves=[@ui.key_escape],
-      edited=fn(_) {
-        search_at.set(0)
-        navigated.set(false)
-      },
-      submitted=fn(_) { on_enter() },
-      size_by=fn() { @sf.theme().t.ui },
-      colors_by=fn() {
-        let th = @ui.tree_theme()
-        (th.fg, th.subtle, th.accent)
-      },
-    )
-    inp.grow(Is(1.0)).basis(Is(Some(0.0))).shrink(Is(1.0)).min_width(Is(Some(0.0))) |> ignore
-    @sf.panel_search_at_hand_node(inp)
-    f.show(at_once=true, fn() { field.text() != "" }, fn(cl) {
-      cl.margin(By(fn() { (0.0, 0.0, (@sf.menu_row_min - 20.0) / 2.0 - @ui.Space::px(S3), 0.0) })) |> ignore
-      @sf.icon_button_node(
-        cl,
-        "close",
-        fn() { @sf.t("web-pages.drive.pickClear") },
-        fn() {
-          field.set("")
-          search_at.set(0)
-          navigated.set(false)
-        },
-        size=20.0,
-        icon_size=12.0,
-      )
-      |> ignore
-    })
-    @sf.style_node(f, fn() {
-      (if @sf.hovered_node(f) || inp.focused() { sp_find_hot } else { sp_find }).then(@ui.style(h=Fixed(@sf.menu_row_min)))
-    })
-  })
-  |> ignore
-}
-
-///|
 /// Whether an entry matches the current search query (matches station name, network path/rtt, or summary).
 fn sp_entry_matches(q : String, entry : StationPickEntry) -> Bool {
   let needle = q.trim().to_owned().to_lower()
@@ -809,15 +729,21 @@ fn sp_wide_table_node(
     @sf.style_node(top, fn() { sp_wide_top })
     top.box(fn(sw) {
       sw.grow(Is(1.0)).basis(Is(Some(0.0))).shrink(Is(1.0)).min_width(Is(Some(0.0))) |> ignore
-      sp_find_node(
+      @sf.panel_search_input_node(
         sw,
         query_field,
         fn() { @sf.t("web-main.newChat.stationSearchWide") },
-        search_at,
-        navigated,
-        on_enter~,
-        on_step~,
+        edited=fn(_) {
+          search_at.set(0)
+          navigated.set(false)
+        },
+        submitted=fn(_) { on_enter() },
+        step=fn(d) {
+          on_step(d)
+          true
+        },
       )
+      |> ignore
     })
     |> ignore
     if show_auto {
@@ -1065,15 +991,21 @@ fn sp_narrow_drawer_node(
 ) -> Unit {
   body.box(fn(sb) {
     @sf.style_node(sb, fn() { sp_narrow_search_wrap.then(@sf.panel_field_in_node(sb)) })
-    sp_find_node(
+    @sf.panel_search_input_node(
       sb,
       query_field,
       fn() { @sf.t("web-main.newChat.stationSearch") },
-      search_at,
-      navigated,
-      on_enter~,
-      on_step~,
+      edited=fn(_) {
+        search_at.set(0)
+        navigated.set(false)
+      },
+      submitted=fn(_) { on_enter() },
+      step=fn(d) {
+        on_step(d)
+        true
+      },
     )
+    |> ignore
   })
   |> ignore
   @sf.capped_node(body, fn() { sp_table_body_max_h }, fn(list) {
@@ -1135,14 +1067,6 @@ let sp_wide_top : @ui.Style = @ui.css("row w=Full gap=S2 pb=S2_5 align=ACenter")
 ///|
 // kept across runs: a value (no field of it changes)
 let sp_narrow_search_wrap : @ui.Style = @ui.css("w=Full pb=S2")
-
-///|
-// kept across runs: a value (no field of it changes)
-let sp_find : @ui.Style = @ui.css("row w=Full px=S3 gap=S2 align=ACenter radius=Full bg=Tint")
-
-///|
-// kept across runs: a value (no field of it changes)
-let sp_find_hot : @ui.Style = @ui.css("row w=Full px=S3 gap=S2 align=ACenter radius=Full bg=TintStrong")
 
 ///|
 // kept across runs: a value (no field of it changes)

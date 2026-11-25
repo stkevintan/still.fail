@@ -127,13 +127,11 @@ struct ListState {
   mut held : Bool
   // past an end: how far (Android: in the view's heights; iOS: points,
   // pulled while held, shown while springing back), at which end (1 the
-  // top, -1 the bottom, 0 none), held (1) or springing back (2), its
-  // velocity outward (Android: pixels per second; iOS: points per ms); going
+  // top, -1 the bottom, 0 none), held (1) or springing back (2); going
   // back, its path (@view's list_motion.mbt)
   mut over : Double
   mut over_edge : Int
   mut over_state : Int
-  mut over_v : Double
   mut back : BackPath
   // a wheel's notches eased in (Ctx::ease_list): what they come to all told (0 none), how fast it set out (px a ms),
   // from when, how much of it has come by the last frame, and what it is said to move by (Ctx::moving)
@@ -189,7 +187,6 @@ struct EditorState {
   mut anchor : Int
   mut marked : String
   mut msel_a : Int
-  mut msel_b : Int
   /// Android's: the handle under the caret is shown (a tap put the caret there, nothing typed since), and where its
   /// tip was drawn last (in the window; `handle_on` false: not drawn)
   mut handle : Bool
@@ -387,7 +384,7 @@ pub struct Ctx {
   // how many boxes the pointer goes through hold what is painted now
   mut passing : Int
   mut next_points : Map[Int, Bool]
-  /// of this frame's, the places of their targets among next_hit_ids, in order (said.mbt's HitsSaid)
+  /// of this frame's, the places of their targets among next_hit_ids, in order (said.mbt's SaidList::Hits)
   next_point_hits : Array[Int]
   mut scroll_ids : Array[Int]
   mut scroll_rects : Array[Double]

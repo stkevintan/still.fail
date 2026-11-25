@@ -1,7 +1,7 @@
 // One view of the main display (main.rs says the messages): the capture and the encoder on a thread of their own, a
 // picture encoded only once one is asked for and only a new one (the screen changed) unless a key frame is asked for;
 // the input and the clipboard on this one, in the order they come.
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -21,7 +21,7 @@ use super::clipboard::{Clipboard, PNG_MAX};
 pub use super::display::{dpi_aware, main_display};
 use super::encode::H264;
 use super::image::{Images, Pixels};
-use super::pace::{self, Gate, KeyClock};
+use super::pace::{self, Gate};
 use super::region::{self, Region};
 use super::svc_client::{ServiceCapture, ServiceInput};
 
@@ -351,8 +351,6 @@ struct View {
     /// No picture sooner than the 帧率 asked lets it (ms since `opened`).
     gate: Gate,
     opened: Instant,
-    /// A key frame at least every 10 s by the clock (the encoder's GOP counts pictures, fewer than asked may come).
-    keys: KeyClock,
 }
 
 fn failed(out: &Out, error: &windows::core::Error, code: &str) -> windows::core::Error {
@@ -432,7 +430,6 @@ impl View {
             looked: Instant::now(),
             gate: Gate::new(options_fps),
             opened: Instant::now(),
-            keys: KeyClock::default(),
         };
         let encoder = if view.options.jpeg {
             "JPEG, quality 0.8".to_string()
@@ -480,14 +477,28 @@ impl View {
 
     fn run(&mut self, rx: Receiver<Msg>, out: &Out) {
         loop {
-            // Waiting on the encoder or waiting to reopen WGC after returning from Winlogon.
-            let busy = self.busy() || (self.wanted > 0 && self.fresh);
+            // Waiting on the async encoder, waiting for the frame-rate gate slot, or reopening WGC after Winlogon.
             let need_reopen = self.capture.is_none() && !self.service_secure;
-            let msg = if busy {
+            let msg = if self.busy() {
                 match rx.recv_timeout(Duration::from_millis(1)) {
                     Ok(m) => Some(m),
                     Err(RecvTimeoutError::Timeout) => None,
                     Err(RecvTimeoutError::Disconnected) => return,
+                }
+            } else if self.wanted > 0 && self.fresh {
+                let wait = self.gate.wait_ms(self.ms());
+                if wait <= 0.0 {
+                    match rx.try_recv() {
+                        Ok(m) => Some(m),
+                        Err(TryRecvError::Empty) => None,
+                        Err(TryRecvError::Disconnected) => return,
+                    }
+                } else {
+                    match rx.recv_timeout(Duration::from_secs_f64((wait / 1000.0).min(0.1))) {
+                        Ok(m) => Some(m),
+                        Err(RecvTimeoutError::Timeout) => None,
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    }
                 }
             } else if need_reopen {
                 match rx.recv_timeout(Duration::from_millis(50)) {
@@ -762,8 +773,8 @@ impl View {
             self.force_unheeded = false;
             self.make_encoder(size.0, size.1)?;
         }
-        // Another part of the display: from a key frame (the client's config says the part); one 10 s after the last.
-        let mut key = self.force_key || part != self.pushed_region || self.keys.due(self.ms());
+        // Another part of the display: from a key frame (the client's config says the part). No 10 s periodic IDR.
+        let mut key = self.force_key || part != self.pushed_region;
         // The same picture again as a key frame (the screen at rest): encoded finer, by an encoder made for it, where the
         // rate asked is under STILL_OWN_FROM.
         let still = key && self.still && !self.no_still && self.encoder.as_ref().unwrap().sharpens() && self.encoder.as_ref().unwrap().rates().1 < STILL_OWN_FROM;
@@ -805,10 +816,6 @@ impl View {
         }
         let texture = self.scaled(crop, size, DXGI_FORMAT_NV12)?;
         let ts = self.timestamp();
-        if key {
-            let now = self.ms();
-            self.keys.keyed(now);
-        }
         if still { self.sharp.as_mut() } else { self.encoder.as_mut() }.unwrap().push(&self.gpu, &texture, ts, key)?;
         self.still = false;
         self.pushed_region = part;
@@ -868,10 +875,6 @@ impl View {
             self.pps = pps;
         }
         let key = key || encoded.clean;
-        if key {
-            let now = self.ms();
-            self.keys.keyed(now);
-        }
         if encoded.asked && !key {
             self.force_unheeded = true;
             self.force_key = true;

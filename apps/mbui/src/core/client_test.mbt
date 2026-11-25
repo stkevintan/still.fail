@@ -424,6 +424,26 @@ test "a core started anew is told again where the app's attention is (client.foc
 }
 
 ///|
+test "a core started anew is told again whether the device sends its reports and traces (client.reports, as told last), none where never told" {
+  let sent : Array[String] = []
+  let c = @core.Client::new(fn(m) { sent.push(m) })
+  c.restarted()
+  assert_true(sent.filter(fn(m) { m.contains("client.reports") }).is_empty(), msg="never told: nothing told again")
+  c.call("client.reports", params={ "on": true }) |> ignore
+  c.call("client.reports", params={ "on": false }) |> ignore
+  sent.clear()
+  c.restarted()
+  let told = sent.filter(fn(m) { m.contains("client.reports") })
+  assert_eq(told.length(), 1)
+  assert_true(told[0].contains("\"on\":false"), msg=told[0])
+  // (a client started anew, as a replay attaching to it does, tells nothing of it)
+  c.reset()
+  sent.clear()
+  c.restarted()
+  assert_true(sent.filter(fn(m) { m.contains("client.reports") }).is_empty())
+}
+
+///|
 test "a core started anew is told both the app's attention and the chat it shows, whichever was told last" {
   let sent : Array[String] = []
   let c = @core.Client::new(fn(m) { sent.push(m) })

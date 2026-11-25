@@ -125,6 +125,12 @@ pub fn take_picture(
       None => 0.0
     }
   }
+  let measuring_ox_known = fn() {
+    match made.val {
+      Some(tree) => tree.measuring_origin_known()
+      None => false
+    }
+  }
   let tree = @signals.untracked(fn() {
     @view.Tree::new(
       fn(root) {
@@ -144,32 +150,32 @@ pub fn take_picture(
         |> ignore
       },
       measure=fn(words, look, width, scale) {
-        with_measuring_origin_pair(measuring_ox(), fn() {
+        with_measuring_origin_pair(measuring_ox(), measuring_ox_known(), fn() {
           view_words_measure(words, look, width, scale, tabular=measuring_tab())
         })
       },
       measure_runs=fn(runs, look, set, width, scale) {
-        with_measuring_origin_pair(measuring_ox(), fn() {
+        with_measuring_origin_pair(measuring_ox(), measuring_ox_known(), fn() {
           view_runs_measure(runs, look, set, width, scale, tabular=measuring_tab())
         })
       },
       measure_kept=fn(words, look, width, scale) {
-        with_measuring_origin_pair(measuring_ox(), fn() {
+        with_measuring_origin_pair(measuring_ox(), measuring_ox_known(), fn() {
           view_words_measure_kept(words, look, width, scale, tabular=measuring_tab())
         })
       },
       measure_runs_kept=fn(runs, look, set, width, scale) {
-        with_measuring_origin_pair(measuring_ox(), fn() {
+        with_measuring_origin_pair(measuring_ox(), measuring_ox_known(), fn() {
           view_runs_measure_kept(runs, look, set, width, scale, tabular=measuring_tab())
         })
       },
       measure_runs_least=fn(runs, look, set, scale) {
-        with_measuring_origin_double(measuring_ox(), fn() {
+        with_measuring_origin_double(measuring_ox(), measuring_ox_known(), fn() {
           view_runs_least(runs, look, set, scale, tabular=measuring_tab())
         })
       },
       measure_shorter=fn(words, shorter, look, width, scale) {
-        with_measuring_origin_double(measuring_ox(), fn() {
+        with_measuring_origin_double(measuring_ox(), measuring_ox_known(), fn() {
           view_shorter_measure(words, shorter, look, width, scale, tabular=measuring_tab())
         })
       },

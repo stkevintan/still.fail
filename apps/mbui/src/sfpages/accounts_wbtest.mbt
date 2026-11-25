@@ -882,6 +882,24 @@ test "a Devin profile's models panel asks Fusion pairs on demand, switches lead 
   assert_true(!calls[1].1.stringify().contains(existing_uid), msg="profile.put drops \{existing_uid}: \{calls[1].1.stringify()}")
   assert_true(calls[2].1.stringify().contains("\"liked\":false"), msg="pick.like clears \{existing_uid}: \{calls[2].1.stringify()}")
   // Switching lead model chip to `GPT-6 Sol` and checking a sidekick saves it and stars it.
+  // First verify Lead group is a single RadioGroup supporting arrow keys and sticky selection.
+  assert_true(t.query(RadioGroup, label=@sf.t("web-pages.profiles.fusionLead")) is Some(_))
+  assert_eq(t.get(Radio, label="Opus 5.5").check, Some(@view.Check::On))
+  // Re-pressing already-selected lead keeps it selected.
+  t.click(Radio, label="Opus 5.5")
+  t.frame()
+  assert_eq(t.get(Radio, label="Opus 5.5").check, Some(@view.Check::On))
+  // Focusing Lead radio and pressing Right arrow moves to `GPT-6 Sol`, Left arrow moves back.
+  t.act(Radio, Focus, label="Opus 5.5")
+  t.frame()
+  t.key(@ui.key_code_right)
+  t.frame()
+  assert_eq(t.get(Radio, label="GPT-6 Sol").check, Some(@view.Check::On))
+  assert_eq(t.focused().map(fn(s) { s.label }), Some("GPT-6 Sol"))
+  t.key(@ui.key_code_left)
+  t.frame()
+  assert_eq(t.get(Radio, label="Opus 5.5").check, Some(@view.Check::On))
+  // Click `GPT-6 Sol` and check/uncheck a sidekick Checkbox chip.
   t.click(Radio, label="GPT-6 Sol")
   t.frame()
   assert_true(t.query(Checkbox, label="SWE-2 · 中") is Some(_))
@@ -1790,4 +1808,144 @@ test "多选 is over as 概览 is shown, and a station's own page takes its acco
     assert_true(one.find("多台 station 独立登录，请点进分别设置") is None, msg=at)
     assert_eq(one.audit(), [], msg="\{at}: " + one.audit().join("; "))
   }
+}
+
+///|
+test "profiles_batch_foot_node (page=true): liquid glass card with outside shadow, 1pt solid fallback, 0 corner faults, reverse-wrap height, and last row scrollable clear of bar" {
+  for dark in [false, true] {
+    for case in [(900.0, 0), (390.0, 2)] {
+      let (w, platform) = case
+      let at = "dark=\{dark} w=\{w} platform=\{platform}"
+      let t = setting_tester(Profiles(""), w, platform~, h=640.0, over=fn(base) { with_share_auto(base) })
+      // Set dark after setting_tester (Tester::new calls reset_globals) and assert theme().dark actually matches
+      @sf.set_dark(Some(dark))
+      @ui.set_glass_solid(None)
+      t.draw()
+      assert_eq(@sf.theme().dark, dark, msg="\{at}: theme().dark must match")
+      t.click(Button, label="多选")
+      t.run_for(@ui.move_most_ms)
+      assert_true(t.find("已选 0 项") is Some(_), msg=at)
+      let share_btn = t.get(Button, label="分享与 station")
+      let stop_btn = t.get(Button, label="停止分享")
+      // Card sits at the bottom of the viewport
+      let bar_glass = t.drawn_glass().filter(fn(g) { g.1 + g.3 > 450.0 && g.2 > 200.0 })
+      let bar_liquid = bar_glass.filter(fn(g) { g.4 == 6 })
+      let bar_shadow = t
+        .drawn_instances()
+        .iter()
+        .any(fn(a) { a.length() > 12 && a[5] == 2.0 && a[12] == 1.0 && a[1] + a[3] > 450.0 && a[2] > 200.0 })
+      assert_eq((at, bar_glass.length(), bar_liquid.length(), bar_shadow), (at, 1, 1, true))
+      // Direct 0 corner fault assertion on the batch bar card
+      assert_eq(t.corner_faults(), [], msg="\{at}: corner faults")
+      // Buttons stay inside the glass card with proper concentric inset
+      let g = bar_liquid[0]
+      assert_true(
+        share_btn.rect.0 >= g.0 + 4.0 &&
+        share_btn.rect.1 + share_btn.rect.3 <= g.1 + g.3 - 4.0 &&
+        stop_btn.rect.0 >= g.0 + 4.0 &&
+        stop_btn.rect.1 + stop_btn.rect.3 <= g.1 + g.3 - 4.0,
+        msg="\{at}: buttons inside card g=\{Repr(g)} share=\{Repr(share_btn.rect)} stop=\{Repr(stop_btn.rect)}",
+      )
+      // On narrow 320pt at 1.3x font scale: reverse-wrap strictly puts primary button on the lower row,
+      // and scrolling in that same narrow wrapped state must bring the true last row ("使用此账号") completely above bar_top
+      if w <= 390.0 {
+        t.resize(320.0, 640.0)
+        t.set_font_scale(1.3)
+        t.run_for(@ui.move_most_ms)
+        let s2 = t.get(Button, label="分享与 station")
+        let st2 = t.get(Button, label="停止分享")
+        assert_true(
+          s2.rect.1 > st2.rect.1 + 1.0,
+          msg="\{at}: reverse-wrap must put primary strictly on lower row: share=\{Repr(s2.rect)} stop=\{Repr(st2.rect)}",
+        )
+        assert_eq(t.corner_faults(), [], msg="\{at}: 320pt 1.3x corner faults")
+        for _ in 0..<12 {
+          t.wheel(160.0, 200.0, 200.0)
+        }
+        t.run_for(@ui.move_most_ms)
+        let narrow_bar_top = t.drawn_glass().filter(fn(gl) { gl.1 + gl.3 > 400.0 && gl.2 > 200.0 })[0].1
+        guard t.query(Button, label="使用此账号") is Some(last_btn) else {
+          fail("\{at}: narrow wrapped last row (使用此账号) not found after scrolling")
+        }
+        let cx = last_btn.rect.0 + last_btn.rect.2 / 2.0
+        let cy = last_btn.rect.1 + last_btn.rect.3 / 2.0
+        let cards = t
+          .boxes_held()
+          .filter(fn(b) {
+            b.bg != 0L && b.radius >= 8.0 && b.h < 400.0 && b.w > last_btn.rect.2 + 20.0 && b.x <= cx && cx <= b.x + b.w && b.y <= cy && cy <= b.y + b.h
+          })
+        guard cards.length() > 0 else {
+          fail("\{at}: narrow wrapped Codex last card enclosing 使用此账号 not found")
+        }
+        let mut last_card = cards[0]
+        for c in cards {
+          if c.h < last_card.h {
+            last_card = c
+          }
+        }
+        let card_bottom = last_card.y + last_card.h
+        assert_true(
+          card_bottom > last_btn.rect.1 + last_btn.rect.3 + 10.0,
+          msg="\{at}: narrow Codex card bottom \{card_bottom} must include below-button lines past \{last_btn.rect.1 + last_btn.rect.3}",
+        )
+        assert_true(
+          card_bottom <= narrow_bar_top,
+          msg="\{at}: narrow wrapped Codex card bottom \{card_bottom} must be <= bar_top \{narrow_bar_top}",
+        )
+        t.set_font_scale(1.0)
+        t.resize(w, 640.0)
+        t.run_for(@ui.move_most_ms)
+      } else {
+        // Wide: scroll down and strictly assert the full Codex last card bottom clears bar_top
+        for _ in 0..<12 {
+          t.wheel(w / 2.0, 200.0, 200.0)
+        }
+        t.run_for(@ui.move_most_ms)
+        let wide_bar_top = t.drawn_glass().filter(fn(gl) { gl.1 + gl.3 > 450.0 && gl.2 > 200.0 })[0].1
+        guard t.query(Button, label="使用此账号") is Some(last_btn) else {
+          fail("\{at}: wide last row (使用此账号) not found after scrolling")
+        }
+        let cx = last_btn.rect.0 + last_btn.rect.2 / 2.0
+        let cy = last_btn.rect.1 + last_btn.rect.3 / 2.0
+        let cards = t
+          .boxes_held()
+          .filter(fn(b) {
+            b.bg != 0L && b.radius >= 8.0 && b.h < 400.0 && b.w > last_btn.rect.2 + 20.0 && b.x <= cx && cx <= b.x + b.w && b.y <= cy && cy <= b.y + b.h
+          })
+        guard cards.length() > 0 else {
+          fail("\{at}: wide Codex last card enclosing 使用此账号 not found")
+        }
+        let mut last_card = cards[0]
+        for c in cards {
+          if c.h < last_card.h {
+            last_card = c
+          }
+        }
+        let card_bottom = last_card.y + last_card.h
+        assert_true(
+          card_bottom > last_btn.rect.1 + last_btn.rect.3 + 10.0,
+          msg="\{at}: wide Codex card bottom \{card_bottom} must include below-button lines past \{last_btn.rect.1 + last_btn.rect.3}",
+        )
+        assert_true(
+          card_bottom <= wide_bar_top,
+          msg="\{at}: wide Codex card bottom \{card_bottom} must be <= bar_top \{wide_bar_top}",
+        )
+      }
+      // MBUI_GLASS=solid fallback: 0 glass + 1pt border
+      @ui.set_glass_solid(Some(true))
+      t.draw()
+      t.run_for(@ui.move_most_ms)
+      assert_eq(@sf.theme().dark, dark, msg="\{at}: solid theme().dark must match")
+      let solid_glass = t.drawn_glass().filter(fn(gl) { gl.1 + gl.3 > 450.0 && gl.2 > 200.0 })
+      let solid_edges = t
+        .boxes_held()
+        .filter(fn(b) { b.border_w >= 0.9 && b.y + b.h > 450.0 && b.w > 200.0 })
+        .map(fn(b) { b.border_w })
+      assert_eq((at, solid_glass.length(), solid_edges), (at, 0, [1.0]))
+      assert_eq(t.corner_faults(), [], msg="\{at}: solid corner faults")
+      @ui.set_glass_solid(None)
+    }
+  }
+  @ui.set_glass_solid(None)
+  @sf.set_dark(None)
 }

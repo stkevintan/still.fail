@@ -87,8 +87,9 @@ export function dbName(sub: string): string {
 }
 
 /// The device's own values (not an account's): kept in the host's storage, one storage value per table, read at start.
-/// (`verified`: signatures checked on this device, vault/verified.ts)
-export const DEVICE_TABLES = ["prefs", "changelog", "choice", "chat_ref", "drive_place", "verified"] as const;
+/// (`verified`: signatures checked on this device, vault/verified.ts; `keys`: this device's own keys' public halves as last read,
+/// shown while they are read again at start, views/lock.ts `KEYS_SHOWN`)
+export const DEVICE_TABLES = ["prefs", "changelog", "choice", "chat_ref", "drive_place", "verified", "keys"] as const;
 export type DeviceTable = (typeof DEVICE_TABLES)[number];
 
 class Device {
@@ -136,8 +137,14 @@ class Device {
 
   load(host: Host): Effect.Effect<void> {
     return Effect.gen({ self: this }, function* () {
-      for (const table of DEVICE_TABLES) {
-        const bytes = yield* Effect.orElseSucceed(host.storageGet(`device/${table}`), () => null);
+      // (read together and taken in order: at a start each read waits its turn on the host's disk behind what else is read
+      // or written then, and the first view waits on all of them; core.start `ms.db`)
+      const read = yield* Effect.all(
+        DEVICE_TABLES.map((table) => Effect.orElseSucceed(host.storageGet(`device/${table}`), () => null)),
+        { concurrency: "unbounded" },
+      );
+      for (const [i, table] of DEVICE_TABLES.entries()) {
+        const bytes = read[i];
         const v = bytes ? parseJson(bytes) : undefined;
         if (!isObject(v) || this.#tables.has(table)) continue;
         // Each value frozen, as `put` keeps it: shared by whoever reads it (`shared`).
@@ -1154,6 +1161,8 @@ export class Data {
     if (table === "ways") return [this.#ofWorkspace(key) ?? null, [key, "ways"]];
     // Its stations' names and marks as they keep them (views/station-marks.ts): in the workspace's, by its id.
     if (table === "stationMarks") return [this.#ofWorkspace(key) ?? null, [key, "stationMarks"]];
+    // The systems its stations run on as their host readings said (station-os.ts): in the workspace's, by its id.
+    if (table === "stationOs") return [this.#ofWorkspace(key) ?? null, [key, "stationOs"]];
     // Its person's presets as the device carries them, and which of its stations are from before (presets-kept.ts):
     // in the workspace's, by its id.
     if (table === "presetRecords") return [this.#ofWorkspace(key) ?? null, [key, "presetRecords"]];
@@ -1702,13 +1711,34 @@ export class Data {
 
   /// The messages of these stations that have all of `terms`, newest first, across their databases (AccountDb.findSaid).
   findSaid(stations: string[], terms: string[], limit: number): ReturnType<AccountDb["findSaid"]> {
+    return this.#said(stations, terms, limit, (db, list) => db.findSaid(list, terms, limit))!;
+  }
+
+  /// `findSaid` as found last (`now`: nothing said since), without looking; null where its databases were never looked
+  /// through for these (each scan reads the whole of what they keep was said).
+  saidFoundKept(stations: string[], terms: string[], limit: number): { found: ReturnType<AccountDb["findSaid"]>; now: boolean } | null {
+    let now = true;
+    const found = this.#said(stations, terms, limit, (db, list) => {
+      const kept = db.saidFoundKept(list, terms, limit);
+      if (kept !== null && !kept.now) now = false;
+      return kept?.found ?? null;
+    });
+    return found === null ? null : { found, now };
+  }
+
+  #said(stations: string[], terms: string[], limit: number, of: (db: AccountDb, stations: string[]) => ReturnType<AccountDb["findSaid"]> | null): ReturnType<AccountDb["findSaid"]> | null {
     for (const station of stations) this.#readQuery({ topic: "$said", station });
     const by = new Map<AccountDb, string[]>();
     for (const s of stations) {
       const db = this.of(s);
       if (db) by.set(db, [...(by.get(db) ?? []), s]);
     }
-    const found = [...by].flatMap(([db, list]) => db.findSaid(list, terms, limit));
+    const found: ReturnType<AccountDb["findSaid"]> = [];
+    for (const [db, list] of by) {
+      const one = of(db, list);
+      if (one === null) return null;
+      found.push(...one);
+    }
     return by.size > 1 ? found.sort((a, b) => (b.at ?? -Infinity) - (a.at ?? -Infinity)).slice(0, limit) : found;
   }
 

@@ -1,0 +1,33 @@
+name: Refresh monoid CI R2 signer
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    if: github.repository == 'AFK-surf/monoid' && github.ref == 'refs/heads/main' && vars.MONOID_CI == 'on'
+    runs-on: ubuntu-24.04
+    environment: production
+    # The secret update creates a Worker version. Queue it alongside the API deploy without canceling either job.
+    concurrency:
+      group: monoid-api-production
+      queue: max
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+      - run: pnpm --dir cloud install --frozen-lockfile --prefer-offline
+      - name: Refresh the upload-only credential
+        env:
+          STILLFAIL_CLOUD: monoid
+          CLOUDFLARE_API_TOKEN: ${{ secrets.MONOID_CLOUDFLARE_API_TOKEN }}
+        run: python3 cloud/deploy.py refresh-ci-r2-signer
+      - name: Prune expired CI archives
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.MONOID_CLOUDFLARE_API_TOKEN }}
+        run: node scripts/release-prune.ts --ci-natives-only

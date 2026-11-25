@@ -1,0 +1,25 @@
+import "base_codec"
+
+fn expect(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+test "owned_ws_sql, is_owned_ws, conv_cmp_earliest, split_session_thread" {
+  expect(owned_ws_sql == "(ws IS NULL OR (ws NOT LIKE 'handed:%' AND ws NOT LIKE 'coming:%'))", "owned_ws_sql")
+  expect(is_owned_ws(base_codec::json_null()), "null ws owned")
+  expect(is_owned_ws(base_codec::json_str("ws1")), "normal ws owned")
+  expect(!is_owned_ws(base_codec::json_str("handed:x")), "handed not owned")
+  expect(!is_owned_ws(base_codec::json_str("coming:y")), "coming not owned")
+  expect(conv_cmp_earliest(1.0, "b", 2.0, "a") < 0, "earlier ts wins")
+  expect(conv_cmp_earliest(1.0, "😀", 1.0, "\u{E000}") < 0, "UTF-16 tie-break")
+  match split_session_thread("slack:C123:1700.1") {
+    Some((ch, ts)) => expect(ch == "C123" && ts == "1700.1", "split slack")
+    None => panic("expected Some")
+  }
+  match split_session_thread("onlyone") {
+    None => ()
+    Some(_) => panic("expected None")
+  }
+}

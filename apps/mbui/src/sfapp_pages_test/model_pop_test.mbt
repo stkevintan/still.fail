@@ -1066,3 +1066,226 @@ test "wide: when otherStations scope and search both appear, search sits on the 
     }
   }
 }
+
+///|
+test "wide: otherStations scope reverts checked radio and resting capsule when pick.set fails" {
+  let base = fixture_app("newchat-station-models-many")
+  let reply : Ref[((Result[Json, Json]) -> Unit)?] = Ref(None)
+  let src : Source = {
+    ..base,
+    call: fn(name, params, done) {
+      if name == "pick.set" {
+        reply.val = Some(done)
+      } else {
+        (base.call)(name, params, done)
+      }
+    },
+  }
+  let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=1280.0, h=800.0, platform=0)
+  t.run_for(squeeze_opening)
+  let seg0 = t.get(Radio, label="本机").rect
+  let seg1 = t.get(Radio, label="所有 station").rect
+  assert_eq(t.get(Radio, label="本机").check, Some(@ui.Check::On))
+  // Click "所有 station" while pick.set is in flight: optimistically switches without waiting.
+  t.click(Radio, label="所有 station")
+  t.run_for(@ui.move_most_ms / 2.0)
+  assert_true(reply.val is Some(_), msg="expected pick.set call to be captured")
+  assert_eq(t.get(Radio, label="所有 station").check, Some(@ui.Check::On))
+  // Simulate async pick.set failure with otherStations topic unchanged (false): must revert cleanly.
+  match reply.val {
+    Some(done) => done(Err(Json::string("network failed")))
+    None => fail("missing pick.set callback")
+  }
+  t.run_for(@ui.move_most_ms * 2.0)
+  assert_eq(t.get(Radio, label="本机").check, Some(@ui.Check::On), msg="failed pick.set must revert checked radio to 本机")
+  assert_eq(t.get(Radio, label="所有 station").check, Some(@ui.Check::Off))
+  let lifted = @ui.tree_theme().lifted
+  let thumbs = t
+    .drawn_rects()
+    .filter(fn(d) {
+      d.4 == lifted &&
+      (d.3 - seg0.3).abs() < 2.0 &&
+      d.1 >= seg0.1 - 4.0 &&
+      d.1 <= seg0.1 + seg0.3 &&
+      d.0 >= seg0.0 - 4.0 &&
+      d.0 + d.2 <= seg1.0 + seg1.2 + 4.0
+    })
+  assert_eq(thumbs.length(), 1, msg="expected 1 resting scope capsule after rollback")
+  let tcx = thumbs[0].0 + thumbs[0].2 / 2.0
+  let r0cx = seg0.0 + seg0.2 / 2.0
+  assert_true((tcx - r0cx).abs() < 1.0, msg="rolled-back capsule center \{tcx} must align with 本机 radio center \{r0cx}")
+}
+
+///|
+test "wide: rapid scope clicks (0 -> 1 -> 0) stay steady on 本机 when stale A topic arrives and pass through external updates after B settles" {
+  let base = fixture_app("newchat-station-models-many")
+  let queue : Array[(Json, (Result[Json, Json]) -> Unit)] = []
+  let src : Source = {
+    ..base,
+    call: fn(name, params, done) {
+      if name == "pick.set" && params is Object(m) && m.contains("otherStations") {
+        queue.push((params, done))
+      } else {
+        (base.call)(name, params, done)
+      }
+    },
+  }
+  let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=1280.0, h=800.0, platform=0)
+  t.run_for(squeeze_opening)
+  let seg0 = t.get(Radio, label="本机").rect
+  let seg1 = t.get(Radio, label="所有 station").rect
+  let lifted = @ui.tree_theme().lifted
+  let scope_thumbs = fn() {
+    t
+    .drawn_rects()
+    .filter(fn(d) {
+      d.4 == lifted &&
+      (d.3 - seg0.3).abs() < 2.0 &&
+      d.1 >= seg0.1 - 4.0 &&
+      d.1 <= seg0.1 + seg0.3 &&
+      d.0 >= seg0.0 - 4.0 &&
+      d.0 + d.2 <= seg1.0 + seg1.2 + 4.0
+    })
+  }
+  let r0cx = seg0.0 + seg0.2 / 2.0
+  let r1cx = seg1.0 + seg1.2 / 2.0
+  // Rapidly click 所有 station (A) then 本机 (B) before either settles.
+  t.click(Radio, label="所有 station")
+  t.frame()
+  t.click(Radio, label="本机")
+  t.run_for(@ui.move_most_ms)
+  assert_eq(queue.length(), 2, msg="expected 2 queued pick.set calls (A and B)")
+  assert_eq(t.get(Radio, label="本机").check, Some(@ui.Check::On))
+  // Stale A topic (otherStations=true) + A Ok arrives while B is still in flight:
+  // must NOT clear pending=Some(0) or jump back to 所有 station.
+  let jumped : Array[String] = []
+  t.each_frame(
+    Some(fn() {
+      for d in scope_thumbs() {
+        let cx = d.0 + d.2 / 2.0
+        if cx > seg0.0 + seg0.2 {
+          jumped.push("t=\{t.time()} cx=\{cx} > seg0.right=\{seg0.0 + seg0.2}")
+        }
+      }
+    }),
+  )
+  (base.call)("pick.set", queue[0].0, queue[0].1)
+  t.run_for(@ui.move_most_ms)
+  t.each_frame(None)
+  assert_eq(t.get(Radio, label="本机").check, Some(@ui.Check::On), msg="stale A must not flip radio to 所有 station")
+  assert_true(jumped.is_empty(), msg="stale A must not bounce capsule toward 所有 station: \{jumped.join("; ")}")
+  let thumbs_mid = scope_thumbs()
+  assert_eq(thumbs_mid.length(), 1)
+  assert_true((thumbs_mid[0].0 + thumbs_mid[0].2 / 2.0 - r0cx).abs() < 1.0)
+  // Deliver B Ok + otherStations=false topic -> stays on 本机 and clears pending.
+  (base.call)("pick.set", queue[1].0, queue[1].1)
+  t.run_for(@ui.move_most_ms)
+  assert_eq(t.get(Radio, label="本机").check, Some(@ui.Check::On))
+  // Prove pending was cleanly cleared: an external otherStations=true push now switches to 所有 station.
+  (base.call)("pick.set", queue[0].0, fn(_) {  })
+  t.run_for(@ui.move_most_ms)
+  assert_eq(t.get(Radio, label="所有 station").check, Some(@ui.Check::On), msg="external push after settle must pass through")
+  let thumbs_ext = scope_thumbs()
+  assert_eq(thumbs_ext.length(), 1)
+  assert_true((thumbs_ext[0].0 + thumbs_ext[0].2 / 2.0 - r1cx).abs() < 1.0)
+}
+
+///|
+test "wide: rapid scope clicks (0 -> 1 -> 0) revert to confirmed 所有 station when A succeeds and B fails" {
+  let base = fixture_app("newchat-station-models-many")
+  let queue : Array[(Json, (Result[Json, Json]) -> Unit)] = []
+  let src : Source = {
+    ..base,
+    call: fn(name, params, done) {
+      if name == "pick.set" && params is Object(m) && m.contains("otherStations") {
+        queue.push((params, done))
+      } else {
+        (base.call)(name, params, done)
+      }
+    },
+  }
+  let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=1280.0, h=800.0, platform=0)
+  t.run_for(squeeze_opening)
+  let seg0 = t.get(Radio, label="本机").rect
+  let seg1 = t.get(Radio, label="所有 station").rect
+  // Rapidly click 所有 station (A) then 本机 (B).
+  t.click(Radio, label="所有 station")
+  t.frame()
+  t.click(Radio, label="本机")
+  t.run_for(@ui.move_most_ms / 2.0)
+  assert_eq(queue.length(), 2, msg="expected 2 queued pick.set calls (A and B)")
+  // A succeeds and updates server topic to otherStations=true.
+  (base.call)("pick.set", queue[0].0, queue[0].1)
+  t.run_for(@ui.move_most_ms / 2.0)
+  assert_eq(t.get(Radio, label="本机").check, Some(@ui.Check::On))
+  // B fails -> pending clears and UI reverts to server-confirmed 所有 station.
+  (queue[1].1)(Err(Json::string("B failed")))
+  t.run_for(@ui.move_most_ms * 2.0)
+  assert_eq(t.get(Radio, label="所有 station").check, Some(@ui.Check::On), msg="failed B must revert to confirmed 所有 station")
+  assert_eq(t.get(Radio, label="本机").check, Some(@ui.Check::Off))
+  let lifted = @ui.tree_theme().lifted
+  let thumbs = t
+    .drawn_rects()
+    .filter(fn(d) {
+      d.4 == lifted &&
+      (d.3 - seg1.3).abs() < 2.0 &&
+      d.1 >= seg0.1 - 4.0 &&
+      d.1 <= seg0.1 + seg0.3 &&
+      d.0 >= seg0.0 - 4.0 &&
+      d.0 + d.2 <= seg1.0 + seg1.2 + 4.0
+    })
+  assert_eq(thumbs.length(), 1, msg="expected 1 resting scope capsule after B rollback")
+  let tcx = thumbs[0].0 + thumbs[0].2 / 2.0
+  let r1cx = seg1.0 + seg1.2 / 2.0
+  assert_true((tcx - r1cx).abs() < 1.0, msg="capsule center \{tcx} must align with confirmed 所有 station (\{r1cx})")
+}
+
+///|
+test "wide: synchronous read-only pick.set rejection keeps scope radio and resting capsule aligned on 本机 (mouse & finger)" {
+  for plat in [0, 2] {
+    let base = fixture_app("newchat-station-models-many")
+    let rejected = Ref(0)
+    let src : Source = {
+      ..base,
+      call: fn(name, params, done) {
+        if name == "pick.set" && params is Object(m) && m.contains("otherStations") {
+          rejected.val += 1
+          done(Err(Json::string("read-only")))
+        } else {
+          (base.call)(name, params, done)
+        }
+      },
+    }
+    let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=1280.0, h=800.0, platform=plat)
+    t.run_for(squeeze_opening)
+    let seg0 = t.get(Radio, label="本机").rect
+    let seg1 = t.get(Radio, label="所有 station").rect
+    let c1x = seg1.0 + seg1.2 / 2.0
+    let c1y = seg1.1 + seg1.3 / 2.0
+    if plat == 0 {
+      t.click(Radio, label="所有 station")
+    } else {
+      t.touch(0, c1x, c1y)
+      t.touch(2, c1x, c1y)
+    }
+    t.run_for(@ui.move_most_ms * 2.0)
+    assert_eq(rejected.val, 1, msg="plat=\{plat}: expected synchronous pick.set rejection")
+    assert_eq(t.get(Radio, label="本机").check, Some(@ui.Check::On), msg="plat=\{plat}: 本机 must remain checked")
+    assert_eq(t.get(Radio, label="所有 station").check, Some(@ui.Check::Off))
+    let lifted = @ui.tree_theme().lifted
+    let thumbs = t
+      .drawn_rects()
+      .filter(fn(d) {
+        d.4 == lifted &&
+        (d.3 - seg0.3).abs() < 2.0 &&
+        d.1 >= seg0.1 - 4.0 &&
+        d.1 <= seg0.1 + seg0.3 &&
+        d.0 >= seg0.0 - 4.0 &&
+        d.0 + d.2 <= seg1.0 + seg1.2 + 4.0
+      })
+    assert_eq(thumbs.length(), 1, msg="plat=\{plat}: expected 1 resting scope capsule after sync rejection")
+    let tcx = thumbs[0].0 + thumbs[0].2 / 2.0
+    let r0cx = seg0.0 + seg0.2 / 2.0
+    assert_true((tcx - r0cx).abs() < 1.0, msg="plat=\{plat}: capsule center \{tcx} must stay on 本机 (\{r0cx})")
+  }
+}

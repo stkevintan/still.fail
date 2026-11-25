@@ -10,81 +10,53 @@ priv struct FilmHost {
 }
 
 ///|
-impl @hostapi.Host for FilmHost with font_metrics(_, size, _, _, out) {
-  out[0] = size * 0.75
-  out[1] = size * 0.25
-  out[2] = size * 1.25
-}
-
-///|
-impl @hostapi.Host for FilmHost with shape(_, text, _, _, _, out) {
-  let n = text.length()
-  for i in 0..<n {
-    out[i * 4] = i.to_double()
-    out[i * 4 + 1] = 1.0
-    out[i * 4 + 2] = film_advance
-    out[i * 4 + 3] = text.at(i).to_int().to_double()
+fn FilmHost::as_host(self : FilmHost) -> @hostapi.Host {
+  let h = @hostapi.Host::noop()
+  h.font_metrics = fn(size, _, _, out) {
+    out[0] = size * 0.75
+    out[1] = size * 0.25
+    out[2] = size * 1.25
   }
-  n
-}
-
-///|
-impl @hostapi.Host for FilmHost with text_key(_, text, _, _, _) {
-  text.at(0).to_int()
-}
-
-///|
-impl @hostapi.Host for FilmHost with glyph(_, key, out) {
-  ignore(key)
-  out[0] = 0.0
-  out[1] = 0.0
-  out[2] = 5.0
-  out[3] = 9.0
-  out[4] = 0.0
-  out[5] = -9.0
-  out[6] = 0.0
-}
-
-///|
-impl @hostapi.Host for FilmHost with glyph_put(self, key, x, y) {
-  self.put.push((key, x, y))
-}
-
-///|
-impl @hostapi.Host for FilmHost with atlas_size(_, colour) {
-  if colour {
-    0
-  } else {
-    1024
+  h.shape = fn(text, _, _, _, out) {
+    let n = text.length()
+    for i in 0..<n {
+      out[i * 4] = i.to_double()
+      out[i * 4 + 1] = 1.0
+      out[i * 4 + 2] = film_advance
+      out[i * 4 + 3] = text.at(i).to_int().to_double()
+    }
+    n
   }
-}
-
-///|
-impl @hostapi.Host for FilmHost with face_add_bytes(self, face, _, _) {
-  self.faces.push(face)
-  true
-}
-
-///|
-impl @hostapi.Host for FilmHost with image_load_bytes(_, _, _) {
-  film_picture
-}
-
-///|
-impl @hostapi.Host for FilmHost with image_info(self, _, out) {
-  if self.turns.val == 0 {
-    return 0
+  h.text_key = fn(text, _, _, _) { text.at(0).to_int() }
+  h.glyph = fn(key, out) {
+    ignore(key)
+    out[0] = 0.0
+    out[1] = 0.0
+    out[2] = 5.0
+    out[3] = 9.0
+    out[4] = 0.0
+    out[5] = -9.0
+    out[6] = 0.0
   }
-  out[0] = 80.0
-  out[1] = 40.0
-  out[2] = 160.0
-  out[3] = 80.0
-  1
-}
-
-///|
-impl @hostapi.Host for FilmHost with image_free(self, id) {
-  self.freed.push(id)
+  h.glyph_put = fn(key, x, y) { self.put.push((key, x, y)) }
+  h.atlas_size = fn(colour) { if colour { 0 } else { 1024 } }
+  h.face_add_bytes = fn(face, _, _) {
+    self.faces.push(face)
+    true
+  }
+  h.image_load_bytes = fn(_, _) { film_picture }
+  h.image_info = fn(_, out) {
+    if self.turns.val == 0 {
+      return 0
+    }
+    out[0] = 80.0
+    out[1] = 40.0
+    out[2] = 160.0
+    out[3] = 80.0
+    1
+  }
+  h.image_free = fn(id) { self.freed.push(id) }
+  h
 }
 
 ///|
@@ -111,7 +83,7 @@ test "a Tester over a live host: the words laid out and drawn by its text, the f
       })
       |> ignore
     },
-    live={ host, turn: fn() { host.turns.val = host.turns.val + 1 } },
+    live={ host: host.as_host(), turn: fn() { host.turns.val = host.turns.val + 1 } },
   )
   t.draw()
   // three clusters of the live host's 7 (the fake's: 8 each at the words' size)

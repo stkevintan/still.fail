@@ -3,239 +3,6 @@
 // else imports it: a test's program, given a Tester's fake host, links none of it.
 
 ///|
-priv struct Native {}
-
-///|
-impl @hostapi.Host for Native with set_window_zoom(_, zoom) {
-  set_window_zoom(zoom)
-}
-
-///|
-impl @hostapi.Host for Native with set_window_key(_, f) {
-  set_window_key(f)
-}
-
-///|
-impl @hostapi.Host for Native with wheel_kept(_, kept) {
-  wheel_kept(kept)
-}
-
-///|
-fn init {
-  @hostapi.set_host(Native::{  })
-}
-
-///|
-impl @hostapi.Host for Native with window_setup(_, min_w, min_h, w, h, inset) {
-  window_setup(min_w, min_h, w, h, inset~)
-}
-
-///|
-impl @hostapi.Host for Native with window_hold(_) {
-  window_hold()
-}
-
-///|
-impl @hostapi.Host for Native with window_show(_) {
-  window_show()
-}
-
-///|
-impl @hostapi.Host for Native with window_inset(_) {
-  window_inset()
-}
-
-///|
-impl @hostapi.Host for Native with full_screen(_) {
-  full_screen()
-}
-
-///|
-impl @hostapi.Host for Native with set_full_screen(_, on) {
-  set_full_screen(on)
-}
-
-///|
-impl @hostapi.Host for Native with window_buttons_down(_, by, ms) {
-  window_buttons_down(by, ms)
-}
-
-///|
-impl @hostapi.Host for Native with window_corner(_) {
-  window_corner()
-}
-
-///|
-impl @hostapi.Host for Native with window_corner_at(_, k) {
-  window_corner_at(k)
-}
-
-///|
-impl @hostapi.Host for Native with window_drag(_) {
-  window_drag()
-}
-
-///|
-impl @hostapi.Host for Native with window_act(_, what) {
-  window_act(what)
-}
-
-///|
-impl @hostapi.Host for Native with window_zoomed(_) {
-  window_zoomed()
-}
-
-///|
-impl @hostapi.Host for Native with window_snap(_, x, y, w, h) {
-  window_snap(x, y, w, h)
-}
-
-///|
-impl @hostapi.Host for Native with window_snap_state(_) {
-  window_snap_state()
-}
-
-///|
-impl @hostapi.Host for Native with window_opens(_) {
-  window_opens()
-}
-
-///|
-impl @hostapi.Host for Native with window_open(_, what) {
-  window_open(what)
-}
-
-///|
-impl @hostapi.Host for Native with window_front(_, what) {
-  window_front(what)
-}
-
-///|
-impl @hostapi.Host for Native with windows_in_process(_) {
-  windows(0, 0, "") != 0
-}
-
-///|
-impl @hostapi.Host for Native with window_open_id(_, what) {
-  windows(1, 0, what)
-}
-
-///|
-impl @hostapi.Host for Native with window_front_id(_, wid) {
-  windows(2, wid, "") != 0
-}
-
-///|
-impl @hostapi.Host for Native with window_close_id(_, wid) {
-  windows(3, wid, "") |> ignore
-}
-
-///|
-impl @hostapi.Host for Native with window_current(_) {
-  windows(4, 0, "")
-}
-
-///|
-impl @hostapi.Host for Native with window_set_title(_, wid, title) {
-  windows(5, wid, title) |> ignore
-}
-
-///|
-impl @hostapi.Host for Native with set_cursor(_, kind) {
-  set_cursor(kind)
-}
-
-///|
-impl @hostapi.Host for Native with set_badge(_, n) {
-  set_badge(n)
-}
-
-///|
-impl @hostapi.Host for Native with menu_setup(_, json) {
-  menu_setup(json)
-}
-
-///|
-impl @hostapi.Host for Native with app_said(_, name) {
-  app_said(name)
-}
-
-///|
-impl @hostapi.Host for Native with app_tell(_, name, arg) {
-  app_tell(name, arg)
-}
-
-///|
-impl @hostapi.Host for Native with set_site_name(_, name) {
-  set_site_name(name)
-}
-
-///|
-impl @hostapi.Host for Native with mods_held(_) {
-  mods_held()
-}
-
-///|
-impl @hostapi.Host for Native with pointer_lock(_, on) {
-  pointer_lock(on)
-}
-
-///|
-impl @hostapi.Host for Native with pointer_locked(_) {
-  pointer_locked()
-}
-
-///|
-impl @hostapi.Host for Native with pointer_delta(_, out) {
-  pointer_delta(out)
-}
-
-///|
-impl @hostapi.Host for Native with gamepads(_, out) {
-  gamepads(out)
-}
-
-///|
-impl @hostapi.Host for Native with run(_, title, frame, pointer, wheel, key, text) {
-  run(title, frame, pointer, wheel, key, text)
-}
-
-///|
-impl @hostapi.Host for Native with now(_) {
-  now()
-}
-
-///|
-impl @hostapi.Host for Native with wall_ms(_) {
-  wall_ms()
-}
-
-///|
-impl @hostapi.Host for Native with utc_offset_min(_, at_ms) {
-  utc_offset_min(at_ms)
-}
-
-///|
-impl @hostapi.Host for Native with event_time(_) {
-  event_time()
-}
-
-///|
-impl @hostapi.Host for Native with event_finger(_) {
-  event_finger()
-}
-
-///|
-impl @hostapi.Host for Native with frame_late(_) {
-  frame_late()
-}
-
-///|
-impl @hostapi.Host for Native with platform(_) {
-  said_once(platform_said, fn() { platform() })
-}
-
-///|
 /// What the platform says once of what stays the same while the app runs, kept: asked (`ask`) the first time only.
 fn said_once(kept : Ref[Int?], ask : () -> Int) -> Int {
   match kept.val {
@@ -278,1134 +45,297 @@ let feeds_said : Ref[Int?] = Ref(None)
 let layers_said : Ref[Int?] = Ref(None)
 
 ///|
-impl @hostapi.Host for Native with request_frame(_) {
-  request_frame()
-}
-
-///|
-impl @hostapi.Host for Native with frames_paced(_, hz) {
-  frames_paced(hz)
-}
-
-///|
-impl @hostapi.Host for Native with wake_after(_, ms) {
-  wake_after(ms)
-}
-
-///|
-impl @hostapi.Host for Native with font_metrics(_, size, weight, style, out) {
-  font_metrics(size, weight, style, out)
-}
-
-///|
-impl @hostapi.Host for Native with shape(_, text, size, weight, style, out) {
-  shape(text, size, weight, style, out)
-}
-
-///|
-impl @hostapi.Host for Native with text_key(_, text, size, weight, style) {
-  text_key(text, size, weight, style)
-}
-
-///|
-impl @hostapi.Host for Native with glyph(_, key, out) {
-  glyph(key, out)
-}
-
-///|
-impl @hostapi.Host for Native with glyph_put(_, key, x, y) {
-  glyph_put(key, x, y)
-}
-
-///|
-impl @hostapi.Host for Native with glyph_picture(_, key, out) {
-  glyph_picture(key, out)
-}
-
-///|
-impl @hostapi.Host for Native with atlas_put(_, x, y, w, h, px) {
-  atlas_put(x, y, w, h, px)
-}
-
-///|
-impl @hostapi.Host for Native with atlas_size(_, colour) {
-  atlas_size(colour)
-}
-
-///|
-impl @hostapi.Host for Native with glyphs_ahead(_, keys, n) {
-  glyphs_ahead(keys, n)
-}
-
-///|
-impl @hostapi.Host for Native with glyphs_ahead_able(_) {
-  true
-}
-
-///|
-impl @hostapi.Host for Native with face_add(_, face, path, weight) {
-  face_add(face, path, weight)
-}
-
-///|
-impl @hostapi.Host for Native with face_add_bytes(_, face, data, weight) {
-  face_add_bytes(face, data, weight)
-}
-
-///|
-impl @hostapi.Host for Native with face_clear(_, face) {
-  face_clear(face)
-}
-
-///|
-impl @hostapi.Host for Native with face_add_family(_, face, family) {
-  face_add_family(face, family)
-}
-
-///|
-impl @hostapi.Host for Native with local_font_families(_) {
-  local_font_families()
-}
-
-///|
-impl @hostapi.Host for Native with atlas_generation(_) {
-  atlas_generation()
-}
-
-///|
-impl @hostapi.Host for Native with present(_, buf, count, r, g, b) {
-  present(buf, count, r, g, b)
-}
-
-///|
-impl @hostapi.Host for Native with groups_here(_) {
-  groups_here()
-}
-
-///|
-impl @hostapi.Host for Native with group_set(_, id, inst, moves, n) {
-  group_set(id, inst, moves, n)
-}
-
-///|
-impl @hostapi.Host for Native with group_drop(_, id) {
-  group_drop(id)
-}
-
-///|
-impl @hostapi.Host for Native with set_ime(_, active, x, y, w, h, text, sel_start, sel_end) {
-  set_ime(active, x, y, w, h, text, sel_start, sel_end)
-}
-
-///|
-impl @hostapi.Host for Native with text_menu(_, shown, x, y, w, h, can) {
-  ffi_text_menu(if shown { 1 } else { 0 }, x, y, w, h, can)
-}
-
-///|
-impl @hostapi.Host for Native with text_menu_own(_, words) {
-  ffi_text_menu_own(words)
-}
-
-///|
-impl @hostapi.Host for Native with edit_can(_, can) {
-  ffi_edit_can(can)
-}
-
-///|
-impl @hostapi.Host for Native with clipboard_set(_, s) {
-  clipboard_set(s)
-}
-
-///|
-impl @hostapi.Host for Native with clipboard_set_html(_, text, html) {
-  clipboard_set_html(text, html)
-}
-
-///|
-impl @hostapi.Host for Native with clipboard_set_image(_, data) {
-  clipboard_set_image(data)
-}
-
-///|
-impl @hostapi.Host for Native with clipboard_set_secret(_, s, clear_ms) {
-  clipboard_set_secret(s, clear_ms~)
-}
-
-///|
-impl @hostapi.Host for Native with clipboard_secret_off(_) {
-  clipboard_secret_off()
-}
-
-///|
-impl @hostapi.Host for Native with log(_, s) {
-  log(s)
-}
-
-///|
-impl @hostapi.Host for Native with bench_mode(_) {
-  bench_mode()
-}
-
-///|
-impl @hostapi.Host for Native with set_outside(_, f) {
-  set_outside(f)
-}
-
-///|
-impl @hostapi.Host for Native with frame_awaiting(_, awaiting, what) {
-  frame_awaiting(awaiting, what)
-}
-
-///|
-impl @hostapi.Host for Native with own_clock(_) {
-  own_clock()
-}
-
-///|
-impl @hostapi.Host for Native with reduce_motion(_) {
-  reduce_motion()
-}
-
-///|
-impl @hostapi.Host for Native with keys_platform(_) {
-  said_once(keys_said, fn() { keys_platform() })
-}
-
-///|
-impl @hostapi.Host for Native with exit(_, code) {
-  exit(code)
-}
-
-///|
-impl @hostapi.Host for Native with mem_bytes(_) {
-  mem_bytes()
-}
-
-///|
-impl @hostapi.Host for Native with set_back(_, back) {
-  set_back(back)
-}
-
-///|
-impl @hostapi.Host for Native with back_enabled(_, on) {
-  back_enabled(on)
-}
-
-///|
-impl @hostapi.Host for Native with reduce_transparency(_) {
-  reduce_transparency()
-}
-
-///|
-impl @hostapi.Host for Native with increase_contrast(_) {
-  increase_contrast()
-}
-
-///|
-impl @hostapi.Host for Native with thermal_throttled(_) {
-  thermal_throttled()
-}
-
-///|
-impl @hostapi.Host for Native with gpu_ms(_) {
-  gpu_ms()
-}
-
-///|
-impl @hostapi.Host for Native with frames_dropped(_) {
-  frames_dropped()
-}
-
-///|
-impl @hostapi.Host for Native with cpu_ms(_) {
-  cpu_ms()
-}
-
-///|
-impl @hostapi.Host for Native with thread_cpu_ms(_) {
-  thread_cpu_ms()
-}
-
-///|
-impl @hostapi.Host for Native with display_hz(_) {
-  display_hz()
-}
-
-///|
-impl @hostapi.Host for Native with perf_state(_) {
-  perf_state()
-}
-
-///|
-impl @hostapi.Host for Native with set_perf(_, on) {
-  set_perf(on)
-}
-
-///|
-impl @hostapi.Host for Native with perf_line(_, line) {
-  perf_line(line)
-}
-
-///|
-impl @hostapi.Host for Native with perf_where(_) {
-  perf_where()
-}
-
-///|
-impl @hostapi.Host for Native with perf_size(_) {
-  perf_size()
-}
-
-///|
-impl @hostapi.Host for Native with perf_open(_, go) {
-  perf_open(go)
-}
-
-///|
-impl @hostapi.Host for Native with reveal_file(_, path, go) {
-  reveal_file(path, go)
-}
-
-///|
-impl @hostapi.Host for Native with perf_read(_) {
-  perf_read()
-}
-
-///|
-impl @hostapi.Host for Native with env(_, name) {
-  env(name)
-}
-
-///|
-impl @hostapi.Host for Native with set_app_state(_, f) {
-  set_app_state(f)
-}
-
-///|
-impl @hostapi.Host for Native with system_dark(_) {
-  system_dark()
-}
-
-///|
-impl @hostapi.Host for Native with font_scale(_) {
-  font_scale()
-}
-
-///|
-impl @hostapi.Host for Native with native_pointing(_) {
-  said_once(native_pointing_said, fn() { native_pointing() })
-}
-
-///|
-impl @hostapi.Host for Native with keyboard(_) {
-  keyboard()
-}
-
-///|
-impl @hostapi.Host for Native with a11y_on(_) {
-  a11y_on()
-}
-
-///|
-impl @hostapi.Host for Native with a11y_tree(_, s) {
-  a11y_tree(s)
-}
-
-///|
-impl @hostapi.Host for Native with set_dark(_, dark) {
-  set_dark(dark)
-}
-
-///|
-impl @hostapi.Host for Native with set_sideways(_, on) {
-  set_sideways(on)
-}
-
-///|
-impl @hostapi.Host for Native with set_turnable(_, on) {
-  set_turnable(on)
-}
-
-///|
-impl @hostapi.Host for Native with share(_, text, name, mime, data) {
-  share(text, name, mime, data)
-}
-
-///|
-impl @hostapi.Host for Native with shared_in(_) {
-  shared_in()
-}
-
-///|
-impl @hostapi.Host for Native with shared_in_file(_, i) {
-  shared_in_file(i)
-}
-
-///|
-impl @hostapi.Host for Native with app_version(_) {
-  app_version()
-}
-
-///|
-impl @hostapi.Host for Native with update_fetch(_, url, sha256, size, name, now, delta) {
-  update_fetch(url, sha256, size, name, now, delta)
-}
-
-///|
-impl @hostapi.Host for Native with update_apply(_, said) {
-  update_apply(said)
-}
-
-///|
-impl @hostapi.Host for Native with update_state(_) {
-  update_state()
-}
-
-///|
-impl @hostapi.Host for Native with install_package(_, name, data) {
-  install_package(name, data)
-}
-
-///|
-impl @hostapi.Host for Native with drive(_, kind, text) {
-  drive(kind, text)
-}
-
-///|
-impl @hostapi.Host for Native with image_load(_, src, max_px) {
-  image_load(src, max_px)
-}
-
-///|
-impl @hostapi.Host for Native with image_load_bytes(_, data, max_px) {
-  image_load_bytes(data, max_px)
-}
-
-///|
-impl @hostapi.Host for Native with image_info(_, id, out) {
-  image_info(id, out)
-}
-
-///|
-impl @hostapi.Host for Native with image_free(_, id) {
-  image_free(id)
-}
-
-///|
-impl @hostapi.Host for Native with image_pixels(_, id, out) {
-  image_pixels(id, out)
-}
-
-///|
-impl @hostapi.Host for Native with drawn_pixels(_, x, y, w, h, out) {
-  drawn_pixels(x, y, w, h, out)
-}
-
-///|
-impl @hostapi.Host for Native with drawn_pixels_of(_, inst, count, r, g, b, scale, w, h, out) {
-  drawn_pixels_of(inst, count, r, g, b, scale, w, h, out)
-}
-
-///|
-impl @hostapi.Host for Native with view_site_next(_, id) {
-  view_site_next(id)
-}
-
-///|
-impl @hostapi.Host for Native with view_site_body(_, id, req) {
-  view_site_body(id, req)
-}
-
-///|
-impl @hostapi.Host for Native with view_site_head(_, id, req, status, headers) {
-  view_site_head(id, req, status, headers)
-}
-
-///|
-impl @hostapi.Host for Native with view_site_chunk(_, id, req, data) {
-  view_site_chunk(id, req, data)
-}
-
-///|
-impl @hostapi.Host for Native with view_site_end(_, id, req, error) {
-  view_site_end(id, req, error)
-}
-
-///|
-impl @hostapi.Host for Native with view_site_state(_, id) {
-  view_site_state(id)
-}
-
-///|
-impl @hostapi.Host for Native with view_site_load(_, id, path) {
-  view_site_load(id, path)
-}
-
-///|
-impl @hostapi.Host for Native with view_tell(_, id, what, text) {
-  view_tell(id, what, text)
-}
-
-///|
-impl @hostapi.Host for Native with view_open(_, kind, arg) {
-  view_open(kind, arg)
-}
-
-///|
-impl @hostapi.Host for Native with view_place(_, id, x, y, w, h, cx0, cy0, cx1, cy1, r0, r1, r2, r3, shown) {
-  view_place(id, x, y, w, h, cx0, cy0, cx1, cy1, r0, r1, r2, r3, shown)
-}
-
-///|
-impl @hostapi.Host for Native with view_close(_, id) {
-  view_close(id)
-}
-
-///|
-impl @hostapi.Host for Native with view_control(_, id, op, value) {
-  view_control(id, op, value)
-}
-
-///|
-impl @hostapi.Host for Native with view_info(_, id, out) {
-  view_info(id, out)
-}
-
-///|
-impl @hostapi.Host for Native with view_read_next(_, id, out) {
-  view_read_next(id, out)
-}
-
-///|
-impl @hostapi.Host for Native with view_read_answer(_, id, req, data, total, more) {
-  view_read_answer(id, req, data, total, more)
-}
-
-///|
-impl @hostapi.Host for Native with pdf_open(_, data) {
-  pdf_open(data)
-}
-
-///|
-impl @hostapi.Host for Native with pdf_pages(_, doc) {
-  pdf_pages(doc)
-}
-
-///|
-impl @hostapi.Host for Native with pdf_page_size(_, doc, page, out) {
-  pdf_page_size(doc, page, out)
-}
-
-///|
-impl @hostapi.Host for Native with pdf_page_load(_, doc, page, max_px) {
-  pdf_page_load(doc, page, max_px)
-}
-
-///|
-impl @hostapi.Host for Native with pdf_close(_, doc) {
-  pdf_close(doc)
-}
-
-///|
-impl @hostapi.Host for Native with view_text(_, id, what) {
-  view_text(id, what)
-}
-
-///|
-impl @hostapi.Host for Native with view_still(_, id) {
-  view_still(id)
-}
-
-///|
-impl @hostapi.Host for Native with save_file(_, name, data) {
-  save_file(name, data)
-}
-
-///|
-impl @hostapi.Host for Native with word_at(_, text, off) {
-  word_at(text, off)
-}
-
-///|
-impl @hostapi.Host for Native with open_url(_, url) {
-  open_url(url)
-}
-
-///|
-impl @hostapi.Host for Native with over_done(_, open_app) {
-  over_done(open_app~)
-}
-
-///|
-impl @hostapi.Host for Native with open_tab(_, url) {
-  open_tab(url)
-}
-
-///|
-impl @hostapi.Host for Native with hold_words(_, channel, title, body) {
-  hold_words(channel~, title~, body~)
-}
-
-///|
-impl @hostapi.Host for Native with post_take(_) {
-  post_take()
-}
-
-///|
-impl @hostapi.Host for Native with post_next(_) {
-  post_next()
-}
-
-///|
-impl @hostapi.Host for Native with ref_begin(_, w, h, scale, bg) {
-  ref_begin(w, h, scale, bg)
-}
-
-///|
-impl @hostapi.Host for Native with ref_text(_, text, size, weight, style, x, base, color, out) {
-  ref_text(text, size, weight, style, x, base, color, out)
-}
-
-///|
-impl @hostapi.Host for Native with ref_end(_, name) {
-  ref_end(name)
-}
-
-///|
-impl @hostapi.Host for Native with ref_frame(_, name) {
-  ref_frame(name)
-}
-
-///|
-impl @hostapi.Host for Native with bl_start(_, path, done) {
-  bl_start(path, done)
-}
-
-///|
-impl @hostapi.Host for Native with bl_port(_, id) {
-  bl_port(id)
-}
-
-///|
-impl @hostapi.Host for Native with bl_open(_, id, url) {
-  bl_open(id, url)
-}
-
-///|
-impl @hostapi.Host for Native with bl_back(_, id) {
-  bl_back(id)
-}
-
-///|
-impl @hostapi.Host for Native with bl_end(_, id) {
-  bl_end(id)
-}
-
-///|
-impl @hostapi.Host for Native with pw_able(_) {
-  pw_able() != 0
-}
-
-///|
-impl @hostapi.Host for Native with pw_run(_, args) {
-  pw_run(args)
-}
-
-///|
-impl @hostapi.Host for Native with pw_out(_, id) {
-  pw_out(id)
-}
-
-///|
-impl @hostapi.Host for Native with pw_end(_, id) {
-  pw_end(id)
-}
-
-///|
-impl @hostapi.Host for Native with af_able(_) {
-  af_able() != 0
-}
-
-///|
-impl @hostapi.Host for Native with af_ask(_, host) {
-  af_ask(host)
-}
-
-///|
-impl @hostapi.Host for Native with af_take(_) {
-  af_take()
-}
-
-///|
-impl @hostapi.Host for Native with af_end(_) {
-  af_end()
-}
-
-///|
-impl @hostapi.Host for Native with wa_able(_) {
-  wa_able() != 0
-}
-
-///|
-impl @hostapi.Host for Native with wa_get(_, ask) {
-  wa_get(ask)
-}
-
-///|
-impl @hostapi.Host for Native with wa_out(_, id) {
-  wa_out(id)
-}
-
-///|
-impl @hostapi.Host for Native with wa_end(_, id) {
-  wa_end(id)
-}
-
-///|
-impl @hostapi.Host for Native with pk_start(_, kind) {
-  pk_start(kind)
-}
-
-///|
-impl @hostapi.Host for Native with pk_state(_, id) {
-  pk_state(id)
-}
-
-///|
-impl @hostapi.Host for Native with pk_count(_, id) {
-  pk_count(id)
-}
-
-///|
-impl @hostapi.Host for Native with pk_name(_, id, i) {
-  pk_name(id, i)
-}
-
-///|
-impl @hostapi.Host for Native with pk_bytes(_, id, i) {
-  pk_bytes(id, i)
-}
-
-///|
-impl @hostapi.Host for Native with pk_info(_, id, i) {
-  pk_info(id, i)
-}
-
-///|
-impl @hostapi.Host for Native with pk_end(_, id) {
-  pk_end(id)
-}
-
-///|
-impl @hostapi.Host for Native with kp_begin(_, name, mime, way) {
-  kp_begin(name, mime, way)
-}
-
-///|
-impl @hostapi.Host for Native with kp_append(_, id, data) {
-  kp_append(id, data)
-}
-
-///|
-impl @hostapi.Host for Native with kp_finish(_, id) {
-  kp_finish(id)
-}
-
-///|
-impl @hostapi.Host for Native with kp_state(_, id) {
-  kp_state(id)
-}
-
-///|
-impl @hostapi.Host for Native with kp_where(_, id) {
-  kp_where(id)
-}
-
-///|
-impl @hostapi.Host for Native with kp_end(_, id) {
-  kp_end(id)
-}
-
-///|
-impl @hostapi.Host for Native with ga_access(_) {
-  ga_access()
-}
-
-///|
-impl @hostapi.Host for Native with ga_ask(_) {
-  ga_ask()
-}
-
-///|
-impl @hostapi.Host for Native with ga_answers(_) {
-  ga_answers()
-}
-
-///|
-impl @hostapi.Host for Native with ga_read(_) {
-  ga_read()
-}
-
-///|
-impl @hostapi.Host for Native with ga_read_state(_, id) {
-  ga_read_state(id)
-}
-
-///|
-impl @hostapi.Host for Native with ga_read_rows(_, id) {
-  ga_read_rows(id)
-}
-
-///|
-impl @hostapi.Host for Native with ga_read_end(_, id) {
-  ga_read_end(id)
-}
-
-///|
-impl @hostapi.Host for Native with pk_photo(_, src) {
-  pk_photo(src)
-}
-
-///|
-impl @hostapi.Host for Native with cs_known(_, charset) {
-  cs_known(charset)
-}
-
-///|
-impl @hostapi.Host for Native with cs_decode(_, data, charset) {
-  cs_decode(data, charset)
-}
-
-///|
-impl @hostapi.Host for Native with mk_start(_, image, marks) {
-  mk_start(image, marks)
-}
-
-///|
-impl @hostapi.Host for Native with mk_state(_, id) {
-  mk_state(id)
-}
-
-///|
-impl @hostapi.Host for Native with mk_png(_, id) {
-  mk_png(id)
-}
-
-///|
-impl @hostapi.Host for Native with nt_show(_, channel, tag, title, body, opens) {
-  nt_show(channel, tag, title, body, opens)
-}
-
-///|
-impl @hostapi.Host for Native with nt_cancel(_, tag) {
-  nt_cancel(tag)
-}
-
-///|
-impl @hostapi.Host for Native with rn_dirty(_, x, y, w, h) {
-  rn_dirty(x, y, w, h)
-}
-
-///|
-impl @hostapi.Host for Native with rn_glass_light_angle(_, rad) {
-  rn_glass_light_angle(rad)
-}
-
-///|
-impl @hostapi.Host for Native with nv_bar(_, spec) {
-  nv_bar(spec)
-}
-
-///|
-impl @hostapi.Host for Native with nv_able(_) {
-  nv_able() != 0
-}
-
-///|
-impl @hostapi.Host for Native with nt_state(_, what) {
-  nt_state(what)
-}
-
-///|
-impl @hostapi.Host for Native with nt_text(_, what) {
-  nt_text(what)
-}
-
-///|
-impl @hostapi.Host for Native with st_open(_) {
-  st_open()
-}
-
-///|
-impl @hostapi.Host for Native with st_h264(_, id, avcc, w, h) {
-  st_h264(id, avcc, w, h)
-}
-
-///|
-impl @hostapi.Host for Native with st_frame(_, id, data, key, ts) {
-  st_frame(id, data, key, ts)
-}
-
-///|
-impl @hostapi.Host for Native with st_jpeg(_, id, data, ts) {
-  st_jpeg(id, data, ts)
-}
-
-///|
-impl @hostapi.Host for Native with st_next(_, id) {
-  st_next(id)
-}
-
-///|
-impl @hostapi.Host for Native with st_show(_, id, ts) {
-  st_show(id, ts)
-}
-
-///|
-impl @hostapi.Host for Native with st_close(_, id) {
-  st_close(id)
-}
-
-///|
-impl @hostapi.Host for Native with st_h264_here(_) {
-  said_once(h264_said, fn() { st_h264_here() })
-}
-
-///|
-impl @hostapi.Host for Native with st_feeds(_) {
-  said_once(feeds_said, fn() { st_feeds() })
-}
-
-///|
-impl @hostapi.Host for Native with st_codec(_, id, cmd, data) {
-  st_codec(id, cmd, data)
-}
-
-///|
-impl @hostapi.Host for Native with cl_read(_) {
-  cl_read()
-}
-
-///|
-impl @hostapi.Host for Native with cl_state(_, id) {
-  cl_state(id)
-}
-
-///|
-impl @hostapi.Host for Native with cl_picture(_, id) {
-  cl_picture(id)
-}
-
-///|
-impl @hostapi.Host for Native with tm_open(_, cols, rows) {
-  tm_open(cols, rows)
-}
-
-///|
-impl @hostapi.Host for Native with tm_write(_, id, data) {
-  tm_write(id, data)
-}
-
-///|
-impl @hostapi.Host for Native with tm_resize(_, id, cols, rows, cw, ch) {
-  tm_resize(id, cols, rows, cw, ch)
-}
-
-///|
-impl @hostapi.Host for Native with tm_frame(_, id, flags) {
-  tm_frame(id, flags)
-}
-
-///|
-impl @hostapi.Host for Native with tm_modes(_, id) {
-  tm_modes(id)
-}
-
-///|
-impl @hostapi.Host for Native with tm_scroll(_, id, kind, value) {
-  tm_scroll(id, kind, value)
-}
-
-///|
-impl @hostapi.Host for Native with tm_select(_, id, kind, x0, y0, x1, y1) {
-  tm_select(id, kind, x0, y0, x1, y1)
-}
-
-///|
-impl @hostapi.Host for Native with tm_text(_, id, sel) {
-  tm_text(id, sel)
-}
-
-///|
-impl @hostapi.Host for Native with tm_mouse(_, id, action, button, mods, x, y, w, h, cw, ch) {
-  tm_mouse(id, action, button, mods, x, y, w, h, cw, ch)
-}
-
-///|
-impl @hostapi.Host for Native with tm_close(_, id) {
-  tm_close(id)
-}
-
-///|
-impl @hostapi.Host for Native with cl_text(_, id) {
-  cl_text(id)
-}
-
-///|
-impl @hostapi.Host for Native with cl_png(_, id) {
-  cl_png(id)
-}
-
-///|
-impl @hostapi.Host for Native with cl_files(_, id) {
-  cl_files(id)
-}
-
-///|
-impl @hostapi.Host for Native with cl_file_name(_, id, i) {
-  cl_file_name(id, i)
-}
-
-///|
-impl @hostapi.Host for Native with cl_file(_, id, i) {
-  cl_file(id, i)
-}
-
-///|
-impl @hostapi.Host for Native with cl_end(_, id) {
-  cl_end(id)
-}
-
-///|
-impl @hostapi.Host for Native with cl_set(_, text, png, label) {
-  cl_set(text, png, label)
-}
-
-///|
-impl @hostapi.Host for Native with dv_copy_shown(_) {
-  said_once(copy_shown_said, fn() { dv_copy_shown() })
-}
-
-///|
-impl @hostapi.Host for Native with dv_key_catch(_, on) {
-  dv_key_catch(on)
-}
-
-///|
-impl @hostapi.Host for Native with dv_ime_inset(_) {
-  dv_ime_inset()
-}
-
-///|
-impl @hostapi.Host for Native with dv_keep_awake(_, on) {
-  dv_keep_awake(on)
-}
-
-///|
-impl @hostapi.Host for Native with dv_haptic(_, kind) {
-  dv_haptic(kind)
-}
-
-///|
-impl @hostapi.Host for Native with dv_ime_action(_, kind) {
-  dv_ime_action(kind)
-}
-
-///|
-impl @hostapi.Host for Native with dv_ime_let_go(_) {
-  dv_ime_let_go()
-}
-
-///|
-impl @hostapi.Host for Native with ncall_call(_, name, params) {
-  ncall_call(name, params)
-}
-
-///|
-impl @hostapi.Host for Native with ncall_state(_, id) {
-  ncall_state(id)
-}
-
-///|
-impl @hostapi.Host for Native with ncall_result(_, id) {
-  ncall_result(id)
-}
-
-///|
-impl @hostapi.Host for Native with ncall_end(_, id) {
-  ncall_end(id)
-}
-
-///|
-impl @hostapi.Host for Native with st_audio_here(_) { st_audio_here() }
-
-///|
-impl @hostapi.Host for Native with st_audio(_, id, data) { st_audio(id, data) }
-
-///|
-impl @hostapi.Host for Native with st_layers(_) { said_once(layers_said, fn() { st_layers() }) }
-
-///|
-impl @hostapi.Host for Native with st_pointer(_, id, png, w, h, hx, hy) { st_pointer(id, png, w, h, hx, hy) }
-
-///|
-impl @hostapi.Host for Native with st_pointer_at(_, id, x, y, shown) { st_pointer_at(id, x, y, shown) }
-
-///|
-impl @hostapi.Host for Native with st_direct(_, id, route, after, what) { st_direct(id, route, after, what) }
-
-impl @hostapi.Host for Native with st_h265_here(_) { said_once(h265_said, fn() { st_h265_here() }) }
-
-///|
-impl @hostapi.Host for Native with st_hevc(_, id, hvcc, w, h) { st_hevc(id, hvcc, w, h) }
-
-///|
-impl @hostapi.Host for Native with st_av1_here(_) { said_once(av1_said, fn() { st_av1_here() }) }
-
-///|
-impl @hostapi.Host for Native with st_av1(_, id, av1c, w, h) { st_av1(id, av1c, w, h) }
-
-///|
-/// Every platform's draws each glyph on its pixels, a list's rows set on them as it moves.
-impl @hostapi.Host for Native with rows_on_pixels(_) {
-  true
-}
-
-///|
-impl @hostapi.Host for Native with st_frame_shown(_, id, data, key, ts, show) { st_frame_shown(id, data, key, ts, show) }
-
-///|
-impl @hostapi.Host for Native with st_flush(_, id, drain) { st_flush(id, drain) }
-
-///|
-impl @hostapi.Host for Native with st_audio_played(_, id) { st_audio_played(id) }
-
-///|
-impl @hostapi.Host for Native with st_audio_queued(_, id) { st_audio_queued(id) }
-
-///|
-impl @hostapi.Host for Native with st_audio_wanted(_, id) { st_audio_wanted(id) }
-
-///|
-impl @hostapi.Host for Native with st_audio_volume(_, id, v) { st_audio_volume(id, v) }
-
-///|
-impl @hostapi.Host for Native with auto_launch(_) {
-  auto_launch()
-}
-
-///|
-impl @hostapi.Host for Native with set_auto_launch(_, enabled) {
-  set_auto_launch(enabled)
-}
-
-///|
-impl @hostapi.Host for Native with hotkey_set(_, id, accel) {
-  hotkey_set(id, accel)
-}
-
-///|
-impl @hostapi.Host for Native with hotkey_clear(_, id) {
-  hotkey_clear(id)
+fn make_native_host() -> @hostapi.Host {
+  let h = @hostapi.Host::noop()
+  h.set_window_zoom = fn(zoom) { set_window_zoom(zoom) }
+  h.set_window_key = fn(f) { set_window_key(f) }
+  h.wheel_kept = fn(kept) { wheel_kept(kept) }
+  h.window_setup = fn(min_w, min_h, w, hh, inset) { window_setup(min_w, min_h, w, hh, inset~) }
+  h.window_hold = fn() { window_hold() }
+  h.window_show = fn() { window_show() }
+  h.window_inset = fn() { window_inset() }
+  h.full_screen = fn() { full_screen() }
+  h.set_full_screen = fn(on) { set_full_screen(on) }
+  h.window_buttons_down = fn(by, ms) { window_buttons_down(by, ms) }
+  h.window_corner = fn() { window_corner() }
+  h.window_corner_at = Some(fn(k) { window_corner_at(k) })
+  h.window_drag = fn() { window_drag() }
+  h.window_act = fn(what) { window_act(what) }
+  h.window_zoomed = fn() { window_zoomed() }
+  h.window_snap = fn(x, y, w, hh) { window_snap(x, y, w, hh) }
+  h.window_snap_state = fn() { window_snap_state() }
+  h.window_opens = fn() { window_opens() }
+  h.window_open = fn(what) { window_open(what) }
+  h.window_front = fn(what) { window_front(what) }
+  h.windows_in_process = fn() { windows(0, 0, "") != 0 }
+  h.window_open_id = fn(what) { windows(1, 0, what) }
+  h.window_front_id = fn(wid) { windows(2, wid, "") != 0 }
+  h.window_close_id = fn(wid) { windows(3, wid, "") |> ignore }
+  h.window_current = fn() { windows(4, 0, "") }
+  h.window_set_title = fn(wid, title) { windows(5, wid, title) |> ignore }
+  h.set_cursor = fn(kind) { set_cursor(kind) }
+  h.set_badge = fn(n) { set_badge(n) }
+  h.menu_setup = fn(json) { menu_setup(json) }
+  h.app_said = fn(name) { app_said(name) }
+  h.app_tell = fn(name, arg) { app_tell(name, arg) }
+  h.set_site_name = fn(name) { set_site_name(name) }
+  h.mods_held = fn() { mods_held() }
+  h.pointer_lock = fn(on) { pointer_lock(on) }
+  h.pointer_locked = fn() { pointer_locked() }
+  h.pointer_delta = fn(out) { pointer_delta(out) }
+  h.gamepads = fn(out) { gamepads(out) }
+  h.run = fn(title, frame, pointer, wheel, key, text) { run(title, frame, pointer, wheel, key, text) }
+  h.now = fn() { now() }
+  h.wall_ms = fn() { wall_ms() }
+  h.utc_offset_min = fn(at_ms) { utc_offset_min(at_ms) }
+  h.event_time = fn() { event_time() }
+  h.event_finger = fn() { event_finger() }
+  h.frame_late = fn() { frame_late() }
+  h.platform = fn() { said_once(platform_said, fn() { platform() }) }
+  h.request_frame = fn() { request_frame() }
+  h.frames_paced = Some(fn(hz) { frames_paced(hz) })
+  h.wake_after = fn(ms) { wake_after(ms) }
+  h.font_metrics = fn(size, weight, style, out) { font_metrics(size, weight, style, out) }
+  h.shape = fn(text, size, weight, style, out) { shape(text, size, weight, style, out) }
+  h.text_key = fn(text, size, weight, style) { text_key(text, size, weight, style) }
+  h.glyph = fn(key, out) { glyph(key, out) }
+  h.glyph_put = fn(key, x, y) { glyph_put(key, x, y) }
+  h.glyph_picture = fn(key, out) { glyph_picture(key, out) }
+  h.atlas_put = fn(x, y, w, hh, px) { atlas_put(x, y, w, hh, px) }
+  h.atlas_size = fn(colour) { atlas_size(colour) }
+  h.glyphs_ahead = fn(keys, n) { glyphs_ahead(keys, n) }
+  h.glyphs_ahead_able = fn() { true }
+  h.face_add = fn(face, path, weight) { face_add(face, path, weight) }
+  h.face_add_bytes = fn(face, data, weight) { face_add_bytes(face, data, weight) }
+  h.face_clear = fn(face) { face_clear(face) }
+  h.face_add_family = fn(face, family) { face_add_family(face, family) }
+  h.has_local_fonts = fn() {
+    let p = platform()
+    p == 0 || p == 3 || p == 5
+  }
+  h.local_font_families = fn() { local_font_families() }
+  h.face_set_ligatures = fn(face, on) { face_set_ligatures(face, on) }
+  h.set_host_autospace = fn(on) { set_host_autospace(on) }
+  h.local_font_info = fn() { local_font_info() }
+  h.atlas_generation = fn() { atlas_generation() }
+  h.present = fn(buf, count, r, g, b) { present(buf, count, r, g, b) }
+  h.groups_here = fn() { groups_here() }
+  h.group_set = fn(id, inst, moves, n) { group_set(id, inst, moves, n) }
+  h.group_drop = fn(id) { group_drop(id) }
+  h.set_ime = fn(active, x, y, w, h, text, sel_start, sel_end) { set_ime(active, x, y, w, h, text, sel_start, sel_end) }
+  h.text_menu = fn(shown, x, y, w, h, can) { ffi_text_menu(if shown { 1 } else { 0 }, x, y, w, h, can) }
+  h.text_menu_own = fn(words) { ffi_text_menu_own(words) }
+  h.edit_can = fn(can) { ffi_edit_can(can) }
+  h.clipboard_set = fn(s) { clipboard_set(s) }
+  h.clipboard_set_html = Some(fn(text, html) { clipboard_set_html(text, html) })
+  h.clipboard_set_image = fn(data) { clipboard_set_image(data) }
+  h.clipboard_set_secret = fn(s, clear_ms) { clipboard_set_secret(s, clear_ms~) }
+  h.clipboard_secret_off = fn() { clipboard_secret_off() }
+  h.log = fn(s) { log(s) }
+  h.bench_mode = fn() { bench_mode() }
+  h.set_outside = fn(f) { set_outside(f) }
+  h.frame_awaiting = fn(awaiting, what) { frame_awaiting(awaiting, what) }
+  h.own_clock = fn() { own_clock() }
+  h.reduce_motion = fn() { reduce_motion() }
+  h.keys_platform = fn() { said_once(keys_said, fn() { keys_platform() }) }
+  h.exit = fn(code) { exit(code) }
+  h.mem_bytes = fn() { mem_bytes() }
+  h.set_back = fn(back) { set_back(back) }
+  h.back_enabled = fn(on) { back_enabled(on) }
+  h.reduce_transparency = fn() { reduce_transparency() }
+  h.increase_contrast = fn() { increase_contrast() }
+  h.thermal_throttled = fn() { thermal_throttled() }
+  h.gpu_ms = fn() { gpu_ms() }
+  h.frames_dropped = fn() { frames_dropped() }
+  h.cpu_ms = fn() { cpu_ms() }
+  h.thread_cpu_ms = fn() { thread_cpu_ms() }
+  h.display_hz = fn() { display_hz() }
+  h.perf_state = fn() { perf_state() }
+  h.set_perf = fn(on) { set_perf(on) }
+  h.perf_line = fn(line) { perf_line(line) }
+  h.perf_where = fn() { perf_where() }
+  h.perf_size = fn() { perf_size() }
+  h.perf_open = fn(go) { perf_open(go) }
+  h.reveal_file = fn(path, go) { reveal_file(path, go) }
+  h.perf_read = fn() { perf_read() }
+  h.env = fn(name) { env(name) }
+  h.set_app_state = fn(f) { set_app_state(f) }
+  h.system_dark = fn() { system_dark() }
+  h.font_scale = fn() { font_scale() }
+  h.native_pointing = fn() { said_once(native_pointing_said, fn() { native_pointing() }) }
+  h.keyboard = fn() { keyboard() }
+  h.a11y_on = fn() { a11y_on() }
+  h.a11y_tree = fn(s) { a11y_tree(s) }
+  h.set_dark = fn(dark) { set_dark(dark) }
+  h.set_sideways = fn(on) { set_sideways(on) }
+  h.set_turnable = fn(on) { set_turnable(on) }
+  h.share = fn(text, name, mime, data) { share(text, name, mime, data) }
+  h.shared_in = fn() { shared_in() }
+  h.shared_in_file = fn(i) { shared_in_file(i) }
+  h.app_version = fn() { app_version() }
+  h.update_fetch = fn(url, sha256, size, name, now, delta) { update_fetch(url, sha256, size, name, now, delta) }
+  h.update_apply = fn(said) { update_apply(said) }
+  h.update_state = fn() { update_state() }
+  h.install_package = fn(name, data) { install_package(name, data) }
+  h.drive = fn(kind, text) { drive(kind, text) }
+  h.image_load = fn(src, max_px) { image_load(src, max_px) }
+  h.image_load_bytes = fn(data, max_px) { image_load_bytes(data, max_px) }
+  h.image_info = fn(id, out) { image_info(id, out) }
+  h.image_free = fn(id) { image_free(id) }
+  h.image_pixels = fn(id, out) { image_pixels(id, out) }
+  h.drawn_pixels = fn(x, y, w, hh, out) { drawn_pixels(x, y, w, hh, out) }
+  h.drawn_pixels_of = fn(inst, count, r, g, b, scale, w, h, out) { drawn_pixels_of(inst, count, r, g, b, scale, w, h, out) }
+  h.view_site_next = fn(id) { view_site_next(id) }
+  h.view_site_body = fn(id, req) { view_site_body(id, req) }
+  h.view_site_head = fn(id, req, status, headers) { view_site_head(id, req, status, headers) }
+  h.view_site_chunk = fn(id, req, data) { view_site_chunk(id, req, data) }
+  h.view_site_end = fn(id, req, error) { view_site_end(id, req, error) }
+  h.view_site_state = fn(id) { view_site_state(id) }
+  h.view_site_load = fn(id, path) { view_site_load(id, path) }
+  h.view_tell = fn(id, what, text) { view_tell(id, what, text) }
+  h.view_open = fn(kind, arg) { view_open(kind, arg) }
+  h.view_place = fn(id, x, y, w, hh, cx0, cy0, cx1, cy1, r0, r1, r2, r3, shown) { view_place(id, x, y, w, hh, cx0, cy0, cx1, cy1, r0, r1, r2, r3, shown) }
+  h.view_close = fn(id) { view_close(id) }
+  h.view_control = fn(id, op, value) { view_control(id, op, value) }
+  h.view_info = fn(id, out) { view_info(id, out) }
+  h.view_read_next = fn(id, out) { view_read_next(id, out) }
+  h.view_read_answer = fn(id, req, data, total, more) { view_read_answer(id, req, data, total, more) }
+  h.pdf_open = fn(data) { pdf_open(data) }
+  h.pdf_pages = fn(doc) { pdf_pages(doc) }
+  h.pdf_page_size = fn(doc, page, out) { pdf_page_size(doc, page, out) }
+  h.pdf_page_load = fn(doc, page, max_px) { pdf_page_load(doc, page, max_px) }
+  h.pdf_close = fn(doc) { pdf_close(doc) }
+  h.view_text = fn(id, what) { view_text(id, what) }
+  h.view_still = fn(id) { view_still(id) }
+  h.save_file = fn(name, data) { save_file(name, data) }
+  h.word_at = fn(text, off) { word_at(text, off) }
+  h.open_url = fn(url) { open_url(url) }
+  h.over_done = fn(open_app) { over_done(open_app~) }
+  h.open_tab = fn(url) { open_tab(url) }
+  h.hold_words = fn(channel, title, body) { hold_words(channel~, title~, body~) }
+  h.post_take = fn() { post_take() }
+  h.post_next = fn() { post_next() }
+  h.ref_begin = fn(w, h, scale, bg) { ref_begin(w, h, scale, bg) }
+  h.ref_text = fn(text, size, weight, style, x, base, color, out) { ref_text(text, size, weight, style, x, base, color, out) }
+  h.ref_end = fn(name) { ref_end(name) }
+  h.ref_frame = fn(name) { ref_frame(name) }
+  h.bl_start = fn(path, done) { bl_start(path, done) }
+  h.bl_port = fn(id) { bl_port(id) }
+  h.bl_open = fn(id, url) { bl_open(id, url) }
+  h.bl_back = fn(id) { bl_back(id) }
+  h.bl_end = fn(id) { bl_end(id) }
+  h.pw_able = fn() { pw_able() != 0 }
+  h.pw_run = fn(args) { pw_run(args) }
+  h.pw_out = fn(id) { pw_out(id) }
+  h.pw_end = fn(id) { pw_end(id) }
+  h.af_able = fn() { af_able() != 0 }
+  h.af_ask = fn(host) { af_ask(host) }
+  h.af_take = fn() { af_take() }
+  h.af_end = fn() { af_end() }
+  h.wa_able = fn() { wa_able() != 0 }
+  h.wa_get = fn(ask) { wa_get(ask) }
+  h.wa_out = fn(id) { wa_out(id) }
+  h.wa_end = fn(id) { wa_end(id) }
+  h.pk_start = fn(kind) { pk_start(kind) }
+  h.pk_state = fn(id) { pk_state(id) }
+  h.pk_count = fn(id) { pk_count(id) }
+  h.pk_name = fn(id, i) { pk_name(id, i) }
+  h.pk_bytes = fn(id, i) { pk_bytes(id, i) }
+  h.pk_info = fn(id, i) { pk_info(id, i) }
+  h.pk_end = fn(id) { pk_end(id) }
+  h.kp_begin = fn(name, mime, way) { kp_begin(name, mime, way) }
+  h.kp_append = fn(id, data) { kp_append(id, data) }
+  h.kp_finish = fn(id) { kp_finish(id) }
+  h.kp_state = fn(id) { kp_state(id) }
+  h.kp_where = fn(id) { kp_where(id) }
+  h.kp_end = fn(id) { kp_end(id) }
+  h.ga_access = fn() { ga_access() }
+  h.ga_ask = fn() { ga_ask() }
+  h.ga_answers = fn() { ga_answers() }
+  h.ga_read = fn() { ga_read() }
+  h.ga_read_state = fn(id) { ga_read_state(id) }
+  h.ga_read_rows = fn(id) { ga_read_rows(id) }
+  h.ga_read_end = fn(id) { ga_read_end(id) }
+  h.pk_photo = fn(src) { pk_photo(src) }
+  h.cs_known = fn(charset) { cs_known(charset) }
+  h.cs_decode = fn(data, charset) { cs_decode(data, charset) }
+  h.mk_start = fn(image, marks) { mk_start(image, marks) }
+  h.mk_state = fn(id) { mk_state(id) }
+  h.mk_png = fn(id) { mk_png(id) }
+  h.nt_show = fn(channel, tag, title, body, opens) { nt_show(channel, tag, title, body, opens) }
+  h.nt_cancel = fn(tag) { nt_cancel(tag) }
+  h.rn_dirty = fn(x, y, w, h) { rn_dirty(x, y, w, h) }
+  h.rn_glass_light_angle = fn(rad) { rn_glass_light_angle(rad) }
+  h.nv_bar = fn(spec) { nv_bar(spec) }
+  h.nv_able = fn() { nv_able() != 0 }
+  h.nt_state = fn(what) { nt_state(what) }
+  h.nt_text = fn(what) { nt_text(what) }
+  h.st_open = fn() { st_open() }
+  h.st_h264 = fn(id, avcc, w, hh) { st_h264(id, avcc, w, hh) }
+  h.st_frame = fn(id, data, key, ts) { st_frame(id, data, key, ts) }
+  h.st_jpeg = fn(id, data, ts) { st_jpeg(id, data, ts) }
+  h.st_next = fn(id) { st_next(id) }
+  h.st_show = fn(id, ts) { st_show(id, ts) }
+  h.st_close = fn(id) { st_close(id) }
+  h.st_h264_here = fn() { said_once(h264_said, fn() { st_h264_here() }) }
+  h.st_feeds = fn() { said_once(feeds_said, fn() { st_feeds() }) }
+  h.st_codec = fn(id, cmd, data) { st_codec(id, cmd, data) }
+  h.cl_read = fn() { cl_read() }
+  h.cl_state = fn(id) { cl_state(id) }
+  h.cl_picture = fn(id) { cl_picture(id) }
+  h.tm_open = fn(cols, rows) { tm_open(cols, rows) }
+  h.tm_write = fn(id, data) { tm_write(id, data) }
+  h.tm_resize = fn(id, cols, rows, cw, ch) { tm_resize(id, cols, rows, cw, ch) }
+  h.tm_frame = fn(id, flags) { tm_frame(id, flags) }
+  h.tm_modes = fn(id) { tm_modes(id) }
+  h.tm_scroll = fn(id, kind, value) { tm_scroll(id, kind, value) }
+  h.tm_select = fn(id, kind, x0, y0, x1, y1) { tm_select(id, kind, x0, y0, x1, y1) }
+  h.tm_text = fn(id, sel) { tm_text(id, sel) }
+  h.tm_mouse = fn(id, action, button, mods, x, y, w, h, cw, ch) { tm_mouse(id, action, button, mods, x, y, w, h, cw, ch) }
+  h.tm_close = fn(id) { tm_close(id) }
+  h.cl_text = fn(id) { cl_text(id) }
+  h.cl_png = fn(id) { cl_png(id) }
+  h.cl_files = fn(id) { cl_files(id) }
+  h.cl_file_name = fn(id, i) { cl_file_name(id, i) }
+  h.cl_file = fn(id, i) { cl_file(id, i) }
+  h.cl_end = fn(id) { cl_end(id) }
+  h.cl_set = fn(text, png, label) { cl_set(text, png, label) }
+  h.dv_copy_shown = fn() { said_once(copy_shown_said, fn() { dv_copy_shown() }) }
+  h.dv_key_catch = fn(on) { dv_key_catch(on) }
+  h.dv_ime_inset = fn() { dv_ime_inset() }
+  h.dv_keep_awake = fn(on) { dv_keep_awake(on) }
+  h.dv_haptic = fn(kind) { dv_haptic(kind) }
+  h.dv_ime_action = fn(kind) { dv_ime_action(kind) }
+  h.dv_ime_let_go = fn() { dv_ime_let_go() }
+  h.ncall_call = fn(name, params) { ncall_call(name, params) }
+  h.ncall_state = fn(id) { ncall_state(id) }
+  h.ncall_result = fn(id) { ncall_result(id) }
+  h.ncall_end = fn(id) { ncall_end(id) }
+  h.st_audio_here = fn() { st_audio_here() }
+  h.st_audio = fn(id, data) { st_audio(id, data) }
+  h.st_layers = fn() { said_once(layers_said, fn() { st_layers() }) }
+  h.st_pointer = fn(id, png, w, hh, hx, hy) { st_pointer(id, png, w, hh, hx, hy) }
+  h.st_pointer_at = fn(id, x, y, shown) { st_pointer_at(id, x, y, shown) }
+  h.st_direct = fn(id, route, after, what) { st_direct(id, route, after, what) }
+  h.st_h265_here = fn() { said_once(h265_said, fn() { st_h265_here() }) }
+  h.st_hevc = fn(id, hvcc, w, hh) { st_hevc(id, hvcc, w, hh) }
+  h.st_av1_here = fn() { said_once(av1_said, fn() { st_av1_here() }) }
+  h.st_av1 = fn(id, av1c, w, hh) { st_av1(id, av1c, w, hh) }
+  h.rows_on_pixels = fn() { true }
+  h.st_frame_shown = Some(fn(id, data, key, ts, show) { st_frame_shown(id, data, key, ts, show) })
+  h.st_flush = fn(id, drain) { st_flush(id, drain) }
+  h.st_audio_played = fn(id) { st_audio_played(id) }
+  h.st_audio_queued = fn(id) { st_audio_queued(id) }
+  h.st_audio_wanted = fn(id) { st_audio_wanted(id) }
+  h.st_audio_volume = fn(id, v) { st_audio_volume(id, v) }
+  h.auto_launch = fn() { auto_launch() }
+  h.set_auto_launch = fn(enabled) { set_auto_launch(enabled) }
+  h.hotkey_set = fn(id, accel) { hotkey_set(id, accel) }
+  h.hotkey_clear = fn(id) { hotkey_clear(id) }
+  h
+}
+
+///|
+fn init {
+  @hostapi.set_host(make_native_host())
 }

@@ -77,79 +77,6 @@ fn preset_join_meta(a : String, b : String) -> String {
 }
 
 ///|
-/// Compact search field for the preset panel (in header on popover, at top of body on sheet).
-fn preset_find_node(
-  parent : @view.View,
-  field : @ui.Field,
-  search_at : @signals.Signal[Int],
-  on_enter~ : () -> Unit,
-  on_step~ : (Int) -> Unit,
-) -> Unit {
-  parent.box(fn(f) {
-    f
-    .key_context("Finder")
-    .on_action("finder.down", fn(_) {
-      on_step(1)
-      true
-    })
-    .on_action("finder.up", fn(_) {
-      on_step(-1)
-      true
-    })
-    .on_key(fn(k) {
-      if k.code == @ui.key_escape && field.text() != "" {
-        field.set("")
-        search_at.set(0)
-        true
-      } else {
-        false
-      }
-    })
-    |> ignore
-    // (round its words the field's to a press too: a tap its caret and its menu to paste, a long press its 粘贴)
-    @ui.field_backdrop(f, field)
-    @sf.icon_node(f, "search", 14.0, By(fn() { @sf.theme().p.muted })) |> ignore
-    let inp = @ui.field(
-      f,
-      field,
-      placeholder=@sf.t("web-main.preset.searchPresets"),
-      line=@sf.theme().t.ui_line,
-      max_lines=1,
-      enter_sends=true,
-      leaves=[@ui.key_escape],
-      edited=fn(_) { search_at.set(0) },
-      submitted=fn(_) { on_enter() },
-      size_by=fn() { @sf.theme().t.ui },
-      colors_by=fn() {
-        let th = @ui.tree_theme()
-        (th.fg, th.subtle, th.accent)
-      },
-    )
-    inp.grow(Is(1.0)).basis(Is(Some(0.0))).shrink(Is(1.0)).min_width(Is(Some(0.0))) |> ignore
-    @sf.panel_search_at_hand_node(inp)
-    f.show(at_once=true, fn() { field.text() != "" }, fn(cl) {
-      cl.margin(By(fn() { (0.0, 0.0, (@sf.menu_row_min - 20.0) / 2.0 - @ui.Space::px(S3), 0.0) })) |> ignore
-      @sf.icon_button_node(
-        cl,
-        "close",
-        fn() { @sf.t("web-pages.drive.pickClear") },
-        fn() {
-          field.set("")
-          search_at.set(0)
-        },
-        size=20.0,
-        icon_size=12.0,
-      )
-      |> ignore
-    })
-    @sf.style_node(f, fn() {
-      (if @sf.hovered_node(f) || inp.focused() { preset_find_hot } else { preset_find }).then(@ui.style(h=Fixed(@sf.menu_row_min)))
-    })
-  })
-  |> ignore
-}
-
-///|
 /// Leading 22x22 icon mark for a preset row, aligned to the first line's height.
 fn preset_picker_mark_node(
   parent : @view.View,
@@ -393,14 +320,36 @@ fn preset_panel(
         if has_search {
           body.box(fn(sb) {
             @sf.style_node(sb, fn() { preset_panel_search_wrap.then(@sf.panel_field_in_node(sb)) })
-            preset_find_node(sb, query_field, search_at, on_enter~, on_step~)
+            @sf.panel_search_input_node(
+              sb,
+              query_field,
+              fn() { @sf.t("web-main.preset.searchPresets") },
+              edited=fn(_) { search_at.set(0) },
+              submitted=fn(_) { on_enter() },
+              step=fn(d) {
+                on_step(d)
+                true
+              },
+            )
+            |> ignore
           })
           |> ignore
         }
       } else if has_search {
         body.box(fn(sb) {
           @sf.style_node(sb, fn() { preset_panel_search_wrap.then(@sf.panel_field_in_node(sb)) })
-          preset_find_node(sb, query_field, search_at, on_enter~, on_step~)
+          @sf.panel_search_input_node(
+            sb,
+            query_field,
+            fn() { @sf.t("web-main.preset.searchPresets") },
+            edited=fn(_) { search_at.set(0) },
+            submitted=fn(_) { on_enter() },
+            step=fn(d) {
+              on_step(d)
+              true
+            },
+          )
+          |> ignore
         })
         |> ignore
       }
@@ -649,7 +598,18 @@ fn preset_others_content(
   if draw_head && small {
     if has_search {
       @sf.panel_head_node(b, fn() { @sf.t("web-main.preset.others") }, end=fn(e) {
-        preset_find_node(e, query_field, search_at, on_enter~, on_step~)
+        @sf.panel_search_input_node(
+          e,
+          query_field,
+          fn() { @sf.t("web-main.preset.searchPresets") },
+          edited=fn(_) { search_at.set(0) },
+          submitted=fn(_) { on_enter() },
+          step=fn(d) {
+            on_step(d)
+            true
+          },
+        )
+        |> ignore
       })
       |> ignore
     } else {
@@ -658,7 +618,18 @@ fn preset_others_content(
   } else if has_search {
     b.box(fn(sb) {
       @sf.style_node(sb, fn() { preset_panel_search_wrap })
-      preset_find_node(sb, query_field, search_at, on_enter~, on_step~)
+      @sf.panel_search_input_node(
+        sb,
+        query_field,
+        fn() { @sf.t("web-main.preset.searchPresets") },
+        edited=fn(_) { search_at.set(0) },
+        submitted=fn(_) { on_enter() },
+        step=fn(d) {
+          on_step(d)
+          true
+        },
+      )
+      |> ignore
     })
     |> ignore
   }
@@ -2462,14 +2433,6 @@ let preset_simple_capsules : @ui.Style = @ui.css("row w=Full gap=S2 align=ACente
 /// The control's words while no preset is picked: as quiet as what says what is not chosen.
 // kept across runs: a value (no field of it changes)
 let preset_capsule_quiet : @ui.TextStyle = @ui.text_style(size=Meta, leading=L5, color=Muted, wrap=false, w=Cut)
-
-///|
-// kept across runs: a value (no field of it changes)
-let preset_find : @ui.Style = @ui.css("row w=Full px=S3 gap=S2 align=ACenter radius=Full bg=Tint")
-
-///|
-// kept across runs: a value (no field of it changes)
-let preset_find_hot : @ui.Style = @ui.css("row w=Full px=S3 gap=S2 align=ACenter radius=Full bg=TintStrong")
 
 ///|
 // kept across runs: a value (no field of it changes)

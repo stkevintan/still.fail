@@ -70,18 +70,19 @@ static CTFontRef serif_font(double size, int weight) {
 
 // The faces given (mb_host_face_add, style.mbt): each a list of font files, by the weight each is for (0: one variable
 // file for every weight), its descriptors read once.
-#define MB_FACES 16
+#define MB_FACES 32
 static NSMutableArray<NSNumber *> *face_weights[MB_FACES];
 static NSMutableArray *face_descs[MB_FACES];  // CTFontDescriptorRef, as id
+static bool face_no_lig[MB_FACES];
 
 // The face a style is set in (style.mbt): the one it names; else code's for the code face, what people wrote's for
 // theirs, the app's own words' for the rest (not the serif face's); 0: none given, the system's.
 static int face_id(int style) {
-  int f = (style >> 8) & 15;
+  int f = (style >> 8) & 31;
   if (f > 0) return face_descs[f].count ? f : 0;
   if (style & 2) return face_descs[3].count ? 3 : 0;
-  if ((style & 16) && face_descs[2].count) return 2;
   if (style & 4) return 0;
+  if ((style & 16) && face_descs[2].count) return 2;
   return face_descs[1].count ? 1 : 0;
 }
 
@@ -135,6 +136,11 @@ static CTFontRef face_font(int face, double size, int weight, bool tabular, bool
     [fs addObject:@{(__bridge id)kCTFontOpenTypeFeatureTag : @"cv11", (__bridge id)kCTFontOpenTypeFeatureValue : @1}];
     [fs addObject:@{(__bridge id)kCTFontOpenTypeFeatureTag : @"ss01", (__bridge id)kCTFontOpenTypeFeatureValue : @1}];
   }
+  if (face_no_lig[face]) {
+    [fs addObject:@{(__bridge id)kCTFontOpenTypeFeatureTag : @"calt", (__bridge id)kCTFontOpenTypeFeatureValue : @0}];
+    [fs addObject:@{(__bridge id)kCTFontOpenTypeFeatureTag : @"liga", (__bridge id)kCTFontOpenTypeFeatureValue : @0}];
+    [fs addObject:@{(__bridge id)kCTFontOpenTypeFeatureTag : @"clig", (__bridge id)kCTFontOpenTypeFeatureValue : @0}];
+  }
   if (tabular) [fs addObjectsFromArray:tabular_figures()];
   if (proportional) [fs addObjectsFromArray:proportional_widths()];
   if (fs.count) {
@@ -151,12 +157,15 @@ static CTFontRef face_font(int face, double size, int weight, bool tabular, bool
 static void ahead_forget(void);
 
 // What was shaped and drawn before a face changed: forgotten (MoonBit drops its glyphs as the generation moves on).
+#define MB_FACE_TRY 7
+static int face_gen[MB_FACES];
 static int keys_stale;  // the keys made before forgotten as the next frame starts (keys_sweep)
 static CTFontRef last_attrs_font;
 static int last_attrs_style = -1;
 static CFDictionaryRef last_attrs;
+static void bmp_forget_face(int32_t face);
 
-static void faces_changed(void) {
+static void face_changed(int32_t face) {
   [fonts removeAllObjects];
   ahead_forget();
   last_size = -1;
@@ -166,8 +175,17 @@ static void faces_changed(void) {
     CFRelease(last_attrs);
     last_attrs = NULL;
   }
+  if (face >= MB_FACE_TRY && face < MB_FACES) {
+    face_gen[face]++;
+    bmp_forget_face(face);
+    return;
+  }
   generation++;
   keys_stale = 1;
+}
+
+static void faces_changed(void) {
+  face_changed(0);
 }
 
 // Drawn at this many pixels a point (the screen the window is on): a change draws every glyph again, as a face's does
@@ -194,7 +212,7 @@ int32_t mb_host_face_add(int32_t face, moonbit_string_t path, int32_t weight) {
   [face_descs[face] addObject:(__bridge id)CFArrayGetValueAtIndex(ds, 0)];
   [face_weights[face] addObject:@(weight)];
   CFRelease(ds);
-  faces_changed();
+  face_changed(face);
   return 1;
 }
 
@@ -210,7 +228,7 @@ int32_t mb_host_face_add_bytes(int32_t face, moonbit_bytes_t data, int32_t weigh
   }
   [face_descs[face] addObject:(__bridge_transfer id)desc];
   [face_weights[face] addObject:@(weight)];
-  faces_changed();
+  face_changed(face);
   return 1;
 }
 
@@ -247,7 +265,7 @@ int32_t mb_host_face_add_family(int32_t face, moonbit_string_t family) {
   if (descs.count == 0) return 0;
   face_descs[face] = descs;
   face_weights[face] = weights;
-  faces_changed();
+  face_changed(face);
   return 1;
 }
 
@@ -255,6 +273,49 @@ int32_t mb_host_face_add_family(int32_t face, moonbit_string_t family) {
 // left out); "" on iOS (no list of them to the app).
 moonbit_string_t mb_host_local_font_families(void) {
 #if TARGET_OS_OSX
+  static NSString *cached = nil;
+  if (!cached) {
+    @autoreleasepool {
+      NSArray<NSString *> *names = (__bridge_transfer NSArray *)CTFontManagerCopyAvailableFontFamilyNames();
+      NSMutableArray<NSString *> *shown = [NSMutableArray new];
+      for (NSString *n in names) {
+        if (![n hasPrefix:@"."]) [shown addObject:n];
+      }
+      [shown sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+      NSData *json = [NSJSONSerialization dataWithJSONObject:shown options:0 error:nil];
+      cached = json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : @"";
+    }
+  }
+  return mb_string_from_ns(cached);
+#else
+  return mb_string_from_ns(@"");
+#endif
+}
+
+void mb_host_face_clear(int32_t face) {
+  if (face <= 0 || face >= MB_FACES) return;
+  face_no_lig[face] = false;
+  if (!face_descs[face].count) return;
+  [face_descs[face] removeAllObjects];
+  [face_weights[face] removeAllObjects];
+  face_changed(face);
+}
+
+void mb_host_face_set_ligatures(int32_t face, int32_t on) {
+  if (face <= 0 || face >= MB_FACES) return;
+  bool no_lig = !on;
+  if (face_no_lig[face] == no_lig) return;
+  face_no_lig[face] = no_lig;
+  face_changed(face);
+}
+
+void mb_host_request_frame(void);
+
+#if TARGET_OS_OSX
+static NSString *local_font_info_json;
+static dispatch_once_t local_font_info_once;
+
+static NSString *scan_local_font_info_macos(void) {
   @autoreleasepool {
     NSArray<NSString *> *names = (__bridge_transfer NSArray *)CTFontManagerCopyAvailableFontFamilyNames();
     NSMutableArray<NSString *> *shown = [NSMutableArray new];
@@ -262,19 +323,80 @@ moonbit_string_t mb_host_local_font_families(void) {
       if (![n hasPrefix:@"."]) [shown addObject:n];
     }
     [shown sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
-    NSData *json = [NSJSONSerialization dataWithJSONObject:shown options:0 error:nil];
-    return mb_string_from_ns(json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : @"");
+    NSMutableArray<NSDictionary *> *items = [NSMutableArray arrayWithCapacity:shown.count];
+    for (NSString *name in shown) {
+      NSDictionary *attrs = @{(__bridge id)kCTFontFamilyNameAttribute : name};
+      CTFontDescriptorRef base = CTFontDescriptorCreateWithAttributes((__bridge CFDictionaryRef)attrs);
+      CFArrayRef ds = base ? CTFontDescriptorCreateMatchingFontDescriptors(base, NULL) : NULL;
+      if (base) CFRelease(base);
+      BOOL mono = NO, serif = NO, cjk = NO;
+      NSString *localized = name;
+      if (ds && CFArrayGetCount(ds) > 0) {
+        CTFontDescriptorRef d = (CTFontDescriptorRef)CFArrayGetValueAtIndex(ds, 0);
+        NSString *loc = (__bridge_transfer NSString *)CTFontDescriptorCopyLocalizedAttribute(
+            d, kCTFontFamilyNameAttribute, NULL);
+        if (loc && loc.length > 0) localized = loc;
+        NSDictionary *traits = (__bridge_transfer NSDictionary *)CTFontDescriptorCopyAttribute(
+            d, kCTFontTraitsAttribute);
+        uint32_t sym = [traits[(__bridge id)kCTFontSymbolicTrait] unsignedIntValue];
+        if (sym & kCTFontMonoSpaceTrait) mono = YES;
+        uint32_t cls = sym & kCTFontClassMaskTrait;
+        if (cls == kCTFontOldStyleSerifsClass || cls == kCTFontTransitionalSerifsClass ||
+            cls == kCTFontModernSerifsClass || cls == kCTFontClarendonSerifsClass ||
+            cls == kCTFontSlabSerifsClass || cls == kCTFontFreeformSerifsClass) {
+          serif = YES;
+        }
+        NSArray<NSString *> *langs = (__bridge_transfer NSArray *)CTFontDescriptorCopyAttribute(
+            d, kCTFontLanguagesAttribute);
+        for (NSString *lang in langs) {
+          if ([lang hasPrefix:@"zh"] || [lang hasPrefix:@"ja"] || [lang hasPrefix:@"ko"]) {
+            cjk = YES;
+            break;
+          }
+        }
+      }
+      if (ds) CFRelease(ds);
+      [items addObject:@{
+        @"name" : name,
+        @"localized" : localized,
+        @"mono" : @(mono),
+        @"serif" : @(serif),
+        @"cjk" : @(cjk),
+      }];
+    }
+    NSData *json = [NSJSONSerialization dataWithJSONObject:items options:0 error:nil];
+    return json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : @"[]";
+  }
+}
+#endif
+
+// Asynchronous non-blocking metadata scan on macOS: returns "" immediately on first call while GCD scans
+// CTFontDescriptor attributes off the main thread, publishes the cached JSON, and wakes the UI via
+// mb_host_request_frame(). Returns "" on iOS.
+moonbit_string_t mb_host_local_font_info(void) {
+#if TARGET_OS_OSX
+  @autoreleasepool {
+    NSString *ready = nil;
+    @synchronized(@"mb_local_font_info") {
+      ready = local_font_info_json;
+    }
+    if (ready) return mb_string_from_ns(ready);
+    dispatch_once(&local_font_info_once, ^{
+      dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *res = scan_local_font_info_macos();
+        @synchronized(@"mb_local_font_info") {
+          local_font_info_json = res;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+          mb_host_request_frame();
+        });
+      });
+    });
+    return mb_string_from_ns(@"");
   }
 #else
   return mb_string_from_ns(@"");
 #endif
-}
-
-void mb_host_face_clear(int32_t face) {
-  if (face <= 0 || face >= MB_FACES || !face_descs[face].count) return;
-  [face_descs[face] removeAllObjects];
-  [face_weights[face] removeAllObjects];
-  faces_changed();
 }
 
 static CTFontRef font_for(double size, int weight, int style) {
@@ -335,29 +457,49 @@ void mb_host_font_metrics(double size, int32_t weight, int32_t style, double *ou
   out[5] = 0;  // lines as asked, not on whole pixels
 }
 
-// Whether Core Text's own spacing of Chinese and Japanese words is left out (MBUI_AUTOSPACE=off or =mbui, a picture
-// of words set as a shaper that spaces none sets them, or as mbui spaces them: hostapi's words_spaced): the line said
-// to be English, where Core Text (macOS 27) puts no room between Han and a Latin letter and sets no full-width mark
-// closer, its letters kerned as before.
+// Whether Core Text's own spacing of Chinese and Japanese words is left out (MBUI_AUTOSPACE=off or =mbui takes
+// priority over runtime mb_host_set_host_autospace): the line said to be English, where Core Text (macOS 27) puts
+// no room between Han and a Latin letter and sets no full-width mark closer, its letters kerned as before.
+static int autospace_override = 1;  // 0: off, 1: on (default)
+
 static int unspaced(void) {
-  static int said = -1;
-  if (said < 0) {
+  static int env_said = -2;  // -2: unread, -1: unset, 0: forced on, 1: forced off
+  if (env_said == -2) {
     const char *v = getenv("MBUI_AUTOSPACE");
-    said = v && (strcmp(v, "off") == 0 || strcmp(v, "mbui") == 0);
+    if (!v || !*v) env_said = -1;
+    else env_said = (strcmp(v, "off") == 0 || strcmp(v, "mbui") == 0) ? 1 : 0;
   }
-  return said;
+  if (env_said >= 0) return env_said;
+  return autospace_override == 0 ? 1 : 0;
 }
 
-// style & 8: no ligatures (words with letter spacing, each cluster spaced on its own)
-static CTLineRef make_line(NSString *s, CTFontRef f, int style) {
+void mb_host_set_host_autospace(int32_t on) {
+  int next = on ? 1 : 0;
+  if (autospace_override == next) return;
+  autospace_override = next;
+  faces_changed();
+}
+
+static bool style_no_ligatures(int style) {
+  if (style & 8) return true;
+  int face = face_id(style);
+  return face > 0 && face_no_lig[face];
+}
+
+// style & 8 or per-face ligatures disabled: no ligatures
+static CTLineRef make_line_with(NSString *s, CTFontRef f, bool no_lig, bool no_autospace) {
   NSMutableDictionary *attrs = [@{
     (__bridge id)kCTFontAttributeName : (__bridge id)f,
     (__bridge id)kCTForegroundColorFromContextAttributeName : @YES,
   } mutableCopy];
-  if (style & 8) attrs[(__bridge id)kCTLigatureAttributeName] = @0;
-  if (unspaced()) attrs[(__bridge id)kCTLanguageAttributeName] = @"en";
+  if (no_lig) attrs[(__bridge id)kCTLigatureAttributeName] = @0;
+  if (no_autospace) attrs[(__bridge id)kCTLanguageAttributeName] = @"en";
   NSAttributedString *as = [[NSAttributedString alloc] initWithString:s attributes:attrs];
   return CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)as);
+}
+
+static CTLineRef make_line(NSString *s, CTFontRef f, int style) {
+  return make_line_with(s, f, style_no_ligatures(style), unspaced() != 0);
 }
 
 static int intern_at(NSString *cluster, double size, int weight, int style, double dx) {
@@ -365,8 +507,10 @@ static int intern_at(NSString *cluster, double size, int weight, int style, doub
     keys = [NSMutableDictionary new];
     texts = [NSMutableArray new];
   }
-  NSString *k = dx == 0 ? [NSString stringWithFormat:@"%@\x01%g\x01%d\x01%d", cluster, size, weight, style]
-                        : [NSString stringWithFormat:@"%@\x01%g\x01%d\x01%d\x01%.3f", cluster, size, weight, style, dx];
+  int fg = face_gen[face_id(style)];
+  NSString *k = (dx == 0 && fg == 0)
+                    ? [NSString stringWithFormat:@"%@\x01%g\x01%d\x01%d", cluster, size, weight, style]
+                    : [NSString stringWithFormat:@"%@\x01%g\x01%d\x01%d\x01%.3f\x01%d", cluster, size, weight, style, dx, fg];
   NSNumber *n = keys[k];
   if (n) return n.intValue;
   if (n_entries == cap_entries) {
@@ -393,6 +537,17 @@ typedef struct {
 } bmp_keys;
 static bmp_keys *bmp_cache;
 static int n_bmp, last_bmp = -1;
+
+static void bmp_forget_face(int32_t face) {
+  for (int i = 0; i < n_bmp; i++) {
+    if (((bmp_cache[i].style >> 8) & 31) == face) {
+      for (int p = 0; p < 256; p++) {
+        free(bmp_cache[i].pages[p]);
+        bmp_cache[i].pages[p] = NULL;
+      }
+    }
+  }
+}
 
 static bmp_keys *bmp_for(double size, int weight, int style) {
   if (last_bmp >= 0) {
@@ -483,15 +638,15 @@ static CGPoint *shape_pos;
 static size_t shape_glyph_cap;
 
 static CTLineRef make_line_cached(CFStringRef s, CTFontRef f, int style) {
-  int flags = style & 8;
+  int flags = (style_no_ligatures(style) ? 1 : 0) | (unspaced() ? 2 : 0);
   if (f != last_attrs_font || flags != last_attrs_style || !last_attrs) {
     if (last_attrs) CFRelease(last_attrs);
     NSMutableDictionary *attrs = [@{
       (__bridge id)kCTFontAttributeName : (__bridge id)f,
       (__bridge id)kCTForegroundColorFromContextAttributeName : @YES,
     } mutableCopy];
-    if (flags) attrs[(__bridge id)kCTLigatureAttributeName] = @0;
-    if (unspaced()) attrs[(__bridge id)kCTLanguageAttributeName] = @"en";
+    if (flags & 1) attrs[(__bridge id)kCTLigatureAttributeName] = @0;
+    if (flags & 2) attrs[(__bridge id)kCTLanguageAttributeName] = @"en";
     last_attrs = (__bridge_retained CFDictionaryRef)[attrs copy];
     last_attrs_font = f;
     last_attrs_style = flags;
@@ -725,9 +880,10 @@ static int key_sub(int full_key) {
 - (void)dealloc { free(_px); }
 @end
 
-static MBDrawn *draw_cluster(NSString *cluster, CTFontRef f, int style, double e_dx, double sub_px, double sc) {
+static MBDrawn *draw_cluster_with(NSString *cluster, CTFontRef f, int style, bool no_lig, bool no_autospace,
+                                  double e_dx, double sub_px, double sc) {
   MBDrawn *d = [MBDrawn new];
-  CTLineRef line = make_line(cluster, f, style);
+  CTLineRef line = make_line_with(cluster, f, no_lig, no_autospace);
   // is it drawn from a color font (emoji)? slanted, from a face with no italic?
   int color = 0, oblique = 0;
   const double slant = 0.2126;  // tan 12°
@@ -815,6 +971,10 @@ static MBDrawn *draw_cluster(NSString *cluster, CTFontRef f, int style, double e
   return d;
 }
 
+static MBDrawn *draw_cluster(NSString *cluster, CTFontRef f, int style, double e_dx, double sub_px, double sc) {
+  return draw_cluster_with(cluster, f, style, style_no_ligatures(style), unspaced() != 0, e_dx, sub_px, sc);
+}
+
 // the glyph drawn last (mb_host_glyph), its picture until it is put in its atlas (mb_host_glyph_put): its key with its
 // phase
 static int held_key = -1;
@@ -858,6 +1018,8 @@ static void place(int full_key, MBDrawn *d) {
 @property(nonatomic, copy) NSString *cluster;
 @property(nonatomic, strong) id font;  // a CTFontRef
 @property(nonatomic) int style;
+@property(nonatomic) BOOL noLig;
+@property(nonatomic) BOOL noAutospace;
 @property(nonatomic) double dx;
 @property(nonatomic) double scale;
 @property(nonatomic) BOOL gone;
@@ -900,7 +1062,7 @@ static void draw_ahead(MBAhead *a, BOOL first) {
   int s = __builtin_ctz(bit);
   MBDrawn *d;
   @autoreleasepool {
-    d = draw_cluster(a.cluster, (__bridge CTFontRef)a.font, a.style, a.dx, sub_dx(s), a.scale);
+    d = draw_cluster_with(a.cluster, (__bridge CTFontRef)a.font, a.style, a.noLig, a.noAutospace, a.dx, sub_dx(s), a.scale);
   }
   pthread_mutex_lock(&ahead_lock);
   a.drawing = (uint8_t)(a.drawing & ~bit);
@@ -1005,6 +1167,8 @@ static BOOL ahead_ask(int k, uint8_t want, uint8_t first, NSMutableArray<MBAhead
   a.cluster = texts[k];
   a.font = (__bridge id)font_for(e->size, e->weight, e->style);
   a.style = e->style;
+  a.noLig = style_no_ligatures(e->style);
+  a.noAutospace = unspaced() != 0;
   a.dx = e->dx;
   a.scale = text_scale;
   a.want = want;
@@ -1076,17 +1240,40 @@ void mb_host_glyphs_ahead(int32_t *keys, int32_t n) {
       uint8_t bit = (uint8_t)(1 << key_sub(keys[i]));
       MBAhead *a = ahead_of[@(k)];
       if (a) {
-        // (asked already, this phase not begun: drawn first too; one asked in this batch is handed on with all of it)
         pthread_mutex_lock(&ahead_lock);
-        BOOL more = (a.want & bit) && !(a.first & bit);
-        if (more) a.first = (uint8_t)(a.first | bit);
+        BOOL stale = a.gone || a.scale != text_scale;
+        BOOL add_first = NO;
+        if (stale) {
+          a.gone = YES;
+          a.drawn = nil;
+          a.have = 0;
+          a.want = 0;
+          a.first = 0;
+        } else if ((a.want & bit) && !(a.first & bit)) {
+          a.first = (uint8_t)(a.first | bit);
+          add_first = YES;
+        } else if (!((a.want | a.drawing | a.have) & bit)) {
+          a.want = (uint8_t)(a.want | bit);
+          a.first = (uint8_t)(a.first | bit);
+          add_first = YES;
+        }
         pthread_mutex_unlock(&ahead_lock);
-        if (more && a.batch != ahead_batch) [firsts addObject:a];
-        continue;
+        if (stale) {
+          ahead_let_go(a);
+        } else {
+          if (add_first) {
+            entries[k].subs_queued |= bit;
+            if (a.batch != ahead_batch) {
+              [firsts addObject:a];
+              [ahead_order removeObject:a];
+              [ahead_order addObject:a];
+            }
+          }
+          continue;
+        }
       }
-      uint8_t want = (uint8_t)(SUB_ALL & ~entries[k].subs_queued);
-      if (want == 0) continue;
-      if (!ahead_ask(k, want, (uint8_t)(want & bit), asked) && ahead_order.count >= AHEAD_MOST) break;
+      uint8_t want = (uint8_t)(bit | (SUB_ALL & ~entries[k].subs_queued));
+      if (!ahead_ask(k, want, (uint8_t)(want & bit), asked)) continue;
     }
     ahead_go(asked, firsts);
   }

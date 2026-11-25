@@ -64,6 +64,7 @@
 #include <dxgi1_2.h>
 #include <dxgi1_3.h>
 #include <dcomp.h>
+#include <dwmapi.h>
 #include <wincodec.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -78,6 +79,9 @@
 #include <math.h>
 #include "win.h"
 #include "win_sound.h"
+#include "stream_pace.h"
+
+#pragma comment(lib, "dwmapi.lib")
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "ole32.lib")
@@ -120,17 +124,27 @@ struct StreamJob {
   uint8_t *data;
   size_t len;
   int key, w, h;
-  int codec;       // a config's: CODEC_*
-  uint64_t route;  // a frame's: the route it came by (mb_stream_route_take), 0 the app's
-  int hidden;      // a frame's: decoded for those after it, never shown (mb_host_stream_frame_shown's `show` 0)
+  int codec;          // a config's: CODEC_*
+  uint64_t route;     // a frame's: the route it came by (mb_stream_route_take), 0 the app's
+  int hidden;         // a frame's: decoded for those after it, never shown (mb_host_stream_frame_shown's `show` 0)
+  double arrived_ms;  // monotonic arrival timestamp (ms) when received from network/route
 };
 
 // What was fed the decoder and is not out of it yet: its sample time there (a count) and its time
 struct Fed {
   LONGLONG n;
   double ts;
-  uint64_t route;  // the route it came by, 0 the app's: its fate acknowledged to its sender, not said
-  int hidden;      // not to be shown: out of the decoder it is said "d", not copied, no frame asked for it
+  uint64_t route;     // the route it came by, 0 the app's: its fate acknowledged to its sender, not said
+  int hidden;         // not to be shown: out of the decoder it is said "d", not copied, no frame asked for it
+  double arrived_ms;  // monotonic arrival timestamp (ms)
+};
+
+struct PacedFrame {
+  StreamFrame f;
+  uint64_t route;
+  double arrived_ms;
+  double base_ms;
+  uint8_t immediate;
 };
 
 // A stream's decoder (its config's, started anew with each and as it fails; the stream's work's alone): the system's
@@ -153,8 +167,8 @@ struct H264 {
   int codec, seq, gpu, streaming;
 };
 
-// a few of a stream's NV12 textures kept to be decoded into again
-#define POOL 4
+// a stream's NV12 textures kept to be decoded into again (sized to hold queued jitter-buffer frames)
+#define POOL 12
 
 struct Stream {
   int id;
@@ -174,10 +188,19 @@ struct Stream {
   H264 *h264;
   // shown by its layer (attached: its events tell the app between frames); read by the decoder's thread
   volatile LONG layered;
-  // frames of its route decoded and on their way to the window's thread, not shown yet (direct_shown)
-  volatile LONG direct_queued;
   // its frames on the GPU not made BGRA there (vp_failed): its decoder in software from the next key frame
   volatile LONG no_gpu;
+  // adaptive VSync-aligned jitter buffer for routed frames (UI thread, stream_pace.h)
+  mb_pace_t pace;
+  PacedFrame paced[MB_PACE_QUEUE_CAP];
+  int npaced;
+  int pace_drawn_this_tick;
+  int pace_idle_ticks;
+  HANDLE pace_thread;
+  HANDLE pace_wake;
+  volatile LONG pace_active;
+  volatile LONG pace_stop_flag;
+  volatile LONG pace_tick_pending;
   // frames that came by a route: how many and their bytes (under lock); the last of them shown and what the app was
   // told of them ("D": the UI thread's)
   long direct_frames, direct_bytes, direct_told_frames, direct_told_bytes;
@@ -257,6 +280,7 @@ static Route routes[ROUTES];
 static uint64_t routes_used;
 static SRWLOCK routes_lock = SRWLOCK_INIT;
 static int (*route_ack)(double route, double ts);
+static int (*route_ack_wait)(double route, double ts, uint32_t wait_us);
 
 // (under routes_lock) route's entry; made where `make` (in a free one, else one routing nothing used least lately)
 static Route *route_at(uint64_t route, int make) {
@@ -299,9 +323,23 @@ static void unroute(int sid, int what) {
   ReleaseSRWLockExclusive(&routes_lock);
 }
 
-// Frame ts of route taken, as far as its sender is concerned (the engine's ack: any thread).
+// Frame ts of route taken, as far as its sender is concerned, with client jitter-buffer wait_us (any thread).
+static void route_acked_wait(uint64_t route, double ts, uint32_t wait_us) {
+  if (route_ack_wait) route_ack_wait((double)route, ts, wait_us);
+  else if (route_ack) route_ack((double)route, ts);
+}
+
 static void route_acked(uint64_t route, double ts) {
-  if (route_ack) route_ack((double)route, ts);
+  route_acked_wait(route, ts, 0);
+}
+
+// Monotonic high-resolution clock in milliseconds (shared by video pacer and audio reserve).
+static double pace_now_ms(void) {
+  static LARGE_INTEGER freq;
+  if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+  LARGE_INTEGER now;
+  QueryPerformanceCounter(&now);
+  return (double)now.QuadPart * 1000.0 / (double)freq.QuadPart;
 }
 
 // ---- the GPU's video side ----
@@ -709,67 +747,238 @@ static ID3D11ShaderResourceView *decode_jpeg(const uint8_t *data, size_t len, in
   return srv;
 }
 
-// ---- a routed frame decoded: shown on the window's thread ----
+// ---- a routed frame decoded: VSync-aligned adaptive jitter buffer on the window's thread ----
+
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 
 static void layer_present(Stream *s);
 
 struct Direct {
   int sid;
   uint64_t route;
+  double arrived_ms;
   StreamFrame f;
 };
 
-// (the window's thread) a frame that came by a route, decoded: shown and acknowledged here while the route still goes
-// to its stream, nothing of the app's run; else kept and said, as the app's are. One with a newer behind it on its way
-// here (a burst the window's thread was too busy to take one by one) is acknowledged and taken as the frame shown, not
-// presented: its swap chain's one frame's room left to the newest.
+static void pace_present_item(Stream *s, PacedFrame *item, double now) {
+  // (what the app said decoded before it and has not shown yet: passed over)
+  EnterCriticalSection(&lock);
+  int k = 0;
+  for (int i = 0; i < s->ndecoded; i++) {
+    if (s->decoded[i].ts > item->f.ts) s->decoded[k++] = s->decoded[i];
+    else frame_free(s, &s->decoded[i]);
+  }
+  s->ndecoded = k;
+  LeaveCriticalSection(&lock);
+  frame_free(s, &s->cur);
+  s->cur = item->f;
+  memset(&item->f, 0, sizeof(item->f));
+  s->drawn = 0;
+  s->direct_at = s->cur.ts;
+  s->pace_drawn_this_tick = 1;
+  layer_present(s);
+  route_acked_wait(item->route, s->cur.ts, mb_pace_wait_us(item->arrived_ms, now));
+}
+
+static void pace_trim(Stream *s, double now, int draws) {
+  int due = 0;
+  while (due < s->npaced &&
+         mb_pace_is_due(&s->pace, s->paced[due].f.ts, s->paced[due].base_ms, s->paced[due].immediate, now)) {
+    due++;
+  }
+  if (due <= 0) {
+    mb_pace_trim(&s->pace, 0, draws, 0.0, now, NULL);
+    return;
+  }
+  int drop = mb_pace_trim(&s->pace, due, draws, s->paced[0].arrived_ms, now, NULL);
+  if (drop > s->npaced) drop = s->npaced;
+  if (drop > 0) {
+    for (int i = 0; i < drop; i++) {
+      PacedFrame old = s->paced[i];
+      frame_free(s, &old.f);
+      route_acked_wait(old.route, old.f.ts, mb_pace_wait_us(old.arrived_ms, now));
+    }
+    memmove(&s->paced[0], &s->paced[drop], (size_t)(s->npaced - drop) * sizeof(PacedFrame));
+    s->npaced -= drop;
+  }
+}
+
+static void pace_stop(Stream *s) {
+  InterlockedExchange(&s->pace_active, 0);
+}
+
+static void pace_tick(void *arg) {
+  int sid = (int)(intptr_t)arg;
+  Stream *s = stream_of(sid);
+  if (!s) return;
+  InterlockedExchange(&s->pace_tick_pending, 0);
+  if (s->closed) {
+    pace_stop(s);
+    return;
+  }
+  s->pace_drawn_this_tick = 0;
+  double now = pace_now_ms();
+  pace_trim(s, now, 1);
+  int drew = 0;
+  if (s->npaced > 0 &&
+      mb_pace_is_due(&s->pace, s->paced[0].f.ts, s->paced[0].base_ms, s->paced[0].immediate, now)) {
+    PacedFrame head = s->paced[0];
+    memmove(&s->paced[0], &s->paced[1], (size_t)(s->npaced - 1) * sizeof(PacedFrame));
+    s->npaced--;
+    pace_present_item(s, &head, now);
+    drew = 1;
+  }
+  if (drew || s->npaced > 0) {
+    s->pace_idle_ticks = 0;
+  } else if (++s->pace_idle_ticks >= MB_PACE_IDLE_STOP_TICKS) {
+    s->pace_idle_ticks = 0;
+    pace_stop(s);
+  }
+}
+
+static DWORD WINAPI pace_thread_proc(void *arg) {
+  Stream *s = (Stream *)arg;
+  HANDLE timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+  for (;;) {
+    while (!InterlockedCompareExchange(&s->pace_active, 0, 0)) {
+      if (InterlockedCompareExchange(&s->pace_stop_flag, 0, 0)) goto done;
+      WaitForSingleObject(s->pace_wake, INFINITE);
+    }
+    if (InterlockedCompareExchange(&s->pace_stop_flag, 0, 0)) break;
+    if (FAILED(DwmFlush())) {
+      if (timer) {
+        LARGE_INTEGER due;
+        due.QuadPart = -160000LL;  // 16ms fallback when DWM is unavailable
+        SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE);
+        WaitForSingleObject(timer, 20);
+      } else {
+        Sleep(16);
+      }
+    }
+    if (InterlockedCompareExchange(&s->pace_stop_flag, 0, 0)) break;
+    if (InterlockedCompareExchange(&s->pace_active, 0, 0) &&
+        InterlockedCompareExchange(&s->pace_tick_pending, 1, 0) == 0) {
+      mb_app_call(pace_tick, (void *)(intptr_t)s->id);
+    }
+  }
+done:
+  if (timer) CloseHandle(timer);
+  return 0;
+}
+
+static void pace_start(Stream *s) {
+  if (s->closed) return;
+  if (!s->pace_wake) s->pace_wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+  if (s->pace_wake && !s->pace_thread) {
+    InterlockedExchange(&s->pace_stop_flag, 0);
+    s->pace_thread = CreateThread(NULL, 0, pace_thread_proc, s, 0, NULL);
+  }
+  InterlockedExchange(&s->pace_active, 1);
+  if (s->pace_wake) SetEvent(s->pace_wake);
+}
+
+static void pace_clear(Stream *s, int ack_remaining) {
+  pace_stop(s);
+  double now = pace_now_ms();
+  for (int i = 0; i < s->npaced; i++) {
+    PacedFrame old = s->paced[i];
+    frame_free(s, &old.f);
+    if (ack_remaining) route_acked_wait(old.route, old.f.ts, mb_pace_wait_us(old.arrived_ms, now));
+  }
+  s->npaced = 0;
+  s->pace_drawn_this_tick = 0;
+  s->pace_idle_ticks = 0;
+  mb_pace_reset(&s->pace);
+}
+
+static void pace_shutdown(Stream *s) {
+  InterlockedExchange(&s->pace_active, 0);
+  InterlockedExchange(&s->pace_stop_flag, 1);
+  if (s->pace_wake) SetEvent(s->pace_wake);
+  if (s->pace_thread) {
+    WaitForSingleObject(s->pace_thread, INFINITE);
+    CloseHandle(s->pace_thread);
+    s->pace_thread = NULL;
+  }
+  if (s->pace_wake) {
+    CloseHandle(s->pace_wake);
+    s->pace_wake = NULL;
+  }
+}
+
+static void pace_reset_cb(void *arg) {
+  Stream *s = stream_of((int)(intptr_t)arg);
+  if (s && !s->closed) pace_clear(s, 1);
+}
+
+// (the window's thread) a frame that came by a route, decoded: enters the VSync-aligned adaptive jitter buffer while
+// the route still goes to its stream; else kept and said, as the app's are.
 static void direct_shown(void *arg) {
   Direct *x = (Direct *)arg;
   Stream *s = stream_of(x->sid);
   StreamFrame f = x->f;
   uint64_t route = x->route;
+  double arrived_ms = x->arrived_ms;
   free(x);
-  LONG behind = s ? InterlockedDecrement(&s->direct_queued) : 0;
   if (!s || s->closed) {
     if (s) frame_free(s, &f);
     else if (f.srv) f.srv->Release(), gpu_drop(&f.gpu);
     else gpu_drop(&f.gpu);
-    route_acked(route, f.ts);
+    route_acked_wait(route, f.ts, 0);
     return;
   }
   if (!routed(route, s->id)) {
     say_decoded(s, f.ts, f.w, f.h, f.srv, f.gpu.tex ? &f.gpu : NULL);
     return;
   }
-  // (what the app said decoded before it and has not shown yet: passed over)
-  EnterCriticalSection(&lock);
-  int k = 0;
-  for (int i = 0; i < s->ndecoded; i++) {
-    if (s->decoded[i].ts > f.ts) s->decoded[k++] = s->decoded[i];
-    else frame_free(s, &s->decoded[i]);
+  double now = pace_now_ms();
+  double obs_arrived = arrived_ms > 0.0 ? arrived_ms : now;
+  s->pace_idle_ticks = 0;
+  mb_pace_arrival_t obs = mb_pace_observe(&s->pace, f.ts, obs_arrived);
+
+  while (s->npaced >= MB_PACE_QUEUE_CAP) {
+    PacedFrame old = s->paced[0];
+    memmove(&s->paced[0], &s->paced[1], (size_t)(s->npaced - 1) * sizeof(PacedFrame));
+    s->npaced--;
+    frame_free(s, &old.f);
+    route_acked_wait(old.route, old.f.ts, mb_pace_wait_us(old.arrived_ms, now));
   }
-  s->ndecoded = k;
-  LeaveCriticalSection(&lock);
-  frame_free(s, &s->cur);
-  s->cur = f;
-  s->drawn = 0;
-  s->direct_at = f.ts;
-  if (behind <= 0) layer_present(s);
-  route_acked(route, f.ts);
+
+  int was_empty = (s->npaced == 0);
+  PacedFrame *slot = &s->paced[s->npaced++];
+  slot->f = f;
+  slot->route = route;
+  slot->arrived_ms = obs.arrived_ms;
+  slot->base_ms = obs.base_ms;
+  slot->immediate = obs.immediate;
+
+  pace_trim(s, now, 0);
+
+  if (was_empty && !s->pace_drawn_this_tick && s->npaced > 0 &&
+      mb_pace_is_due(&s->pace, s->paced[0].f.ts, s->paced[0].base_ms, s->paced[0].immediate, now)) {
+    PacedFrame head = s->paced[0];
+    memmove(&s->paced[0], &s->paced[1], (size_t)(s->npaced - 1) * sizeof(PacedFrame));
+    s->npaced--;
+    pace_present_item(s, &head, now);
+  }
+  if (s->npaced > 0 || s->pace_drawn_this_tick) pace_start(s);
 }
 
-// (the stream's work) a frame of route decoded: to the window's thread, to be shown there
-static void direct_decoded(Stream *s, double ts, int w, int h, ID3D11ShaderResourceView *srv, Gpu *gpu, uint64_t route) {
-  if (!srv && !(gpu && gpu->tex)) return route_acked(route, ts);
+// (the stream's work) a frame of route decoded: to the window's thread, to be paced and shown there
+static void direct_decoded(Stream *s, double ts, int w, int h, ID3D11ShaderResourceView *srv, Gpu *gpu, uint64_t route,
+                           double arrived_ms) {
+  if (!srv && !(gpu && gpu->tex)) return route_acked_wait(route, ts, 0);
   Direct *x = (Direct *)calloc(1, sizeof(Direct));
   x->sid = s->id;
   x->route = route;
+  x->arrived_ms = arrived_ms;
   x->f.ts = ts;
   x->f.w = w;
   x->f.h = h;
   x->f.srv = srv;
   if (gpu) x->f.gpu = *gpu;
-  InterlockedIncrement(&s->direct_queued);
   mb_app_call(direct_shown, x);
 }
 
@@ -1195,12 +1404,13 @@ static void h264_drain(Stream *s) {
     LONGLONG t = 0;
     o.pSample->GetSampleTime(&t);
     LONGLONG n = (t + 5000) / 10000;
-    double ts = -1, passed = -1, passed_direct = -1;
+    double ts = -1, passed = -1, passed_direct = -1, arrived_ms = 0;
     uint64_t route = 0, passed_route = 0;
     int hidden = 0, passed_wake = 0;
     int k = 0;
     while (k < d->nfed && d->fed[k].n <= n) {
-      if (d->fed[k].n == n) ts = d->fed[k].ts, route = d->fed[k].route, hidden = d->fed[k].hidden;
+      if (d->fed[k].n == n)
+        ts = d->fed[k].ts, route = d->fed[k].route, hidden = d->fed[k].hidden, arrived_ms = d->fed[k].arrived_ms;
       else if (d->fed[k].route) passed_direct = d->fed[k].ts, passed_route = d->fed[k].route;
       else passed = d->fed[k].ts, passed_wake |= !d->fed[k].hidden;
       k++;
@@ -1232,7 +1442,7 @@ static void h264_drain(Stream *s) {
     o.pSample->Release();
     if (ts < 0) continue;
     if (route) {
-      direct_decoded(s, ts, (int)d->w, (int)d->h, srv, gpu.tex ? &gpu : NULL, route);
+      direct_decoded(s, ts, (int)d->w, (int)d->h, srv, gpu.tex ? &gpu : NULL, route, arrived_ms);
       continue;
     }
     say_decoded(s, ts, (int)d->w, (int)d->h, srv, gpu.tex ? &gpu : NULL);
@@ -1245,6 +1455,7 @@ static void h264_config(Stream *s, StreamJob *j) {
   H264 *d = s->h264;
   fed_dropped(s);
   h264_stop(d);
+  mb_app_call(pace_reset_cb, (void *)(intptr_t)s->id);
   d->codec = j->codec;
   int read = j->codec == CODEC_AV1    ? av1c_read(d, j->data, j->len)
              : j->codec == CODEC_HEVC ? hvcc_read(d, j->data, j->len)
@@ -1314,7 +1525,7 @@ static void h264_frame(Stream *s, StreamJob *j) {
     d->cap_fed = d->cap_fed ? d->cap_fed * 2 : 16;
     d->fed = (Fed *)realloc(d->fed, (size_t)d->cap_fed * sizeof *d->fed);
   }
-  d->fed[d->nfed++] = {n, j->ts, j->route, j->hidden};
+  d->fed[d->nfed++] = {n, j->ts, j->route, j->hidden, j->arrived_ms};
   HRESULT hr = d->dec->ProcessInput(0, smp, 0);
   if (hr == MF_E_NOTACCEPTING) {
     h264_drain(s);
@@ -1837,6 +2048,7 @@ int32_t mb_host_stream_open(void) {
   Stream *s = (Stream *)calloc(1, sizeof(Stream));
   s->id = nstreams;
   s->direct_at = s->direct_told_at = -1;
+  mb_pace_init(&s->pace);
   streams[nstreams] = s;
   int id = nstreams++;
   ReleaseSRWLockExclusive(&streams_lock);
@@ -2225,6 +2437,8 @@ void mb_host_stream_close(int32_t id) {
   free(s->sound_ring);
   s->sound_ring = NULL;
   ReleaseSRWLockExclusive(&sound_lock);
+  pace_shutdown(s);
+  pace_clear(s, 1);
   layer_drop(s);
   if (s->ptr_px) free(s->ptr_px);
   s->ptr_px = NULL;
@@ -2532,12 +2746,13 @@ int mb_stream_route_take(uint64_t route, int kind, int key, uint64_t seq, uint64
   s->direct_frames += 1;
   s->direct_bytes += (long)len;
   LeaveCriticalSection(&lock);
-  StreamJob j = {JOB_FRAME, (double)ts, NULL, 0, key != 0, 0, 0, 0, route};
+  StreamJob j = {JOB_FRAME, (double)ts, NULL, 0, key != 0, 0, 0, 0, route, 0, pace_now_ms()};
   queue_bytes(s, j, bytes, len);
   return 1;
 }
 
 void mb_stream_route_acks(int (*ack)(double route, double ts)) { route_ack = ack; }
+void mb_stream_route_acks_wait(int (*ack)(double route, double ts, uint32_t wait_us)) { route_ack_wait = ack; }
 
 // A system video layer here (win_views.cpp's views of kind 4, where there is a composition and a video device): what a
 // stream shows put there by the GPU, nothing drawn of it; shown as sRGB (2: its tagged colours not honoured, so none

@@ -471,7 +471,7 @@ fn[P] Nav::held_by(
       nav.waited = true
       nav.t0 = s.logic_at()
       sets_out()
-      g().moving(nav.mover, nav as &Moving, what="a stack's slide")
+      g().moving(nav.mover, nav.as_moving(), what="a stack's slide")
       nav.shown_told()
     }
   }

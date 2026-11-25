@@ -332,7 +332,7 @@ fn Ctx::bar_moved(self : Ctx, id : Int) -> Unit {
     (Some(s), Some((b, _, _))) => s.set((b.near, b.held))
     _ => ()
   }
-  let again = fn(who : Mover, m : &Moving, what : String) {
+  let again = fn(who : Mover, m : Moving, what : String) {
     let mut said = what
     for e in self.movers {
       if physical_equal(e.who, who) {
@@ -342,10 +342,10 @@ fn Ctx::bar_moved(self : Ctx, id : Int) -> Unit {
     self.moving_as(who, m, said)
   }
   match self.lists.get(id) {
-    Some(st) => again(st.ease_mover, st as &Moving, "a list's scroll bar")
+    Some(st) => again(st.ease_mover, st.as_moving(), "a list's scroll bar")
     None =>
       match sideways.get(id) {
-        Some(s) => again(s.mover, s as &Moving, "a box scrolled inside a list and its scroll bar")
+        Some(s) => again(s.mover, s.as_moving(), "a box scrolled inside a list and its scroll bar")
         None => ()
       }
   }

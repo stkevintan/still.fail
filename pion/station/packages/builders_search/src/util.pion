@@ -1,0 +1,277 @@
+// Shared string, UTF-16, sorting, and lossless JSON serialization helpers for `builders_search`.
+
+import "base_codec"
+import "js_json"
+import "sql_db"
+
+fn str_has_prefix(s : String, prefix : String) -> Bool {
+  let sb = s.to_bytes()
+  let pb = prefix.to_bytes()
+  if pb.length() > sb.length() {
+    return false
+  }
+  for i in 0..<pb.length() {
+    if sb[i] != pb[i] {
+      return false
+    }
+  }
+  true
+}
+
+fn str_has_suffix(s : String, suffix : String) -> Bool {
+  let sb = s.to_bytes()
+  let tb = suffix.to_bytes()
+  if tb.length() > sb.length() {
+    return false
+  }
+  let off = sb.length() - tb.length()
+  for i in 0..<tb.length() {
+    if sb[off + i] != tb[i] {
+      return false
+    }
+  }
+  true
+}
+
+fn str_slice_bytes(s : String, start : Int, end : Int) -> String {
+  let b = s.to_bytes()
+  let n = b.length()
+  let s0 = if start < 0 { 0 } else if start > n { n } else { start }
+  let e0 = if end < 0 { 0 } else if end > n { n } else { end }
+  if s0 >= e0 {
+    return ""
+  }
+  let sb = StringBuilder::new()
+  for i in s0..<e0 {
+    sb.write_byte(b[i])
+  }
+  sb.to_string()
+}
+
+fn str_find_bytes_from(hay : String, needle : String, from : Int) -> Option[Int] {
+  let hb = hay.to_bytes()
+  let nb = needle.to_bytes()
+  let hn = hb.length()
+  let nn = nb.length()
+  let start = if from < 0 { 0 } else { from }
+  if nn == 0 {
+    return Some(if start > hn { hn } else { start })
+  }
+  if start + nn > hn {
+    return None
+  }
+  let last = hn - nn
+  for i in start..<(last + 1) {
+    let mut ok = true
+    for j in 0..<nn {
+      if hb[i + j] != nb[j] {
+        ok = false
+        break
+      }
+    }
+    if ok {
+      return Some(i)
+    }
+  }
+  None
+}
+
+fn str_find_bytes(hay : String, needle : String) -> Option[Int] {
+  str_find_bytes_from(hay, needle, 0)
+}
+
+fn str_rev_find_bytes(hay : String, needle : String) -> Option[Int] {
+  let hb = hay.to_bytes()
+  let nb = needle.to_bytes()
+  let hn = hb.length()
+  let nn = nb.length()
+  if nn == 0 {
+    return Some(hn)
+  }
+  if nn > hn {
+    return None
+  }
+  let mut i = hn - nn
+  while i >= 0 {
+    let mut ok = true
+    for j in 0..<nn {
+      if hb[i + j] != nb[j] {
+        ok = false
+        break
+      }
+    }
+    if ok {
+      return Some(i)
+    }
+    i = i - 1
+  }
+  None
+}
+
+fn str_split_lf(s : String) -> Array[String] {
+  let b = s.to_bytes()
+  let n = b.length()
+  let out : Array[String] = []
+  let mut start = 0
+  for i in 0..<n {
+    if (b[i].to_int() & 0xFF) == 10 {
+      out.push(str_slice_bytes(s, start, i))
+      start = i + 1
+    }
+  }
+  out.push(str_slice_bytes(s, start, n))
+  out
+}
+
+fn str_strip_cr(s : String) -> String {
+  let b = s.to_bytes()
+  let n = b.length()
+  if n > 0 && (b[n - 1].to_int() & 0xFF) == 13 {
+    str_slice_bytes(s, 0, n - 1)
+  } else {
+    s
+  }
+}
+
+fn str_join(parts : Array[String], sep : String) -> String {
+  let sb = StringBuilder::new()
+  for i in 0..<parts.length() {
+    if i > 0 {
+      sb.write_string(sep)
+    }
+    sb.write_string(parts[i])
+  }
+  sb.to_string()
+}
+
+fn arr_contains_str(xs : Array[String], target : String) -> Bool {
+  for i in 0..<xs.length() {
+    if xs[i] == target {
+      return true
+    }
+  }
+  false
+}
+
+/// Stable merge sort (in-place) matching JS/MoonBit `Array::sort_by`.
+fn sort_by[T](arr : Array[T], cmp : (T, T) -> Int) -> Unit {
+  let n = arr.length()
+  if n <= 1 {
+    return
+  }
+  let mut width = 1
+  while width < n {
+    let mut left = 0
+    while left < n {
+      let mid = if left + width < n { left + width } else { n }
+      let right = if left + width * 2 < n { left + width * 2 } else { n }
+      if mid < right {
+        let merged : Array[T] = []
+        let mut i = left
+        let mut j = mid
+        while i < mid && j < right {
+          if cmp(arr[i], arr[j]) <= 0 {
+            merged.push(arr[i])
+            i = i + 1
+          } else {
+            merged.push(arr[j])
+            j = j + 1
+          }
+        }
+        while i < mid {
+          merged.push(arr[i])
+          i = i + 1
+        }
+        while j < right {
+          merged.push(arr[j])
+          j = j + 1
+        }
+        for k in 0..<merged.length() {
+          arr[left + k] = merged[k]
+        }
+      }
+      left = left + width * 2
+    }
+    width = width * 2
+  }
+}
+
+/// Find first UTF-16 code-unit index of `needle` inside `hay`.
+fn units_find(hay : Array[Int], needle : Array[Int]) -> Option[Int] {
+  let hn = hay.length()
+  let nn = needle.length()
+  if nn == 0 {
+    return Some(0)
+  }
+  if nn > hn {
+    return None
+  }
+  let last = hn - nn
+  for i in 0..<(last + 1) {
+    let mut ok = true
+    for j in 0..<nn {
+      if hay[i + j] != needle[j] {
+        ok = false
+        break
+      }
+    }
+    if ok {
+      return Some(i)
+    }
+  }
+  None
+}
+
+/// Serialize a `base_codec::Json` object entry list where an optional `text` field can be
+/// provided as raw UTF-16 code units (preserving lone surrogates at UTF-16 excerpt cuts).
+/// Key insertion order and numeric `repr` are preserved identically to `sql_db::stringify_json`.
+fn stringify_hit_object(
+  fields : Array[(String, base_codec::Json)],
+  text_units : Array[Int],
+) -> String {
+  let sb = StringBuilder::new()
+  sb.write_byte(0x7B as Byte) // '{'
+  let mut wrote = false
+  for i in 0..<fields.length() {
+    let (k, v) = fields[i]
+    if wrote {
+      sb.write_byte(0x2C as Byte)
+    }
+    wrote = true
+    sb.write_string(sql_db::stringify_json(base_codec::json_str(k)))
+    sb.write_byte(0x3A as Byte)
+    if k == "text" {
+      sb.write_string(js_json::stringify_line(js_json::JValue::Str(text_units)))
+    } else {
+      sb.write_string(sql_db::stringify_json(v))
+    }
+  }
+  sb.write_byte(0x7D as Byte) // '}'
+  sb.to_string()
+}
+
+/// Build a JSON array string from pre-serialized JSON element strings.
+fn stringify_raw_array(items : Array[String]) -> String {
+  let sb = StringBuilder::new()
+  sb.write_byte(0x5B as Byte) // '['
+  for i in 0..<items.length() {
+    if i > 0 {
+      sb.write_byte(0x2C as Byte)
+    }
+    sb.write_string(items[i])
+  }
+  sb.write_byte(0x5D as Byte) // ']'
+  sb.to_string()
+}
+
+/// Insert/replace a key in an ordered association list (preserving first-insertion order like Map).
+fn assoc_set(fields : Array[(String, base_codec::Json)], key : String, value : base_codec::Json) -> Unit {
+  for i in 0..<fields.length() {
+    let (k, _) = fields[i]
+    if k == key {
+      fields[i] = (key, value)
+      return
+    }
+  }
+  fields.push((key, value))
+}

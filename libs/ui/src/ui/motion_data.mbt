@@ -9,11 +9,40 @@
 ///|
 /// What moves by itself (a spring's way, an Anim): when it is at rest, on the frames' clock, asked at the end of each
 /// frame (`now` its time, `frame` its number) while it is said to move. +inf: it does not know yet (it starts at a
-/// frame to come), a frame is owed to it; at or before `now`: at rest, forgotten.
-pub(open) trait Moving {
-  rest_at(Self, now : Double, frame : Int) -> Double
-  sample(Self, now : Double) -> Unit = _
-  keeps_time(Self) -> Bool = _
+/// frame to come), a frame is owed to it; at or before `now`: at rest, forgotten. What moves makes one of itself
+/// (its `as_moving`), each of its answers its own.
+pub struct Moving {
+  priv rest_at_fn : (Double, Int) -> Double
+  priv sample_fn : (Double) -> Unit
+  priv keeps_time_fn : () -> Bool
+}
+
+///|
+/// What moves, said by its answers: `rest_at` when it is at rest (Moving::rest_at), `sample` what it does with the
+/// frame's time it is handed (Moving::sample, by default nothing), `keeps_time` whether it keeps it
+/// (Moving::keeps_time, by default not).
+pub fn Moving::new(
+  rest_at : (Double, Int) -> Double,
+  sample? : (Double) -> Unit = samples_nothing,
+  keeps_time? : () -> Bool = keeps_no_time,
+) -> Moving {
+  { rest_at_fn: rest_at, sample_fn: sample, keeps_time_fn: keeps_time }
+}
+
+///|
+fn samples_nothing(now : Double) -> Unit {
+  ignore(now)
+}
+
+///|
+fn keeps_no_time() -> Bool {
+  false
+}
+
+///|
+/// When it is at rest, asked at the end of a frame at `now`, frame `frame` (Moving).
+pub fn Moving::rest_at(self : Moving, now : Double, frame : Int) -> Double {
+  (self.rest_at_fn)(now, frame)
 }
 
 ///|
@@ -22,9 +51,8 @@ pub(open) trait Moving {
 /// move and the frame it is at rest too: sampled first, forgotten at that frame's end (Ctx::motion_owed). What sets out
 /// as the view builds is not handed that frame's: Ctx::set_out answers it. What moves as data reads where it is from
 /// it, not the clock. By default nothing.
-impl Moving with sample(self, now) {
-  ignore(self)
-  ignore(now)
+pub fn Moving::sample(self : Moving, now : Double) -> Unit {
+  (self.sample_fn)(now)
 }
 
 ///|
@@ -32,9 +60,8 @@ impl Moving with sample(self, now) {
 /// whose springs are read so): then the time it is handed is the clock read followed (Ctx::now), and what is built is
 /// built again each frame it moves (frame_watch.mbt); else it is handed the time as it stands, and only what reads
 /// where it is, as it reads it, follows the clock. By default it keeps none.
-impl Moving with keeps_time(self) {
-  ignore(self)
-  false
+pub fn Moving::keeps_time(self : Moving) -> Bool {
+  (self.keeps_time_fn)()
 }
 
 ///|
@@ -90,7 +117,7 @@ pub fn Mover::changed(self : Mover) -> Unit {
 /// What is said to move: who, what it is, what it is said to be and who told it (Tester::moving).
 struct MoverEntry {
   who : Mover
-  mut m : &Moving
+  mut m : Moving
   mut what : String
 }
 
@@ -99,7 +126,7 @@ struct MoverEntry {
 /// (a new way) it replaces what was said. `what` it is (a spring, an Anim and its key), and who told it (`loc`): what a
 /// test is told of it while it moves (Tester::moving).
 #callsite(autofill(loc))
-pub fn Ctx::moving(self : Ctx, who : Mover, m : &Moving, what? : String = "", loc~ : SourceLoc) -> Unit {
+pub fn Ctx::moving(self : Ctx, who : Mover, m : Moving, what? : String = "", loc~ : SourceLoc) -> Unit {
   who.told_as(what, loc)
   self.moving_as(who, m, (if what == "" { "" } else { what + ", " }) + "told at \{loc}")
 }
@@ -110,7 +137,7 @@ pub fn Ctx::moving(self : Ctx, who : Mover, m : &Moving, what? : String = "", lo
 /// told between frames, the clock's then (a frame is asked for, to show it). Where what moves as data starts from, not
 /// the clock. Not for a fiber: its clock is the runtime's (whole ms), not the frames'.
 #callsite(autofill(loc))
-pub fn Ctx::set_out(self : Ctx, who : Mover, m : &Moving, what? : String = "", loc~ : SourceLoc) -> Double {
+pub fn Ctx::set_out(self : Ctx, who : Mover, m : Moving, what? : String = "", loc~ : SourceLoc) -> Double {
   who.told_as(what, loc)
   self.moving_as(who, m, (if what == "" { "" } else { what + ", " }) + "told at \{loc}")
   if self.in_frame() {
@@ -147,7 +174,7 @@ fn Ctx::movers_sample(self : Ctx) -> Unit {
 /// The same as Ctx::moving, `what` saying all of what it is and who told it (what moves again by itself, as first told).
 /// `tell`: what was built from where it was built again (Mover::changed); not where the caller tells it once its way
 /// is known whole (a layout's motions: the motion package's after_layout).
-pub fn Ctx::moving_as(self : Ctx, who : Mover, m : &Moving, what : String, tell? : Bool = true) -> Unit {
+pub fn Ctx::moving_as(self : Ctx, who : Mover, m : Moving, what : String, tell? : Bool = true) -> Unit {
   if tell {
     who.changed()
   }
@@ -469,16 +496,22 @@ pub fn SpringPath::go(
   } else {
     self.end = now + 1000.0 * spring_end(x - to, self.v0, self.k, self.c, self.rest)
   }
-  g().moving(self.id, self as &Moving, what=what + " to \{to}", loc~)
+  g().moving(self.id, self.as_moving(), what=what + " to \{to}", loc~)
   // (named for the record without where to: the same spring told elsewhere is the same motion)
   self.id.what = what
 }
 
 ///|
-pub impl Moving for SpringPath with rest_at(self, now, frame) {
+fn SpringPath::rest_at(self : SpringPath, now : Double, frame : Int) -> Double {
   ignore(now)
   ignore(frame)
   self.end
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn SpringPath::as_moving(self : SpringPath) -> Moving {
+  Moving::new(fn(now, frame) { self.rest_at(now, frame) })
 }
 
 ///|

@@ -11,57 +11,43 @@ priv struct ZoomHost {
 }
 
 ///|
-impl @hostapi.Host for ZoomHost with font_metrics(_, size, _, _, out) {
-  out[0] = size * 0.75
-  out[1] = size * 0.25
-  out[2] = size * 1.25
-}
-
-///|
-impl @hostapi.Host for ZoomHost with shape(_, text, size, _, _, out) {
-  let n = text.length()
-  for i in 0..<n {
-    out[i * 4] = i.to_double()
-    out[i * 4 + 1] = 1.0
-    out[i * 4 + 2] = size * 0.5
-    out[i * 4 + 3] = (text.at(i).to_int() * 1000 + (size * 10.0).round().to_int()).to_double()
+fn ZoomHost::as_host(self : ZoomHost) -> @hostapi.Host {
+  let h = @hostapi.Host::noop()
+  h.font_metrics = fn(size, _, _, out) {
+    out[0] = size * 0.75
+    out[1] = size * 0.25
+    out[2] = size * 1.25
   }
-  n
-}
-
-///|
-impl @hostapi.Host for ZoomHost with glyph(_, key, out) {
-  let size = (key % 1000).to_double() / 10.0
-  out[0] = 0.0
-  out[1] = 0.0
-  out[2] = size * 0.5
-  out[3] = size
-  out[4] = 0.0
-  out[5] = -size * 0.75
-  out[6] = 0.0
-}
-
-///|
-impl @hostapi.Host for ZoomHost with glyph_put(self, key, x, y) {
-  self.put[(x, y)] = key
-}
-
-///|
-impl @hostapi.Host for ZoomHost with atlas_size(_, colour) {
-  if colour {
-    0
-  } else {
-    1024
+  h.shape = fn(text, size, _, _, out) {
+    let n = text.length()
+    for i in 0..<n {
+      out[i * 4] = i.to_double()
+      out[i * 4 + 1] = 1.0
+      out[i * 4 + 2] = size * 0.5
+      out[i * 4 + 3] = (text.at(i).to_int() * 1000 + (size * 10.0).round().to_int()).to_double()
+    }
+    n
   }
-}
-
-///|
-impl @hostapi.Host for ZoomHost with drawn_pixels_of(self, inst, count, _, _, _, scale, w, h, out) {
-  self.drawn.push((scale, w, h, Array::makei(count * zoom_inst, fn(i) { inst[i] })))
-  for i in 0..<(w * h * 4) {
-    out[i] = b'\x00'
+  h.glyph = fn(key, out) {
+    let size = (key % 1000).to_double() / 10.0
+    out[0] = 0.0
+    out[1] = 0.0
+    out[2] = size * 0.5
+    out[3] = size
+    out[4] = 0.0
+    out[5] = -size * 0.75
+    out[6] = 0.0
   }
-  true
+  h.glyph_put = fn(key, x, y) { self.put[(x, y)] = key }
+  h.atlas_size = fn(colour) { if colour { 0 } else { 1024 } }
+  h.drawn_pixels_of = fn(inst, count, _, _, _, scale, w, hh, out) {
+    self.drawn.push((scale, w, hh, Array::makei(count * zoom_inst, fn(i) { inst[i] })))
+    for i in 0..<(w * hh * 4) {
+      out[i] = b'\x00'
+    }
+    true
+  }
+  h
 }
 
 ///|
@@ -102,7 +88,7 @@ test "a shot taken at 3 pixels a point in a window of 2: drawn at 3 into a pictu
     w=200.0,
     h=120.0,
     scale=2.0,
-    live={ host, turn: fn() {  } },
+    live={ host: host.as_host(), turn: fn() {  } },
   )
   // on the screen: glyphs made at its size, drawn 8 wide, 16 pixels of them in the atlas
   let (inst, n, _) = t.presented()

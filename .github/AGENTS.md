@@ -33,7 +33,7 @@
   natives: taking the group first, it held natives and every job waiting for the readers), `natives-main` and cross-platform
   `side` parts run on `ci-1` (`linux-ci`, `linux-quick`, a 16-core Linux machine; `vars.CI_1 = 'off'` falls back to
   `macos-ci` for the non-Apple parts, `natives-mac` building the Apple ones all the same), unloading `Mini1`. Every `natives*` job builds only what plan found missing (`missing_list`,
-  `missing_win_list`, `missing_mac_list`, `missing_mac_reader_list`, `missing_harness_list`), and fetches no Farview client (`mbui-moonbit`'s `farview: 'false'`). On
+  `missing_win_list`, `missing_mac_list`, `missing_mac_reader_list`, `missing_harness_list`). On
   `ci-1` the readers keep `mbc`'s 768 KB package units and `MBC_DATA_LAYOUTS` (never `MBC_INIT_SPLIT=0`, which turns
   the layouts off, so that a changed type compiles all of `moonbit_init` again). A branch missing only
   `reader:linux-x64` builds `natives` on `ubuntu-24.04`, and `natives-win-reader` there whenever `shell-station` is

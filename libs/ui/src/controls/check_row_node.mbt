@@ -47,7 +47,19 @@ pub fn check_row_node(
       })
       |> ignore
     }
-    on_first_line(fn(l) { check_row_box_node(l, on, turn, label, disabled) })
+    on_first_line(fn(l) {
+      check_box_node_by(
+        l,
+        on,
+        turn,
+        label,
+        disabled,
+        fn() { theme().rows.check },
+        fn() { theme().rows.check_corner },
+        None,
+      )
+      |> ignore
+    })
     match lead {
       Some(make) => on_first_line(make)
       None => ()
@@ -59,54 +71,6 @@ pub fn check_row_node(
       words.show(fn() { note() != "" }, fn(n) { styled_words(n, note, fn() { theme().rows.note }) |> ignore })
     })
     |> ignore
-  })
-  |> ignore
-}
-
-///|
-/// A tick row's box in `parent` (check_row's @kit.checkbox in checkbox_look_of the theme's rows' `check` and
-/// `check_corner`): as check_node's, its side and corner the theme's rows'.
-#callsite(autofill(loc))
-fn check_row_box_node(
-  parent : @view.View,
-  on : () -> Bool,
-  turn : (Bool) -> Unit,
-  label : () -> String,
-  disabled : () -> Bool,
-  loc~ : SourceLoc,
-) -> Unit {
-  let side = fn() { theme().rows.check }
-  let corner = fn() { theme().rows.check_corner }
-  // (what it is to the hand, the keyboard and a screen reader: mbui's headless toggle's)
-  @headless.toggle(made_for=loc, parent, Checkbox, label, on, turn, disabled~, fn(b, _) {
-    b
-    .width(By(fn() { Some(side()) }))
-    .height(By(fn() { Some(side()) }))
-    .radius(By(corner))
-    .lines_up(Is(Some(Middle)))
-    .lies_along(Is(Middle))
-    .ground(By(fn() {
-      let t = @ui.tree_theme()
-      if on() { t.primary } else { t.bg }
-    }))
-    .edge(By(fn() {
-      let t = @ui.tree_theme()
-      let line = if on() {
-        t.primary
-      } else if b.pointed() && !disabled() {
-        t.field_hover
-      } else {
-        t.border
-      }
-      (1.0, line)
-    }))
-    .alpha(By(fn() { if disabled() { check_disabled_alpha } else { 1.0 } }))
-    |> ignore
-    // (pressed, sunk a little and springing back as it is let go; its tick drawn by its stroke as it is ticked)
-    @motion.press_feel(b, live=fn() { !disabled() }, hovers=false, size=(theme().rows.check, theme().rows.check)) |> ignore
-    check_tick_node(b, on, side, fn() { @ui.tree_theme().on_primary })
-    // (the keyboard's focus on it: a concentric ring round it, its gap and width the theme's)
-    focus_ring_node(b)
   })
   |> ignore
 }

@@ -166,10 +166,14 @@ fn scene_tester(
     Some(f) if f > 0.0 => t.set_font_scale(f)
     _ => ()
   }
-  // (the font families installed here, as a host lists them: MBUI_FILM_LOCAL_FONTS, a JSON array of their names)
+  // (the font families installed here, as a host lists them: MBUI_FILM_LOCAL_FONTS / MBUI_FILM_LOCAL_FONT_INFO)
   match arg("MBUI_FILM_LOCAL_FONTS") {
     "" => ()
     families => t.set_local_fonts(families)
+  }
+  match arg("MBUI_FILM_LOCAL_FONT_INFO") {
+    "" => ()
+    info => t.set_local_font_info(info)
   }
   // (what the app's own native calls say in the scene: MBUI_APP_SAID, a JSON object of a text for each name)
   match (try Some(@json.parse(arg("MBUI_APP_SAID"))) catch { _ => None }) {

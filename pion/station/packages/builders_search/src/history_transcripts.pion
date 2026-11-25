@@ -1,0 +1,1082 @@
+// 1:1 port of `station/mb/src/history/transcripts.mbt`:
+// Transcript tailing, disk marks (`<data>/transcript-marks/<sha1>.json` with raw-bytes base64 `partial`),
+// `chain_of`, `length_of`, `entries_of`, `state_json`, `tail_read`, reusing `transcript_io`.
+
+import "base_codec"
+import "builders_core"
+import "js_json"
+import "nodepath"
+import "sql_db"
+import "transcript_io"
+
+let READING_VERSION : Int = 3
+
+let KEPT_MOST : Int = 16
+
+let KEPT_BYTES : Int64 = 262144.to_int64() // 256 << 10
+
+let PIECE_SIZE : Int64 = 4194304.to_int64() // 4 << 20
+
+let MARK_EVERY : Int = 256
+
+let MARK_BYTES : Int64 = 1048576.to_int64() // 1 << 20
+
+let PIECE_READ : Int64 = 1048576.to_int64() // 1 << 20
+
+pub struct Mark {
+  pub offset : Int64
+  pub index : Int
+  pub inner : Array[(String, Int)]
+}
+
+pub struct TailState {
+  pub path : String
+  pub runtime : Option[String]
+  pub offset : Int64
+  pub partial : Bytes
+  pub count : Int
+  pub inner : Array[(String, Int)]
+  pub packed_stamp : Option[String]
+}
+
+pub struct Marked {
+  pub state : TailState
+  pub marks : Array[Mark]
+}
+
+pub struct TranscriptCache {
+  kept : Map[String, Marked]
+  kept_order : Array[String]
+  on_disk : Map[String, Int64]
+  mut unpacked : Option[(String, Option[String], Bytes)]
+}
+
+pub fn TranscriptCache::new() -> TranscriptCache {
+  TranscriptCache::{
+    kept: Map::new(),
+    kept_order: [],
+    on_disk: Map::new(),
+    unpacked: None,
+  }
+}
+
+fn TranscriptCache::touch_kept(self : TranscriptCache, path : String, m : Marked) -> Unit {
+  self.remove_kept_order(path)
+  self.kept.set(path, m)
+  self.kept_order.push(path)
+  if self.kept_order.length() > KEPT_MOST {
+    let oldest = self.kept_order[0]
+    self.kept.remove(oldest)
+    self.remove_kept_order(oldest)
+  }
+}
+
+fn TranscriptCache::remove_kept_order(self : TranscriptCache, path : String) -> Unit {
+  let next : Array[String] = []
+  for i in 0..<self.kept_order.length() {
+    if self.kept_order[i] != path {
+      next.push(self.kept_order[i])
+    }
+  }
+  while self.kept_order.length() > 0 {
+    let _ = self.kept_order.pop()
+  }
+  for i in 0..<next.length() {
+    self.kept_order.push(next[i])
+  }
+}
+
+fn tr_meta(client : builders_core::ShellClient, path : String) -> Option[(Int64, Double)] {
+  match client.shell_sync_json("fs.meta", base_codec::json_obj([("path", base_codec::json_str(path))])) {
+    Ok(v) => {
+      match (builders_core::json_get_last(v, "size"), builders_core::json_get_last(v, "mtime")) {
+        (Some(base_codec::Json::Num(sz, _)), Some(base_codec::Json::Num(mt, _))) => Some((sz.to_int64(), mt))
+        _ => None
+      }
+    }
+    Err(_) => None
+  }
+}
+
+fn tr_bytes_of(
+  client : builders_core::ShellClient,
+  path : String,
+  from : Int64 = 0.to_int64(),
+  length : Option[Int64] = None,
+  zstd : Bool = false,
+  exact : Bool = false,
+) -> Result[Option[Bytes], String] {
+  let fields : Array[(String, base_codec::Json)] = [
+    ("path", base_codec::json_str(path)),
+    ("from", base_codec::json_num(from.to_double())),
+  ]
+  match length {
+    Some(n) => fields.push(("length", base_codec::json_num(n.to_double())))
+    None => ()
+  }
+  if zstd {
+    fields.push(("zstd", base_codec::json_bool(true)))
+  }
+  if exact {
+    fields.push(("exact", base_codec::json_bool(true)))
+  }
+  match client.shell_sync_json("fs.bytes", base_codec::json_obj(fields)) {
+    Ok(base_codec::Json::Str(hex)) => {
+      match base_codec::hex_decode(hex) {
+        Some(b) => Ok(Some(b))
+        None => Err("invalid hex in fs.bytes")
+      }
+    }
+    Ok(_) => Ok(None)
+    Err(e) => Err(e.message)
+  }
+}
+
+fn bytes_concat(parts : Array[Bytes]) -> Bytes {
+  let mut n = 0
+  for i in 0..<parts.length() {
+    n = n + parts[i].length()
+  }
+  let out = Bytes::new(n)
+  let mut at = 0
+  for i in 0..<parts.length() {
+    let p = parts[i]
+    for j in 0..<p.length() {
+      out[at] = p[j]
+      at = at + 1
+    }
+  }
+  out
+}
+
+fn bytes_slice(b : Bytes, start : Int, end : Int) -> Bytes {
+  if start >= end || start < 0 || end > b.length() {
+    return Bytes::new(0)
+  }
+  let n = end - start
+  let out = Bytes::new(n)
+  for i in 0..<n {
+    out[i] = b[start + i]
+  }
+  out
+}
+
+fn last_newline(b : Bytes) -> Int {
+  let mut i = b.length() - 1
+  while i >= 0 {
+    if (b[i].to_int() & 0xFF) == 10 {
+      return i
+    }
+    i = i - 1
+  }
+  -1
+}
+
+fn record_of(line : String) -> Option[js_json::JValue] {
+  let text = str_strip_cr(line)
+  if text == "" {
+    return None
+  }
+  js_json::jval_try_parse(text)
+}
+
+fn lines_of(b : Bytes, cut : Int) -> Array[Int] {
+  let out : Array[Int] = []
+  for i in 0..<cut {
+    if (b[i].to_int() & 0xFF) == 10 {
+      out.push(i + 1)
+    }
+  }
+  out
+}
+
+struct Tail {
+  runtime : String
+  path : String
+  mut offset : Int64
+  mut packed_stamp : Option[String]
+  mut parts : Array[Bytes]
+  mut held : Int
+  mut state : ReadState
+  mut count : Int
+  mut marks : Array[Mark]
+  mut anew : Bool
+  mut collect : Option[Array[Entry]]
+  mut began : Option[Int]
+}
+
+fn Tail::new(runtime : String, path : String) -> Tail {
+  Tail::{
+    runtime: runtime,
+    path: path,
+    offset: 0.to_int64(),
+    packed_stamp: None,
+    parts: [],
+    held: 0,
+    state: ReadState::new(),
+    count: 0,
+    marks: [],
+    anew: false,
+    collect: None,
+    began: None,
+  }
+}
+
+fn Tail::hold(self : Tail, rest : Bytes) -> Unit {
+  if rest.length() > 0 {
+    self.parts = [rest]
+    self.held = rest.length()
+  } else {
+    self.parts = []
+    self.held = 0
+  }
+}
+
+fn Tail::from(runtime : String, state : TailState, marks : Array[Mark]) -> Tail {
+  let rt = match state.runtime {
+    Some(r) => r
+    None => runtime
+  }
+  let tail = Tail::new(rt, state.path)
+  for i in 0..<marks.length() {
+    tail.marks.push(marks[i])
+  }
+  tail.offset = state.offset
+  tail.hold(state.partial)
+  tail.count = state.count
+  tail.state = ReadState::of(state.inner)
+  tail.packed_stamp = state.packed_stamp
+  tail
+}
+
+fn Tail::snapshot(self : Tail) -> TailState {
+  if self.parts.length() > 1 {
+    self.parts = [bytes_concat(self.parts)]
+  }
+  let partial = if self.parts.length() > 0 { self.parts[0] } else { Bytes::new(0) }
+  TailState::{
+    path: self.path,
+    runtime: Some(self.runtime),
+    offset: self.offset,
+    partial: partial,
+    count: self.count,
+    inner: self.state.pairs(),
+    packed_stamp: self.packed_stamp,
+  }
+}
+
+struct TailRun {
+  tail : Tail
+  had : Int
+  mut read : Int
+}
+
+fn TailRun::take(self : TailRun, piece : Bytes) -> Result[Unit, String] {
+  let tail = self.tail
+  let last = last_newline(piece)
+  if last < 0 {
+    tail.parts.push(piece)
+    tail.held = tail.held + piece.length()
+    return Ok(())
+  }
+  let bytes = if tail.held > 0 {
+    let all : Array[Bytes] = []
+    for i in 0..<tail.parts.length() {
+      all.push(tail.parts[i])
+    }
+    all.push(piece)
+    bytes_concat(all)
+  } else {
+    piece
+  }
+  let cut = tail.held + last + 1
+  tail.hold(bytes_slice(bytes, cut, bytes.length()))
+  let base = tail.offset - bytes.length().to_int64()
+  let ends = lines_of(bytes, cut)
+  let mut from = 0
+  for ei in 0..<ends.length() {
+    let end = ends[ei]
+    let chunk_str = sql_db::decode_utf8_lossy_bytes(bytes_slice(bytes, from, end))
+    let lines = str_split_lf(chunk_str)
+    let records : Array[js_json::JValue] = []
+    for li in 0..<lines.length() {
+      match record_of(lines[li]) {
+        Some(r) => records.push(r)
+        None => ()
+      }
+    }
+    from = end
+    let entries : Array[Entry] = []
+    for ri in 0..<records.length() {
+      match timeline_of(tail.runtime, records[ri], tail.state, entries) {
+        Ok(_) => ()
+        Err(e) => return Err(e)
+      }
+    }
+    match tail.collect {
+      Some(out) => {
+        for k in 0..<entries.length() {
+          out.push(entries[k])
+        }
+      }
+      None => ()
+    }
+    self.read = self.read + entries.length()
+    let index = self.had + self.read
+    let (last_offset, last_index) = if tail.marks.length() > 0 {
+      let m = tail.marks[tail.marks.length() - 1]
+      (m.offset, m.index)
+    } else {
+      (0.to_int64(), 0)
+    }
+    if index - last_index >= MARK_EVERY || (index > last_index && base + end.to_int64() - last_offset >= MARK_BYTES) {
+      tail.marks.push(Mark::{ offset: base + end.to_int64(), index: index, inner: tail.state.pairs() })
+    }
+  }
+  Ok(())
+}
+
+fn TailRun::end(self : TailRun) -> Unit {
+  self.tail.count = self.tail.count + self.read
+}
+
+fn Tail::begin(self : Tail, stamp : Option[String], size : Int64) -> Option[TailRun] {
+  self.packed_stamp = stamp
+  if size < self.offset {
+    self.anew = true
+    self.offset = 0.to_int64()
+    self.hold(Bytes::new(0))
+    self.count = 0
+    self.marks = []
+  }
+  if size == self.offset {
+    return None
+  }
+  self.began = Some(self.count)
+  Some(TailRun::{ tail: self, had: self.count, read: 0 })
+}
+
+fn opt_str_eq(a : Option[String], b : Option[String]) -> Bool {
+  match (a, b) {
+    (Some(x), Some(y)) => x == y
+    (None, None) => true
+    _ => false
+  }
+}
+
+fn Tail::read(self : Tail, client : builders_core::ShellClient) -> Result[Unit, String] {
+  let compressed = match tr_meta(client, self.path) {
+    None => true
+    Some(_) => false
+  }
+  let disk = if compressed { self.path + ".zst" } else { self.path }
+  let (disk_size, mtime) = match tr_meta(client, disk) {
+    Some(pair) => pair
+    None => return Ok(())
+  }
+  let stamp = disk_size.to_string() + ":" + js_json::stringify(js_json::JValue::Num(mtime))
+  if compressed && opt_str_eq(self.packed_stamp, Some(stamp)) {
+    return Ok(())
+  }
+  let mut whole : Option[Bytes] = None
+  let mut size = disk_size
+  if compressed {
+    match transcript_io::packed_written_size(client, disk) {
+      Ok(Some(w)) => size = w
+      Ok(None) => {
+        match tr_bytes_of(client, disk, zstd=true) {
+          Ok(Some(b)) => {
+            whole = Some(b)
+            size = b.length().to_int64()
+          }
+          Ok(None) => {
+            whole = Some(Bytes::new(0))
+            size = 0.to_int64()
+          }
+          Err(_) => return Ok(())
+        }
+      }
+      Err(_) => return Ok(())
+    }
+  }
+  let run = match self.begin(if compressed { Some(stamp) } else { None }, size) {
+    Some(r) => r
+    None => return Ok(())
+  }
+  match whole {
+    Some(b) => {
+      let mut at = self.offset
+      while at < size {
+        let e = if at + PIECE_SIZE < size { at + PIECE_SIZE } else { size }
+        self.offset = e
+        match run.take(bytes_slice(b, at.to_int(), e.to_int())) {
+          Ok(_) => ()
+          Err(err) => return Err(err)
+        }
+        at = at + PIECE_SIZE
+      }
+      self.offset = size
+    }
+    None => {
+      if compressed {
+        let _ = transcript_io::packed_read_segments(
+          client,
+          disk,
+          self.offset,
+          Some(size),
+          false,
+          fn(piece : Bytes) -> Result[Bool, String] {
+            self.offset = self.offset + piece.length().to_int64()
+            match run.take(piece) {
+              Ok(_) => Ok(true)
+              Err(err) => Err(err)
+            }
+          },
+        )
+      } else {
+        while self.offset < size {
+          let rem = size - self.offset
+          let n = if PIECE_SIZE < rem { PIECE_SIZE } else { rem }
+          match tr_bytes_of(client, self.path, from=self.offset, length=Some(n)) {
+            Ok(Some(piece)) => {
+              if piece.length() == 0 {
+                break
+              }
+              self.offset = self.offset + piece.length().to_int64()
+              match run.take(piece) {
+                Ok(_) => ()
+                Err(_) => break
+              }
+            }
+            _ => break
+          }
+        }
+      }
+    }
+  }
+  run.end()
+  Ok(())
+}
+
+/// read/transcripts.ts `marksDir`.
+pub fn marks_dir(sep : String, data : String) -> String {
+  nodepath::join(sep, [data, "transcript-marks"])
+}
+
+fn mark_file_of(sep : String, dir : String, path : String) -> String {
+  nodepath::join(sep, [dir, transcript_io::sha1_utf8_hex(path) + ".json"])
+}
+
+fn pairs_json(pairs : Array[(String, Int)]) -> base_codec::Json {
+  let out : Array[base_codec::Json] = []
+  for i in 0..<pairs.length() {
+    let (k, v) = pairs[i]
+    out.push(base_codec::json_arr([base_codec::json_str(k), base_codec::json_int(v)]))
+  }
+  base_codec::json_arr(out)
+}
+
+fn pairs_of(v : Option[base_codec::Json]) -> Result[Array[(String, Int)], String] {
+  let xs = match v {
+    Some(base_codec::Json::Arr(a)) => a
+    _ => return Err("no pairs")
+  }
+  let out : Array[(String, Int)] = []
+  for i in 0..<xs.length() {
+    match xs[i] {
+      base_codec::Json::Arr(pair) => {
+        if pair.length() != 2 {
+          return Err("not a pair")
+        }
+        match (pair[0], pair[1]) {
+          (base_codec::Json::Str(k), base_codec::Json::Num(n, _)) => out.push((k, n.to_int()))
+          _ => return Err("not a pair")
+        }
+      }
+      _ => return Err("not a pair")
+    }
+  }
+  Ok(out)
+}
+
+fn marked_json(m : Marked) -> base_codec::Json {
+  let s = m.state
+  let marks_arr : Array[base_codec::Json] = []
+  for i in 0..<m.marks.length() {
+    let k = m.marks[i]
+    marks_arr.push(
+      base_codec::json_obj([
+        ("offset", base_codec::json_num(k.offset.to_double())),
+        ("index", base_codec::json_int(k.index)),
+        ("inner", pairs_json(k.inner)),
+      ]),
+    )
+  }
+  base_codec::json_obj([
+    ("reading", base_codec::json_int(READING_VERSION)),
+    (
+      "state",
+      base_codec::json_obj([
+        ("path", base_codec::json_str(s.path)),
+        (
+          "runtime",
+          match s.runtime {
+            Some(r) => base_codec::json_str(r)
+            None => base_codec::json_null()
+          },
+        ),
+        ("offset", base_codec::json_num(s.offset.to_double())),
+        ("partial", base_codec::json_str(base_codec::base64_encode(s.partial))),
+        ("count", base_codec::json_int(s.count)),
+        ("inner", pairs_json(s.inner)),
+        (
+          "packedStamp",
+          match s.packed_stamp {
+            Some(p) => base_codec::json_str(p)
+            None => base_codec::json_null()
+          },
+        ),
+      ]),
+    ),
+    ("marks", base_codec::json_arr(marks_arr)),
+  ])
+}
+
+fn state_of_json(v : base_codec::Json) -> Result[TailState, String] {
+  let path = match builders_core::json_get_last(v, "path") {
+    Some(base_codec::Json::Str(s)) => s
+    _ => return Err("no state")
+  }
+  let offset = match builders_core::json_get_last(v, "offset") {
+    Some(base_codec::Json::Num(n, _)) => n.to_int64()
+    _ => return Err("no state")
+  }
+  let partial_str = match builders_core::json_get_last(v, "partial") {
+    Some(base_codec::Json::Str(s)) => s
+    _ => return Err("no state")
+  }
+  let count = match builders_core::json_get_last(v, "count") {
+    Some(base_codec::Json::Num(n, _)) => n.to_int()
+    _ => return Err("no state")
+  }
+  let partial = match base_codec::base64_decode(partial_str) {
+    Some(b) => b
+    None => return Err("bad partial")
+  }
+  let inner = match pairs_of(builders_core::json_get_last(v, "inner")) {
+    Ok(p) => p
+    Err(e) => return Err(e)
+  }
+  let runtime = match builders_core::json_get_last(v, "runtime") {
+    Some(base_codec::Json::Str(r)) => Some(r)
+    _ => None
+  }
+  let packed_stamp = match builders_core::json_get_last(v, "packedStamp") {
+    Some(base_codec::Json::Str(p)) => Some(p)
+    _ => None
+  }
+  Ok(
+    TailState::{
+      path: path,
+      runtime: runtime,
+      offset: offset,
+      partial: partial,
+      count: count,
+      inner: inner,
+      packed_stamp: packed_stamp,
+    },
+  )
+}
+
+fn marked_of_json(v : base_codec::Json) -> Result[(Int, Marked), String] {
+  let r = match builders_core::json_get_last(v, "reading") {
+    Some(base_codec::Json::Num(n, _)) => n.to_int()
+    _ => return Err("no reading")
+  }
+  let st_val = match builders_core::json_get_last(v, "state") {
+    Some(s) => s
+    None => return Err("no reading")
+  }
+  let marks_val = match builders_core::json_get_last(v, "marks") {
+    Some(base_codec::Json::Arr(ms)) => ms
+    _ => return Err("no reading")
+  }
+  let marks : Array[Mark] = []
+  for i in 0..<marks_val.length() {
+    let k = marks_val[i]
+    let off = match builders_core::json_get_last(k, "offset") {
+      Some(base_codec::Json::Num(o, _)) => o.to_int64()
+      _ => return Err("no mark")
+    }
+    let idx = match builders_core::json_get_last(k, "index") {
+      Some(base_codec::Json::Num(n, _)) => n.to_int()
+      _ => return Err("no mark")
+    }
+    let inner = match pairs_of(builders_core::json_get_last(k, "inner")) {
+      Ok(p) => p
+      Err(e) => return Err(e)
+    }
+    marks.push(Mark::{ offset: off, index: idx, inner: inner })
+  }
+  let state = match state_of_json(st_val) {
+    Ok(s) => s
+    Err(e) => return Err(e)
+  }
+  Ok((r, Marked::{ state: state, marks: marks }))
+}
+
+fn marked_of(
+  cache : TranscriptCache,
+  client : builders_core::ShellClient,
+  sep : String,
+  runtime : String,
+  path : String,
+  dir : Option[String],
+) -> Result[Marked, String] {
+  let mut had = cache.kept.get(path)
+  cache.kept.remove(path)
+  cache.remove_kept_order(path)
+  match (had, dir) {
+    (None, Some(d)) => {
+      let fpath = mark_file_of(sep, d, path)
+      match client.shell_sync_json("fs.read", base_codec::json_obj([("path", base_codec::json_str(fpath)), ("strict", base_codec::json_bool(false))])) {
+        Ok(base_codec::Json::Str(text)) => {
+          match sql_db::parse_json(text) {
+            base_codec::JsonParseResult::Ok(j) => {
+              match marked_of_json(j) {
+                Ok((r, v)) => {
+                  let rt = match v.state.runtime {
+                    Some(x) => x
+                    None => runtime
+                  }
+                  if r == READING_VERSION && v.state.path == path && rt == runtime {
+                    had = Some(v)
+                    cache.on_disk.set(path, v.state.offset)
+                  }
+                }
+                Err(_) => ()
+              }
+            }
+            base_codec::JsonParseResult::Err(_) => ()
+          }
+        }
+        _ => ()
+      }
+    }
+    _ => ()
+  }
+  match had {
+    Some(h) => {
+      let rt = match h.state.runtime {
+        Some(x) => x
+        None => runtime
+      }
+      if rt != runtime {
+        had = None
+      }
+    }
+    None => ()
+  }
+  let tail = match had {
+    None => Tail::new(runtime, path)
+    Some(h) => Tail::from(runtime, h.state, h.marks)
+  }
+  match tail.read(client) {
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  let now = Marked::{ state: tail.snapshot(), marks: tail.marks }
+  cache.touch_kept(path, now)
+  let behind = match cache.on_disk.get(path) {
+    Some(o) => now.state.offset - o >= KEPT_BYTES
+    None => true
+  }
+  let changed = match had {
+    None => true
+    Some(h) => {
+      tail.anew ||
+      now.marks.length() != h.marks.length() ||
+      !opt_str_eq(now.state.packed_stamp, h.state.packed_stamp) ||
+      behind
+    }
+  }
+  match dir {
+    Some(d) => {
+      if changed {
+        let fpath = mark_file_of(sep, d, path)
+        match client.shell_sync_json(
+          "fs.write",
+          base_codec::json_obj([
+            ("path", base_codec::json_str(fpath)),
+            ("text", base_codec::json_str(sql_db::stringify_json(marked_json(now)))),
+          ]),
+        ) {
+          Ok(_) => cache.on_disk.set(path, now.state.offset)
+          Err(_) => ()
+        }
+      }
+    }
+    None => ()
+  }
+  Ok(now)
+}
+
+/// read/transcripts.ts `chainOf`.
+pub fn chain_of(
+  cache : TranscriptCache,
+  client : builders_core::ShellClient,
+  sep : String,
+  paths : Array[(String, String)],
+  dir : Option[String],
+) -> Result[Array[Marked], String] {
+  match cache.unpacked {
+    Some((p, _, _)) => {
+      let mut still_present = false
+      for i in 0..<paths.length() {
+        let (path, _) = paths[i]
+        if path == p {
+          still_present = true
+          break
+        }
+      }
+      if !still_present {
+        cache.unpacked = None
+      }
+    }
+    None => ()
+  }
+  let out : Array[Marked] = []
+  for i in 0..<paths.length() {
+    let (path, runtime) = paths[i]
+    match marked_of(cache, client, sep, runtime, path, dir) {
+      Ok(m) => out.push(m)
+      Err(e) => return Err(e)
+    }
+  }
+  Ok(out)
+}
+
+/// read/transcripts.ts `lengthOf`.
+pub fn length_of(chain : Array[Marked]) -> Int {
+  let mut n = 0
+  for i in 0..<chain.length() {
+    n = n + chain[i].state.count
+  }
+  n
+}
+
+/// test/reference/tail.ts `TailState` as JSON.
+pub fn state_json(s : TailState) -> base_codec::Json {
+  let fields : Array[(String, base_codec::Json)] = [("path", base_codec::json_str(s.path))]
+  match s.runtime {
+    Some(r) => fields.push(("runtime", base_codec::json_str(r)))
+    None => ()
+  }
+  fields.push(("offset", base_codec::json_num(s.offset.to_double())))
+  fields.push(("partial", base_codec::json_str(base_codec::base64_encode(s.partial))))
+  fields.push(("count", base_codec::json_int(s.count)))
+  fields.push(("inner", pairs_json(s.inner)))
+  fields.push((
+    "packedStamp",
+    match s.packed_stamp {
+      Some(p) => base_codec::json_str(p)
+      None => base_codec::json_null()
+    },
+  ))
+  base_codec::json_obj(fields)
+}
+
+fn read_between(
+  cache : TranscriptCache,
+  client : builders_core::ShellClient,
+  runtime : String,
+  m : Marked,
+  from : Double,
+  to : Double,
+) -> Array[Entry] {
+  let mut mark = Mark::{ offset: 0.to_int64(), index: 0, inner: [] }
+  for i in 0..<m.marks.length() {
+    let each = m.marks[i]
+    if each.index.to_double() > from {
+      break
+    }
+    mark = each
+  }
+  let path = m.state.path
+  let end = m.state.offset - m.state.partial.length().to_int64()
+  let state = ReadState::of(mark.inner)
+  let out : Array[Entry] = []
+  let mut index = mark.index
+  let handle_line = fn(b : Bytes) -> Result[Bool, String] {
+    let record = match record_of(sql_db::decode_utf8_lossy_bytes(b)) {
+      Some(r) => r
+      None => return Ok(true)
+    }
+    let entries : Array[Entry] = []
+    match timeline_of(runtime, record, state, entries) {
+      Ok(_) => ()
+      Err(e) => return Err(e)
+    }
+    for k in 0..<entries.length() {
+      if index.to_double() >= from && index.to_double() < to {
+        out.push(entries[k])
+      }
+      index = index + 1
+    }
+    Ok(index.to_double() < to)
+  }
+  let handle_lines = fn(data : Bytes) -> Result[Option[Bytes], String] {
+    let mut at = 0
+    for i in 0..<data.length() {
+      if (data[i].to_int() & 0xFF) == 10 {
+        match handle_line(bytes_slice(data, at, i)) {
+          Ok(true) => ()
+          Ok(false) => return Ok(None)
+          Err(e) => return Err(e)
+        }
+        at = i + 1
+      }
+    }
+    Ok(Some(bytes_slice(data, at, data.length())))
+  }
+  let packed = match tr_meta(client, path) {
+    None => true
+    Some(_) => false
+  }
+  if packed {
+    let disk = path + ".zst"
+    let mut carry = Bytes::new(0)
+    match transcript_io::packed_read_segments(
+      client,
+      disk,
+      mark.offset,
+      Some(end),
+      false,
+      fn(piece : Bytes) -> Result[Bool, String] {
+        let joined = if carry.length() > 0 { bytes_concat([carry, piece]) } else { piece }
+        match handle_lines(joined) {
+          Ok(None) => Ok(false)
+          Ok(Some(left)) => {
+            carry = left
+            Ok(true)
+          }
+          Err(e) => Err(e)
+        }
+      },
+    ) {
+      Ok(true) => return out
+      Ok(false) => {
+        let stamp = m.state.packed_stamp
+        let bytes = match cache.unpacked {
+          Some((p, s, b)) => {
+            if p == path && opt_str_eq(s, stamp) {
+              b
+            } else {
+              let fresh = match tr_bytes_of(client, disk, zstd=true) {
+                Ok(Some(v)) => v
+                _ => Bytes::new(0)
+              }
+              cache.unpacked = Some((path, stamp, fresh))
+              fresh
+            }
+          }
+          None => {
+            let fresh = match tr_bytes_of(client, disk, zstd=true) {
+              Ok(Some(v)) => v
+              _ => Bytes::new(0)
+            }
+            cache.unpacked = Some((path, stamp, fresh))
+            fresh
+          }
+        }
+        let blen = bytes.length().to_int64()
+        let a64 = if mark.offset < blen { mark.offset } else { blen }
+        let e64 = if end < blen { end } else { blen }
+        let b64 = if a64 > e64 { a64 } else { e64 }
+        let _ = handle_lines(bytes_slice(bytes, a64.to_int(), b64.to_int()))
+      }
+      Err(_) => ()
+    }
+    return out
+  }
+  let mut carry = Bytes::new(0)
+  let mut at = mark.offset
+  while at < end {
+    let rem = end - at
+    let n = if PIECE_READ < rem { PIECE_READ } else { rem }
+    match tr_bytes_of(client, path, from=at, length=Some(n)) {
+      Ok(Some(piece)) => {
+        if piece.length() == 0 {
+          break
+        }
+        at = at + piece.length().to_int64()
+        let joined = if carry.length() > 0 { bytes_concat([carry, piece]) } else { piece }
+        match handle_lines(joined) {
+          Ok(None) => break
+          Ok(Some(left)) => carry = left
+          Err(_) => break
+        }
+      }
+      _ => break
+    }
+  }
+  out
+}
+
+/// read/transcripts.ts `entriesOf`.
+pub fn entries_of(
+  cache : TranscriptCache,
+  client : builders_core::ShellClient,
+  runtime : String,
+  chain : Array[Marked],
+  from : Double,
+  to : Double,
+  in_brief : Bool,
+) -> Array[base_codec::Json] {
+  let out : Array[base_codec::Json] = []
+  let mut first = 0.0
+  for i in 0..<chain.length() {
+    let m = chain[i]
+    let a = if from > first { from } else { first }
+    let end_m = first + m.state.count.to_double()
+    let b = if to < end_m { to } else { end_m }
+    if a < b {
+      let rt = match m.state.runtime {
+        Some(r) => r
+        None => runtime
+      }
+      let got = read_between(cache, client, rt, m, a - first, b - first)
+      for j in 0..<got.length() {
+        let e = got[j]
+        if in_brief {
+          let (shown, briefed) = brief(e)
+          out.push(entry_json(shown, briefed))
+        } else {
+          out.push(entry_json(e, false))
+        }
+      }
+      if got.length().to_double() < b - a {
+        break
+      }
+    }
+    first = first + m.state.count.to_double()
+  }
+  out
+}
+
+/// test/reference/tail.ts `TranscriptTail.from(...).readSoon()`.
+pub fn tail_read(
+  client : builders_core::ShellClient,
+  runtime : String,
+  state : base_codec::Json,
+) -> Result[base_codec::Json, String] {
+  let st = match builders_core::json_get_last(state, "offset") {
+    Some(base_codec::Json::Num(_, _)) => {
+      match state_of_json(state) {
+        Ok(s) => s
+        Err(e) => return Err(e)
+      }
+    }
+    _ => {
+      match builders_core::json_get_last(state, "path") {
+        Some(base_codec::Json::Str(path)) => {
+          let rt = match builders_core::json_get_last(state, "runtime") {
+            Some(base_codec::Json::Str(r)) => Some(r)
+            _ => None
+          }
+          TailState::{
+            path: path,
+            runtime: rt,
+            offset: 0.to_int64(),
+            partial: Bytes::new(0),
+            count: 0,
+            inner: [],
+            packed_stamp: None,
+          }
+        }
+        _ => return Err("no state")
+      }
+    }
+  }
+  let tail = Tail::from(runtime, st, [])
+  let out : Array[Entry] = []
+  let skip_entries = match builders_core::json_get_last(state, "entries") {
+    Some(base_codec::Json::Bool(false)) => true
+    _ => false
+  }
+  if !skip_entries {
+    tail.collect = Some(out)
+  }
+  match tail.read(client) {
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  let start = match tail.began {
+    Some(at) => at
+    None => tail.count
+  }
+  let entries_json : Array[base_codec::Json] = []
+  for i in 0..<out.length() {
+    let e = out[i]
+    let whole = entry_json(e, false)
+    let (b, was_briefed) = brief(e)
+    if was_briefed {
+      match whole {
+        base_codec::Json::Obj(fields) => {
+          let next_fields : Array[(String, base_codec::Json)] = []
+          for j in 0..<fields.length() {
+            next_fields.push(fields[j])
+          }
+          next_fields.push(("~brief", entry_json(b, true)))
+          entries_json.push(base_codec::json_obj(next_fields))
+        }
+        other => entries_json.push(other)
+      }
+    } else {
+      entries_json.push(whole)
+    }
+  }
+  Ok(
+    base_codec::json_obj([
+      ("start", base_codec::json_int(start)),
+      ("entries", base_codec::json_arr(entries_json)),
+      ("state", state_json(tail.snapshot())),
+    ]),
+  )
+}
+
+/// Internal smoke entrypoint (`--smoke-history-marks`) for cross-engine `transcript-marks/<sha1>.json`
+/// interoperability testing against real MoonBit `stillfail-reader`.
+pub fn run_smoke_history_marks(data : String, path : String, runtime : String, sep : String) -> Int {
+  let shell_dir = nodepath::join(sep, [data, "shell"])
+  if !host_shim::start(shell_dir, true) {
+    let _ = host_shim::write_stderr_line("the shell did not start")
+    return 1
+  }
+  let queue = builders_core::LineQueue::new()
+  let client = builders_core::ShellClient::from_queue(queue)
+  let cache = TranscriptCache::new()
+  let mdir = marks_dir(sep, data)
+  let rc = match marked_of(cache, client, sep, runtime, path, Some(mdir)) {
+    Ok(m) => {
+      let from = if m.state.count > 5 { (m.state.count - 5).to_double() } else { 0.0 }
+      let to = m.state.count.to_double()
+      let ej = entries_of(cache, client, runtime, [m], from, to, false)
+      let out = base_codec::json_obj([
+        ("markFile", base_codec::json_str(mark_file_of(sep, mdir, path))),
+        ("count", base_codec::json_int(m.state.count)),
+        ("marked", marked_json(m)),
+        ("state", state_json(m.state)),
+        ("tailEntries", base_codec::json_arr(ej)),
+      ])
+      let _ = host_shim::write_stdout_line(sql_db::stringify_json(out))
+      0
+    }
+    Err(e) => {
+      let _ = host_shim::write_stderr_line(e)
+      1
+    }
+  }
+  host_shim::stop()
+  rc
+}

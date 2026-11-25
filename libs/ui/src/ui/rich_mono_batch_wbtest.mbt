@@ -21,6 +21,8 @@ fn batch_test_rich(runs : Array[Run], wrap? : Bool = false, code_bg? : Int64 = 0
     max_lines: 0,
     faces: 0,
     shaped_in: 0,
+    cjk_override: None,
+    code_cjk_override: None,
   }
 }
 

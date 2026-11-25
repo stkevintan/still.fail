@@ -10,7 +10,7 @@
 /// What a list's row of a station carries (the core's `stations`), its machine's and overview's own fields under it.
 // kept across runs: a table, never written
 let row_fields : Array[String] = [
-  "station", "id", "name", "emoji", "icon", "summary", "face", "line", "online", "acceptAutoChats", "reconnecting", "blocked", "stateText",
+  "station", "id", "name", "emoji", "icon", "osIcon", "summary", "face", "line", "online", "acceptAutoChats", "reconnecting", "blocked", "stateText",
   "stateBusy", "problems", "protect", "lastSeen", "version", "way", "joined", "home", "mine", "host", "overview",
 ]
 

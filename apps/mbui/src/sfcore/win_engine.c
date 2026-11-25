@@ -27,6 +27,7 @@ static void device_name(void) {
 // to, and how what it took is acknowledged to the station
 int mb_stream_route_take(uint64_t route, int kind, int key, uint64_t seq, uint64_t ts, const uint8_t *bytes, size_t len);
 void mb_stream_route_acks(int (*ack)(double route, double ts));
+void mb_stream_route_acks_wait(int (*ack)(double route, double ts, uint32_t wait_us));
 
 // (MSVC's C has no constructor attribute: the app hands it over itself, before it starts the core, src/stillfail/win_engine.c)
 static void use_hermes_engine(void) {
@@ -36,4 +37,5 @@ static void use_hermes_engine(void) {
   // win_stream.cpp), acknowledged to the station through the shell
   mb_core_route_media(mb_stream_route_take);
   mb_stream_route_acks(mb_core_screen_ack);
+  mb_stream_route_acks_wait(mb_core_screen_ack_wait);
 }

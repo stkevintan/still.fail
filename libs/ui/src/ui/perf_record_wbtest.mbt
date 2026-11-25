@@ -137,7 +137,7 @@ test "the performance record names the motions the frames were built for: what e
   })
   t.set_perf(0)
   @hostapi.set_perf(true)
-  t.ctx().moving(who, Endless::{  }, what="Anim \"slide\" to 1")
+  t.ctx().moving(who, Endless::{  }.as_moving(), what="Anim \"slide\" to 1")
   let at = place_here()
   who.told_as("Anim \"slide\"", at)
   t.frame()

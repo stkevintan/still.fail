@@ -55,6 +55,7 @@
 #pragma comment(lib, "stillfail_shell.dll.lib")
 void sf_shell_set_say(const void *shell, void (*say)(void *, const uint8_t *, size_t, const uint8_t *, size_t), void *ctx);
 uint8_t sf_shell_screen_ack(const void *shell, uint64_t call, double ts);
+uint8_t sf_shell_screen_ack_wait(const void *shell, uint64_t call, double ts, uint32_t wait_us);
 uint8_t sf_shell_screen_input(const void *shell, uint64_t call, const uint8_t *json, size_t len);
 void sf_shell_set_media(const void *shell, uint8_t (*media)(void *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, const uint8_t *, size_t),
                         void *ctx);
@@ -893,6 +894,15 @@ int mb_core_screen_ack(double call, double ts) {
   if (call < 1) return 0;
   AcquireSRWLockShared(&W.gate);
   if (W.engine && W.shell) done = sf_shell_screen_ack(W.shell, (uint64_t)call, ts) != 0;
+  ReleaseSRWLockShared(&W.gate);
+  return done;
+}
+
+int mb_core_screen_ack_wait(double call, double ts, uint32_t wait_us) {
+  int done = 0;
+  if (call < 1) return 0;
+  AcquireSRWLockShared(&W.gate);
+  if (W.engine && W.shell) done = sf_shell_screen_ack_wait(W.shell, (uint64_t)call, ts, wait_us) != 0;
   ReleaseSRWLockShared(&W.gate);
   return done;
 }

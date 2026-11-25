@@ -624,7 +624,11 @@ pub fn key_caps(keys : String) -> Array[String] {
       caps.push(chars[at].to_string())
       at += 1
     }
-    let key = String::from_array(chars[at:]).trim(chars=" ").to_owned()
+    let rest = StringBuilder(capacity=chars.length() - at)
+    for i in at..<chars.length() {
+      rest.write_char(chars[i])
+    }
+    let key = rest.to_string().trim(chars=" ").to_owned()
     if key != "" {
       caps.push(key)
     }

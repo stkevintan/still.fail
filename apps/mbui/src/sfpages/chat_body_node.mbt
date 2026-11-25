@@ -1304,6 +1304,60 @@ fn chat_body_node(
     },
     same=fn(a, b) { physical_equal(a, b) || a == b },
   )
+  // (what was sent from here not among the list's keys a while after it was sent, by the key it was sent as or as the
+  // core's row of the viewer's own said after it: told as a fault (on a device a ui_fault report, chat_sent_unseen_said),
+  // saying which step lost it, never its words)
+  let sent_watched : Set[String] = Set([])
+  // (those sent since the last look, each with the newest message there as it was sent: looked at as the hold each
+  // sending sets again ends)
+  let sent_looked_for : Array[(String, Double)] = []
+  let (sent_told, sent_holding) = v.holds_for(chat_sent_unseen_ms, later=true)
+  v.reacts(fn() { sending().map(fn(l) { ("o:" + l.row.id, l.newest) }) }, fn(sent) {
+    for s in sent {
+      guard !sent_watched.contains(s.0) else { continue }
+      sent_watched.add(s.0)
+      sent_looked_for.push(s)
+      sent_told()
+    }
+  })
+  v.reacts(fn() { sent_holding() }, at_start=false, fn(holding) {
+    guard !holding else { return }
+    for s in sent_looked_for {
+      let (k, newest) = s
+      let (listed_has, row_has, staged_has, held, sending_has) = @signals.untracked(fn() {
+        let lk = (listed.keys)()
+        let found = if lk.contains(k) {
+          Some(k)
+        } else {
+          let mut i = lk.length() - 1
+          let mut f : String? = None
+          while i >= 0 && i >= lk.length() - chat_sent_unseen_looked {
+            match (listed.row)(lk[i]) {
+              Some({ entry: Said(m), .. }) if m.mine && !m.system && m.seq > newest => {
+                f = Some(lk[i])
+                break
+              }
+              _ => ()
+            }
+            i = i - 1
+          }
+          f
+        }
+        let at = found.unwrap_or(k)
+        (
+          found is Some(_),
+          (listed.row)(at) is Some(_),
+          keys.get().contains(at),
+          stage.held_plan(at) is Some(_),
+          sending().iter().any(fn(l) { "o:" + l.row.id == k }),
+        )
+      })
+      if !(listed_has && row_has && staged_has) {
+        @view.fault(chat_sent_unseen_said(listed_has, row_has, staged_has, held, sending_has))
+      }
+    }
+    sent_looked_for.clear()
+  })
   let (list_keys_index, clear_list_keys_index) = chat_keys_index_cache()
   let rest_sight : Ref[() -> Unit] = Ref(fn() {  })
   let list : ChatBodyList = {
@@ -2492,4 +2546,23 @@ fn chat_live_causes(
     guard origin.animates() && @signals.untracked(shows) && @signals.untracked(@ui.app_visible) else { return }
     @view.transition(within=v, fn() {  })
   }
+}
+
+///|
+/// How long after it was sent what was sent from here is looked for among a chat's list's keys (chat_body_node's
+/// sent_watched): past its flight and the core's answer on a slow link.
+let chat_sent_unseen_ms : Double = 4000.0
+
+///|
+/// How many of a chat's list's last keys are looked at for the core's row of what was sent from here (chat_body_node's
+/// sent_watched).
+let chat_sent_unseen_looked : Int = 24
+
+///|
+/// The fault said where what was sent from here is not among a chat's list's keys a while after it was sent: which
+/// step of the list has it (the rows made of the core's and what is on its way, a row for its key, the keys staged to
+/// show, a hold on it, still on its way), never its words.
+fn chat_sent_unseen_said(listed : Bool, row : Bool, staged : Bool, held : Bool, sending : Bool) -> String {
+  let b = fn(x : Bool) { if x { "1" } else { "0" } }
+  "chat sent unseen: listed=\{b(listed)} row=\{b(row)} staged=\{b(staged)} held=\{b(held)} sending=\{b(sending)}"
 }

@@ -18,7 +18,6 @@ import {
   "ui/signals",
   "ui/view",
   "stillfail/gallery",
-  "fvclient/stage",
 }
 
-import { "stillfail/sffixture", "stillfail/sfkept", "stillfail/core", "ui/halt", "ui/headless", "fvclient/proto", "fvclient/html", "fvclient/doc" } for "wbtest"
+import { "stillfail/sffixture", "stillfail/sfkept", "stillfail/core", "ui/halt", "ui/headless" } for "wbtest"

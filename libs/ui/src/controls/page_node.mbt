@@ -2428,6 +2428,7 @@ pub fn page_card_node(
   footed? : Bool = false,
   layered? : Bool = false,
   layered_narrow? : Bool = false,
+  glass? : Bool = false,
   loc~ : SourceLoc,
 ) -> Unit {
   let at = part_of(parent)
@@ -2437,9 +2438,14 @@ pub fn page_card_node(
       .padding(Is((card_pad, card_pad, card_pad, if footed { card_foot_in(button_height()) } else { card_pad })))
       .gap(Is(page_card_gap))
       .radius(By(fn() { @ui.tree_theme().corner(Xl3) }))
-      .ground(By(fn() { @ui.tree_theme().color(Card) }))
       .lends(part_at, { ..at, list: false, card: true })
       |> ignore
+      if glass {
+        panel_surface_decorate(k, solid=panel_ground, clips=false) |> ignore
+        floating_host_lend(k)
+      } else {
+        k.ground(By(fn() { @ui.tree_theme().color(Card) })) |> ignore
+      }
       corner_card_node(k, fn() { @ui.tree_theme().corner(Xl3) }, inset=fn() { card_pad })
       body(k)
     })

@@ -96,7 +96,7 @@ export const PALETTE = {
     code_ground: "#26272A",
     purple: "#C4A9FF",
     purple_bg: tone("#C4A9FF"),
-    lifted: "#E9E9EA1F",
+    lifted: "#68686E",
     field_hover: "#5D6066",
     field_focus: "#8A8D93",
   },

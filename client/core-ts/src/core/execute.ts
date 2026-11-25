@@ -120,7 +120,7 @@ export function execute(inner: Inner, call: Call, progress: Progress, at: [Clien
         return Effect.succeed({});
       }
       case "clientError": {
-        if (!inner.reporting) return Effect.succeed({});
+        if (inner.reporting === false) return Effect.succeed({});
         // A UI fault's text can hold editor keys made from file paths: only its category leaves (ui-faults.ts), whatever
         // an app sends, an older one's original text too.
         const source = [...call.source].slice(0, 64).join("").replace(/[\r\n\u0000-\u001f]/g, " ");
@@ -143,7 +143,7 @@ export function execute(inner: Inner, call: Call, progress: Progress, at: [Clien
         return Effect.succeed({});
       }
       case "clientMetric": {
-        if (!inner.reporting) return Effect.succeed(null);
+        if (inner.reporting === false) return Effect.succeed(null);
         if (call.metricKind === "bar_switch") {
           const n = inner.barSwitchCount++;
           const emit = call.attrs.cut === true || call.attrs.failed === true || call.durationMs >= 250 || n % 5 === 0;
@@ -167,6 +167,7 @@ export function execute(inner: Inner, call: Call, progress: Progress, at: [Clien
       case "clientReports":
         inner.reporting = call.on;
         inner.useCounts.setOn(call.on);
+        inner.tracer.setOn(call.on);
         return Effect.succeed({});
       case "clientShown":
         inner.useCounts.shown(call.page);

@@ -19,7 +19,19 @@
 /// a read of their clock, so what reads that as it is built is built again each frame while it does (ui's
 /// frame_watch.mbt).
 // kept across runs: set once by ui as it starts
-pub let polled : Ref[() -> Unit] = Ref(fn() {  })
+let polled : Ref[() -> Unit] = Ref(fn() {  })
+
+///|
+/// Sets what is said as the host's own state is read (polled).
+pub fn set_polled(f : () -> Unit) -> Unit {
+  polled.val = f
+}
+
+///|
+/// Says the host's own state is read (polled).
+pub fn call_polled() -> Unit {
+  (polled.val)()
+}
 
 ///|
 /// Who waits on the host's word that what it does for the app of `kind` (as set_outside numbers them) for `id` is done
@@ -27,11 +39,23 @@ pub let polled : Ref[() -> Unit] = Ref(fn() {  })
 /// there to take), and who lets such a wait go (`let_go(kind, id)`): ui's outside_takes and outside_let_go, set as it
 /// starts. Without ui, `f` is tried at once and nothing else is.
 // kept across runs: set once by ui as it starts
-pub let outside_waits : Ref[(Int, Int, () -> Bool) -> Unit] = Ref(fn(_, _, f) { f() |> ignore })
+let outside_waits : Ref[(Int, Int, () -> Bool) -> Unit] = Ref(fn(_, _, f) { f() |> ignore })
+
+///|
+/// Sets who waits on the host's word (outside_waits).
+pub fn set_outside_waits(f : (Int, Int, () -> Bool) -> Unit) -> Unit {
+  outside_waits.val = f
+}
 
 ///|
 // kept across runs: set once by ui as it starts
-pub let outside_lets_go : Ref[(Int, Int) -> Unit] = Ref(fn(_, _) {  })
+let outside_lets_go : Ref[(Int, Int) -> Unit] = Ref(fn(_, _) {  })
+
+///|
+/// Sets who lets a wait on the host's word go (outside_lets_go).
+pub fn set_outside_lets_go(f : (Int, Int) -> Unit) -> Unit {
+  outside_lets_go.val = f
+}
 
 ///|
 /// A sign-in under way in the browser.
@@ -66,7 +90,7 @@ pub fn BrowserLogin::open(self : BrowserLogin, url : String) -> Bool {
 /// is asked for as it comes, so a view can look each frame.
 pub fn BrowserLogin::back(self : BrowserLogin) -> String? {
   // (the host's own state, come with no event: what reads it as it is built, built each frame while it does)
-  (polled.val)()
+  call_polled()
   let s = bl_back(self.id)
   if s.length() == 0 {
     None

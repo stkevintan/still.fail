@@ -6,10 +6,10 @@
 // The key is sealed so that each use asks the person (`user: true`: biometrics or the screen lock). Web pages have none:
 // their code is the cloud's.
 import { ed25519 } from "@noble/curves/ed25519.js";
-import { Effect, Schedule, Semaphore } from "effect";
+import { Deferred, Effect, Fiber, Schedule, Semaphore } from "effect";
 // @ts-ignore: the MoonBit build's JS, untyped
 import * as rules from "../../../rules/js/rules.js";
-import { CoreError, asCoreError } from "./error.ts";
+import { CoreError, type HostError, asCoreError } from "./error.ts";
 import type { Host } from "./host.ts";
 import { t } from "./i18n.ts";
 import { type Entry, WEB_DEVICE_SECS, canonical, entryHash, signedBytes } from "./lock.ts";
@@ -185,9 +185,34 @@ export function revokeHolds(s: unknown, sub: string, devices: ReadonlyMap<string
 /// joined, or that removed it), `replaced` (the cloud has another than the one pinned here: all devices lost, or forged).
 export type Standing = "none" | "member" | "outside" | "replaced";
 
+/// What the device keeps of the people's own locks, its reads begun at a start before the lock is made (core.ts, beside
+/// the databases' opening: each read waits its turn on the host's disk, and the vaults' pages and cards wait on these;
+/// core.start `own_lock_ms`). Each is taken by the first read of its key (this device's key's id, every person's alike,
+/// by each person's), and let go of by any write of it first.
+export class EarlyReads {
+  readonly #reads = new Map<string, Effect.Effect<Uint8Array | null>>();
+
+  constructor(host: Host, runner: Runner, subs: readonly string[]) {
+    const keys = subs.length === 0 ? [] : [KEY_ID, ...subs.flatMap((sub) => [keptAs(sub), asideAs(sub), leftAs(sub), pendingAs(sub), statedAs(sub)])];
+    for (const key of keys) this.#reads.set(key, Fiber.join(runner.fork(Effect.orElseSucceed(host.storageGet(key), () => null))));
+  }
+
+  take(key: string): Effect.Effect<Uint8Array | null> | undefined {
+    const read = this.#reads.get(key);
+    if (key !== KEY_ID) this.#reads.delete(key);
+    return read;
+  }
+
+  drop(key: string): void {
+    this.#reads.delete(key);
+  }
+}
+
 export type PersonalEnv = {
   host: Host;
   runner: Runner;
+  /// The reads of what the device keeps begun before this lock was made, at a start.
+  early?: EarlyReads;
   /// A request to the cloud as this person.
   cloud: (sub: string, method: string, path: string, body: unknown) => Effect.Effect<unknown, CoreError>;
   /// This device's base key (as a pairing dials it), and its name.
@@ -286,6 +311,7 @@ export class PersonalLock {
   readonly #aside = new Map<string, Entry[]>();
   readonly #seen = new Map<string, Entry[]>();
   readonly #loaded = new Set<string>();
+  readonly #loads = new Map<string, Deferred.Deferred<void>>();
   /// The roots of the chains this device left behind as it began anew, each person's: the stations may keep one still
   /// (they refused this device then, so the new chain reached only the cloud), and it is no lock begun elsewhere.
   readonly #left = new Map<string, Set<string>>();
@@ -324,6 +350,24 @@ export class PersonalLock {
     this.#env = env;
   }
 
+  /// Whether what the device keeps of `sub`'s lock (the chain pinned, this device's key) has been read this run
+  /// (`refresh`, in a fork of its own at start): till then `standing` says none, not what is kept.
+  loaded(sub: string): boolean {
+    return this.#loaded.has(sub);
+  }
+
+  /// Done once `loaded(sub)`: what a press waits on rather than go by a lock that names none of the person's devices
+  /// yet (no network waited on: `refresh` reads the device first, each read falling back to none).
+  whenLoaded(sub: string): Effect.Effect<void> {
+    if (this.#loaded.has(sub)) return Effect.void;
+    let d = this.#loads.get(sub);
+    if (d === undefined) {
+      d = Deferred.makeUnsafe<void>();
+      this.#loads.set(sub, d);
+    }
+    return Deferred.await(d);
+  }
+
   /// The chain pinned here as read so far, its entries from the genesis (read only).
   pinnedOf(sub: string): readonly Entry[] {
     return this.#pinned.get(sub) ?? [];
@@ -346,28 +390,42 @@ export class PersonalLock {
     const env = this.#env;
     return Effect.gen({ self: this }, function* () {
       if (!this.#loaded.has(sub)) {
-        const kept = yield* Effect.orElseSucceed(env.host.storageGet(keptAs(sub)), () => null);
-        const said = kept === null ? null : (parseJson(kept) as Entry[] | null);
-        if (Array.isArray(said) && checkChain(said, sub) !== null) {
-          this.#pinned.set(sub, said);
-          const aside = parseJson(yield* Effect.orElseSucceed(env.host.storageGet(asideAs(sub)), () => null)) as unknown;
-          // (one on the chain now, written before the chain was, is not aside)
-          const on = new Set(said.map(hashOf));
-          if (Array.isArray(aside)) this.#aside.set(sub, (aside as Entry[]).filter((e) => typeof e === "object" && e !== null && !on.has(hashOf(e))));
+        // (read together, not one after another: at a start each waits its turn on the host's disk behind whatever else is
+        // read or written then, and the vaults' pages and cards wait on all of them; core.start `own_lock_ms`)
+        const read = (key: string) => this.#read(key);
+        const [kept, asideKept, left, pendingKept, statedKept, id] = yield* Effect.all(
+          [read(keptAs(sub)), read(asideAs(sub)), this.#leftKept(sub), read(pendingAs(sub)), read(statedAs(sub)), read(KEY_ID)],
+          { concurrency: "unbounded" },
+        );
+        // (another refresh of this person read and took them meanwhile, and may have taken newer since: what was read here
+        // is older, not put back over it)
+        if (!this.#loaded.has(sub)) {
+          const said = kept === null ? null : (parseJson(kept) as Entry[] | null);
+          if (Array.isArray(said) && checkChain(said, sub) !== null) {
+            this.#pinned.set(sub, said);
+            const aside = parseJson(asideKept) as unknown;
+            // (one on the chain now, written before the chain was, is not aside)
+            const on = new Set(said.map(hashOf));
+            if (Array.isArray(aside)) this.#aside.set(sub, (aside as Entry[]).filter((e) => typeof e === "object" && e !== null && !on.has(hashOf(e))));
+          }
+          this.#left.set(sub, left);
+          const pending = parseJson(pendingKept) as unknown;
+          if (Array.isArray(pending)) this.#pending.set(sub, (pending as Pending[]).filter((x) => typeof x === "object" && x !== null && typeof x.id === "string" && typeof x.entry === "object"));
+          const stated = parseJson(statedKept) as unknown;
+          if (Array.isArray(stated)) {
+            const kept: [string, { act: Act | null; name: string; role?: string }][] = (stated as unknown[]).flatMap((x) => (Array.isArray(x) && typeof x[0] === "string" && typeof x[1]?.name === "string" ? [[x[0], x[1]] as [string, { act: Act | null; name: string; role?: string }]] : []));
+            this.#stated.set(sub, kept.slice(-STATED_KEPT));
+            for (const [h, as] of kept) if (!this.#shown.has(h)) this.#shown.set(h, as);
+          }
+          if (id !== null) this.#myKey = fromUtf8(id);
+          this.#loaded.add(sub);
+          const waiting = this.#loads.get(sub);
+          if (waiting !== undefined) {
+            this.#loads.delete(sub);
+            Deferred.doneUnsafe(waiting, Effect.void);
+          }
+          env.changed();
         }
-        this.#left.set(sub, yield* this.#leftKept(sub));
-        const pending = parseJson(yield* Effect.orElseSucceed(env.host.storageGet(pendingAs(sub)), () => null)) as unknown;
-        if (Array.isArray(pending)) this.#pending.set(sub, (pending as Pending[]).filter((x) => typeof x === "object" && x !== null && typeof x.id === "string" && typeof x.entry === "object"));
-        const stated = parseJson(yield* Effect.orElseSucceed(env.host.storageGet(statedAs(sub)), () => null)) as unknown;
-        if (Array.isArray(stated)) {
-          const kept: [string, { act: Act | null; name: string; role?: string }][] = (stated as unknown[]).flatMap((x) => (Array.isArray(x) && typeof x[0] === "string" && typeof x[1]?.name === "string" ? [[x[0], x[1]] as [string, { act: Act | null; name: string; role?: string }]] : []));
-          this.#stated.set(sub, kept.slice(-STATED_KEPT));
-          for (const [h, as] of kept) if (!this.#shown.has(h)) this.#shown.set(h, as);
-        }
-        const id = yield* Effect.orElseSucceed(env.host.storageGet(KEY_ID), () => null);
-        if (id !== null) this.#myKey = fromUtf8(id);
-        this.#loaded.add(sub);
-        env.changed();
       }
       const bound = (this.#pinned.get(sub)?.length ?? 0) > 0 ? within : undefined;
       // (a read and what is done with what it brings are one work, so that one past the wait is taken all the same)
@@ -407,9 +465,22 @@ export class PersonalLock {
 
   /// The roots of the chains this device left behind, as kept on it (none kept, or unreadable: none).
   #leftKept(sub: string): Effect.Effect<Set<string>> {
-    return Effect.map(Effect.orElseSucceed(this.#env.host.storageGet(leftAs(sub)), () => null), (kept) => {
+    return Effect.map(this.#read(leftAs(sub)), (kept) => {
       const said = parseJson(kept) as unknown;
       return new Set(Array.isArray(said) ? said.filter((r): r is string => typeof r === "string") : []);
+    });
+  }
+
+  /// What the device keeps at `key` (none, or unreadable: none): the read begun at the start where one was.
+  #read(key: string): Effect.Effect<Uint8Array | null> {
+    return this.#env.early?.take(key) ?? Effect.orElseSucceed(this.#env.host.storageGet(key), () => null);
+  }
+
+  /// `value` kept at `key` (none: let go of), a read of it begun at the start no longer what it keeps.
+  #write(key: string, value: Uint8Array | null): Effect.Effect<void, HostError> {
+    return Effect.suspend(() => {
+      this.#env.early?.drop(key);
+      return value === null ? this.#env.host.storageDelete(key) : this.#env.host.storageSet(key, value);
     });
   }
 
@@ -564,8 +635,8 @@ export class PersonalLock {
       const taken = pending.filter((x) => on.has(hashOf(x.entry))).map((x) => x.entry);
       this.#env.runner.fork(Effect.ignore(this.#env.cloud(sub, "POST", PATH, { entries: taken })));
     }
-    const keptAside = off.length === had.length && off.every((e, i) => e === had[i]) ? Effect.void : Effect.mapError(off.length === 0 ? this.#env.host.storageDelete(asideAs(sub)) : this.#env.host.storageSet(asideAs(sub), utf8(JSON.stringify(off))), asCoreError);
-    return Effect.andThen(keptAside, Effect.mapError(this.#env.host.storageSet(keptAs(sub), utf8(JSON.stringify(entries))), asCoreError));
+    const keptAside = off.length === had.length && off.every((e, i) => e === had[i]) ? Effect.void : Effect.mapError(this.#write(asideAs(sub), off.length === 0 ? null : utf8(JSON.stringify(off))), asCoreError);
+    return Effect.andThen(keptAside, Effect.mapError(this.#write(keptAs(sub), utf8(JSON.stringify(entries))), asCoreError));
   }
 
   /// `roots` kept as left behind (beside the pinned chain, its write failing as the pin's does), never the root of the
@@ -577,7 +648,7 @@ export class PersonalLock {
       const left = new Set([...had, ...roots].filter((r) => r !== now));
       this.#left.set(sub, left);
       if (left.size === had.size && [...left].every((r) => had.has(r))) return;
-      yield* Effect.mapError(this.#env.host.storageSet(leftAs(sub), utf8(JSON.stringify([...left]))), asCoreError);
+      yield* Effect.mapError(this.#write(leftAs(sub), utf8(JSON.stringify([...left]))), asCoreError);
     });
   }
 
@@ -746,7 +817,7 @@ export class PersonalLock {
       host.randomBytes(seed);
       yield* Effect.mapError(host.secureSet(KEY, seed, { user: true }), (e) => CoreError.refused(e, "personal_no_key"));
       const id = `ed25519:${hex(ed25519.getPublicKey(seed))}`;
-      yield* Effect.mapError(host.storageSet(KEY_ID, utf8(id)), asCoreError);
+      yield* Effect.mapError(this.#write(KEY_ID, utf8(id)), asCoreError);
       this.#myKey = id;
       return { id, seed };
     });
@@ -840,8 +911,7 @@ export class PersonalLock {
   #putPending(sub: string, items: readonly Pending[]): void {
     const kept = bounded(items);
     this.#pending.set(sub, kept);
-    const host = this.#env.host;
-    this.#env.runner.fork(Effect.ignore(kept.length === 0 ? host.storageDelete(pendingAs(sub)) : host.storageSet(pendingAs(sub), utf8(JSON.stringify(kept))), { log: "Unhandled", message: "personal lock: pending kept" }));
+    this.#env.runner.fork(Effect.ignore(this.#write(pendingAs(sub), kept.length === 0 ? null : utf8(JSON.stringify(kept))), { log: "Unhandled", message: "personal lock: pending kept" }));
     this.#env.changed();
   }
 
@@ -1311,7 +1381,7 @@ export class PersonalLock {
       const begun = this.#append(sub, seed, "genesis", { sub, device: { key, id, label: this.#env.label(), ...(signKey !== null ? { sign_key: signKey } : {}) } });
       // Not begun (no station nor the cloud took it): the key just made is forgotten, being on no chain and said
       // nowhere, so the next try makes one and has its seed in hand; kept, this device could begin only by asking.
-      yield* Effect.tapError(begun, () => Effect.andThen(Effect.ignore(this.#env.host.storageDelete(KEY_ID)), Effect.sync(() => void (this.#myKey = null))));
+      yield* Effect.tapError(begun, () => Effect.andThen(Effect.ignore(this.#write(KEY_ID, null)), Effect.sync(() => void (this.#myKey = null))));
       yield* this.#addApproved(sub, seed);
       return true;
     });
@@ -1633,7 +1703,7 @@ export class PersonalLock {
       if (said.length > 0) {
         const kept = [...(this.#stated.get(sub) ?? []), ...said].slice(-STATED_KEPT);
         this.#stated.set(sub, kept);
-        this.#env.runner.fork(Effect.ignore(this.#env.host.storageSet(statedAs(sub), utf8(JSON.stringify(kept))), { log: "Unhandled", message: "personal lock: statements kept" }));
+        this.#env.runner.fork(Effect.ignore(this.#write(statedAs(sub), utf8(JSON.stringify(kept))), { log: "Unhandled", message: "personal lock: statements kept" }));
       }
       const taken = brought === null ? 0 : brought.success;
       if (typeof taken === "number" && taken > 0) {
@@ -1721,8 +1791,8 @@ export class PersonalLock {
       if (this.#env.host.secureAsk) yield* Effect.catch(this.#env.host.secureAsk(reason), (e) => (e.message === "no_device_lock" ? Effect.void : Effect.fail(CoreError.refused(e, "lock_refused"))));
       this.#pinned.delete(sub);
       this.#aside.delete(sub);
-      yield* Effect.mapError(this.#env.host.storageDelete(keptAs(sub)), asCoreError);
-      yield* Effect.ignore(this.#env.host.storageDelete(asideAs(sub)));
+      yield* Effect.mapError(this.#write(keptAs(sub), null), asCoreError);
+      yield* Effect.ignore(this.#write(asideAs(sub), null));
       this.#env.changed();
       return null;
     });

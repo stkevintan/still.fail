@@ -1,0 +1,415 @@
+// 1:1 port of `station/mb/src/search/match.mbt`:
+// Search terms, UTF-16 code-unit excerpting (preserving lone surrogates through serialization),
+// visibility checks (`sees`), substring matching (`has`), and per-kind top-K heap (`Pages`).
+
+import "base_codec"
+import "builders_core"
+import "js_json"
+import "jscase"
+import "sql_db"
+
+pub struct Doc {
+  pub key : String
+  pub kind : String
+  pub ws : Option[String]
+  pub doc_scope : Option[String]
+  pub title : String
+  pub body : String
+  pub at : Option[Double]
+  pub refs : Array[(String, base_codec::Json)]
+}
+
+pub struct Asker {
+  pub workspace : String
+  pub home : Bool
+  pub scopes : Array[String]
+}
+
+pub fn Asker::from_json(j : base_codec::Json) -> Asker {
+  let workspace = match builders_core::json_get_last(j, "workspace") {
+    Some(base_codec::Json::Str(w)) => w
+    _ => ""
+  }
+  let home = match builders_core::json_get_last(j, "home") {
+    Some(base_codec::Json::Bool(true)) => true
+    _ => false
+  }
+  let scopes : Array[String] = []
+  match builders_core::json_get_last(j, "scopes") {
+    Some(base_codec::Json::Arr(xs)) => {
+      for i in 0..<xs.length() {
+        match xs[i] {
+          base_codec::Json::Str(s) => scopes.push(s)
+          _ => ()
+        }
+      }
+    }
+    _ => ()
+  }
+  Asker::{ workspace: workspace, home: home, scopes: scopes }
+}
+
+/// match.ts `terms`: split on JS `\s`, lower via V8 `toLowerCase`, dedupe, cap at 8.
+pub fn terms(query : String) -> Array[String] {
+  let out : Array[String] = []
+  let parts = jscase::split_by(jscase::trim(query), jscase::is_space)
+  for i in 0..<parts.length() {
+    let w = jscase::lower(parts[i])
+    if w != "" && !arr_contains_str(out, w) {
+      out.push(w)
+      if out.length() >= 8 {
+        break
+      }
+    }
+  }
+  out
+}
+
+let EXCERPT_BEFORE : Int = 80
+
+let EXCERPT_AFTER : Int = 240
+
+/// `body.replace(/\s+/gu, " ").trim()` over raw UTF-16 code units (preserving lone surrogates).
+fn flatten_units_raw(raw : Array[Int]) -> Array[Int] {
+  let n = raw.length()
+  let out : Array[Int] = []
+  let mut i = 0
+  while i < n {
+    let c = raw[i]
+    if jscase::is_space(c) {
+      out.push(0x20)
+      while i < n && jscase::is_space(raw[i]) {
+        i = i + 1
+      }
+    } else {
+      out.push(c)
+      i = i + 1
+    }
+  }
+  let mut a = 0
+  let mut b = out.length()
+  while a < b && jscase::is_space(out[a]) {
+    a = a + 1
+  }
+  while b > a && jscase::is_space(out[b - 1]) {
+    b = b - 1
+  }
+  let trimmed : Array[Int] = []
+  for k in a..<b {
+    trimmed.push(out[k])
+  }
+  trimmed
+}
+
+/// match.ts `excerpt` over raw UTF-16 code units (preserving lone surrogates both from the source
+/// text and from any cut landing inside a surrogate pair, until serialized via `js_json::stringify_line`).
+pub fn excerpt_units_from_utf16(raw : Array[Int], words : Array[String]) -> Array[Int] {
+  let flat = flatten_units_raw(raw)
+  let flat_str = js_json::sanitize_str(flat)
+  let lower_str = jscase::lower(flat_str)
+  let lower_u = js_json::utf16_units(lower_str)
+  let mut at = -1
+  for i in 0..<words.length() {
+    let wu = js_json::utf16_units(words[i])
+    match units_find(lower_u, wu) {
+      Some(idx) => {
+        if at < 0 || idx < at {
+          at = idx
+        }
+      }
+      None => ()
+    }
+  }
+  if at < 0 {
+    at = 0
+  }
+  let flen = flat.length()
+  let from0 = if at - EXCERPT_BEFORE > 0 { at - EXCERPT_BEFORE } else { 0 }
+  let to = if at + EXCERPT_AFTER < flen { at + EXCERPT_AFTER } else { flen }
+  let from = if from0 > flen { flen } else { from0 }
+  let out : Array[Int] = []
+  if from > 0 {
+    out.push(0x2026) // '…'
+  }
+  if to > from {
+    for k in from..<to {
+      out.push(flat[k])
+    }
+  }
+  if to < flen {
+    out.push(0x2026) // '…'
+  }
+  out
+}
+
+/// match.ts `excerpt` returning exact UTF-16 code units (preserving lone surrogates if a cut
+/// lands inside a surrogate pair, until serialized via `js_json::stringify_line`).
+pub fn excerpt_units(body : String, words : Array[String]) -> Array[Int] {
+  excerpt_units_from_utf16(js_json::utf16_units(body), words)
+}
+
+/// Convenience sanitized string form of `excerpt_units`.
+pub fn excerpt(body : String, words : Array[String]) -> String {
+  js_json::sanitize_str(excerpt_units(body, words))
+}
+
+/// match.ts `sees`.
+pub fn sees(ws : Option[String], doc_scope : Option[String], asker : Asker) -> Bool {
+  let place = match ws {
+    Some("*") => true
+    Some(w) => w == asker.workspace
+    None => asker.home
+  }
+  if !place {
+    return false
+  }
+  match doc_scope {
+    None => true
+    Some(s) => arr_contains_str(asker.scopes, s)
+  }
+}
+
+/// match.ts `has`.
+pub fn has(text : String, words : Array[String]) -> Bool {
+  let lower = jscase::lower(text)
+  for i in 0..<words.length() {
+    if !lower.contains(words[i]) {
+      return false
+    }
+  }
+  true
+}
+
+struct Ranked {
+  titled : Bool
+  at : Option[Double]
+  order : Int
+  hit_json : String
+}
+
+/// match.ts `compare`: negative when `a` comes first.
+fn compare_ranked(a : Ranked, b : Ranked) -> Int {
+  let titled = (if b.titled { 1 } else { 0 }) - (if a.titled { 1 } else { 0 })
+  if titled != 0 {
+    return titled
+  }
+  let a_none = match a.at {
+    None => 1
+    Some(_) => 0
+  }
+  let b_none = match b.at {
+    None => 1
+    Some(_) => 0
+  }
+  let none = a_none - b_none
+  if none != 0 {
+    return none
+  }
+  let av = match a.at {
+    Some(v) => v
+    None => 0.0
+  }
+  let bv = match b.at {
+    Some(v) => v
+    None => 0.0
+  }
+  let d = bv - av
+  if d < 0.0 {
+    return -1
+  }
+  if d > 0.0 {
+    return 1
+  }
+  a.order - b.order
+}
+
+struct KindBucket {
+  heap : Array[Ranked]
+  mut count : Int
+}
+
+/// match.ts `Pages`: each kind's worst kept at its max-heap root.
+pub struct Pages {
+  words : Array[String]
+  asker : Asker
+  limit : Int
+  offset : Int
+  want : Int
+  kinds : Map[String, KindBucket]
+  kind_names : Array[String]
+  mut order : Int
+}
+
+pub fn Pages::new(words : Array[String], asker : Asker, limit : Int, offset : Int) -> Pages {
+  Pages::{
+    words: words,
+    asker: asker,
+    limit: limit,
+    offset: offset,
+    want: offset + limit,
+    kinds: Map::new(),
+    kind_names: [],
+    order: 0,
+  }
+}
+
+/// A limit as the worker clamps it (`Math.max(1, Math.min(limit ?? 8, 200))`).
+pub fn clamp_limit(v : Option[base_codec::Json]) -> Int {
+  match v {
+    Some(base_codec::Json::Num(n, _)) => {
+      if n != n || n < 1.0 {
+        1
+      } else if n > 200.0 {
+        200
+      } else {
+        n.to_int()
+      }
+    }
+    _ => 8
+  }
+}
+
+/// An offset as the worker clamps it (`Math.max(0, offset ?? 0)`).
+pub fn clamp_offset(v : Option[base_codec::Json]) -> Int {
+  match v {
+    Some(base_codec::Json::Num(n, _)) => {
+      if n != n || n < 0.0 {
+        0
+      } else {
+        n.to_int()
+      }
+    }
+    _ => 0
+  }
+}
+
+fn at_json(at : Option[Double]) -> base_codec::Json {
+  match at {
+    Some(v) => sql_db::double_to_json(v)
+    None => base_codec::json_null()
+  }
+}
+
+pub fn Pages::add(self : Pages, d : Doc) -> Unit {
+  if !sees(d.ws, d.doc_scope, self.asker) {
+    return
+  }
+  if !has(d.title + "\n" + d.body, self.words) {
+    return
+  }
+  let list = match self.kinds.get(d.kind) {
+    Some(k) => k
+    None => {
+      let k = KindBucket::{ heap: [], count: 0 }
+      self.kinds.set(d.kind, k)
+      self.kind_names.push(d.kind)
+      k
+    }
+  }
+  list.count = list.count + 1
+  let order = self.order
+  self.order = self.order + 1
+  let titled = jscase::lower(d.title).contains(self.words[0])
+  let probe = Ranked::{ titled: titled, at: d.at, order: order, hit_json: "" }
+  let heap = list.heap
+  if heap.length() >= self.want && compare_ranked(probe, heap[0]) >= 0 {
+    return
+  }
+  let source = if d.kind == "chat" && has(d.title, self.words) { d.title } else { d.body }
+  let fields : Array[(String, base_codec::Json)] = []
+  for i in 0..<d.refs.length() {
+    let (rk, rv) = d.refs[i]
+    assoc_set(fields, rk, rv)
+  }
+  assoc_set(fields, "kind", base_codec::json_str(d.kind))
+  assoc_set(fields, "key", base_codec::json_str(d.key))
+  assoc_set(fields, "title", base_codec::json_str(d.title))
+  assoc_set(fields, "text", base_codec::json_null())
+  assoc_set(fields, "at", at_json(d.at))
+  let text_u = excerpt_units(source, self.words)
+  let hit_json = stringify_hit_object(fields, text_u)
+  let ranked = Ranked::{ titled: titled, at: d.at, order: order, hit_json: hit_json }
+  if heap.length() < self.want {
+    heap.push(ranked)
+    let mut i = heap.length() - 1
+    while i > 0 {
+      let parent = (i - 1) / 2
+      if compare_ranked(heap[i], heap[parent]) <= 0 {
+        break
+      }
+      let t = heap[i]
+      heap[i] = heap[parent]
+      heap[parent] = t
+      i = parent
+    }
+  } else {
+    heap[0] = ranked
+    let mut i = 0
+    while true {
+      let left = i * 2 + 1
+      let right = left + 1
+      if left >= heap.length() {
+        break
+      }
+      let worst = if right < heap.length() && compare_ranked(heap[right], heap[left]) > 0 {
+        right
+      } else {
+        left
+      }
+      if compare_ranked(heap[worst], heap[i]) <= 0 {
+        break
+      }
+      let t = heap[i]
+      heap[i] = heap[worst]
+      heap[worst] = t
+      i = worst
+    }
+  }
+}
+
+/// Strings by their UTF-16 code units, as JavaScript compares them.
+pub fn compare_units(a : String, b : String) -> Int {
+  js_json::js_compare(a, b)
+}
+
+/// Return serialized JSON strings for each non-empty group, sorted by kind in UTF-16 order.
+pub fn Pages::result_raw(self : Pages) -> Array[String] {
+  let names : Array[String] = []
+  for i in 0..<self.kind_names.length() {
+    names.push(self.kind_names[i])
+  }
+  sort_by(names, compare_units)
+  let out : Array[String] = []
+  for i in 0..<names.length() {
+    let name = names[i]
+    match self.kinds.get(name) {
+      None => ()
+      Some(k) => {
+        sort_by(k.heap, compare_ranked)
+        let hits : Array[String] = []
+        let end = if self.offset + self.limit < k.heap.length() {
+          self.offset + self.limit
+        } else {
+          k.heap.length()
+        }
+        if self.offset < end {
+          for j in self.offset..<end {
+            hits.push(k.heap[j].hit_json)
+          }
+        }
+        if hits.length() > 0 {
+          let more_str = if k.count > self.want { "true" } else { "false" }
+          let grp = "{\"kind\":" +
+          sql_db::stringify_json(base_codec::json_str(name)) +
+          ",\"more\":" +
+          more_str +
+          ",\"hits\":" +
+          stringify_raw_array(hits) +
+          "}"
+          out.push(grp)
+        }
+      }
+    }
+  }
+  out
+}

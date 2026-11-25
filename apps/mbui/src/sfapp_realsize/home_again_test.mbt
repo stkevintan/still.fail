@@ -191,7 +191,7 @@ test "home again: a place of the bar tapped from Home at rest, and Home tapped a
         // quota brings profiles down to made=591, laid=457 (+1 made/+1 laid for place_top_bar_glass wrapping settings
         // in bar_pill_group_node, +2 made/+2 laid for narrow_bar_scrim_node); +22 made/+11 laid: the bar's 多选 and each
         // account row's pick between its row and 多选's)
-        assert_eq(home_again_peak.val, if place == "profiles" { (616, 0, 471) } else { (366, 0, 257) }, msg="\{tag} home→\{place}")
+        assert_eq(home_again_peak.val, if place == "profiles" { (616, 0, 470) } else { (366, 0, 257) }, msg="\{tag} home→\{place}")
         t.run_for(@sfapptest.kept_switch_over_ms)
         home_again_measure(t, "\{tag} \{place}→home", fn() { t.tap(xs[0], y) })
         println("home-again \{tag}: on \{Repr(@sfapp.place_of(@sfbase.app.nav.top()))} (asked chats)")
@@ -369,7 +369,7 @@ test "home again: Home come back to in a taller phone's window, and from a page 
       // for place_top_bar_glass wrapping settings in bar_pill_group_node, +2 made/+2 laid for narrow_bar_scrim_node;
       // +26 made/+13 laid: the bar's 多选 and each account row's pick between its row and 多选's)
       let first = if place == "profiles" {
-        (760, 0, 581)
+        (760, 0, 580)
       } else if place == "connects" {
         // (-2 made/-1 laid: a page's room under its last block its list's end_room, no block of it)
         (440, 0, 308)
@@ -378,8 +378,8 @@ test "home again: Home come back to in a taller phone's window, and from a page 
         // action_box_while_node's pick; 3 seg_fill_nodes -> made unchanged, +9 initial laid; -1 structure-box in usage_node;
         // +1 made/+1 laid for place_top_bar_glass bar_pill_group_node, +2 made/+2 laid for narrow_bar_scrim_node;
         // -12 laid from View::scrolls eliminating redundant room_spill layout; -2 made/-1 laid: its room under its last
-        // block its list's end_room, no block of it)
-        (487, 0, 396)
+        // block its list's end_room, no block of it; -3 laid from seg_fill_node delegating to liquid_segmented_node)
+        (487, 0, 393)
       }
       assert_eq(home_again_peak.val, first, msg="\{tag} home→\{place}")
       t.run_for(@sfapptest.kept_switch_over_ms)

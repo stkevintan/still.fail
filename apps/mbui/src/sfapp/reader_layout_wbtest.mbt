@@ -128,10 +128,10 @@ test "小屏: the layout's controls pressed where they are drawn: the size, a pa
   t.tap(x, y)
   t.run_for(@ui.move_most_ms)
   assert_eq(layout_style().paper, "green")
-  // the lines tapped a quarter along (its knob's middle 11 in from either end): 1.2 + a quarter of 1.2, kept as it is
+  // the lines tapped a quarter along (its capsule thumb's middle 19 in from either end): 1.2 + a quarter of 1.2, kept as it is
   // let go
   let ((sx, sy, sw, sh), _) = layout_control(t, Slider, "行距")
-  t.tap(sx + 11.0 + (sw - 22.0) * 0.25, sy + sh / 2.0)
+  t.tap(sx + 19.0 + (sw - 38.0) * 0.25, sy + sh / 2.0)
   t.run_for(@ui.move_most_ms)
   assert_true((layout_style().line - 1.5).abs() < 1.0e-9, msg="\{layout_style().line}")
   assert_true(t.find("150%") is Some(_))
@@ -217,7 +217,7 @@ test "wide: the layout's controls pressed where they are drawn: the size, a pape
   // the margins dragged from their knob past the line's end: the most, kept as it is let go
   let ((sx, sy, sw, sh), _) = layout_control(t, Slider, "边距")
   let (least, most) = @sf.reader_margins
-  let from = sx + 11.0 + (sw - 22.0) * (was.margin - least).to_double() / (most - least).to_double()
+  let from = sx + 19.0 + (sw - 38.0) * (was.margin - least).to_double() / (most - least).to_double()
   t.drag(from, sy + sh / 2.0, sx + sw + 20.0, sy + sh / 2.0)
   t.run_for(@ui.move_most_ms)
   assert_eq(layout_style().margin, most)
@@ -271,12 +271,12 @@ test "wide: the layout of a chat's Markdown answers its controls, is under a lat
   t.run_for(@ui.move_most_ms)
   assert_eq(layout_style().paper, "green")
   let ((sx, sy, sw, sh), _) = layout_control(t, Slider, "行距")
-  t.tap(sx + 11.0 + (sw - 22.0) * 0.25, sy + sh / 2.0)
+  t.tap(sx + 19.0 + (sw - 38.0) * 0.25, sy + sh / 2.0)
   t.run_for(@ui.move_most_ms)
   assert_true((layout_style().line - 1.5).abs() < 1.0e-9)
   let ((sx, sy, sw, sh), _) = layout_control(t, Slider, "边距")
   let (least, most) = @sf.reader_margins
-  let from = sx + 11.0 + (sw - 22.0) * (was.margin - least).to_double() / (most - least).to_double()
+  let from = sx + 19.0 + (sw - 38.0) * (was.margin - least).to_double() / (most - least).to_double()
   // The whole gesture between frames: it is still captured by this slider when let go beyond its end.
   t.touch(0, from, sy + sh / 2.0)
   t.touch(1, sx + sw + 20.0, sy + sh / 2.0)
@@ -372,7 +372,7 @@ test "wide: layout changes show while the core is still keeping them" {
   assert_eq(layout_style().face, "serif")
   assert_eq(t.get(Radio, label="宋体").check, Some(On))
   let ((sx, sy, sw, sh), _) = layout_control(t, Slider, "行距")
-  t.tap(sx + 11.0 + (sw - 22.0) * 0.25, sy + sh / 2.0)
+  t.tap(sx + 19.0 + (sw - 38.0) * 0.25, sy + sh / 2.0)
   t.draw()
   assert_true(t.find("150%") is Some(_))
   assert_eq(pending.length(), 3)

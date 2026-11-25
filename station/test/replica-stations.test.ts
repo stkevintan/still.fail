@@ -4,19 +4,20 @@
 // month catches up; the stations that keep a copy change without fewer than two holding it; a
 // workspace's copies stay with its stations; a station rolled back loses nothing they hold.
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, test } from "node:test";
 import { Effect, Exit, Scope, type Clock } from "effect";
 import { TestClock } from "effect/testing";
+import { type Fs, direct } from "../src/drive/fs.ts";
 import { PeerBus, Refused, bytesOf, withBytes } from "../src/mesh/bus.ts";
 import { oneBytes } from "../src/mesh/files.ts";
 import { type Line, hearLines } from "../src/ops/log.ts";
 import { Fibers } from "../src/ops/fibers.ts";
 import { Copies, HANDOVER_QUIET_MS, keptDir } from "../src/replica/copies.ts";
-import type { Head } from "../src/replica/format.ts";
+import { type Head, asHead, isHex64 } from "../src/replica/format.ts";
 import { keepers } from "../src/replica/peers.ts";
 import { FolderPlace, type Place, level, nothingHeld } from "../src/replica/places.ts";
 import { readCopy, takeBack } from "./reference/replica-restore.ts";
@@ -900,4 +901,540 @@ test("in-flight busy overflow keeper fails after primary recovery without arming
   await a.copies.settle();
   const oAfter = (await a.copies.overview(HOME)) as Json;
   assert.equal(oAfter.keepers.find((k: Json) => k.station === third)?.error, null, "re-overflow to third succeeds immediately with no stale retry state");
+});
+
+test("asHead and isHex64 validate 64-char lowercase hex keys without false accepts or rejects", () => {
+  const validHex = "0123456789abcdef".repeat(4);
+  assert.equal(isHex64(validHex), true);
+  assert.equal(isHex64(validHex.toUpperCase()), false);
+  assert.equal(isHex64(validHex.slice(0, 63)), false);
+  assert.equal(isHex64(`${validHex}0`), false);
+  assert.equal(isHex64(`g${validHex.slice(1)}`), false);
+  assert.equal(isHex64(`/${validHex.slice(1)}`), false);
+  assert.equal(isHex64(`:${validHex.slice(1)}`), false);
+  assert.equal(isHex64(`\`${validHex.slice(1)}`), false);
+
+  const makeHead = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    v: 1,
+    origin: id("a"),
+    workspace: HOME,
+    gen: "1a2b3c-deadbeef",
+    name: "test",
+    dataDir: "/tmp/d",
+    made: 1000,
+    to: 1,
+    batches: ["0000000001-0000000001-01234567.ndjson.zst"],
+    files: { [validHex]: 123 },
+    chats: 1,
+    messages: 1,
+    bytes: 123,
+    runs: [{ run: "abcd1234", from: 1 }],
+    ...overrides,
+  });
+
+  // Large transcriptFiles map accepted
+  const largeTf: Record<string, number> = {};
+  for (let i = 0; i < 1_000; i++) {
+    largeTf[i.toString(16).padStart(64, "0")] = i + 1;
+  }
+  assert.notEqual(asHead(makeHead({ transcriptFiles: largeTf })), null);
+
+  // Invalid files / transcriptFiles rejected
+  assert.equal(asHead(makeHead({ files: null })), null);
+  assert.equal(asHead(makeHead({ files: [] })), null);
+  assert.equal(asHead(makeHead({ files: { [validHex.toUpperCase()]: 1 } })), null);
+  assert.equal(asHead(makeHead({ files: { short: 1 } })), null);
+  assert.equal(asHead(makeHead({ transcriptFiles: null })), null);
+  assert.equal(asHead(makeHead({ transcriptFiles: [] })), null);
+  assert.equal(asHead(makeHead({ transcriptFiles: { [`z${validHex.slice(1)}`]: 1 } })), null);
+});
+
+test("FolderPlace caches head metadata by (mtimeMs, size), skips re-reading head.json and readdir(files) in drop, and clears on remove", async () => {
+  const root = dataDir("fp-cache");
+  let headReads = 0;
+  let filesDirReads = 0;
+  const countingFs: Fs = {
+    ...direct,
+    async readAll(path: string) {
+      if (path.endsWith("head.json")) headReads++;
+      return direct.readAll(path);
+    },
+    async names(dir: string) {
+      if (dir.endsWith("/files") || dir.endsWith("\\files")) filesDirReads++;
+      return direct.names(dir);
+    },
+  };
+
+  const place = new FolderPlace(root, countingFs);
+  const origin = id("a");
+  const gen1 = "1000-aaaaaaaa";
+  const gen2 = "2000-bbbbbbbb";
+  const b1 = "0000000001-0000000001-11111111.ndjson.zst";
+  const b2 = "0000000002-0000000002-22222222.ndjson.zst";
+  const fKeep = id("1");
+  const fShared = id("2");
+  const fOrphan = id("3");
+
+  const makeHead = (gen: string, to: number, batches: string[], files: Record<string, number>, transcriptFiles?: Record<string, number>): Head => ({
+    v: 1,
+    origin,
+    workspace: HOME,
+    gen,
+    name: "n",
+    dataDir: "/d",
+    made: to * 1000,
+    to,
+    batches,
+    files,
+    ...(transcriptFiles !== undefined ? { transcriptFiles } : {}),
+    chats: 1,
+    messages: to,
+    bytes: 10,
+    runs: [{ run: "12345678", from: 1 }],
+  });
+
+  await place.put(HOME, origin, gen1, "batch", b1, Buffer.from("batch1"));
+  await place.put(HOME, origin, gen1, "batch", b2, Buffer.from("batch2"));
+  await place.putFile(HOME, origin, fKeep, Buffer.from("keep"));
+  await place.putFile(HOME, origin, fShared, Buffer.from("shared"));
+  await place.putFile(HOME, origin, fOrphan, Buffer.from("orphan"));
+
+  // First put("head"): head.json doesn't exist yet -> 0 reads, writes & caches.
+  await place.put(HOME, origin, gen1, "head", "head.json", Buffer.from(JSON.stringify(makeHead(gen1, 1, [b1], { [fKeep]: 4, [fShared]: 6, [fOrphan]: 6 }))));
+  assert.equal(headReads, 0);
+
+  // Second put("head"): hits cache -> 0 reads, updates cache.
+  await place.put(HOME, origin, gen1, "head", "head.json", Buffer.from(JSON.stringify(makeHead(gen1, 2, [b2], { [fKeep]: 4 }))));
+  assert.equal(headReads, 0);
+
+  // Stale head (to=1 < cached to=2): ignored with 0 reads.
+  await place.put(HOME, origin, gen1, "head", "head.json", Buffer.from(JSON.stringify(makeHead(gen1, 1, [b1], { [fKeep]: 4 }))));
+  assert.equal(headReads, 0);
+  const headPath1 = join(place.dir(HOME, origin), gen1, "head.json");
+  assert.equal((JSON.parse(readFileSync(headPath1, "utf8")) as Head).to, 2);
+
+  // Put gen2 referencing fShared in transcriptFiles.
+  await place.put(HOME, origin, gen2, "batch", b1, Buffer.from("batch1-g2"));
+  await place.put(HOME, origin, gen2, "head", "head.json", Buffer.from(JSON.stringify(makeHead(gen2, 1, [b1], {}, { [fShared]: 6 }))));
+  assert.equal(headReads, 0);
+
+  // drop() on gen1: drops b1 and fOrphan, keeps b2, fKeep, and fShared (referenced by gen2).
+  // Must NOT read head.json again and must NOT call names("files").
+  await place.drop(HOME, origin, gen1, [b1, b2], [fOrphan, fShared, fKeep]);
+  assert.equal(headReads, 0, "drop uses cached head metadata");
+  assert.equal(filesDirReads, 0, "drop must not readdir(files)");
+  assert.equal(existsSync(join(place.dir(HOME, origin), gen1, "log", b1)), false);
+  assert.equal(existsSync(join(place.dir(HOME, origin), gen1, "log", b2)), true);
+  assert.equal(existsSync(join(place.dir(HOME, origin), "files", fOrphan)), false);
+  assert.equal(existsSync(join(place.dir(HOME, origin), "files", fShared)), true);
+  assert.equal(existsSync(join(place.dir(HOME, origin), "files", fKeep)), true);
+
+  // Externally overwrite head.json on disk with higher to=5 and newer mtime -> cache invalidates automatically.
+  const externalHead = makeHead(gen1, 5, [b2], { [fKeep]: 4 });
+  writeFileSync(headPath1, JSON.stringify(externalHead, null, 2));
+  utimesSync(headPath1, new Date(1_800_000_000_000), new Date(1_800_000_000_000));
+  await place.put(HOME, origin, gen1, "head", "head.json", Buffer.from(JSON.stringify(makeHead(gen1, 3, [b2], { [fKeep]: 4 }))));
+  assert.equal(headReads, 1, "external disk modification invalidates cache and triggers re-read");
+  assert.equal((JSON.parse(readFileSync(headPath1, "utf8")) as Head).to, 5, "externally written newer head is not overwritten");
+
+  // remove() clears cache: re-putting to=1 after remove succeeds without stale cache interference.
+  await place.remove(HOME, origin);
+  await place.put(HOME, origin, gen1, "batch", b1, Buffer.from("batch1-again"));
+  await place.put(HOME, origin, gen1, "head", "head.json", Buffer.from(JSON.stringify(makeHead(gen1, 1, [b1], { [fKeep]: 4 }))));
+  assert.equal((JSON.parse(readFileSync(headPath1, "utf8")) as Head).to, 1);
+});
+
+test("level() fast path, missing+oldFiles cleanup, includeTranscripts:false drop, and overlap ENOENT semantics", async () => {
+  const origin = id("a");
+  const gen = "1000-aaaaaaaa";
+  const fChat = id("1");
+  const fOverlap = id("2");
+  const fTr = id("3");
+  const fOld = id("4");
+  const fMissing = id("5");
+
+  const makeHead = (to: number, files: Record<string, number>, transcriptFiles?: Record<string, number>): Head => ({
+    v: 1,
+    origin,
+    workspace: HOME,
+    gen,
+    name: "n",
+    dataDir: "/d",
+    made: to * 1000,
+    to,
+    batches: [],
+    files,
+    ...(transcriptFiles !== undefined ? { transcriptFiles } : {}),
+    chats: 1,
+    messages: to,
+    bytes: 0,
+    runs: [{ run: "12345678", from: 1 }],
+  });
+
+  // 1. Fast path (no old files) -> drop not called.
+  const drops: { batches: string[]; files: string[] }[] = [];
+  const memFiles = new Set<string>([fChat, fTr]);
+  const fakePlace: Place = {
+    async held() {
+      return { gens: [{ gen, head: makeHead(1, { [fChat]: 1 }, { [fTr]: 1 }), batches: [] }], files: [...memFiles] };
+    },
+    async put() {},
+    async putFile(_ws, _o, hash) {
+      memFiles.add(hash);
+    },
+    async drop(_ws, _o, _g, batches, files) {
+      drops.push({ batches, files });
+      for (const f of files) memFiles.delete(f);
+    },
+  };
+  const r1 = await level(fakePlace, HOME, {
+    head: makeHead(2, { [fChat]: 1 }, { [fTr]: 1 }),
+    batch: async () => Buffer.alloc(0),
+    sources: async () => new Map(),
+  });
+  assert.equal(r1.behind, false);
+  assert.equal(r1.missing, 0);
+  assert.equal(drops.length, 0, "fast path skips drop when k.files matches wanted");
+
+  // 2. missing > 0 while an old file is in k.files AND chat/transcript hashes overlap -> old file is still dropped, overlap/live files kept!
+  memFiles.add(fOld);
+  memFiles.add(fOverlap);
+  r1.known.files.add(fOld);
+  r1.known.files.add(fOverlap);
+  const r2 = await level(
+    fakePlace,
+    HOME,
+    {
+      head: makeHead(3, { [fChat]: 1, [fOverlap]: 1, [fMissing]: 1 }, { [fOverlap]: 1, [fTr]: 1 }),
+      batch: async () => Buffer.alloc(0),
+      sources: async () => new Map(), // fMissing has no source -> missing = 1
+    },
+    r1.known,
+  );
+  assert.equal(r2.behind, false);
+  assert.equal(r2.missing, 1);
+  assert.deepEqual(drops.at(-1)?.files, [fOld], "old file is dropped even when missing > 0 with overlapping chat+transcript hash");
+  assert.equal(r2.known.files.has(fChat), true);
+  assert.equal(r2.known.files.has(fOverlap), true);
+  assert.equal(r2.known.files.has(fTr), true);
+
+  // 3. includeTranscripts: false -> drops transcript-only files, keeps chat and overlap files.
+  const r3 = await level(
+    fakePlace,
+    HOME,
+    {
+      head: makeHead(4, { [fChat]: 1, [fOverlap]: 1 }, { [fOverlap]: 1, [fTr]: 1 }),
+      batch: async () => Buffer.alloc(0),
+      sources: async () => new Map(),
+    },
+    r2.known,
+    { includeTranscripts: false },
+  );
+  assert.equal(r3.behind, false);
+  assert.deepEqual(drops.at(-1)?.files, [fTr], "includeTranscripts:false drops transcript-only hash");
+  assert.equal(r3.known.files.has(fOverlap), true, "overlap hash in files is preserved");
+
+  // 4. ENOENT semantics: chat-only hash swallows ENOENT into missing++, overlap (chat+transcript) hash rethrows ENOENT.
+  const enoentPlace: Place = {
+    async held() {
+      return nothingHeld();
+    },
+    async put() {},
+    async putFile() {
+      throw Object.assign(new Error("ENOENT: gone"), { code: "ENOENT" });
+    },
+    async drop() {},
+  };
+  const rChatEnoent = await level(enoentPlace, HOME, {
+    head: makeHead(1, { [fChat]: 1 }),
+    batch: async () => Buffer.alloc(0),
+    sources: async (hs) => new Map(hs.map((h) => [h, `/tmp/${h}`])),
+  });
+  assert.equal(rChatEnoent.behind, false);
+  assert.equal(rChatEnoent.missing, 1, "chat-only ENOENT counted as missing");
+
+  await assert.rejects(
+    level(enoentPlace, HOME, {
+      head: makeHead(1, { [fOverlap]: 1 }, { [fOverlap]: 1 }),
+      batch: async () => Buffer.alloc(0),
+      sources: async (hs) => new Map(hs.map((h) => [h, `/tmp/${h}`])),
+    }),
+    /ENOENT/,
+    "overlap chat+transcript hash must rethrow ENOENT",
+  );
+});
+
+test("FolderPlace serializes concurrent put('head') and drop() to prevent stale overwrite or cache-disk divergence", async () => {
+  const root = dataDir("fp-race");
+  const origin = id("a");
+  const gen = "1000-aaaaaaaa";
+  const b1 = "0000000001-0000000001-11111111.ndjson.zst";
+  const b2 = "0000000002-0000000002-22222222.ndjson.zst";
+  const b3 = "0000000003-0000000003-33333333.ndjson.zst";
+
+  let pauseNextHeadRename = false;
+  let renamePaused = deferred<void>();
+  let releaseRename = deferred<void>();
+  const raceFs: Fs = {
+    ...direct,
+    async rename(from: string, to: string) {
+      if (pauseNextHeadRename && to.endsWith("head.json")) {
+        pauseNextHeadRename = false;
+        renamePaused.resolve();
+        await releaseRename.promise;
+      }
+      return direct.rename(from, to);
+    },
+  };
+
+  const place = new FolderPlace(root, raceFs);
+  await place.put(HOME, origin, gen, "batch", b1, Buffer.from("b1"));
+  await place.put(HOME, origin, gen, "batch", b2, Buffer.from("b2"));
+  await place.put(HOME, origin, gen, "batch", b3, Buffer.from("b3"));
+
+  const makeHead = (to: number, batches: string[]): Head => ({
+    v: 1,
+    origin,
+    workspace: HOME,
+    gen,
+    name: "n",
+    dataDir: "/d",
+    made: to * 1000,
+    to,
+    batches,
+    files: {},
+    chats: 1,
+    messages: to,
+    bytes: 0,
+    runs: [{ run: "12345678", from: 1 }],
+  });
+
+  // Case 1: older put(to=1) pauses before rename while newer put(to=2) arrives concurrently -> final disk & cache hold to=2.
+  pauseNextHeadRename = true;
+  const pOld = place.put(HOME, origin, gen, "head", "head.json", Buffer.from(JSON.stringify(makeHead(1, [b1]))));
+  await renamePaused.promise;
+  const pNew = place.put(HOME, origin, gen, "head", "head.json", Buffer.from(JSON.stringify(makeHead(2, [b1, b2]))));
+  releaseRename.resolve();
+  await Promise.all([pOld, pNew]);
+
+  const headPath = join(place.dir(HOME, origin), gen, "head.json");
+  assert.equal((JSON.parse(readFileSync(headPath, "utf8")) as Head).to, 2);
+  // drop([b2]) must NOT delete b2 because to=2 references it.
+  await place.drop(HOME, origin, gen, [b2], []);
+  assert.equal(existsSync(join(place.dir(HOME, origin), gen, "log", b2)), true);
+
+  // Case 2: newer put(to=3, [b1,b2,b3]) pauses before rename while older put(to=2) and drop([b3]) arrive concurrently.
+  renamePaused = deferred<void>();
+  releaseRename = deferred<void>();
+  pauseNextHeadRename = true;
+  const pNewest = place.put(HOME, origin, gen, "head", "head.json", Buffer.from(JSON.stringify(makeHead(3, [b1, b2, b3]))));
+  await renamePaused.promise;
+  const pStale = place.put(HOME, origin, gen, "head", "head.json", Buffer.from(JSON.stringify(makeHead(2, [b1, b2]))));
+  const pDrop = place.drop(HOME, origin, gen, [b3], []);
+  releaseRename.resolve();
+  await Promise.all([pNewest, pStale, pDrop]);
+
+  assert.equal((JSON.parse(readFileSync(headPath, "utf8")) as Head).to, 3, "stale concurrent put does not overwrite newer head");
+  assert.equal(existsSync(join(place.dir(HOME, origin), gen, "log", b3)), true, "concurrent drop does not delete batch referenced by newer head");
+
+  // Subsequent older put(to=2) is still rejected by cached to=3.
+  await place.put(HOME, origin, gen, "head", "head.json", Buffer.from(JSON.stringify(makeHead(2, [b1]))));
+  assert.equal((JSON.parse(readFileSync(headPath, "utf8")) as Head).to, 3);
+});
+
+test("FolderPlace handles corrupted head.json in drop, enforces LRU cap on #headFiles, and clears cache on forget()", async () => {
+  const root = dataDir("fp-lru");
+  const headReads = new Map<string, number>();
+  const countingFs: Fs = {
+    ...direct,
+    async readAll(path: string) {
+      if (path.endsWith("head.json")) {
+        headReads.set(path, (headReads.get(path) ?? 0) + 1);
+      }
+      return direct.readAll(path);
+    },
+  };
+
+  const place = new FolderPlace(root, countingFs);
+  const origin = id("a");
+  const fOrphan = id("9");
+  await place.putFile(HOME, origin, fOrphan, Buffer.from("orphan"));
+
+  const makeHead = (ws: string, gen: string, to: number, files: Record<string, number>): Head => ({
+    v: 1,
+    origin,
+    workspace: ws,
+    gen,
+    name: "n",
+    dataDir: "/d",
+    made: to * 1000,
+    to,
+    batches: [],
+    files,
+    chats: 1,
+    messages: to,
+    bytes: 0,
+    runs: [{ run: "12345678", from: 1 }],
+  });
+
+  // 1. Put 9 origins (> MAX_FILES_ENTRIES = 8) so origin0 is evicted from #headFiles while origin1..origin8 stay cached.
+  const gen = "1000-00000001";
+  const origins = ["0", "1", "2", "3", "4", "5", "6", "7", "8"].map(id);
+  for (let i = 0; i < origins.length; i++) {
+    const o = origins[i]!;
+    await place.putFile(HOME, o, fOrphan, Buffer.from("orphan"));
+    await place.put(HOME, o, gen, "head", "head.json", Buffer.from(JSON.stringify({
+      ...makeHead(HOME, gen, 1, { [id(String(i))]: 1 }),
+      origin: o,
+    })));
+  }
+  assert.equal(headReads.size, 0, "putting 9 heads does not re-read any head.json");
+
+  // Most recent origin8 is still cached in #headFiles -> 0 reads on drop.
+  await place.drop(HOME, origins[8]!, gen, [], [fOrphan]);
+  assert.equal(headReads.size, 0, "most recent origin stays cached in #headFiles");
+  assert.equal(existsSync(join(place.dir(HOME, origins[8]!), "files", fOrphan)), false, "unreferenced file unlinked");
+
+  // Oldest origin0 was evicted by LRU cap -> re-read once on drop.
+  await place.drop(HOME, origins[0]!, gen, [], [fOrphan]);
+  const origin0Head = join(place.dir(HOME, origins[0]!), gen, "head.json");
+  assert.equal(headReads.get(origin0Head), 1, "oldest entry was evicted by LRU cap and re-read on drop");
+  assert.equal(existsSync(join(place.dir(HOME, origins[0]!), "files", fOrphan)), false, "unreferenced file unlinked on evicted origin");
+
+  // 2. Corrupted head.json on disk: fail-closed drop() MUST reject and preserve all files without unlinking.
+  const corruptGen = "9999-cccccccc";
+  const corruptDir = join(place.dir(HOME, origin), corruptGen);
+  mkdirSync(corruptDir, { recursive: true });
+  writeFileSync(join(corruptDir, "head.json"), "{corrupted-json");
+  const fOrphan2 = id("e");
+  await place.putFile(HOME, origin, fOrphan2, Buffer.from("orphan2"));
+  await assert.rejects(() => place.drop(HOME, origin, corruptGen, [], [fOrphan2]), /corrupted head\.json/);
+  assert.equal(existsSync(join(place.dir(HOME, origin), "files", fOrphan2)), true, "fail-closed drop preserves files on corrupted head.json");
+
+  // 3. forget(ws, origin) and forget(ws) clear cache so subsequent put/drop re-reads disk cleanly.
+  const origin8Head = join(place.dir(HOME, origins[8]!), gen, "head.json");
+  const origin8Payload = Buffer.from(JSON.stringify({ ...makeHead(HOME, gen, 1, { [id("8")]: 1 }), origin: origins[8]! }));
+  headReads.clear();
+  place.forget(HOME, origins[8]!);
+  await place.put(HOME, origins[8]!, gen, "head", "head.json", origin8Payload);
+  assert.equal(headReads.get(origin8Head), 1, "forget(ws, origin) evicted cache entry");
+
+  headReads.clear();
+  place.forget(HOME);
+  await place.put(HOME, origins[8]!, gen, "head", "head.json", origin8Payload);
+  assert.equal(headReads.get(origin8Head), 1, "forget(ws) evicted cache entry");
+});
+
+test("D71: level() pages place.drop() by dropFilesPage, preserves remaining files on mid-page error, and drops batches-only", async () => {
+  const origin = id("a");
+  const gen = "1000-aaaaaaaa";
+  const b1 = "0000000001-0000000001-11111111.ndjson.zst";
+  const b2 = "0000000002-0000000002-22222222.ndjson.zst";
+  const oldFiles = ["1", "2", "3", "4", "5"].map(id);
+  const liveFile = id("9");
+
+  const makeHead = (to: number, batches: string[], files: Record<string, number>): Head => ({
+    v: 1,
+    origin,
+    workspace: HOME,
+    gen,
+    name: "n",
+    dataDir: "/d",
+    made: to * 1000,
+    to,
+    batches,
+    files,
+    chats: 1,
+    messages: to,
+    bytes: 0,
+    runs: [{ run: "12345678", from: 1 }],
+  });
+
+  // 1. 5 oldFiles, dropFilesPage=2, oldBatches=[b1] -> 3 calls: ([b1], 2), ([], 2), ([], 1)
+  const calls: { batches: string[]; files: string[] }[] = [];
+  const place1: Place = {
+    async held() {
+      return { gens: [{ gen, head: makeHead(1, [b1], { [liveFile]: 1 }), batches: [b1] }], files: [liveFile, ...oldFiles] };
+    },
+    async put() {},
+    async putFile() {},
+    async drop(_ws, _o, _g, batches, files) {
+      calls.push({ batches: [...batches], files: [...files] });
+    },
+  };
+  const r1 = await level(
+    place1,
+    HOME,
+    { head: makeHead(2, [b2], { [liveFile]: 1 }), batch: async () => Buffer.from("b2"), sources: async () => new Map() },
+    null,
+    { dropFilesPage: 2 },
+  );
+  assert.equal(r1.behind, false);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[0], { batches: [b1], files: oldFiles.slice(0, 2) });
+  assert.deepEqual(calls[1], { batches: [], files: oldFiles.slice(2, 4) });
+  assert.deepEqual(calls[2], { batches: [], files: oldFiles.slice(4, 5) });
+  assert.deepEqual([...r1.known.batches], [b2]);
+  assert.deepEqual([...r1.known.files], [liveFile]);
+
+  // 2. Page 2 throws -> page 1's oldBatches and 2 files removed from k, remaining 3 files kept in k.files for retry
+  let callNum = 0;
+  const known2 = {
+    gen,
+    batches: new Set([b1, b2]),
+    files: new Set([liveFile, ...oldFiles]),
+    others: new Set<string>(),
+    to: 1,
+    made: 1000,
+  };
+  const place2: Place = {
+    async held() {
+      return nothingHeld();
+    },
+    async put() {},
+    async putFile() {},
+    async drop() {
+      callNum++;
+      if (callNum === 2) throw new Error("page 2 network failure");
+    },
+  };
+  await assert.rejects(
+    level(
+      place2,
+      HOME,
+      { head: makeHead(2, [b2], { [liveFile]: 1 }), batch: async () => Buffer.from("b2"), sources: async () => new Map() },
+      known2,
+      { dropFilesPage: 2 },
+    ),
+    /page 2 network failure/,
+  );
+  assert.equal(known2.batches.has(b1), false, "page 1 oldBatch removed before page 2 failed");
+  assert.equal(known2.files.has(oldFiles[0]!), false, "page 1 file 0 removed");
+  assert.equal(known2.files.has(oldFiles[1]!), false, "page 1 file 1 removed");
+  assert.equal(known2.files.has(oldFiles[2]!), true, "page 2 file 2 retained for retry");
+  assert.equal(known2.files.has(oldFiles[3]!), true, "page 2 file 3 retained for retry");
+  assert.equal(known2.files.has(oldFiles[4]!), true, "page 3 file 4 retained for retry");
+
+  // 3. oldFiles=[] and oldBatches=[b1] -> 1 call place.drop(..., [b1], [])
+  const batchOnlyCalls: { batches: string[]; files: string[] }[] = [];
+  const place3: Place = {
+    async held() {
+      return { gens: [{ gen, head: makeHead(1, [b1], { [liveFile]: 1 }), batches: [b1] }], files: [liveFile] };
+    },
+    async put() {},
+    async putFile() {},
+    async drop(_ws, _o, _g, batches, files) {
+      batchOnlyCalls.push({ batches: [...batches], files: [...files] });
+    },
+  };
+  const r3 = await level(
+    place3,
+    HOME,
+    { head: makeHead(2, [b2], { [liveFile]: 1 }), batch: async () => Buffer.from("b2"), sources: async () => new Map() },
+    null,
+    { dropFilesPage: 2 },
+  );
+  assert.equal(r3.behind, false);
+  assert.deepEqual(batchOnlyCalls, [{ batches: [b1], files: [] }]);
+  assert.deepEqual([...r3.known.batches], [b2]);
 });

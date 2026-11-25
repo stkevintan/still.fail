@@ -457,7 +457,6 @@ pub fn Anim::snap(Self, @ui.Ctx, Double) -> Unit
 pub fn Anim::stop_at(Self, @ui.Ctx, Double, points~ : Double, loc~ : SourceLoc) -> Unit
 pub fn Anim::target(Self) -> Double
 pub fn Anim::value_at(Self, Double) -> Double
-pub impl @ui.Moving for Anim
 
 #derive(Eq, @debug.Debug)
 pub(all) enum BondEvent {

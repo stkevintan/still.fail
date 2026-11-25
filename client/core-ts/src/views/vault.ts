@@ -65,7 +65,7 @@ import type { Owner } from "../core/routing.ts";
 import { CoreError, asCoreError } from "../error.ts";
 import { t } from "../i18n.ts";
 import { type Entry, Signer, entryHash } from "../lock.ts";
-import { OTHERS_MS, answersOf, askPerson, baseOf, tookOrRefused, deviceText, deviceVerifyCode, held as lockHeld, inForceOf, leftIn, lockSeen, movedHere, onBoundPerson, view as workspaceView, nameOf as workspaceName, signerKnown, signerOf, stateOf } from "./lock.ts";
+import { OTHERS_MS, answersOf, askPerson, baseOf, tookOrRefused, deviceText, deviceVerifyCode, held as lockHeld, inForceOf, leftIn, lockSeen, movedHere, onBoundPerson, view as workspaceView, nameOf as workspaceName, KEYS_SHOWN, signerKnown, signerOf, signerShown, stateOf } from "./lock.ts";
 import { checkChain, crypto as personCrypto } from "../personal-lock.ts";
 import * as prefs from "../prefs.ts";
 import { workspaceIds } from "./marks.ts";
@@ -319,6 +319,22 @@ function personalExtras(inner: Inner, ws: string, sub: string): { memberChains: 
 /// yet (`none`): one naming none of their devices, so a secret to keep is shown and 开启 begins it (`Vaults.setup`);
 /// this device outside it or replaced: an error, the page offering to be approved there.
 const personalLocks = new WeakMap<Inner, Map<string, { at: string; lock: Checked | CoreError }>>();
+
+/// Whether the lock a workspace's vault goes by is not read from the device yet at start: the person's own, where it is
+/// not in safe mode (`PersonalLock.loaded`). Till then that lock names none of their devices, and what is shown would say
+/// 未获此库授权 or 开启 of a vault this device holds the key to: the pages wait for it, the cards are answered as keyed
+/// (what is pressed reads the lock).
+function lockRead(inner: Inner, ws: string): Effect.Effect<void> {
+  if (!lockUnread(inner, ws)) return Effect.void;
+  return inner.adb.personal().whenLoaded(inner.workspaces.owner(ws)!);
+}
+
+function lockUnread(inner: Inner, ws: string): boolean {
+  if (safeMode(inner, ws)) return false;
+  const sub = inner.workspaces.owner(ws);
+  const personal = inner.adb.personal();
+  return sub !== null && typeof personal.loaded === "function" && typeof personal.whenLoaded === "function" && !personal.loaded(sub);
+}
 function personalLockOf(inner: Inner, ws: string): Checked | CoreError {
   const sub = inner.workspaces.owner(ws);
   if (sub === null) return new CoreError("vault_no_account", t("core-misc.vault.notTrusted"));
@@ -663,7 +679,15 @@ const bare = ({ sub: _s, ...c }: Vouched): BoxCert => c;
 /// The box key's public half this app keeps (BOX_PUB), as `install` reads it at the app's start: given so by a core put
 /// together without that start (test/real-size-asked.ts).
 export function boxKeyKnown(inner: Inner, pub: string | null): void {
+  boxIs(inner, pub);
+}
+
+/// This app's box key's public half as now read or made (`m.box`), kept beside the device's records too for the next
+/// start (`boxShown`).
+function boxIs(inner: Inner, pub: string | null): string | null {
   mem(inner).box = pub;
+  if (inner.data.record(KEYS_SHOWN, "box") !== pub) inner.data.put(KEYS_SHOWN, "box", pub);
+  return pub;
 }
 
 export function install(inner: Inner): void {
@@ -680,12 +704,14 @@ export function install(inner: Inner): void {
   // What this app keeps (no person asked): its box key's public half.
   inner.runner.fork(
     Effect.gen(function* () {
-      const m = mem(inner);
-      const pub = yield* Effect.orElseSucceed(inner.host.storageGet(BOX_PUB), () => null);
-      m.box = pub ? new TextDecoder().decode(pub) : null;
+      const read = yield* Effect.result(inner.host.storageGet(BOX_PUB));
+      // (one that could not be read is none this run, not kept as none for the next: `boxShown`)
+      if (read._tag === "Failure") mem(inner).box = null;
+      else boxIs(inner, read.success ? new TextDecoder().decode(read.success) : null);
       lockSeen(inner).touch("self");
       inner.views?.vaultChanged(null);
       vaultReady(inner);
+      inner.startRead("box");
     }),
   );
 }
@@ -1243,6 +1269,12 @@ function owner(inner: Inner): Owner {
           for (const otherWs of crossWorkspaces) seen.read(`vault ${otherWs}`);
         }
       }
+      // (no value yet while the lock it goes by is not read from the device: `lockUnread`; nor, with a browse asked,
+      // while that of a workspace it would browse is not: it would say there is nothing to browse)
+      if (lockUnread(inner, ws)) return undefined;
+      if (t.topic === "vaults" && Object.values(held(inner, ws).requests).some((r) => r.status === "pending" && r.browse !== undefined)) {
+        for (const [otherWs] of inner.workspaces.owned()) if (otherWs !== ws && lockUnread(inner, otherWs)) return undefined;
+      }
       return { ok: t.topic === "vaults" ? vaultsView(inner, ws) : t.topic === "vaultUses" ? usesView(inner, ws, String(t.vault), String(t.item)) : itemsView(inner, ws, String(t.vault)) };
     },
   };
@@ -1287,6 +1319,8 @@ export type BrowseCandidateWorkspace = {
 export type BrowseCandidates = {
   workspaces: BrowseCandidateWorkspace[];
   unkeyedWorkspaces: number;
+  /// Those whose lock is not read from the device yet (`lockUnread`): neither keyed nor not.
+  unreadWorkspaces: number;
 };
 
 /// Whether an item of a cross-workspace personal vault `v` is readable by `selfA` on this device:
@@ -1327,11 +1361,12 @@ function crossItemReadable(
 /// - only non-deleted items with an agent `listing` under `v.epoch` or a readable `before` epoch.
 export function browseCandidates(inner: Inner, ws: string): BrowseCandidates {
   const ownerSub = inner.workspaces?.owner(ws) ?? null;
-  const signer = signerOf(inner);
-  if (ownerSub === null || signer === null || !able(inner)) return { workspaces: [], unkeyedWorkspaces: 0 };
+  const signer = signerShown(inner);
+  if (ownerSub === null || signer === null || !able(inner)) return { workspaces: [], unkeyedWorkspaces: 0, unreadWorkspaces: 0 };
   const myBox = mem(inner).box;
   const workspaces: BrowseCandidateWorkspace[] = [];
   let unkeyedWorkspaces = 0;
+  let unreadWorkspaces = 0;
   for (const [otherWs, otherOwner] of inner.workspaces.owned()) {
     if (otherWs === ws) continue;
     if (inner.scheduler && !mem(inner).browseRead.has(otherWs)) {
@@ -1346,6 +1381,10 @@ export function browseCandidates(inner: Inner, ws: string): BrowseCandidates {
       }
     }
     const hA = held(inner, otherWs);
+    if (lockUnread(inner, otherWs)) {
+      unreadWorkspaces++;
+      continue;
+    }
     const lockA = lockOf(inner, otherWs);
     const selfA = lockA instanceof CoreError ? null : me(lockA, signer);
     if (lockA instanceof CoreError || selfA === null || selfA.sub !== otherOwner) {
@@ -1354,18 +1393,20 @@ export function browseCandidates(inner: Inner, ws: string): BrowseCandidates {
       }
       continue;
     }
+    // (not read yet at start: as an earlier run read it, or as this device's certificate there names it, `boxShown`)
+    const box = myBox !== undefined ? myBox : boxShown(inner, certHere(lockA, hA, selfA.device));
     const wsItems: BrowseCandidateItem[] = [];
     let hasUnkeyed = false;
     for (const v of Object.values(hA.vaults)) {
       if (v.deleted || v.scope === "workspace" || v.owner !== otherOwner) continue;
       const asA = readAs(inner, otherWs, lockA, v, selfA);
-      const keyed = asA !== null && myBox !== null && myBox !== undefined && v.keys.some((k) => k.cert.device === selfA.device && k.cert.box === myBox);
+      const keyed = asA !== null && box !== null && box !== undefined && v.keys.some((k) => k.cert.device === selfA.device && k.cert.box === box);
       if (!keyed) {
         hasUnkeyed = true;
         continue;
       }
       for (const i of Object.values(items(inner, otherWs, v.id))) {
-        if (crossItemReadable(inner, otherWs, lockA, hA, v, selfA, myBox, i) === null) continue;
+        if (crossItemReadable(inner, otherWs, lockA, hA, v, selfA, box, i) === null) continue;
         const l = i.listing!;
         wsItems.push({
           vault: v.id,
@@ -1386,7 +1427,7 @@ export function browseCandidates(inner: Inner, ws: string): BrowseCandidates {
     }
   }
   workspaces.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  return { workspaces, unkeyedWorkspaces };
+  return { workspaces, unkeyedWorkspaces, unreadWorkspaces };
 }
 
 /// Whether a secret an agent asks to keep was sealed by its station to the person's devices set up then, this one not
@@ -1395,6 +1436,23 @@ export function browseCandidates(inner: Inner, ws: string): BrowseCandidates {
 /// failing as 存入 is pressed (2026-11-03, 「此申请提出时此设备尚未开启密钥库」).
 const notHere = (r: Request | undefined, device: string | null, box: string | null): boolean =>
   r?.save !== undefined && r.save.typed !== true && Array.isArray(r.sealed) && device !== null && !r.sealed.some((x) => x.device === device && (box === null || x.box === box));
+
+/// This device's box key's public half as what is shown reads it: the one read, or, while this run has not read it yet
+/// (`undefined`, `install`), the one an earlier run read (`boxIs`), else the one this device's certificate names. Read
+/// as none, every keyed vault and card said 未获此库授权 for as long as that read took after each restart. What seals,
+/// opens or checks a key reads it from the host (`ensureBoxKey`, `BOX_PUB`).
+const boxShown = (inner: Inner, mine: BoxCert | undefined): string | null | undefined => {
+  const box = mem(inner).box;
+  if (box !== undefined) return box;
+  const kept = inner.data.record(KEYS_SHOWN, "box");
+  return kept === null || typeof kept === "string" ? kept : mine?.box;
+};
+
+/// This device's box certificate in a workspace, where its lock vouches for it.
+const certHere = (lock: Checked, h: Held, device: string): BoxCert | undefined => {
+  const cert = h.boxes[device];
+  return cert !== undefined && certOwner(lock, cert) !== null ? cert : undefined;
+};
 
 /// Whether an encrypted-vault request lacks a key on this device (cannot be approved, saved, renamed or deleted here):
 /// - plain requests never need an encrypted vault key;
@@ -1443,7 +1501,16 @@ export function askAnswers(inner: Inner, ws: string, asks: { request: string; sa
   const plain = plainMode(inner, ws);
   if (!able(inner) && !plain) return asks.map(() => ({ answer: "elsewhere" }));
   const h = held(inner, ws);
-  const self = lock instanceof CoreError ? null : me(lock, signerOf(inner));
+  const lastsOf = (r: Request | undefined): Scope =>
+    r === undefined
+      ? "chat"
+      : r.vault === PLAIN
+        ? (h.plain[r.item]?.listing?.lasts ?? h.plainLasts?.lasts ?? "chat")
+        : (items(inner, ws, r.vault)[r.item]?.listing?.lasts ?? h.vaults[r.vault]?.lasts ?? "chat");
+  // (the lock not read from the device yet: answered as keyed here, its press waiting for it, `lockUnread`; one about
+  // another workspace's secrets by that one's)
+  const unread = lockUnread(inner, ws);
+  const self = lock instanceof CoreError ? null : me(lock, signerShown(inner));
   // (this device's box certificate the lock vouches for, its key the one kept here: as the `vaults` topic's setUp)
   let mineLoaded = false;
   let mineCert: BoxCert | undefined;
@@ -1458,7 +1525,7 @@ export function askAnswers(inner: Inner, ws: string, asks: { request: string; sa
   const isSetUp = (): boolean => {
     if (setUp !== undefined) return setUp;
     const mine = mineOf();
-    return (setUp = mine !== undefined && mine.box === mem(inner).box);
+    return (setUp = mine !== undefined && mine.box === boxShown(inner, mine));
   };
   let activeVaults: Vault[] | undefined;
   const activeMemberVaults = (): Vault[] => {
@@ -1471,8 +1538,7 @@ export function askAnswers(inner: Inner, ws: string, asks: { request: string; sa
     if (saveTargetsCache !== undefined) return saveTargetsCache ?? undefined;
     if (plain || lock instanceof CoreError || self === null) return (saveTargetsCache = null), undefined;
     const mine = mineOf();
-    const box = mem(inner).box;
-    if (mine === undefined || mine.box !== box) return (saveTargetsCache = null), undefined;
+    if (mine === undefined || mine.box !== boxShown(inner, mine)) return (saveTargetsCache = null), undefined;
     const keyed = activeMemberVaults().filter((v) => v.keys.some((k) => k.cert.device === self.device && k.cert.box === mine.box));
     if (keyed.length <= 1) return (saveTargetsCache = null), undefined;
     const cmp = (a: Vault, b: Vault) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : 1);
@@ -1486,11 +1552,13 @@ export function askAnswers(inner: Inner, ws: string, asks: { request: string; sa
   return asks.map(({ request, save, browse, crossWs }): AskAnswer => {
     const r = h.requests[request];
     if (browse || r?.browse !== undefined) {
-      if (!able(inner) || lock instanceof CoreError || self === null) return { answer: "elsewhere" };
+      if (!able(inner) || (!unread && (lock instanceof CoreError || self === null))) return { answer: "elsewhere" };
       const cands = candidatesOf();
       const browseWorkspaces = cands.workspaces.length;
       const browseItems = cands.workspaces.reduce((n, w) => n + w.items.length, 0);
       if (browseItems === 0) {
+        // (some not read yet: none said to be had or not)
+        if (cands.unreadWorkspaces > 0) return { answer: "approve", browseWorkspaces: 0, browseItems: 0 };
         return cands.unkeyedWorkspaces > 0
           ? { answer: "noKey", browseWorkspaces: 0, browseItems: 0 }
           : { answer: "empty", browseWorkspaces: 0, browseItems: 0 };
@@ -1499,12 +1567,14 @@ export function askAnswers(inner: Inner, ws: string, asks: { request: string; sa
     }
     const sourceWs = r?.cross?.workspace ?? crossWs;
     if (sourceWs !== undefined) {
-      if (!able(inner) || lock instanceof CoreError || self === null) return { answer: "elsewhere" };
+      if (!able(inner) || (!unread && (lock instanceof CoreError || self === null))) return { answer: "elsewhere" };
+      const lastsA = (): Scope => (r === undefined ? "chat" : (items(inner, sourceWs, r.vault)[r.item]?.listing?.lasts ?? held(inner, sourceWs).vaults[r.vault]?.lasts ?? "chat"));
+      if (lockUnread(inner, sourceWs)) return { answer: "approve", lasts: lastsA() };
       const otherOwner = inner.workspaces.owner(sourceWs);
       const lockA = lockOf(inner, sourceWs);
-      const selfA = lockA instanceof CoreError ? null : me(lockA, signerOf(inner));
+      const selfA = lockA instanceof CoreError ? null : me(lockA, signerShown(inner));
       const hA = held(inner, sourceWs);
-      const myBox = mem(inner).box;
+      const myBox = lockA instanceof CoreError || selfA === null ? undefined : boxShown(inner, certHere(lockA, hA, selfA.device));
       let sourceNoKey = otherOwner === null || lockA instanceof CoreError || selfA === null || selfA.sub !== otherOwner || myBox === null || myBox === undefined;
       if (!sourceNoKey && !(lockA instanceof CoreError) && r !== undefined) {
         const vA = hA.vaults[r.vault];
@@ -1516,11 +1586,11 @@ export function askAnswers(inner: Inner, ws: string, asks: { request: string; sa
           readAs(inner, sourceWs, lockA, vA, selfA) === null ||
           !vA.keys.some((k) => k.cert.device === selfA!.device && k.cert.box === myBox);
       }
-      const lasts: Scope = r === undefined ? "chat" : (items(inner, sourceWs, r.vault)[r.item]?.listing?.lasts ?? hA.vaults[r.vault]?.lasts ?? "chat");
-      return { answer: sourceNoKey ? "noKey" : "approve", lasts };
+      return { answer: sourceNoKey ? "noKey" : "approve", lasts: lastsA() };
     }
+    if (unread) return save ? { answer: "approve" } : { answer: "approve", lasts: lastsOf(r) };
     const noKey = (): boolean =>
-      !plain && !(lock instanceof CoreError) && vaultNoKey(lock, h, self, mineOf(), mem(inner).box, r, save, isSetUp, activeMemberVaults);
+      !plain && !(lock instanceof CoreError) && vaultNoKey(lock, h, self, mineOf(), boxShown(inner, mineOf()), r, save, isSetUp, activeMemberVaults);
     if (save) {
       if (r?.describe !== undefined || r?.remove !== undefined) {
         return { answer: noKey() ? "noKey" : !plain && !isSetUp() ? "setUp" : "approve" };
@@ -1528,7 +1598,7 @@ export function askAnswers(inner: Inner, ws: string, asks: { request: string; sa
       const answer =
         !plain && !isSetUp()
           ? "setUp"
-          : notHere(r, self?.device ?? null, mem(inner).box ?? null)
+          : notHere(r, self?.device ?? null, boxShown(inner, mineOf()) ?? null)
             ? "notHere"
             : noKey()
               ? "noKey"
@@ -1536,13 +1606,7 @@ export function askAnswers(inner: Inner, ws: string, asks: { request: string; sa
       const saveTargets = answer === "approve" ? keyedTargets() : undefined;
       return saveTargets !== undefined ? { answer, saveTargets } : { answer };
     }
-    const lasts =
-      r === undefined
-        ? "chat"
-        : r.vault === PLAIN
-          ? (h.plain[r.item]?.listing?.lasts ?? h.plainLasts?.lasts ?? "chat")
-          : (items(inner, ws, r.vault)[r.item]?.listing?.lasts ?? h.vaults[r.vault]?.lasts ?? "chat");
-    return { answer: noKey() ? "noKey" : "approve", lasts };
+    return { answer: noKey() ? "noKey" : "approve", lasts: lastsOf(r) };
   });
 }
 
@@ -1638,14 +1702,16 @@ export function ensureBoxKey(inner: Inner): Effect.Effect<string, CoreError> {
   if (!able(inner)) return fail("vault_unavailable", t("core-misc.vault.unavailable"));
   const m = mem(inner);
   return m.boxInit.withPermits(1)(Effect.gen(function* () {
-    const had = yield* Effect.orElseSucceed(inner.host.storageGet(BOX_PUB), () => null);
-    if (had) return (m.box = new TextDecoder().decode(had));
+    // (one that could not be read is not none: made anew, the private half kept would be written over, and every vault
+    // keyed to it lost on this device)
+    const had = yield* Effect.mapError(inner.host.storageGet(BOX_PUB), asCoreError);
+    if (had) return boxIs(inner, new TextDecoder().decode(had))!;
     const priv = new Uint8Array(32);
     inner.host.randomBytes(priv);
     const pub = boxPublic(priv);
     yield* Effect.mapError(inner.host.secureSet!(BOX_KEY, priv, { user: true }), (e) => CoreError.refused(e, "vault_refused"));
     yield* Effect.mapError(inner.host.storageSet(BOX_PUB, utf8(pub)), asCoreError);
-    return (m.box = pub);
+    return boxIs(inner, pub)!;
   }));
 }
 
@@ -1659,11 +1725,12 @@ export function ensureBoxKey(inner: Inner): Effect.Effect<string, CoreError> {
 function renewBoxKey(inner: Inner, dead: string | null): Effect.Effect<string, CoreError> {
   const m = mem(inner);
   return m.boxInit.withPermits(1)(Effect.gen(function* () {
-    const had = yield* Effect.orElseSucceed(inner.host.storageGet(BOX_PUB), () => null);
+    // (one that could not be read is not none: as `ensureBoxKey`)
+    const had = yield* Effect.mapError(inner.host.storageGet(BOX_PUB), asCoreError);
     const now = had ? new TextDecoder().decode(had) : null;
-    if (now !== null && now !== dead) return (m.box = now);
+    if (now !== null && now !== dead) return boxIs(inner, now)!;
     yield* Effect.ignore(inner.host.storageDelete(BOX_PUB));
-    m.box = null;
+    boxIs(inner, null);
     // (what the pages say of this device, its setting up and its keys, is read by the box key kept: said again)
     lockSeen(inner).touch("self");
     inner.views?.vaultChanged(null);
@@ -1673,7 +1740,7 @@ function renewBoxKey(inner: Inner, dead: string | null): Effect.Effect<string, C
     yield* Effect.mapError(inner.host.secureSet!(BOX_KEY, priv, { user: true }), (e) => CoreError.refused(e, "vault_refused"));
     priv.fill(0);
     yield* Effect.mapError(inner.host.storageSet(BOX_PUB, utf8(pub)), asCoreError);
-    m.box = pub;
+    boxIs(inner, pub);
     lockSeen(inner).touch("self");
     inner.views?.vaultChanged(null);
     return pub;
@@ -2107,7 +2174,7 @@ export function vaultsView(inner: Inner, ws: string): J {
   // No safe mode and this device not on its person's own lock (another device of theirs approves it) or that lock
   // replaced: nothing signed here; the page offers being approved (or going on as the one that replaced it).
   if (lock instanceof CoreError) return { ...base, ...statusWords([], []) };
-  const self = me(lock, signerOf(inner));
+  const self = me(lock, signerShown(inner));
   const vouched = certs(inner, ws, lock);
   const mine = self ? vouched.find((c) => c.device === self.device) : undefined;
   const myDeviceId = self?.device ?? baseDeviceId;
@@ -2154,7 +2221,7 @@ export function vaultsView(inner: Inner, ws: string): J {
         // Whether this device has a key to it; members' devices set up since that have none yet (its owner's device gives
         // them the key as it next has it in hand, or as asked: addDevice).
         // (by the box key kept here too: a certificate naming one made anew since is not this device's key, FB-51)
-        keyed: self !== null && mine !== undefined && mine.box === m.box && keyed.get(self.device) === mine.box,
+        keyed: self !== null && mine !== undefined && mine.box === boxShown(inner, mine) && keyed.get(self.device) === mine.box,
         missing: pendingDevices.length,
         recoverable: v.recovery !== undefined, lasts: v.lasts ?? "chat",
         authorizedDevices,
@@ -2165,7 +2232,8 @@ export function vaultsView(inner: Inner, ws: string): J {
     });
   // (a secret to keep is told only to whom it is for: it may be meant for no vault yet; none of the plain library's, which
   // safe mode on has none of)
-  const setUp = mine !== undefined && mine.box === m.box;
+  const setUp = mine !== undefined && mine.box === boxShown(inner, mine);
+  const box = boxShown(inner, mine);
   const plain = plainMode(inner, ws);
   let activeVaults: Vault[] | undefined;
   const activeMemberVaults = (): Vault[] =>
@@ -2177,7 +2245,7 @@ export function vaultsView(inner: Inner, ws: string): J {
     return {
       browseWorkspaces: cands.workspaces.length,
       browseItems,
-      ...(browseItems === 0 && cands.unkeyedWorkspaces > 0 ? { noKey: true as const } : {}),
+      ...(browseItems === 0 && cands.unkeyedWorkspaces > 0 && cands.unreadWorkspaces === 0 ? { noKey: true as const } : {}),
     };
   };
   const requests = Object.values(h.requests)
@@ -2193,22 +2261,25 @@ export function vaultsView(inner: Inner, ws: string): J {
         const hA = held(inner, srcWs);
         const listingA = items(inner, srcWs, r.vault)[r.item]?.listing;
         const lockA = lockOf(inner, srcWs);
-        const selfA = lockA instanceof CoreError ? null : me(lockA, signerOf(inner));
+        const selfA = lockA instanceof CoreError ? null : me(lockA, signerShown(inner));
         const vA = hA.vaults[r.vault];
-        const crossNoKey =
+        // (this device's box key, while not read yet, as an earlier run read it or its certificate there names it: `boxShown`)
+        const box = lockA instanceof CoreError || selfA === null ? undefined : boxShown(inner, certHere(lockA, hA, selfA.device));
+        // (that workspace's lock not read from the device yet: neither keyed nor not, `lockUnread`)
+        const crossNoKey = !lockUnread(inner, srcWs) && (
           otherOwner === null ||
           lockA instanceof CoreError ||
           self === null ||
           selfA === null ||
           selfA.sub !== otherOwner ||
-          m.box === null ||
-          m.box === undefined ||
+          box === null ||
+          box === undefined ||
           vA === undefined ||
           vA.deleted ||
           vA.scope === "workspace" ||
           vA.owner !== otherOwner ||
           readAs(inner, srcWs, lockA, vA, selfA) === null ||
-          !vA.keys.some((k) => k.cert.device === selfA.device && k.cert.box === m.box);
+          !vA.keys.some((k) => k.cert.device === selfA.device && k.cert.box === box));
         return {
           ...requestRow(r, listingA?.name ?? null, r.cross.vaultName, listingA?.lasts ?? vA?.lasts ?? "chat"),
           ...(crossNoKey ? { noKey: true } : {}),
@@ -2216,10 +2287,10 @@ export function vaultsView(inner: Inner, ws: string): J {
       }
       const listing = items(inner, ws, r.vault)[r.item]?.listing;
       const isSave = r.save !== undefined || r.describe !== undefined || r.remove !== undefined;
-      const noKey = !plain && vaultNoKey(lock, h, self, mine, m.box, r, isSave, () => setUp, activeMemberVaults);
+      const noKey = !plain && vaultNoKey(lock, h, self, mine, box, r, isSave, () => setUp, activeMemberVaults);
       return {
         ...requestRow(r, r.save?.name ?? r.describe?.was.name ?? r.remove?.name ?? listing?.name ?? null, h.vaults[r.vault]?.name ?? personal, listing?.lasts ?? h.vaults[r.vault]?.lasts ?? "chat"),
-        ...(notHere(r, self?.device ?? null, m.box ?? null) ? { notHere: true } : {}),
+        ...(notHere(r, self?.device ?? null, box ?? null) ? { notHere: true } : {}),
         ...(noKey ? { noKey: true } : {}),
       };
     });
@@ -2324,7 +2395,7 @@ export function itemsView(inner: Inner, ws: string, id: string): J {
   const v = held(inner, ws).vaults[id];
   const lock = lockOf(inner, ws);
   // (one waiting to be keyed anew too, where this device holds a key of it: readAs)
-  if (!v || lock instanceof CoreError || readAs(inner, ws, lock, v, me(lock, signerOf(inner))) === null) return { vault: id, name: "", open: false, items: [] };
+  if (!v || lock instanceof CoreError || readAs(inner, ws, lock, v, me(lock, signerShown(inner))) === null) return { vault: id, name: "", open: false, items: [] };
   const key = unlocked(inner, v) ? mem(inner).keys.get(keyOf(v))!.key : null;
   const list = Object.values(items(inner, ws, id))
     .filter((i) => !i.deleted)
@@ -2509,6 +2580,8 @@ class Vaults {
     return Effect.gen(function* () {
       const inner = self.#inner;
       if (!able(inner)) return yield* fail("vault_unavailable", t("core-misc.vault.unavailable"));
+      // (pressed at start: by the lock as read from the device, not one naming none of the person's devices yet)
+      yield* lockRead(inner, self.ws);
       const lock = lockOf(inner, self.ws);
       if (lock instanceof CoreError) return yield* Effect.fail(lock);
       const signer = yield* Signer.load(inner.host);
@@ -2565,7 +2638,8 @@ class Vaults {
   #boxKey(reason: string): Effect.Effect<Uint8Array, CoreError> {
     const inner = this.#inner;
     return Effect.gen(function* () {
-      const kept = yield* Effect.orElseSucceed(inner.host.storageGet(BOX_PUB), () => null);
+      // (one that could not be read is not none: taken for the dead one's, a key renewed would be said made anew and not be)
+      const kept = yield* Effect.mapError(inner.host.storageGet(BOX_PUB), asCoreError);
       const got = yield* Effect.result(inner.host.secureGet!(BOX_KEY, { user: true, reason }));
       if (got._tag === "Failure") {
         if (got.failure.message !== "key_invalidated") return yield* Effect.fail(CoreError.refused(got.failure, "vault_refused"));
@@ -3042,6 +3116,7 @@ class Vaults {
     const self = this;
     return Effect.gen(function* () {
       const inner = self.#inner;
+      yield* lockRead(inner, self.ws);
       // No safe mode and their own lock begun nowhere (`personalNone`): begun here first, this device on it with its
       // signer (made now where it has none, `begin`), the person asked once. Where reading it found it begun on another
       // device after all, nothing is begun: the page then offers to be approved there.
@@ -3679,7 +3754,11 @@ class Vaults {
     return Effect.gen(function* () {
       const inner = self.#inner;
       const { signer } = yield* self.#ready();
-      const myBox = mem(inner).box;
+      // (the lock of each workspace it may browse read from the device first: unread, it names none of their devices)
+      for (const [otherWs] of inner.workspaces.owned()) if (otherWs !== self.ws) yield* lockRead(inner, otherWs);
+      // (read now, not as shown: the candidates shown may be by the one an earlier run read, `boxShown`)
+      const kept = yield* Effect.orElseSucceed(inner.host.storageGet(BOX_PUB), () => null);
+      const myBox = kept ? new TextDecoder().decode(kept) : null;
       const wanted = selected !== undefined
         ? selected
         : browseCandidates(inner, self.ws).workspaces.flatMap((w) => w.items.map((it) => ({ workspace: w.id, vault: it.vault, item: it.item })));
@@ -3747,6 +3826,8 @@ class Vaults {
       const wsA = r.cross!.workspace;
       if (wsA === self.ws) return yield* fail("vault_invalid", t("core-misc.vault.unknown"));
       const { signer } = yield* self.#ready();
+      // (the source workspace's lock read from the device first, as this one's in `#ready`)
+      yield* lockRead(inner, wsA);
       const otherOwner = inner.workspaces.owner(wsA);
       if (otherOwner === null) return yield* fail("vault_not_owner", t("core-misc.vault.notOwner"));
       const lockA = lockOf(inner, wsA);
@@ -3985,6 +4066,7 @@ class Vaults {
       }
       // (a secret to keep, no safe mode, their own lock begun nowhere yet: turned down with this app's signer, which the
       // station takes from whoever it is kept for, station/src/vault/secrets.ts `deny`; no vault turned on for it)
+      yield* lockRead(self.#inner, self.ws);
       const signer = (asked.r.save !== undefined || asked.r.browse !== undefined || asked.r.cross !== undefined) && able(self.#inner) && personalNone(self.#inner, self.ws) ? yield* Signer.make(self.#inner.host) : (yield* self.#ready()).signer;
       const { r, station } = yield* self.#request(id);
       const deny: Deny = sign({ v: 1 as const, ws: self.ws, request: r.id, at: nowS(self.#inner) }, TAG.deny, signer);

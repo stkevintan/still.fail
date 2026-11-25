@@ -12,23 +12,31 @@ on:
       - "station/mb/src/cc/**"
       - "station/mb/src/counts/**"
       - "station/mb/src/footprint/**"
+      - "station/mb/src/history/**"
       - "station/mb/src/host/**"
       - "station/mb/src/jobs/**"
+      - "station/mb/src/jscase/**"
       - "station/mb/src/jsjson/**"
       - "station/mb/src/legacy/**"
       - "station/mb/src/letters/**"
+      - "station/mb/src/locate/**"
       - "station/mb/src/lookups/**"
       - "station/mb/src/marks/**"
       - "station/mb/src/memory/**"
+      - "station/mb/src/nodepath/**"
       - "station/mb/src/outflow/**"
       - "station/mb/src/packed/**"
       - "station/mb/src/posts/**"
       - "station/mb/src/reader/main.mbt"
       - "station/mb/src/readops/chatparts.mbt"
+      - "station/mb/src/readops/machine.mbt"
       - "station/mb/src/readops/pages.mbt"
       - "station/mb/src/readops/shared_sql.mbt"
+      - "station/mb/src/readops/usage.mbt"
       - "station/mb/src/recent/**"
+      - "station/mb/src/replica/**"
       - "station/mb/src/said/**"
+      - "station/mb/src/search/**"
       - "station/mb/src/searchscope/**"
       - "station/mb/src/sessions/**"
       - "station/mb/src/signin/**"
@@ -36,34 +44,33 @@ on:
       - "station/mb/src/turns/**"
       - "station/mb/src/upjobs/**"
       - "station/mb/src/usage/**"
+      - "station/mb/src/usagecount/**"
       - "station/mb/src/usagefill/**"
       - "station/mb/src/vaultuses/**"
       - "station/mb/src/widgets/**"
       - "station/mb/src/wire/**"
       - "station/src/jobs/process-jobs-builder.ts"
+      - "station/src/main.ts"
+      - "station/src/move/live.ts"
+      - "station/src/move/station.ts"
       - "station/src/ops/paths.ts"
-      - "station/src/read/archive-mark-builder.ts"
-      - "station/src/read/card-posts-builder.ts"
-      - "station/src/read/cc-index-builder.ts"
-      - "station/src/read/chat-index-builder.ts"
-      - "station/src/read/mb-reader.ts"
-      - "station/src/read/pool.ts"
-      - "station/src/read/reader-select.ts"
-      - "station/src/read/recent-chat-builder.ts"
-      - "station/src/read/requested-builder.ts"
-      - "station/src/read/said-builder.ts"
-      - "station/src/read/session-bindings-builder.ts"
-      - "station/src/read/session-list-builder.ts"
-      - "station/src/read/session-up-jobs-builder.ts"
-      - "station/src/read/turn-builder.ts"
-      - "station/src/read/widget-sources-builder.ts"
-      - "station/src/read/workspace-up-jobs-builder.ts"
+      - "station/src/read/**"
+      - "station/src/replica/carry.ts"
+      - "station/src/replica/handover.ts"
+      - "station/src/replica/module.ts"
+      - "station/src/replica/restore.ts"
+      - "station/src/replica/retire.ts"
+      - "station/src/replica/runner.ts"
       - "station/src/rig/main.ts"
+      - "station/src/search/module.ts"
       - "station/src/search/scope-builder.ts"
+      - "station/src/search/search.ts"
       - "station/src/services.ts"
       - "station/src/sessions/agents.ts"
       - "station/src/sessions/footprint.ts"
       - "station/src/sessions/hub.ts"
+      - "station/src/sessions/live-location-protocol.ts"
+      - "station/src/sessions/live-locator.ts"
       - "station/src/sessions/packed-mb.ts"
       - "station/src/sessions/post-block-builder.ts"
       - "station/src/sessions/sandbox-name-builder.ts"
@@ -97,6 +104,8 @@ on:
       - "station/src/store/usage-compact.ts"
       - "station/src/store/usage-retire.ts"
       - "station/src/store/widget-sources.ts"
+      - "station/src/usage/counter-mb.ts"
+      - "station/src/usage/counter.ts"
       - "station/src/usage/minute-reader.ts"
       - "station/src/usage/module.ts"
       - "station/src/vault/member-index.ts"
@@ -113,10 +122,14 @@ on:
       - "station/test/builders-core-pion-switch.test.ts"
       - "station/test/builders-index-pion-switch.test.ts"
       - "station/test/builders-legacy-pion-switch.test.ts"
+      - "station/test/builders-locate-pion-switch.test.ts"
       - "station/test/builders-recent-pion-switch.test.ts"
       - "station/test/builders-requested-pion-switch.test.ts"
+      - "station/test/builders-search-pion-switch.test.ts"
       - "station/test/builders-stateful-pion-switch.test.ts"
+      - "station/test/builders-usage-pion-switch.test.ts"
       - "station/test/builders-vault-pion-switch.test.ts"
+      - "station/test/carry-reference.ts"
       - "station/test/footprint-mounts.ts"
       - "station/test/footprint-pion-switch.test.ts"
       - "station/test/footprint-reference.ts"
@@ -125,20 +138,27 @@ on:
       - "station/test/mb-card-posts.test.ts"
       - "station/test/mb-cc-index.test.ts"
       - "station/test/mb-footprint.test.ts"
+      - "station/test/mb-idle-programs.test.ts"
       - "station/test/mb-legacy-ids.test.ts"
       - "station/test/mb-legacy-rest.test.ts"
       - "station/test/mb-legacy.test.ts"
+      - "station/test/mb-live-locator.test.ts"
       - "station/test/mb-lookups.test.ts"
       - "station/test/mb-memory-merge.test.ts"
       - "station/test/mb-outflow-chats.test.ts"
       - "station/test/mb-packed.test.ts"
+      - "station/test/mb-replica-carry.test.ts"
+      - "station/test/reference/transcript-paths.ts"
+      - "station/test/workers/live-locator-worker.ts"
       - "station/test/mb-page-letters.test.ts"
       - "station/test/mb-post-blocks.test.ts"
       - "station/test/mb-process-jobs.test.ts"
       - "station/test/mb-recent-chat.test.ts"
       - "station/test/mb-said.test.ts"
       - "station/test/mb-sandbox-names.test.ts"
+      - "station/test/mb-search-history.test.ts"
       - "station/test/mb-search-scope.test.ts"
+      - "station/test/mb-search.test.ts"
       - "station/test/mb-session-backfill.test.ts"
       - "station/test/mb-session-bindings.test.ts"
       - "station/test/mb-session-counts.test.ts"
@@ -148,6 +168,7 @@ on:
       - "station/test/mb-signin-save.test.ts"
       - "station/test/mb-turn-counts.test.ts"
       - "station/test/mb-usage-check.test.ts"
+      - "station/test/mb-usage-counter.test.ts"
       - "station/test/mb-usage-retire.test.ts"
       - "station/test/mb-vault-uses.test.ts"
       - "station/test/mb-widget-sources.test.ts"
@@ -160,8 +181,12 @@ on:
       - "station/test/reader-contract-memory.test.ts"
       - "station/test/reader-contract-packed.test.ts"
       - "station/test/reader-contract-select.test.ts"
+      - "station/test/usage-counter-reference.ts"
+      - "station/test/usage-counter.test.ts"
+      - "station/test/usage-timing-bounded.test.ts"
       - "station/test/vault-use-ambiguity.test.ts"
       - "station/test/w5-foundation.test.ts"
+      - "station/test/w6-selection-coldstart.test.ts"
       - "station/test/reference/backfill/archive-last.ts"
       - "station/test/reference/backfill/archive-mark-index.ts"
       - "station/test/reference/backfill/archive-policy-index.ts"
@@ -193,6 +218,8 @@ on:
       - "station/test/reference/memory-merge.ts"
       - "station/test/reference/packed.ts"
       - "station/test/reference/search-scope-prepare.ts"
+      - "station/test/reference/search-sources.ts"
+      - "station/test/reference/search-worker.ts"
       - "station/test/reference/share-skills.ts"
       - "station/test/reference/turn-state.ts"
       - "station/test/reference/workspace-archive.ts"
@@ -433,7 +460,7 @@ jobs:
 
       - if: steps.reader.outputs.missing == 'true'
         uses: ./.github/actions/mbui-moonbit
-        with: { tools: 'mbc', farview: 'false' }
+        with: { tools: 'mbc' }
 
       - name: Zig 0.16.0 for the reader (UBSan off at -O0, as natives)
         if: steps.reader.outputs.missing == 'true'
@@ -677,10 +704,171 @@ jobs:
             station/test/builders-legacy-pion-switch.test.ts \
             station/test/builders-recent-pion-switch.test.ts
 
+  gate-w6-locate-search:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: build-linux
+    if: needs.build-linux.result == 'success'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup
+
+      - name: Download and verify Linux binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/download-artifact.sh "$GITHUB_RUN_ID" pion-station-linux-bins "$RUNNER_TEMP/bins"
+          (cd "$RUNNER_TEMP/bins" && sha256sum -c SHA256SUMS)
+          chmod +x "$RUNNER_TEMP/bins/stillfail-pion-linux-x64" "$RUNNER_TEMP/bins/stillfail-reader-linux-x64"
+          test "$(realpath "$RUNNER_TEMP/bins/stillfail-pion-linux-x64")" != "$(realpath "$RUNNER_TEMP/bins/stillfail-reader-linux-x64")"
+
+      - name: Run Wave 6 live-locator and search gates (Pion forced + idle subsets + dual-engine switches)
+        run: |
+          set -euo pipefail
+          BIN_PION="$RUNNER_TEMP/bins/stillfail-pion-linux-x64"
+          BIN_MB="$RUNNER_TEMP/bins/stillfail-reader-linux-x64"
+          pnpm --dir station install --frozen-lockfile --prefer-offline
+
+          echo "BIN_PION=$BIN_PION"
+          "$BIN_PION" --version
+
+          LOC_OUT="$(STILLFAIL_MB_READER="$BIN_PION" node --test --test-reporter=tap station/test/mb-live-locator.test.ts)"
+          printf '%s\n' "$LOC_OUT"
+          printf '%s\n' "$LOC_OUT" | grep -qE '^# tests [1-9][0-9]*$'
+          printf '%s\n' "$LOC_OUT" | grep -qE '^# skipped 0$'
+
+          # Run ONLY the live-locator and search idle lifecycle cases from mb-idle-programs.test.ts (never feed --data to Pion)
+          IDLE_OUT="$(STILLFAIL_MB_READER="$BIN_PION" node --test --test-reporter=tap --test-name-pattern "live locator's program goes when trimmed|a search starts its program when asked" station/test/mb-idle-programs.test.ts)"
+          printf '%s\n' "$IDLE_OUT"
+          printf '%s\n' "$IDLE_OUT" | grep -qE '^# tests ([2-9]|[1-9][0-9]+)$'
+          printf '%s\n' "$IDLE_OUT" | grep -qE '^# skipped 0$'
+
+          SRCH_OUT="$(STILLFAIL_MB_READER="$BIN_PION" node --test --test-reporter=tap station/test/mb-search.test.ts station/test/mb-search-history.test.ts)"
+          printf '%s\n' "$SRCH_OUT"
+          printf '%s\n' "$SRCH_OUT" | grep -qE '^# tests ([2-9]|[1-9][0-9]+)$'
+          printf '%s\n' "$SRCH_OUT" | grep -qE '^# skipped 0$'
+
+          SW_LOC_OUT="$(STILLFAIL_MB_READER="$BIN_MB" STILLFAIL_PION_READER="$BIN_PION" STILLFAIL_REQUIRE_DUAL_READER=1 \
+            node --test --test-reporter=tap station/test/builders-locate-pion-switch.test.ts)"
+          printf '%s\n' "$SW_LOC_OUT"
+          printf '%s\n' "$SW_LOC_OUT" | grep -qE '^# tests [1-9][0-9]*$'
+          printf '%s\n' "$SW_LOC_OUT" | grep -qE '^# skipped 0$'
+
+          SW_SRCH_OUT="$(STILLFAIL_MB_READER="$BIN_MB" STILLFAIL_PION_READER="$BIN_PION" STILLFAIL_REQUIRE_DUAL_READER=1 \
+            node --test --test-reporter=tap station/test/builders-search-pion-switch.test.ts)"
+          printf '%s\n' "$SW_SRCH_OUT"
+          printf '%s\n' "$SW_SRCH_OUT" | grep -qE '^# tests [1-9][0-9]*$'
+          printf '%s\n' "$SW_SRCH_OUT" | grep -qE '^# skipped 0$'
+
+  gate-w6-usage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: build-linux
+    if: needs.build-linux.result == 'success'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup
+
+      - name: Download and verify Linux binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/download-artifact.sh "$GITHUB_RUN_ID" pion-station-linux-bins "$RUNNER_TEMP/bins"
+          (cd "$RUNNER_TEMP/bins" && sha256sum -c SHA256SUMS)
+          chmod +x "$RUNNER_TEMP/bins/stillfail-pion-linux-x64" "$RUNNER_TEMP/bins/stillfail-reader-linux-x64"
+          test "$(realpath "$RUNNER_TEMP/bins/stillfail-pion-linux-x64")" != "$(realpath "$RUNNER_TEMP/bins/stillfail-reader-linux-x64")"
+
+      - name: Run Wave 6 usage-counter and cold-start/hot-reload selection gates
+        run: |
+          set -euo pipefail
+          BIN_PION="$RUNNER_TEMP/bins/stillfail-pion-linux-x64"
+          BIN_MB="$RUNNER_TEMP/bins/stillfail-reader-linux-x64"
+          pnpm --dir station install --frozen-lockfile --prefer-offline
+
+          echo "BIN_PION=$BIN_PION"
+          "$BIN_PION" --version
+
+          check_tap_strict() {
+            local label="$1"
+            local out="$2"
+            printf '%s\n' "$out"
+            local tests_n pass_n
+            tests_n="$(printf '%s\n' "$out" | sed -n 's/^# tests \([0-9][0-9]*\)$/\1/p' | tail -n 1)"
+            pass_n="$(printf '%s\n' "$out" | sed -n 's/^# pass \([0-9][0-9]*\)$/\1/p' | tail -n 1)"
+            if ! printf '%s\n' "$tests_n" | grep -qE '^[1-9][0-9]*$'; then
+              echo "FAIL: $label reported invalid test count '$tests_n'" >&2
+              exit 1
+            fi
+            if [ "$pass_n" != "$tests_n" ]; then
+              echo "FAIL: $label pass ($pass_n) != tests ($tests_n)" >&2
+              exit 1
+            fi
+            printf '%s\n' "$out" | grep -qE '^# fail 0$'
+            printf '%s\n' "$out" | grep -qE '^# skipped 0$'
+          }
+
+          COLD_OUT="$(STILLFAIL_MB_READER="$BIN_MB" STILLFAIL_PION_READER="$BIN_PION" STILLFAIL_REQUIRE_DUAL_READER=1 \
+            node --test --test-reporter=tap station/test/w6-selection-coldstart.test.ts)"
+          check_tap_strict "w6-selection-coldstart.test.ts" "$COLD_OUT"
+
+          MB_USAGE_OUT="$(STILLFAIL_MB_READER="$BIN_PION" \
+            node --test --test-reporter=tap station/test/mb-usage-counter.test.ts)"
+          check_tap_strict "mb-usage-counter.test.ts" "$MB_USAGE_OUT"
+
+          TIMING_OUT="$(STILLFAIL_MB_READER="$BIN_PION" \
+            node --test --test-reporter=tap station/test/usage-timing-bounded.test.ts)"
+          check_tap_strict "usage-timing-bounded.test.ts" "$TIMING_OUT"
+
+          # Deterministic subset of usage-counter.test.ts: exclude the local-snapshot test via --test-skip-pattern
+          # (in Node 24.x, excluded tests are not counted in `# skipped`, enforcing strict `# skipped 0`).
+          USAGE_OUT="$(STILLFAIL_MB_READER="$BIN_PION" \
+            node --test --test-reporter=tap --test-skip-pattern="^on a real station's copy" station/test/usage-counter.test.ts)"
+          check_tap_strict "usage-counter.test.ts" "$USAGE_OUT"
+          printf '%s\n' "$USAGE_OUT" | grep -qE '^# tests 46$'
+          printf '%s\n' "$USAGE_OUT" | grep -qE '^# pass 46$'
+
+          SW_OUT="$(STILLFAIL_MB_READER="$BIN_MB" STILLFAIL_PION_READER="$BIN_PION" STILLFAIL_REQUIRE_DUAL_READER=1 \
+            node --test --test-reporter=tap station/test/builders-usage-pion-switch.test.ts)"
+          check_tap_strict "builders-usage-pion-switch.test.ts" "$SW_OUT"
+
+  gate-w6-replica:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: build-linux
+    if: needs.build-linux.result == 'success'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup
+
+      - name: Download and verify Linux binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/download-artifact.sh "$GITHUB_RUN_ID" pion-station-linux-bins "$RUNNER_TEMP/bins"
+          (cd "$RUNNER_TEMP/bins" && sha256sum -c SHA256SUMS)
+          chmod +x "$RUNNER_TEMP/bins/stillfail-pion-linux-x64" "$RUNNER_TEMP/bins/stillfail-reader-linux-x64"
+          test "$(realpath "$RUNNER_TEMP/bins/stillfail-pion-linux-x64")" != "$(realpath "$RUNNER_TEMP/bins/stillfail-reader-linux-x64")"
+
+      - name: Verify Wave 6 replica baseline placeholder (W6-B will take over)
+        run: |
+          set -euo pipefail
+          BIN_PION="$RUNNER_TEMP/bins/stillfail-pion-linux-x64"
+          BIN_MB="$RUNNER_TEMP/bins/stillfail-reader-linux-x64"
+          pnpm --dir station install --frozen-lockfile --prefer-offline
+
+          "$BIN_PION" --version | grep -q 'live-locator'
+          STILLFAIL_MB_READER="$BIN_MB" node --test station/test/mb-replica-carry.test.ts
+
   verify-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: [c-shims, pion-unit, build-linux, gate-workers, gate-sqlite-w14, gate-sqlite-w5]
+    needs: [c-shims, pion-unit, build-linux, gate-workers, gate-sqlite-w14, gate-sqlite-w5, gate-w6-locate-search, gate-w6-usage, gate-w6-replica]
     if: always()
     steps:
       - name: Require all upstream jobs to succeed
@@ -691,10 +879,13 @@ jobs:
           R_WORKERS: ${{ needs.gate-workers.result }}
           R_W14: ${{ needs.gate-sqlite-w14.result }}
           R_W5: ${{ needs.gate-sqlite-w5.result }}
+          R_W6_LOCATE_SEARCH: ${{ needs.gate-w6-locate-search.result }}
+          R_W6_USAGE: ${{ needs.gate-w6-usage.result }}
+          R_W6_REPLICA: ${{ needs.gate-w6-replica.result }}
         run: |
           set -euo pipefail
-          echo "c-shims=$R_CSHIMS pion-unit=$R_UNIT build-linux=$R_BUILD gate-workers=$R_WORKERS gate-sqlite-w14=$R_W14 gate-sqlite-w5=$R_W5"
-          for r in "$R_CSHIMS" "$R_UNIT" "$R_BUILD" "$R_WORKERS" "$R_W14" "$R_W5"; do
+          echo "c-shims=$R_CSHIMS pion-unit=$R_UNIT build-linux=$R_BUILD gate-workers=$R_WORKERS gate-sqlite-w14=$R_W14 gate-sqlite-w5=$R_W5 gate-w6-locate-search=$R_W6_LOCATE_SEARCH gate-w6-usage=$R_W6_USAGE gate-w6-replica=$R_W6_REPLICA"
+          for r in "$R_CSHIMS" "$R_UNIT" "$R_BUILD" "$R_WORKERS" "$R_W14" "$R_W5" "$R_W6_LOCATE_SEARCH" "$R_W6_USAGE" "$R_W6_REPLICA"; do
             if [ "$r" != "success" ]; then
               echo "FAIL: upstream job result is '$r' (expected 'success')" >&2
               exit 1

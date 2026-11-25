@@ -22,6 +22,7 @@ pub fn value_slider_node(
   format? : (Int) -> String = fn(n) { n.to_string() },
   bubble? : Bool = true,
   tips? : TipLayer,
+  on_commit? : (Double) -> Unit,
   loc~ : SourceLoc,
 ) -> @view.View {
   let dd = @glass.DampedDrag::new(
@@ -58,6 +59,7 @@ pub fn value_slider_node(
         value_text=fn(x) { format(x.round().to_int()) },
         flush=true,
         drag=dd,
+        on_commit?,
         loc~,
       )
       sl.grow(Is(1.0)) |> ignore

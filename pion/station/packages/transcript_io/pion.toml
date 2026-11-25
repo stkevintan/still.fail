@@ -1,0 +1,10 @@
+[package]
+name = "transcript_io"
+version = "0.1.0"
+
+[dependencies]
+base_codec = { workspace = true }
+builders_core = { workspace = true }
+crypto = { workspace = true }
+js_json = { workspace = true }
+nodepath = { workspace = true }

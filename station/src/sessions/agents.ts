@@ -734,7 +734,7 @@ export const AgentsLive = (control: Control) =>
       // And what a watched transcript gains as it is written (mb/src/reader/live.mbt `read_soon`): parsed by them, not here.
       hub.live.tailRead = async (runtime, state) => JSON.parse(await readers.read("tailRead", { runtime, state }, "zh", { told: true }));
       // Resolving a live session's older transcript files may take a while; keep it off the station's thread.
-      const liveLocator = new LiveLocator(data, (key) => store.getSession(key), () => hub.config().profiles);
+      const liveLocator = new LiveLocator(data, (key) => store.getSession(key), () => hub.config().profiles, undefined, undefined, readerConfig);
       hub.live.locateAsync = (key, signal) => liveLocator.locate(key, signal);
       readers.onTrim(() => liveLocator.trimIdle());
       yield* Effect.addFinalizer(() => Effect.promise(() => liveLocator.close()));

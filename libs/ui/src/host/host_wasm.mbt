@@ -129,6 +129,20 @@ fn ffi_local_font_families() -> String {
   @wasmrt.take_string(mbw_mb_host_local_font_families())
 }
 
+///|
+fn ffi_face_set_ligatures(face : Int, on : Int) = "mbhost" "mb_host_face_set_ligatures"
+
+///|
+fn ffi_set_host_autospace(on : Int) = "mbhost" "mb_host_set_host_autospace"
+
+///|
+fn mbw_mb_host_local_font_info() -> Int = "mbhost" "mb_host_local_font_info"
+
+///|
+fn ffi_local_font_info() -> String {
+  @wasmrt.take_string(mbw_mb_host_local_font_info())
+}
+
 fn ffi_atlas_generation() -> Int = "mbhost" "mb_host_atlas_generation"
 
 fn mbw_mb_host_present(buf : Int, count : Int, r : Double, g : Double, b : Double) = "mbhost" "mb_host_present"
@@ -927,6 +941,21 @@ fn face_add_family(face : Int, family : String) -> Bool {
 ///|
 fn local_font_families() -> String {
   ffi_local_font_families()
+}
+
+///|
+fn face_set_ligatures(face : Int, on : Bool) -> Unit {
+  ffi_face_set_ligatures(face, if on { 1 } else { 0 })
+}
+
+///|
+fn set_host_autospace(on : Bool) -> Unit {
+  ffi_set_host_autospace(if on { 1 } else { 0 })
+}
+
+///|
+fn local_font_info() -> String {
+  ffi_local_font_info()
 }
 
 ///|

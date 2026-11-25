@@ -26,7 +26,7 @@ pub let accent : @ui.TextStyle
 pub fn accent_key() -> String
 
 #callsite(autofill(loc))
-pub fn accent_pick_node(@view.View, () -> Array[String], () -> String, () -> String, () -> String, (String) -> Unit, preview? : (String?) -> Unit, loc~ : SourceLoc) -> Unit
+pub fn accent_pick_node(@view.View, () -> Array[String], () -> String, () -> String, () -> String, () -> String, (String) -> Unit, preview? : (String?) -> Unit, loc~ : SourceLoc) -> Unit
 
 pub let accents : Array[AccentTone]
 
@@ -185,6 +185,9 @@ pub fn band_row_h() -> Double
 
 #callsite(autofill(loc))
 pub fn band_row_node(@view.View, () -> Bool, () -> String, () -> Unit, ListAt, (@view.View) -> Unit, loc~ : SourceLoc) -> Unit
+
+#callsite(autofill(loc))
+pub fn bar_actions_pill_node(@view.View, () -> Bool, (@view.View) -> Unit, count? : () -> Int32, loc~ : SourceLoc) -> Unit
 
 pub let bar_field_least : Double
 
@@ -375,6 +378,9 @@ pub let chat_station_in : @ui.Space
 pub let chat_station_most : @ui.Len
 
 #callsite(autofill(loc))
+pub fn check_chip_node(@view.View, () -> String, () -> Bool, (Bool) -> Unit, (@view.View) -> Unit, disabled? : () -> Bool, loc~ : SourceLoc) -> @view.View
+
+#callsite(autofill(loc))
 pub fn check_groups_node(@view.View, () -> Array[CheckSection], (String) -> Bool, (String, Bool) -> Unit, () -> Bool, () -> Unit, CheckGroupsSaid, TipLayer, loc~ : SourceLoc) -> Unit
 
 #callsite(autofill(loc))
@@ -458,7 +464,7 @@ pub let code : @ui.TextStyle
 pub let code_big_size : @ui.TextSize
 
 #callsite(autofill(loc))
-pub fn code_block_node(@view.View, () -> String, () -> String, () -> String?, face? : () -> Int32?, command? : Bool, keys_always? : Bool, loc~ : SourceLoc) -> Unit
+pub fn code_block_node(@view.View, () -> String, () -> String, () -> String?, face? : () -> Int32?, scale? : () -> Double, code_cjk? : () -> @view.CjkOverride?, command? : Bool, keys_always? : Bool, loc~ : SourceLoc) -> Unit
 
 #callsite(autofill(loc))
 pub fn code_display_node(@view.View, () -> String, groups? : Array[Int32], loc~ : SourceLoc) -> @view.View
@@ -1433,7 +1439,7 @@ pub fn mark_yellow() -> Int64
 pub fn markdown_found_count(String, @json.Json?, Array[String]) -> Int32
 
 #callsite(autofill(loc))
-pub fn markdown_node(@view.View, () -> String, tree? : () -> @json.Json?, size? : () -> Double, line? : () -> Double, apart? : Bool, ink? : () -> Int64, document? : Bool, bleed? : () -> Double, copy? : Bool, fit_tables? : Bool, paths? : Bool, found? : () -> Array[String], found_at? : () -> Int32?, lit? : () -> (String, Int64), on_link? : (String) -> Unit, on_link_hold? : ((String, (Double, Double, Double, Double)) -> Unit)?, on_link_shown? : (@view.View, Array[(String, String, Int32)]) -> Unit, link_cards? : (TipLayer, (LinkOf) -> LinkCard?), one_line? : Bool, one_line_by? : () -> Bool, chat_title? : (String) -> String?, code? : (String) -> ((@view.View, () -> String) -> Unit)?, files? : (String) -> PlacedNode?, screens? : ScreensNode, piece? : MdPiece?, piece_by? : () -> MdPiece?, across_of? : (Int32) -> @view.Scroll, tracks_of? : (Int32) -> @view.TracksKept?, text_face? : () -> Int32?, code_face? : () -> Int32?, serif? : () -> Bool, nodes? : () -> Array[@json.Json], loc~ : SourceLoc) -> @view.View
+pub fn markdown_node(@view.View, () -> String, tree? : () -> @json.Json?, size? : () -> Double, line? : () -> Double, apart? : Bool, ink? : () -> Int64, document? : Bool, bleed? : () -> Double, copy? : Bool, fit_tables? : Bool, paths? : Bool, found? : () -> Array[String], found_at? : () -> Int32?, lit? : () -> (String, Int64), on_link? : (String) -> Unit, on_link_hold? : ((String, (Double, Double, Double, Double)) -> Unit)?, on_link_shown? : (@view.View, Array[(String, String, Int32)]) -> Unit, link_cards? : (TipLayer, (LinkOf) -> LinkCard?), one_line? : Bool, one_line_by? : () -> Bool, chat_title? : (String) -> String?, code? : (String) -> ((@view.View, () -> String) -> Unit)?, files? : (String) -> PlacedNode?, screens? : ScreensNode, piece? : MdPiece?, piece_by? : () -> MdPiece?, across_of? : (Int32) -> @view.Scroll, tracks_of? : (Int32) -> @view.TracksKept?, text_face? : () -> Int32?, code_face? : () -> Int32?, typography? : () -> MdTypography, serif? : () -> Bool, nodes? : () -> Array[@json.Json], loc~ : SourceLoc) -> @view.View
 
 pub fn markdown_piece_with(String, @json.Json?, Array[MdPiece], passage? : String, words? : Array[String], at? : Int32) -> Int32
 
@@ -1446,9 +1452,11 @@ pub fn marks_actions_node(@view.View, () -> MarksActionsSaid, () -> ViewerInk, @
 
 pub fn md_links_to(String, @json.Json?) -> Map[String, LinkTo]
 
-pub let md_lits : @view.Lent[() -> Array[(String, Int64)]]
+pub let md_lits : @view.Lent[() -> Array[(String, Int64, String?)]]
 
 pub fn md_node_at(@json.Json) -> Int32
+
+pub let md_typography_default : MdTypography
 
 pub fn media_bar_foot() -> Double
 
@@ -1575,6 +1583,9 @@ pub let named_actions : @ref.Ref[(() -> Unit)?]
 
 #callsite(autofill(loc))
 pub fn narrow_about_node(@view.View, () -> String, TipLayer, loc~ : SourceLoc) -> Unit
+
+#callsite(autofill(loc))
+pub fn narrow_bar_choice_node(@view.View, () -> Array[String], () -> Int32, (Int32) -> Unit, loc~ : SourceLoc) -> Unit
 
 #callsite(autofill(loc))
 pub fn narrow_card_node(@view.View, (@view.View) -> Unit, loc~ : SourceLoc) -> Unit
@@ -1772,7 +1783,7 @@ pub fn page_bar_node(@view.View, (@view.View) -> Unit, corners? : (Double, Doubl
 pub fn page_block(@view.View, (@view.View) -> Unit, loc~ : SourceLoc) -> Unit
 
 #callsite(autofill(loc))
-pub fn page_card_node(@view.View, (@view.View) -> Unit, footed? : Bool, layered? : Bool, layered_narrow? : Bool, loc~ : SourceLoc) -> Unit
+pub fn page_card_node(@view.View, (@view.View) -> Unit, footed? : Bool, layered? : Bool, layered_narrow? : Bool, glass? : Bool, loc~ : SourceLoc) -> Unit
 
 #callsite(autofill(loc))
 pub fn page_choice_node(@view.View, () -> Array[String], () -> Int32, (Int32) -> Unit, item_w? : Double, thumb? : SegThumb, loc~ : SourceLoc) -> Unit
@@ -1793,6 +1804,9 @@ pub fn page_foot_bar_node(@view.View, (@view.View) -> Unit, wrap_gap? : Double, 
 
 #callsite(autofill(loc))
 pub fn page_gutter_node(@view.View, (@view.View) -> Unit, loc~ : SourceLoc) -> Unit
+
+#callsite(autofill(loc))
+pub fn page_lane_node(@view.View, (() -> Double)?, (@view.View) -> Unit, loc~ : SourceLoc) -> Unit
 
 #callsite(autofill(loc))
 pub fn page_narrow_card_node(@view.View, (@view.View) -> Unit, loc~ : SourceLoc) -> Unit
@@ -1929,6 +1943,9 @@ pub fn panel_said_row_node(@view.View, () -> Array[@text.Run], () -> Unit, () ->
 
 pub fn panel_search_at_hand_node(@view.View) -> Unit
 
+#callsite(autofill(loc))
+pub fn panel_search_input_node(@view.View, @ui.Field, () -> String, edited? : (String) -> Unit, submitted? : (String) -> Unit, step? : (Int32) -> Bool, step_can? : () -> Bool, loc~ : SourceLoc) -> @view.View
+
 pub fn panel_sides_at_node(@view.View) -> Double
 
 pub fn panel_surface_decorate(@view.View, radius? : Double, solid? : () -> Int64, merge? : () -> Double, active? : () -> Bool, clips? : Bool) -> @view.View
@@ -1960,7 +1977,7 @@ pub let paragraph : @ui.TextStyle
 
 pub fn parts_reset() -> Unit
 
-pub fn passage_marks(Array[@text.Run], (String, Int64), starts? : Bool, ends? : Bool) -> Array[@view.RunsMark]
+pub fn passage_marks(Array[@text.Run], (String, Int64), starts? : Bool, ends? : Bool, before? : String) -> Array[@view.RunsMark]
 
 pub fn path_link(String, Int32?) -> String
 
@@ -2009,6 +2026,11 @@ pub let phone_max : @ui.Len
 pub let phone_row_in : @ui.Space
 
 pub fn pick(String, Array[Choice], String, (String) -> Unit, from~ : Beside, along? : @view.Along, side? : @view.Side, search? : Bool) -> Unit
+
+pub fn pick_bar_action(() -> String, icon? : String, ((Double, Double, Double, Double)) -> Unit) -> PickBarAction
+
+#callsite(autofill(loc))
+pub fn pick_bar_desk_node(@view.View, Array[PickBarAction], loc~ : SourceLoc) -> @view.View
 
 #callsite(autofill(loc))
 pub fn pick_bar_node(@view.View, Array[PickBarItem], compact? : Bool, loc~ : SourceLoc) -> @view.View
@@ -2223,13 +2245,17 @@ pub fn quote_card_node(@view.View, TipLayer, () -> String, () -> String, () -> S
 
 pub let quote_picture_corner : Double
 
-pub let quote_pop_h : @ui.Len
-
 pub let r_field : Double
 
 pub let r_menu : Double
 
 pub let radii : @ui.RadiusScale
+
+#callsite(autofill(loc))
+pub fn[K : Eq] radio_chip_group(@view.View, () -> String, () -> K, (K) -> Unit, (@view.View, @headless.RadioGroup[K]) -> Unit, disabled? : () -> Bool, loc~ : SourceLoc) -> @view.View
+
+#callsite(autofill(loc))
+pub fn[K : Eq] radio_chip_item(@headless.RadioGroup[K], @view.View, () -> K, () -> String, (@view.View) -> Unit, disabled? : () -> Bool, loc~ : SourceLoc) -> @view.View
 
 #callsite(autofill(loc))
 pub fn radio_rows_node(@view.View, () -> String, () -> Array[(String, String)], () -> String, (String) -> Unit, (@view.View, () -> String, RadioRow) -> Unit, gap? : Double, loc~ : SourceLoc) -> @view.View
@@ -2245,6 +2271,12 @@ pub fn rail_in_tape() -> Double
 pub let rail_say_max : @ui.Len
 
 pub let rail_w : @ui.Len
+
+pub let rainbow_accent_key : String
+
+pub fn rainbow_hue_now() -> Int32
+
+pub fn rainbow_hue_of_seed(Int64) -> Int32
 
 pub fn raised(Double, ambient? : Double, spot? : Double) -> Raised
 
@@ -2569,6 +2601,8 @@ pub fn set_dark(Bool?) -> Unit
 pub fn set_language(String?) -> Unit
 
 pub fn set_product(String) -> Unit
+
+pub fn set_rainbow_hue(Int32) -> Unit
 
 pub fn set_shortcuts((String) -> String) -> Unit
 
@@ -3081,7 +3115,7 @@ pub let value : @ui.TextStyle
 pub fn[T : Eq] value_kept(@view.View, () -> T) -> () -> T
 
 #callsite(autofill(loc))
-pub fn value_slider_node(@view.View, () -> String, () -> Double, (Double) -> Unit, min? : Double, max? : Double, step? : Double, disabled? : () -> Bool, format? : (Int32) -> String, bubble? : Bool, tips? : TipLayer, loc~ : SourceLoc) -> @view.View
+pub fn value_slider_node(@view.View, () -> String, () -> Double, (Double) -> Unit, min? : Double, max? : Double, step? : Double, disabled? : () -> Bool, format? : (Int32) -> String, bubble? : Bool, tips? : TipLayer, on_commit? : (Double) -> Unit, loc~ : SourceLoc) -> @view.View
 
 #callsite(autofill(loc))
 pub fn verify_ok_node(@view.View, () -> String, loc~ : SourceLoc) -> Unit
@@ -3869,6 +3903,16 @@ pub(all) struct MdPiece {
   last : Bool
 }
 
+#derive(Eq)
+pub(all) struct MdTypography {
+  prose_scale : Double
+  code_scale : Double
+  line_scale : Double
+  text_cjk : @view.CjkOverride?
+  code_cjk : @view.CjkOverride?
+}
+pub fn MdTypography::default() -> Self
+
 pub(all) struct MediaInk {
   text : Int64
   muted : Int64
@@ -4008,6 +4052,12 @@ pub(all) enum PanelTone {
   Accent
   Quiet
   Filled
+}
+
+pub struct PickBarAction {
+  label : () -> String
+  icon : String
+  press_at : ((Double, Double, Double, Double)) -> Unit
 }
 
 pub(all) struct PickBarItem {

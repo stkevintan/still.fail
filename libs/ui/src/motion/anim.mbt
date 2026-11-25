@@ -194,7 +194,7 @@ fn Anim::finish(self : Anim) -> Unit {
 /// When it is there (whole ms, as its time goes), asked at each frame's end while it moves: read only, the same
 /// whoever asks first. It goes from the moment it was told (between frames too: that moment, a frame asked for to
 /// show it), so its end is known as it is told.
-pub impl @ui.Moving for Anim with rest_at(self, now, frame) {
+fn Anim::rest_at(self : Anim, now : Double, frame : Int) -> Double {
   ignore(now)
   ignore(frame)
   if self.running && self.start >= 0.0 {
@@ -202,6 +202,12 @@ pub impl @ui.Moving for Anim with rest_at(self, now, frame) {
   } else {
     -1.0
   }
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn Anim::as_moving(self : Anim) -> @ui.Moving {
+  @ui.Moving::new(fn(now, frame) { self.rest_at(now, frame) })
 }
 
 ///|
@@ -361,10 +367,10 @@ pub fn Anim::animate(
     let what = if self.name == "" { "an Anim" } else { "Anim \"" + self.name + "\"" }
     self.told = what + " to \{target}, told at \{loc}"
     if c.in_frame() {
-      c.moving_as(self.id, self as &@ui.Moving, self.told, tell~)
+      c.moving_as(self.id, self.as_moving(), self.told, tell~)
     } else {
       // (told between frames: from the moment it was told, a frame asked for to show it)
-      ignore(c.set_out(self.id, self as &@ui.Moving, what=self.told))
+      ignore(c.set_out(self.id, self.as_moving(), what=self.told))
     }
     // (who it is for the performance record: its key and who told it, not where to)
     self.id.told_as(what, loc)

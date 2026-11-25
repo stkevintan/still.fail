@@ -834,14 +834,6 @@ fn stations_unread_net() -> @ui.Tester {
 }
 
 ///|
-/// The tops of the list's network lines laid out unseen (their 直连 keeping the room), down the list.
-fn unseen_lines(t : @ui.Tester) -> Array[Double] {
-  let tops = t.words().filter(fn(w) { w.0 == "直连" && w.5 == 0.0 }).map(fn(w) { w.2 })
-  tops.sort()
-  tops
-}
-
-///|
 /// The chip whose words are `words` and its ground's fill as drawn: the fill's width (0: none) and
 /// the chip's, the fill from the chip's left, as tall as it.
 fn chip_fill(t : @ui.Tester, words : String) -> (Double, Double) {
@@ -873,52 +865,54 @@ test "settings: a station's network not open yet (stationNet's null) waits as it
 }
 
 ///|
-test "settings: a station's network not open yet waits where its line goes (StationBody): its bones over the line's room, 10 under the load's boxes" {
+test "settings: a station's network not open yet waits at the end of its metric line as compact bones" {
   let t = stations_unread_net()
-  // Willow's: its low box (a chip high round its words), the line's room 10 under it
-  let (_, box_mid) = t.find("剩 5.8 G").unwrap()
-  let room = unseen_lines(t)[0]
-  assert_true((room - (box_mid + @sf.fill_chip_h / 2.0 + 10.0)).abs() < 0.5, msg="the line's room from \{room}, the box's middle \{box_mid}")
-  // its bones the line it keeps the room of (the same made-up one, unseen): a bar where each of its words starts, in
-  // that word's line
-  let unseen = t.words().filter(fn(w) { w.5 == 0.0 && w.2 >= room - 0.5 && w.2 < room + 38.0 && w.0 != " " })
+  // Willow's line 2: semantic meters on the left, compact network waiting bones flush right on the same line band
+  let (mem_x, mem_y, mem_w, mem_h) = t.rect_of("内存剩 5.8 G").unwrap()
+  assert_eq(t.bones_drawn(), 3)
   let line = @sf.theme().p.line >> 8
-  let bars = t.drawn_rects().filter(fn(r) { r.4 >> 8 == line && r.1 > box_mid && r.1 < room + 38.0 })
-  assert_eq(bars.length(), unseen.length())
+  let bars = t.drawn_rects().filter(fn(r) {
+    r.4 >> 8 == line && r.0 > mem_x + mem_w && r.1 >= mem_y - 2.0 && r.1 + r.3 <= mem_y + mem_h + 4.0
+  })
+  assert_eq(bars.length(), 2, msg="expected 2 compact network bone bars on line 2, got \{bars.length()}")
+  // Bars stay strictly to the right of the meters and inside the 390pt viewport
   for r in bars {
-    assert_true(
-      unseen.iter().any(fn(w) { (r.0 - w.1).abs() < 0.5 && r.1 > w.2 && r.1 + r.3 < w.2 + w.4 }),
-      msg="a bar at \{r.0}, \{r.1}",
-    )
+    assert_true(r.0 > mem_x + mem_w && r.0 + r.2 < 390.0, msg="bar out of place: \{r.0}, \{r.2}")
   }
 }
 
 ///|
-test "settings: an offline station's picture and line centred across its card's room (StationBody), not over the 10 above it" {
+test "settings: an offline station keeps the same 2-line structure and summary line under its name" {
   let t = stations_unread_net()
-  // Maple's room: its load's chip and 10 over its unseen line, the line's own
-  let line = t.words().filter(fn(w) { w.0 == "直连" && w.5 == 0.0 }).map(fn(w) { w.4 })[0]
-  let room = unseen_lines(t)[1] - @sf.fill_chip_h - 10.0
-  let middle = room + (@sf.fill_chip_h + 10.0 + line) / 2.0
-  let (_, said) = t.find("长时间未连接").unwrap()
-  assert_true((said - middle).abs() < 0.5, msg="the line's middle \{said}, the room's \{middle}")
+  let (_, y_willow, _, _) = t.rect_of("Willow").unwrap()
+  let (_, y_mem, _, _) = t.rect_of("内存剩 5.8 G").unwrap()
+  let (_, y_maple, _, _) = t.rect_of("Maple").unwrap()
+  let (_, y_off, _, _) = t.rect_of("离线 · 2 天前").unwrap()
+  let online_gap = y_mem - y_willow
+  let offline_gap = y_off - y_maple
+  assert_true(y_maple > y_mem, msg="Maple should sit below Willow's line 2")
+  assert_true(
+    (online_gap - offline_gap).abs() < 1.0,
+    msg="online line gap \{online_gap} vs offline line gap \{offline_gap}",
+  )
 }
 
 ///|
-test "settings: a station's card with its CPU, memory and disk all low shows each chip whole, never cut with an ellipsis" {
+test "settings: a station's row with its CPU, memory and disk all low keeps every shown warning whole, never cut with an ellipsis" {
   // (on a phone they were cut to CPU 空闲…, 内存剩 9.2 G, 磁盘剩 19…, 2026-11-06)
   for w in [390.0, 320.0] {
     let t = settings_tester("stations", shows="settings-stations-low")
     t.resize(w, 844.0)
     t.draw()
     let shown = t.words().filter(fn(x) { x.5 > 0.5 }).map(fn(x) { x.0 })
-    // in words where the line has the room for all three, else all by their figures: one way for all of them
-    // (a name run on into what is left, 内存剩 5.8 G: fill_chip's chip_joined)
-    let worded = ["空闲 8%", "内存剩 5.8 G", "磁盘剩 19.4 G"].iter().all(fn(x) { shown.contains(x) })
-    let figured = ["8%", "5.8G", "19.4G"].iter().all(fn(x) { shown.contains(x) })
-    assert_true(worded != figured, msg="\{w}: \{Repr(shown)}")
+    // At 390pt all three low-headroom warnings fit whole alongside latency; at 320pt lower-priority warnings drop cleanly
+    // instead of truncating with an ellipsis.
+    assert_true(shown.contains("CPU 空闲 8%"), msg="\{w}: \{Repr(shown)}")
+    assert_true(shown.contains("内存剩 5.8 G"), msg="\{w}: \{Repr(shown)}")
+    if w >= 390.0 {
+      assert_true(shown.contains("磁盘剩 19.4 G"), msg="\{w}: \{Repr(shown)}")
+    }
     assert_true(!shown.iter().any(fn(x) { x.contains("…") }), msg="\{w}: \{Repr(shown)}")
-    // (at 320 its summary beside its name is cut short, as it may be: none of the chips is)
     let chips = t.squeeze_faults().filter(fn(f) { ["空闲", "剩", "%", "G」"].iter().any(fn(x) { f.contains(x) }) })
     assert_eq(chips, [], msg="\{w}")
   }
@@ -926,7 +920,12 @@ test "settings: a station's card with its CPU, memory and disk all low shows eac
 
 ///|
 test "settings: a station's low box filled as far as is used (FillChip): 内存 18% left, 82% of it" {
-  let t = stations_unread_net()
+  // FillChip meter boxes live on the station peek card (station_peek.mbt); open from workspace so "剩 5.8 G"
+  // resolves uniquely to the peek card's FillChip rather than the list behind it.
+  let t = settings_tester("workspace")
+  @settings.open_station_peek("ws1/st1", from=Unanchored)
+  t.draw()
+  t.run_for(@ui.move_most_ms)
   let (fill, chip) = chip_fill(t, "剩 5.8 G")
   assert_true(chip > 0.0)
   assert_true((fill - chip * 0.82).abs() < 0.5, msg="the fill \{fill} of \{chip}")

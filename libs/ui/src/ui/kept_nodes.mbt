@@ -80,7 +80,7 @@ priv struct RowNodes {
   mut ok : Bool
   mut why : String
   /// what its build said of the frame: said.mbt's build lists; what it marked used this frame
-  said : Array[&SaidAgain]
+  said : Array[SaidAgain]
   marks : Array[Int]
   /// what it read of how lists stand (Ctx::list_info_as, read back)
   info : Array[(String, () -> Bool)]
@@ -1130,7 +1130,7 @@ fn Ctx::nodes_put_back(self : Ctx, rn : RowNodes, parent : Int) -> Int {
 /// What row or part `rn`'s build said of the frame, said again of its nodes where they are now.
 fn Ctx::nodes_said_again(self : Ctx, rn : RowNodes) -> Unit {
   let by = rn.base - rn.said_base
-  self.say_again(rn.said, { ..unmoved, by: by })
+  self.say_again(rn.said, unmoved)
   for f in rn.used {
     f()
   }

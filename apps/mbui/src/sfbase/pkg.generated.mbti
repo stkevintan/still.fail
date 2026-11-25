@@ -1228,8 +1228,6 @@ pub fn page_entry_read(Int32, Source, Page) -> Unit
 
 pub fn page_entry_source(Source, @view.View, Int32) -> Source
 
-pub fn page_faces() -> Array[Bytes]
-
 pub fn page_glass() -> @paint.Glass
 
 pub let page_js : String

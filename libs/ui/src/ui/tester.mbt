@@ -62,7 +62,7 @@ pub fn run_let_go() -> Unit {
 /// The host outside every Tester (the platform's where the program has mbui/host, none in a test's), kept as a Tester
 /// gives its fake where none was there before it: what answers between one run's Tester and the next's.
 // kept across runs: it is no run's
-let host_outside : Ref[&@hostapi.Host?] = Ref(None)
+let host_outside : Ref[@hostapi.Host?] = Ref(None)
 
 ///|
 /// The run before's fake host let go of where a run is begun before its Tester is made (an app's new_run): what is made
@@ -87,7 +87,7 @@ pub fn host_let_go() -> Unit {
 /// End this test run and restore the host that was current before it began. Release its window tree, bindings and the
 /// faces the run gave to its live host, so a later run starts with its own fonts. An older tester cannot close a newer
 /// one. A live host used here must be dedicated to the test: a face the run replaced on it cannot be restored.
-pub fn Tester::end_run(self : Tester, restore : &@hostapi.Host) -> Unit {
+pub fn Tester::end_run(self : Tester, restore : @hostapi.Host) -> Unit {
   match fake.val {
     Some(f) if physical_equal(f, self.fake) => {
       run_let_go()
@@ -175,6 +175,7 @@ fn reset_globals() -> Unit {
   text_cache.metrics.clear()
   glyphs_forget()
   measuring_origin_x.val = 0.0
+  measuring_origin_known.val = false
   halos_forget()
   halos.none = false
   halos.blurred = 0
@@ -636,6 +637,7 @@ fn tester_make(
     late_after: -1.0,
     late_frame: -1,
     present_ms: 0.0,
+    glyph_ms: 0.0,
     wall: tester_wall - time,
     scale,
     wants: false,
@@ -659,6 +661,9 @@ fn tester_make(
     app_said: Map([]),
     app_told: [],
     local_fonts: "",
+    local_fonts_info: "",
+    face_ligatures: {},
+    host_autospace: true,
     families_given: {},
     unreadable_fonts: [],
     mods: 0,
@@ -843,7 +848,7 @@ fn tester_make(
   fake.val = Some(f)
   wall_ahead.set(f.wall)
   // (what the app asks of its host directly, the fake's too: fake_host.mbt)
-  @hostapi.set_host(f)
+  @hostapi.set_host(f.as_host())
   reset_globals()
   // (each pass of a frame's build that kept rows built again keeping none and compared: tester_rows.mbt)
   pass_look.val = Some(rows_pass_looked)
@@ -1908,6 +1913,14 @@ pub fn Tester::set_app_said(self : Tester, name : String, said : String) -> Unit
 /// The font families installed here from now on, as a JSON array of their names (@ui.local_font_families); "" none.
 pub fn Tester::set_local_fonts(self : Tester, json : String) -> Unit {
   self.fake.local_fonts = json
+}
+
+///|
+/// Publish local font metadata JSON (@ui.local_font_info) and request a frame, simulating background scan completion.
+pub fn Tester::set_local_font_info(self : Tester, json : String) -> Unit {
+  self.fake.local_fonts_info = json
+  self.fake.wants = true
+  self.fake.paced = 0.0
 }
 
 ///|

@@ -23,6 +23,8 @@ fn kept_rich(runs : Array[Run]) -> Rich {
     max_lines: 0,
     faces: 0,
     shaped_in: 0,
+    cjk_override: None,
+    code_cjk_override: None,
   }
 }
 

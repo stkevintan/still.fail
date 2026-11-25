@@ -715,3 +715,62 @@ test "present contributor records present/host sub-part separately from frame no
   let j = told[0].json().stringify()
   assert_true(j.contains("\"part\":\"present/host\",\"ms\":60"), msg=j)
 }
+
+///|
+test "paint glyphs telemetry records exact cache-miss ms on full and paint-only frames, zero on all-hit, no bleed" {
+  let label = @signals.signal("")
+  let ink = @signals.signal(0xFF111111L)
+  let t = Tester::tree(fn(root) {
+    root.box(fn(b) {
+      b.words(By(fn() { label.get() })).ink(By(fn() { ink.get() })) |> ignore
+    })
+    |> ignore
+  })
+  let find_frame_notes = fn() -> Array[(String, Double)] {
+    let entries = journal()
+    let mut i = entries.length() - 1
+    while i >= 0 {
+      match entries[i] {
+        Work({ what: Frame(_), notes, .. }) => return notes
+        _ => ()
+      }
+      i -= 1
+    }
+    []
+  }
+  // 1. Full frame with 3 distinct glyph misses ("a", "b", "c") at 4.0 ms each => 12.0 ms.
+  t.fake.glyph_ms = 4.0
+  label.set("abc")
+  t.draw()
+  let n1 = find_frame_notes()
+  let pg1 = n1.filter(fn(p) { p.0 == "paint glyphs" })
+  assert_eq(pg1.length(), 1, msg="expected paint glyphs note on full frame")
+  assert_eq(journal_ms(pg1[0].1), 12.0)
+
+  // 2. All-hit frame (changing ink repaints the same already-cached glyphs): no "paint glyphs" note and no bleed.
+  t.clock_frame()
+  ink.set(0xFF222222L)
+  t.clock_frame()
+  let n2 = find_frame_notes()
+  let pg2 = n2.filter(fn(p) { p.0 == "paint glyphs" })
+  assert_eq(pg2.length(), 0, msg="expected no paint glyphs on all-hit frame")
+
+  // 3. Standalone repaint frame (`paint_frame`, alone=true) after evicting atlas: re-rasterizes 3 glyphs => 12.0 ms.
+  let alone_before = paints_alone.val
+  glyphs_forget()
+  ink.set(0xFF333333L)
+  t.clock_frame()
+  assert_eq(paints_alone.val - alone_before, 1, msg=t.built_why())
+  let n3 = find_frame_notes()
+  let pg3 = n3.filter(fn(p) { p.0 == "paint glyphs" })
+  assert_eq(pg3.length(), 1, msg="expected paint glyphs note on paint-only frame")
+  assert_eq(journal_ms(pg3[0].1), 12.0)
+
+  // 4. Subsequent frame with 2 new glyphs ("d", "e") => 8.0 ms (no bleed from previous 12.0 ms).
+  label.set("abcde")
+  t.draw()
+  let n4 = find_frame_notes()
+  let pg4 = n4.filter(fn(p) { p.0 == "paint glyphs" })
+  assert_eq(pg4.length(), 1, msg="expected paint glyphs note on incremental frame")
+  assert_eq(journal_ms(pg4[0].1), 8.0)
+}

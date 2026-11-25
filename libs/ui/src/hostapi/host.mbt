@@ -10,567 +10,305 @@
 // The methods without docs here are what this package's own wrappers ask (pick.mbt's pk_*, keep.mbt's kp_*…).
 
 ///|
-pub(open) trait Host {
-  set_window_zoom(Self, Double) -> Unit = _
-  set_window_key(Self, FuncRef[(Int, Int) -> Int]) -> Unit = _
-  wheel_kept(Self, Bool) -> Unit = _
-  window_setup(Self, Double, Double, Double, Double, Bool) -> Unit = _
-  window_inset(Self) -> Bool = _
-  window_buttons_down(Self, Double, Double) -> Unit = _
-  window_hold(Self) -> Unit = _
-  window_show(Self) -> Unit = _
-  full_screen(Self) -> Bool = _
-  set_full_screen(Self, Bool) -> Unit = _
-  window_corner(Self) -> Double = _
-  window_corner_at(Self, Int) -> Double = _
-  window_drag(Self) -> Unit = _
-  window_act(Self, Int) -> Unit = _
-  window_zoomed(Self) -> Bool = _
-  window_snap(Self, Double, Double, Double, Double) -> Unit = _
-  window_snap_state(Self) -> Int = _
-  window_opens(Self) -> Bool = _
-  window_open(Self, String) -> Bool = _
-  window_front(Self, String) -> Bool = _
-  windows_in_process(Self) -> Bool = _
-  window_open_id(Self, String) -> Int = _
-  window_front_id(Self, Int) -> Bool = _
-  window_close_id(Self, Int) -> Unit = _
-  window_current(Self) -> Int = _
-  set_cursor(Self, Int) -> Unit = _
-  set_badge(Self, Int) -> Unit = _
-  menu_setup(Self, String) -> Unit = _
-  app_said(Self, String) -> String = _
-  app_tell(Self, String, String) -> Unit = _
-  set_site_name(Self, String) -> Unit = _
-  mods_held(Self) -> Int = _
-  run(Self, String, FuncRef[(Double, Double, Double, Double) -> Unit], FuncRef[(Int, Double, Double, Int) -> Unit], FuncRef[(Double, Double, Double, Double, Int) -> Unit], FuncRef[(Int, Int) -> Unit], FuncRef[(Int, String, Int, Int) -> Unit]) -> Unit = _
-  now(Self) -> Double = _
-  wall_ms(Self) -> Double = _
-  clock_at_wall(Self, Double) -> Double = _
-  utc_offset_min(Self, Double) -> Int = _
-  event_time(Self) -> Double = _
-  event_finger(Self) -> Int = _
-  frame_late(Self) -> Double = _
-  platform(Self) -> Int = _
-  request_frame(Self) -> Unit = _
-  request_frame_on(Self) -> Unit = _
-  frames_paced(Self, Double) -> Unit = _
-  wake_after(Self, Double) -> Unit = _
-  font_metrics(Self, Double, Int, Int, FixedArray[Double]) -> Unit = _
-  shape(Self, String, Double, Int, Int, FixedArray[Double]) -> Int = _
-  text_key(Self, String, Double, Int, Int) -> Int = _
-  glyph(Self, Int, FixedArray[Double]) -> Unit = _
-  glyph_put(Self, Int, Int, Int) -> Unit = _
-  atlas_size(Self, Bool) -> Int = _
-  glyphs_ahead(Self, FixedArray[Int], Int) -> Unit = _
-  glyph_picture(Self, Int, FixedArray[Byte]) -> Bool = _
-  atlas_put(Self, Int, Int, Int, Int, FixedArray[Byte]) -> Bool = _
-  face_add(Self, Int, String, Int) -> Bool = _
-  face_add_bytes(Self, Int, Bytes, Int) -> Bool = _
-  face_clear(Self, Int) -> Unit = _
-  face_add_family(Self, Int, String) -> Bool = _
-  local_font_families(Self) -> String = _
-  atlas_generation(Self) -> Int = _
-  present(Self, FixedArray[Double], Int, Double, Double, Double) -> Unit = _
-  groups_here(Self) -> Bool = _
-  group_set(Self, Int, FixedArray[Double], FixedArray[Double], Int) -> Unit = _
-  group_drop(Self, Int) -> Unit = _
-  set_ime(Self, Bool, Double, Double, Double, Double, String, Int, Int) -> Unit = _
-  text_menu(Self, Bool, Double, Double, Double, Double, Int) -> Unit = _
-  text_menu_own(Self, String) -> Unit = _
-  edit_can(Self, Int) -> Unit = _
-  clipboard_set(Self, String) -> Unit = _
-  clipboard_set_html(Self, String, String) -> Unit = _
-  clipboard_set_secret(Self, String, Double) -> Unit = _
-  clipboard_secret_off(Self) -> Unit = _
-  clipboard_set_image(Self, Bytes) -> Unit = _
-  log(Self, String) -> Unit = _
-  bench_mode(Self) -> Int = _
-  set_outside(Self, FuncRef[(Int, Int, Int) -> Unit]) -> Bool = _
-  answers_by_frame(Self, Int) -> Bool = _
-  script_step(Self, String, String) -> String = _
-  rows_on_pixels(Self) -> Bool = _
-  keeps_sources(Self) -> Bool = _
-  lines_on_pixels(Self) -> Bool = _
-  frame_awaiting(Self, Int, String) -> Unit = _
-  own_clock(Self) -> Bool = _
-  reduce_motion(Self) -> Bool = _
-  keys_platform(Self) -> Int = _
-  exit(Self, Int) -> Unit = _
-  mem_bytes(Self) -> Double = _
-  set_back(Self, FuncRef[(Int, Double, Double, Int) -> Unit]) -> Unit = _
-  back_enabled(Self, Bool) -> Unit = _
-  reduce_transparency(Self) -> Bool = _
-  increase_contrast(Self) -> Bool = _
-  thermal_throttled(Self) -> Bool = _
-  gpu_ms(Self) -> Double = _
-  frames_dropped(Self) -> Int = _
-  cpu_ms(Self) -> Double = _
-  thread_cpu_ms(Self) -> Double = _
-  display_hz(Self) -> Double = _
-  env(Self, String) -> String = _
-  set_app_state(Self, FuncRef[(Int) -> Unit]) -> Unit = _
-  system_dark(Self) -> Bool = _
-  font_scale(Self) -> Double = _
-  native_pointing(Self) -> Int = _
-  pointing(Self) -> Int = _
-  keyboard(Self) -> Int = _
-  a11y_on(Self) -> Bool = _
-  a11y_tree(Self, String) -> Unit = _
-  set_dark(Self, Bool) -> Unit = _
-  set_sideways(Self, Bool) -> Unit = _
-  set_turnable(Self, Bool) -> Bool = _
-  share(Self, String, String, String, Bytes) -> Bool = _
-  perf_state(Self) -> Int = _
-  set_perf(Self, Bool) -> Unit = _
-  perf_line(Self, String) -> Unit = _
-  perf_where(Self) -> String = _
-  perf_size(Self) -> Double = _
-  perf_read(Self) -> Bytes = _
-  perf_open(Self, Bool) -> Bool = _
-  reveal_file(Self, String, Bool) -> Bool = _
-  shared_in(Self) -> String = _
-  shared_in_file(Self, Int) -> Bytes = _
-  app_version(Self) -> Int = _
-  update_fetch(Self, String, String, Double, String, Bool, String) -> Unit = _
-  update_apply(Self, String) -> Unit = _
-  update_state(Self) -> String = _
-  install_package(Self, String, Bytes) -> Unit = _
-  drive(Self, Int, String) -> Bool = _
-  image_load(Self, String, Int) -> Int = _
-  image_load_bytes(Self, Bytes, Int) -> Int = _
-  image_info(Self, Int, FixedArray[Double]) -> Int = _
-  image_free(Self, Int) -> Unit = _
-  image_pixels(Self, Int, FixedArray[Byte]) -> Bool = _
-  drawn_pixels(Self, Int, Int, Int, Int, FixedArray[Byte]) -> Bool = _
-  drawn_pixels_of(Self, FixedArray[Double], Int, Double, Double, Double, Double, Int, Int, FixedArray[Byte]) -> Bool = _
-  view_site_next(Self, Int) -> String = _
-  view_site_body(Self, Int, Int) -> Bytes = _
-  view_site_head(Self, Int, Int, Int, String) -> Unit = _
-  view_site_chunk(Self, Int, Int, Bytes) -> Unit = _
-  view_site_end(Self, Int, Int, String) -> Unit = _
-  view_site_state(Self, Int) -> String = _
-  view_site_load(Self, Int, String) -> Unit = _
-  view_tell(Self, Int, Int, String) -> Unit = _
-  view_open(Self, Int, String) -> Int = _
-  view_place(Self, Int, Double, Double, Double, Double, Double, Double, Double, Double, Double, Double, Double, Double, Bool) -> Unit = _
-  view_close(Self, Int) -> Unit = _
-  view_control(Self, Int, Int, Double) -> Unit = _
-  view_info(Self, Int, FixedArray[Double]) -> Int = _
-  view_read_next(Self, Int, FixedArray[Double]) -> Int = _
-  view_read_answer(Self, Int, Int, Bytes, Double, Bool) -> Unit = _
-  pdf_open(Self, Bytes) -> Int = _
-  pdf_pages(Self, Int) -> Int = _
-  pdf_page_size(Self, Int, Int, FixedArray[Double]) -> Unit = _
-  pdf_page_load(Self, Int, Int, Int) -> Int = _
-  pdf_close(Self, Int) -> Unit = _
-  view_text(Self, Int, Int) -> String? = _
-  view_still(Self, Int) -> Bytes = _
-  save_file(Self, String, Bytes) -> Bool = _
-  word_at(Self, String, Int) -> (Int, Int) = _
-  open_url(Self, String) -> Bool = _
-  over_done(Self, Bool) -> Unit = _
-  open_tab(Self, String) -> Bool = _
-  hold_words(Self, String, String, String) -> Unit = _
-  post_take(Self) -> Int = _
-  post_next(Self) -> (String, String, Bytes)? = _
-  ref_begin(Self, Double, Double, Double, Int) -> Unit = _
-  ref_text(Self, String, Double, Int, Int, Double, Double, Int, FixedArray[Double]) -> Unit = _
-  ref_end(Self, String) -> Bool = _
-  ref_frame(Self, String) -> Bool = _
-  bl_start(Self, String, String) -> Int = _
-  bl_port(Self, Int) -> Int = _
-  bl_open(Self, Int, String) -> Int = _
-  bl_back(Self, Int) -> String = _
-  bl_end(Self, Int) -> Unit = _
-  pw_able(Self) -> Bool = _
-  pw_run(Self, String) -> Int = _
-  pw_out(Self, Int) -> String = _
-  pw_end(Self, Int) -> Unit = _
-  af_able(Self) -> Bool = _
-  af_ask(Self, String) -> Int = _
-  af_take(Self) -> String = _
-  af_end(Self) -> Unit = _
-  wa_able(Self) -> Bool = _
-  wa_get(Self, String) -> Int = _
-  wa_out(Self, Int) -> String = _
-  wa_end(Self, Int) -> Unit = _
-  pk_start(Self, Int) -> Int = _
-  pk_state(Self, Int) -> Int = _
-  pk_count(Self, Int) -> Int = _
-  pk_name(Self, Int, Int) -> String = _
-  pk_bytes(Self, Int, Int) -> Bytes = _
-  pk_info(Self, Int, Int) -> String = _
-  pk_end(Self, Int) -> Unit = _
-  kp_begin(Self, String, String, Int) -> Int = _
-  kp_append(Self, Int, Bytes) -> Int = _
-  kp_finish(Self, Int) -> Unit = _
-  kp_state(Self, Int) -> Int = _
-  kp_where(Self, Int) -> String = _
-  kp_end(Self, Int) -> Unit = _
-  ga_access(Self) -> Int = _
-  ga_ask(Self) -> Unit = _
-  ga_answers(Self) -> Int = _
-  ga_read(Self) -> Int = _
-  ga_read_state(Self, Int) -> Int = _
-  ga_read_rows(Self, Int) -> String = _
-  ga_read_end(Self, Int) -> Unit = _
-  pk_photo(Self, String) -> Int = _
-  cs_known(Self, String) -> Int = _
-  cs_decode(Self, Bytes, String) -> String = _
-  mk_start(Self, Bytes, String) -> Int = _
-  mk_state(Self, Int) -> Int = _
-  mk_png(Self, Int) -> Bytes = _
-  nt_show(Self, String, String, String, String, String) -> Unit = _
-  rn_dirty(Self, Double, Double, Double, Double) -> Unit = _
-  rn_glass_light_angle(Self, Double) -> Unit = _
-  nv_bar(Self, String) -> Int = _
-  nv_able(Self) -> Bool = _
-  nt_cancel(Self, String) -> Unit = _
-  nt_state(Self, Int) -> Int = _
-  nt_text(Self, Int) -> String = _
-  st_audio_here(Self) -> Int = _
-  st_audio(Self, Int, Bytes) -> Unit = _
-  st_audio_played(Self, Int) -> Double = _
-  st_audio_queued(Self, Int) -> Double = _
-  st_audio_wanted(Self, Int) -> Double = _
-  st_audio_volume(Self, Int, Double) -> Unit = _
-  st_frame_shown(Self, Int, Bytes, Int, Double, Int) -> Int = _
-  st_flush(Self, Int, Int) -> Unit = _
-  st_layers(Self) -> Int = _
-  st_pointer(Self, Int, Bytes, Double, Double, Double, Double) -> Unit = _
-  st_pointer_named(Self, Int, String, () -> Bytes, Double, Double, Double, Double) -> Unit = _
-  st_pointer_at(Self, Int, Double, Double, Int) -> Unit = _
-  st_direct(Self, Int, Double, Double, Int) -> Unit = _
-  st_h265_here(Self) -> Int = _
-  st_hevc(Self, Int, Bytes, Int, Int) -> Unit = _
-  st_av1_here(Self) -> Int = _
-  st_av1(Self, Int, Bytes, Int, Int) -> Unit = _
-  st_open(Self) -> Int = _
-  st_h264(Self, Int, Bytes, Int, Int) -> Unit = _
-  st_frame(Self, Int, Bytes, Int, Double) -> Unit = _
-  st_jpeg(Self, Int, Bytes, Double) -> Unit = _
-  st_next(Self, Int) -> String = _
-  st_show(Self, Int, Double) -> Unit = _
-  st_close(Self, Int) -> Unit = _
-  st_h264_here(Self) -> Int = _
-  st_feeds(Self) -> Int = _
-  st_codec(Self, Int, String, Bytes) -> Unit = _
-  cl_read(Self) -> Int = _
-  cl_state(Self, Int) -> Int = _
-  cl_picture(Self, Int) -> Int = _
-  tm_open(Self, Int, Int) -> Int = _
-  tm_write(Self, Int, Bytes) -> Unit = _
-  tm_resize(Self, Int, Int, Int, Int, Int) -> Unit = _
-  tm_frame(Self, Int, Int) -> Bytes = _
-  tm_modes(Self, Int) -> Int = _
-  tm_scroll(Self, Int, Int, Int) -> Unit = _
-  tm_select(Self, Int, Int, Int, Int, Int, Int) -> Int = _
-  tm_text(Self, Int, Int) -> String = _
-  tm_mouse(Self, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int) -> Bytes = _
-  tm_close(Self, Int) -> Unit = _
-  cl_text(Self, Int) -> String = _
-  cl_png(Self, Int) -> Bytes = _
-  cl_files(Self, Int) -> Int = _
-  cl_file_name(Self, Int, Int) -> String = _
-  cl_file(Self, Int, Int) -> Bytes = _
-  cl_end(Self, Int) -> Unit = _
-  cl_set(Self, String, Bytes, String) -> Unit = _
-  dv_copy_shown(Self) -> Int = _
-  dv_key_catch(Self, Int) -> Unit = _
-  dv_ime_inset(Self) -> Double = _
-  dv_keep_awake(Self, Int) -> Unit = _
-  dv_haptic(Self, Int) -> Unit = _
-  dv_ime_action(Self, Int) -> Unit = _
-  dv_ime_let_go(Self) -> Unit = _
-  ncall_call(Self, String, String) -> Int = _
-  ncall_state(Self, Int) -> Int = _
-  ncall_result(Self, Int) -> String = _
-  ncall_end(Self, Int) -> Unit = _
-  // (a method is added last: one put before others moves their places in the table every call goes through, and the C
-  // of each program calling them, all of it, is compiled again)
-  words_spaced(Self) -> Int = _
-  window_set_title(Self, Int, String) -> Unit = _
-  auto_launch(Self) -> Bool = _
-  set_auto_launch(Self, Bool) -> Bool = _
-  hotkey_set(Self, String, String) -> Bool = _
-  hotkey_clear(Self, String) -> Unit = _
-  pointer_lock(Self, Bool) -> Unit = _
-  pointer_locked(Self) -> Bool = _
-  pointer_delta(Self, FixedArray[Double]) -> Unit = _
-  gamepads(Self, FixedArray[Double]) -> Int = _
-  glyphs_ahead_able(Self) -> Bool = _
+pub(all) struct Host {
+  mut set_window_zoom : (Double) -> Unit
+  mut set_window_key : (FuncRef[(Int, Int) -> Int]) -> Unit
+  mut wheel_kept : (Bool) -> Unit
+  mut window_setup : (Double, Double, Double, Double, Bool) -> Unit
+  mut window_inset : () -> Bool
+  mut window_buttons_down : (Double, Double) -> Unit
+  mut window_hold : () -> Unit
+  mut window_show : () -> Unit
+  mut full_screen : () -> Bool
+  mut set_full_screen : (Bool) -> Unit
+  mut window_corner : () -> Double
+  mut window_corner_at : ((Int) -> Double)?
+  mut window_drag : () -> Unit
+  mut window_act : (Int) -> Unit
+  mut window_zoomed : () -> Bool
+  mut window_snap : (Double, Double, Double, Double) -> Unit
+  mut window_snap_state : () -> Int
+  mut window_opens : () -> Bool
+  mut window_open : (String) -> Bool
+  mut window_front : (String) -> Bool
+  mut windows_in_process : () -> Bool
+  mut window_open_id : (String) -> Int
+  mut window_front_id : (Int) -> Bool
+  mut window_close_id : (Int) -> Unit
+  mut window_current : () -> Int
+  mut set_cursor : (Int) -> Unit
+  mut set_badge : (Int) -> Unit
+  mut menu_setup : (String) -> Unit
+  mut app_said : (String) -> String
+  mut app_tell : (String, String) -> Unit
+  mut set_site_name : (String) -> Unit
+  mut mods_held : () -> Int
+  mut run : (String, FuncRef[(Double, Double, Double, Double) -> Unit], FuncRef[(Int, Double, Double, Int) -> Unit], FuncRef[(Double, Double, Double, Double, Int) -> Unit], FuncRef[(Int, Int) -> Unit], FuncRef[(Int, String, Int, Int) -> Unit]) -> Unit
+  mut now : () -> Double
+  mut wall_ms : () -> Double
+  mut clock_at_wall : ((Double) -> Double)?
+  mut utc_offset_min : (Double) -> Int
+  mut event_time : () -> Double
+  mut event_finger : () -> Int
+  mut frame_late : () -> Double
+  mut platform : () -> Int
+  mut request_frame : () -> Unit
+  mut request_frame_on : (() -> Unit)?
+  mut frames_paced : ((Double) -> Unit)?
+  mut wake_after : (Double) -> Unit
+  mut font_metrics : (Double, Int, Int, FixedArray[Double]) -> Unit
+  mut shape : (String, Double, Int, Int, FixedArray[Double]) -> Int
+  mut text_key : (String, Double, Int, Int) -> Int
+  mut glyph : (Int, FixedArray[Double]) -> Unit
+  mut glyph_put : (Int, Int, Int) -> Unit
+  mut atlas_size : (Bool) -> Int
+  mut glyphs_ahead : (FixedArray[Int], Int) -> Unit
+  mut glyph_picture : (Int, FixedArray[Byte]) -> Bool
+  mut atlas_put : (Int, Int, Int, Int, FixedArray[Byte]) -> Bool
+  mut face_add : (Int, String, Int) -> Bool
+  mut face_add_bytes : (Int, Bytes, Int) -> Bool
+  mut face_clear : (Int) -> Unit
+  mut face_add_family : (Int, String) -> Bool
+  mut local_font_families : () -> String
+  mut atlas_generation : () -> Int
+  mut present : (FixedArray[Double], Int, Double, Double, Double) -> Unit
+  mut groups_here : () -> Bool
+  mut group_set : (Int, FixedArray[Double], FixedArray[Double], Int) -> Unit
+  mut group_drop : (Int) -> Unit
+  mut set_ime : (Bool, Double, Double, Double, Double, String, Int, Int) -> Unit
+  mut text_menu : (Bool, Double, Double, Double, Double, Int) -> Unit
+  mut text_menu_own : (String) -> Unit
+  mut edit_can : (Int) -> Unit
+  mut clipboard_set : (String) -> Unit
+  mut clipboard_set_html : ((String, String) -> Unit)?
+  mut clipboard_set_secret : (String, Double) -> Unit
+  mut clipboard_secret_off : () -> Unit
+  mut clipboard_set_image : (Bytes) -> Unit
+  mut log : (String) -> Unit
+  mut bench_mode : () -> Int
+  mut set_outside : (FuncRef[(Int, Int, Int) -> Unit]) -> Bool
+  mut answers_by_frame : (Int) -> Bool
+  mut script_step : (String, String) -> String
+  mut rows_on_pixels : () -> Bool
+  mut keeps_sources : () -> Bool
+  mut lines_on_pixels : (() -> Bool)?
+  mut frame_awaiting : (Int, String) -> Unit
+  mut own_clock : () -> Bool
+  mut reduce_motion : () -> Bool
+  mut keys_platform : () -> Int
+  mut exit : (Int) -> Unit
+  mut mem_bytes : () -> Double
+  mut set_back : (FuncRef[(Int, Double, Double, Int) -> Unit]) -> Unit
+  mut back_enabled : (Bool) -> Unit
+  mut reduce_transparency : () -> Bool
+  mut increase_contrast : () -> Bool
+  mut thermal_throttled : () -> Bool
+  mut gpu_ms : () -> Double
+  mut frames_dropped : () -> Int
+  mut cpu_ms : () -> Double
+  mut thread_cpu_ms : () -> Double
+  mut display_hz : () -> Double
+  mut env : (String) -> String
+  mut set_app_state : (FuncRef[(Int) -> Unit]) -> Unit
+  mut system_dark : () -> Bool
+  mut font_scale : () -> Double
+  mut native_pointing : () -> Int
+  mut pointing : () -> Int
+  mut keyboard : () -> Int
+  mut a11y_on : () -> Bool
+  mut a11y_tree : (String) -> Unit
+  mut set_dark : (Bool) -> Unit
+  mut set_sideways : (Bool) -> Unit
+  mut set_turnable : (Bool) -> Bool
+  mut share : (String, String, String, Bytes) -> Bool
+  mut perf_state : () -> Int
+  mut set_perf : (Bool) -> Unit
+  mut perf_line : (String) -> Unit
+  mut perf_where : () -> String
+  mut perf_size : () -> Double
+  mut perf_read : () -> Bytes
+  mut perf_open : (Bool) -> Bool
+  mut reveal_file : (String, Bool) -> Bool
+  mut shared_in : () -> String
+  mut shared_in_file : (Int) -> Bytes
+  mut app_version : () -> Int
+  mut update_fetch : (String, String, Double, String, Bool, String) -> Unit
+  mut update_apply : (String) -> Unit
+  mut update_state : () -> String
+  mut install_package : (String, Bytes) -> Unit
+  mut drive : (Int, String) -> Bool
+  mut image_load : (String, Int) -> Int
+  mut image_load_bytes : (Bytes, Int) -> Int
+  mut image_info : (Int, FixedArray[Double]) -> Int
+  mut image_free : (Int) -> Unit
+  mut image_pixels : (Int, FixedArray[Byte]) -> Bool
+  mut drawn_pixels : (Int, Int, Int, Int, FixedArray[Byte]) -> Bool
+  mut drawn_pixels_of : (FixedArray[Double], Int, Double, Double, Double, Double, Int, Int, FixedArray[Byte]) -> Bool
+  mut view_site_next : (Int) -> String
+  mut view_site_body : (Int, Int) -> Bytes
+  mut view_site_head : (Int, Int, Int, String) -> Unit
+  mut view_site_chunk : (Int, Int, Bytes) -> Unit
+  mut view_site_end : (Int, Int, String) -> Unit
+  mut view_site_state : (Int) -> String
+  mut view_site_load : (Int, String) -> Unit
+  mut view_tell : (Int, Int, String) -> Unit
+  mut view_open : (Int, String) -> Int
+  mut view_place : (Int, Double, Double, Double, Double, Double, Double, Double, Double, Double, Double, Double, Double, Bool) -> Unit
+  mut view_close : (Int) -> Unit
+  mut view_control : (Int, Int, Double) -> Unit
+  mut view_info : (Int, FixedArray[Double]) -> Int
+  mut view_read_next : (Int, FixedArray[Double]) -> Int
+  mut view_read_answer : (Int, Int, Bytes, Double, Bool) -> Unit
+  mut pdf_open : (Bytes) -> Int
+  mut pdf_pages : (Int) -> Int
+  mut pdf_page_size : (Int, Int, FixedArray[Double]) -> Unit
+  mut pdf_page_load : (Int, Int, Int) -> Int
+  mut pdf_close : (Int) -> Unit
+  mut view_text : (Int, Int) -> String?
+  mut view_still : (Int) -> Bytes
+  mut save_file : (String, Bytes) -> Bool
+  mut word_at : (String, Int) -> (Int, Int)
+  mut open_url : (String) -> Bool
+  mut over_done : (Bool) -> Unit
+  mut open_tab : (String) -> Bool
+  mut hold_words : (String, String, String) -> Unit
+  mut post_take : () -> Int
+  mut post_next : () -> (String, String, Bytes)?
+  mut ref_begin : (Double, Double, Double, Int) -> Unit
+  mut ref_text : (String, Double, Int, Int, Double, Double, Int, FixedArray[Double]) -> Unit
+  mut ref_end : (String) -> Bool
+  mut ref_frame : (String) -> Bool
+  mut bl_start : (String, String) -> Int
+  mut bl_port : (Int) -> Int
+  mut bl_open : (Int, String) -> Int
+  mut bl_back : (Int) -> String
+  mut bl_end : (Int) -> Unit
+  mut pw_able : () -> Bool
+  mut pw_run : (String) -> Int
+  mut pw_out : (Int) -> String
+  mut pw_end : (Int) -> Unit
+  mut af_able : () -> Bool
+  mut af_ask : (String) -> Int
+  mut af_take : () -> String
+  mut af_end : () -> Unit
+  mut wa_able : () -> Bool
+  mut wa_get : (String) -> Int
+  mut wa_out : (Int) -> String
+  mut wa_end : (Int) -> Unit
+  mut pk_start : (Int) -> Int
+  mut pk_state : (Int) -> Int
+  mut pk_count : (Int) -> Int
+  mut pk_name : (Int, Int) -> String
+  mut pk_bytes : (Int, Int) -> Bytes
+  mut pk_info : (Int, Int) -> String
+  mut pk_end : (Int) -> Unit
+  mut kp_begin : (String, String, Int) -> Int
+  mut kp_append : (Int, Bytes) -> Int
+  mut kp_finish : (Int) -> Unit
+  mut kp_state : (Int) -> Int
+  mut kp_where : (Int) -> String
+  mut kp_end : (Int) -> Unit
+  mut ga_access : () -> Int
+  mut ga_ask : () -> Unit
+  mut ga_answers : () -> Int
+  mut ga_read : () -> Int
+  mut ga_read_state : (Int) -> Int
+  mut ga_read_rows : (Int) -> String
+  mut ga_read_end : (Int) -> Unit
+  mut pk_photo : (String) -> Int
+  mut cs_known : (String) -> Int
+  mut cs_decode : (Bytes, String) -> String
+  mut mk_start : (Bytes, String) -> Int
+  mut mk_state : (Int) -> Int
+  mut mk_png : (Int) -> Bytes
+  mut nt_show : (String, String, String, String, String) -> Unit
+  mut rn_dirty : (Double, Double, Double, Double) -> Unit
+  mut rn_glass_light_angle : (Double) -> Unit
+  mut nv_bar : (String) -> Int
+  mut nv_able : () -> Bool
+  mut nt_cancel : (String) -> Unit
+  mut nt_state : (Int) -> Int
+  mut nt_text : (Int) -> String
+  mut st_audio_here : () -> Int
+  mut st_audio : (Int, Bytes) -> Unit
+  mut st_audio_played : (Int) -> Double
+  mut st_audio_queued : (Int) -> Double
+  mut st_audio_wanted : (Int) -> Double
+  mut st_audio_volume : (Int, Double) -> Unit
+  mut st_frame_shown : ((Int, Bytes, Int, Double, Int) -> Int)?
+  mut st_flush : (Int, Int) -> Unit
+  mut st_layers : () -> Int
+  mut st_pointer : (Int, Bytes, Double, Double, Double, Double) -> Unit
+  mut st_pointer_named : ((Int, String, () -> Bytes, Double, Double, Double, Double) -> Unit)?
+  mut st_pointer_at : (Int, Double, Double, Int) -> Unit
+  mut st_direct : (Int, Double, Double, Int) -> Unit
+  mut st_h265_here : () -> Int
+  mut st_hevc : (Int, Bytes, Int, Int) -> Unit
+  mut st_av1_here : () -> Int
+  mut st_av1 : (Int, Bytes, Int, Int) -> Unit
+  mut st_open : () -> Int
+  mut st_h264 : (Int, Bytes, Int, Int) -> Unit
+  mut st_frame : (Int, Bytes, Int, Double) -> Unit
+  mut st_jpeg : (Int, Bytes, Double) -> Unit
+  mut st_next : (Int) -> String
+  mut st_show : (Int, Double) -> Unit
+  mut st_close : (Int) -> Unit
+  mut st_h264_here : () -> Int
+  mut st_feeds : () -> Int
+  mut st_codec : (Int, String, Bytes) -> Unit
+  mut cl_read : () -> Int
+  mut cl_state : (Int) -> Int
+  mut cl_picture : (Int) -> Int
+  mut tm_open : (Int, Int) -> Int
+  mut tm_write : (Int, Bytes) -> Unit
+  mut tm_resize : (Int, Int, Int, Int, Int) -> Unit
+  mut tm_frame : (Int, Int) -> Bytes
+  mut tm_modes : (Int) -> Int
+  mut tm_scroll : (Int, Int, Int) -> Unit
+  mut tm_select : (Int, Int, Int, Int, Int, Int) -> Int
+  mut tm_text : (Int, Int) -> String
+  mut tm_mouse : (Int, Int, Int, Int, Int, Int, Int, Int, Int, Int) -> Bytes
+  mut tm_close : (Int) -> Unit
+  mut cl_text : (Int) -> String
+  mut cl_png : (Int) -> Bytes
+  mut cl_files : (Int) -> Int
+  mut cl_file_name : (Int, Int) -> String
+  mut cl_file : (Int, Int) -> Bytes
+  mut cl_end : (Int) -> Unit
+  mut cl_set : (String, Bytes, String) -> Unit
+  mut dv_copy_shown : () -> Int
+  mut dv_key_catch : (Int) -> Unit
+  mut dv_ime_inset : () -> Double
+  mut dv_keep_awake : (Int) -> Unit
+  mut dv_haptic : (Int) -> Unit
+  mut dv_ime_action : (Int) -> Unit
+  mut dv_ime_let_go : () -> Unit
+  mut ncall_call : (String, String) -> Int
+  mut ncall_state : (Int) -> Int
+  mut ncall_result : (Int) -> String
+  mut ncall_end : (Int) -> Unit
+  mut words_spaced : (() -> Int)?
+  mut window_set_title : (Int, String) -> Unit
+  mut auto_launch : () -> Bool
+  mut set_auto_launch : (Bool) -> Bool
+  mut hotkey_set : (String, String) -> Bool
+  mut hotkey_clear : (String) -> Unit
+  mut pointer_lock : (Bool) -> Unit
+  mut pointer_locked : () -> Bool
+  mut pointer_delta : (FixedArray[Double]) -> Unit
+  mut gamepads : (FixedArray[Double]) -> Int
+  mut glyphs_ahead_able : () -> Bool
+  mut has_local_fonts : () -> Bool
+  mut face_set_ligatures : (Int, Bool) -> Unit
+  mut set_host_autospace : (Bool) -> Unit
+  mut local_font_info : () -> String
+  mut has_async_local_font_info : () -> Bool
 }
 
 ///|
-impl Host with set_window_zoom(_, _) {
-  ()
-}
-
-///|
-impl Host with set_window_key(_, _) {
-  ()
-}
-
-///|
-impl Host with wheel_kept(_, _) {
-  ()
-}
-
-///|
-impl Host with window_setup(_, _, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with window_inset(_) {
-  false
-}
-
-///|
-impl Host with window_buttons_down(_, _, _) {
-  ()
-}
-
-///|
-impl Host with window_hold(_) {
-  ()
-}
-
-///|
-impl Host with window_show(_) {
-  ()
-}
-
-///|
-impl Host with full_screen(_) {
-  false
-}
-
-///|
-impl Host with set_full_screen(_, _) {
-  ()
-}
-
-///|
-impl Host with window_corner(_) {
-  0.0
-}
-
-///|
-impl Host with window_corner_at(self, _) {
-  self.window_corner()
-}
-
-///|
-impl Host with window_drag(_) {
-  ()
-}
-
-///|
-impl Host with window_act(_, _) {
-  ()
-}
-
-///|
-impl Host with window_zoomed(_) {
-  false
-}
-
-///|
-impl Host with window_snap(_, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with window_snap_state(_) {
-  0
-}
-
-///|
-impl Host with window_opens(_) {
-  false
-}
-
-///|
-impl Host with window_open(_, _) {
-  false
-}
-
-///|
-impl Host with window_front(_, _) {
-  false
-}
-
-///|
-impl Host with windows_in_process(_) {
-  false
-}
-
-///|
-impl Host with window_open_id(_, _) {
-  0
-}
-
-///|
-impl Host with window_front_id(_, _) {
-  false
-}
-
-///|
-impl Host with window_close_id(_, _) {
-  ()
-}
-
-///|
-impl Host with window_current(_) {
-  0
-}
-
-///|
-impl Host with window_set_title(_, _, _) {
-  ()
-}
-
-///|
-impl Host with set_cursor(_, _) {
-  ()
-}
-
-///|
-impl Host with set_badge(_, _) {
-  ()
-}
-
-///|
-impl Host with menu_setup(_, _) {
-  ()
-}
-
-///|
-impl Host with app_said(_, _) {
-  ""
-}
-
-///|
-impl Host with app_tell(_, _, _) {
-  ()
-}
-
-///|
-impl Host with set_site_name(_, _) {
-  ()
-}
-
-///|
-impl Host with mods_held(_) {
-  0
-}
-
-///|
-impl Host with pointer_lock(_, _) {
-  ()
-}
-
-///|
-impl Host with pointer_locked(_) {
-  false
-}
-
-///|
-impl Host with pointer_delta(_, _) {
-  ()
-}
-
-///|
-impl Host with gamepads(_, _) {
-  0
-}
-
-///|
-impl Host with run(_, _, _, _, _, _, _) {
-  @halt.saying("mbui: no host: an app's main imports mbui/host")
-}
-
-///|
-impl Host with now(_) {
-  0.0
-}
-
-///|
-impl Host with wall_ms(_) {
-  0.0
-}
-
-///|
-impl Host with clock_at_wall(self, ms) {
-  ms - (self.wall_ms() - self.now())
-}
-
-///|
-impl Host with utc_offset_min(_, _) {
-  0
-}
-
-///|
-impl Host with event_time(_) {
-  -1.0
-}
-
-///|
-impl Host with event_finger(_) {
-  -1
-}
-
-///|
-impl Host with frame_late(_) {
-  0.0
-}
-
-///|
-impl Host with platform(_) {
-  0
-}
-
-///|
-impl Host with request_frame(_) {
-  ()
-}
-
-///|
-impl Host with request_frame_on(self) {
-  self.request_frame()
-}
-
-///|
-impl Host with frames_paced(self, _) {
-  self.request_frame_on()
-}
-
-///|
-impl Host with wake_after(_, _) {
-  ()
-}
-
-///|
-impl Host with font_metrics(_, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with shape(_, _, _, _, _, _) {
-  0
-}
-
-///|
-impl Host with text_key(_, _, _, _, _) {
-  0
-}
-
-///|
-/// Found from the host's own shapes (MBUI_AUTOSPACE=off: none wanted; see words_spaced).
-impl Host with words_spaced(self) {
-  if self.env("MBUI_AUTOSPACE") == "off" {
+/// Found from a host's own shapes (MBUI_AUTOSPACE=off: none wanted; see words_spaced).
+pub fn words_spaced_of(h : Host) -> Int {
+  if (h.env)("MBUI_AUTOSPACE") == "off" {
     return words_spaced_none
   }
   // a Han character and a Latin letter shaped together a sixteenth of an em wider than each on its own (Core Text's:
@@ -579,9 +317,9 @@ impl Host with words_spaced(self) {
   let pair = FixedArray::make(8, 0.0)
   let han = FixedArray::make(4, 0.0)
   let latin = FixedArray::make(4, 0.0)
-  if self.shape("\u{56FD}a", size, 400, 0, pair) == 2 &&
-    self.shape("\u{56FD}", size, 400, 0, han) == 1 &&
-    self.shape("a", size, 400, 0, latin) == 1 &&
+  if (h.shape)("\u{56FD}a", size, 400, 0, pair) == 2 &&
+    (h.shape)("\u{56FD}", size, 400, 0, han) == 1 &&
+    (h.shape)("a", size, 400, 0, latin) == 1 &&
     pair[2] + pair[6] - han[2] - latin[2] > size / 16.0 {
     words_spaced_by_host
   } else {
@@ -590,1081 +328,402 @@ impl Host with words_spaced(self) {
 }
 
 ///|
-impl Host with glyph(_, _, _) {
-  ()
+/// A host with nothing for any call (nothing done, 0, false, empty, None).
+pub fn Host::noop() -> Host {
+  {
+    set_window_zoom: fn(_) { () },
+    set_window_key: fn(_) { () },
+    wheel_kept: fn(_) { () },
+    window_setup: fn(_, _, _, _, _) { () },
+    window_inset: fn() { false },
+    window_buttons_down: fn(_, _) { () },
+    window_hold: fn() { () },
+    window_show: fn() { () },
+    full_screen: fn() { false },
+    set_full_screen: fn(_) { () },
+    window_corner: fn() { 0.0 },
+    window_corner_at: None,
+    window_drag: fn() { () },
+    window_act: fn(_) { () },
+    window_zoomed: fn() { false },
+    window_snap: fn(_, _, _, _) { () },
+    window_snap_state: fn() { 0 },
+    window_opens: fn() { false },
+    window_open: fn(_) { false },
+    window_front: fn(_) { false },
+    windows_in_process: fn() { false },
+    window_open_id: fn(_) { 0 },
+    window_front_id: fn(_) { false },
+    window_close_id: fn(_) { () },
+    window_current: fn() { 0 },
+    set_cursor: fn(_) { () },
+    set_badge: fn(_) { () },
+    menu_setup: fn(_) { () },
+    app_said: fn(_) { "" },
+    app_tell: fn(_, _) { () },
+    set_site_name: fn(_) { () },
+    mods_held: fn() { 0 },
+    run: fn(_, _, _, _, _, _) { @halt.saying("mbui: no host: an app's main imports mbui/host") },
+    now: fn() { 0.0 },
+    wall_ms: fn() { 0.0 },
+    clock_at_wall: None,
+    utc_offset_min: fn(_) { 0 },
+    event_time: fn() { -1.0 },
+    event_finger: fn() { -1 },
+    frame_late: fn() { 0.0 },
+    platform: fn() { 0 },
+    request_frame: fn() { () },
+    request_frame_on: None,
+    frames_paced: None,
+    wake_after: fn(_) { () },
+    font_metrics: fn(_, _, _, _) { () },
+    shape: fn(_, _, _, _, _) { 0 },
+    text_key: fn(_, _, _, _) { 0 },
+    glyph: fn(_, _) { () },
+    glyph_put: fn(_, _, _) { () },
+    atlas_size: fn(_) { 0 },
+    glyphs_ahead: fn(_, _) { () },
+    glyph_picture: fn(_, _) { false },
+    atlas_put: fn(_, _, _, _, _) { false },
+    face_add: fn(_, _, _) { false },
+    face_add_bytes: fn(_, _, _) { false },
+    face_clear: fn(_) { () },
+    face_add_family: fn(_, _) { false },
+    local_font_families: fn() { "" },
+    atlas_generation: fn() { 0 },
+    present: fn(_, _, _, _, _) { () },
+    groups_here: fn() { false },
+    group_set: fn(_, _, _, _) { () },
+    group_drop: fn(_) { () },
+    set_ime: fn(_, _, _, _, _, _, _, _) { () },
+    text_menu: fn(_, _, _, _, _, _) { () },
+    text_menu_own: fn(_) { () },
+    edit_can: fn(_) { () },
+    clipboard_set: fn(_) { () },
+    clipboard_set_html: None,
+    clipboard_set_secret: fn(_, _) { () },
+    clipboard_secret_off: fn() { () },
+    clipboard_set_image: fn(_) { () },
+    log: fn(_) { () },
+    bench_mode: fn() { 0 },
+    set_outside: fn(_) { false },
+    answers_by_frame: fn(_) { false },
+    script_step: fn(step, _) { "\{step}: this host takes no such step of a script" },
+    rows_on_pixels: fn() { false },
+    keeps_sources: fn() { false },
+    lines_on_pixels: None,
+    frame_awaiting: fn(_, _) { () },
+    own_clock: fn() { false },
+    reduce_motion: fn() { false },
+    keys_platform: fn() { -1 },
+    exit: fn(_) { () },
+    mem_bytes: fn() { -1.0 },
+    set_back: fn(_) { () },
+    back_enabled: fn(_) { () },
+    reduce_transparency: fn() { false },
+    increase_contrast: fn() { false },
+    thermal_throttled: fn() { false },
+    gpu_ms: fn() { -1.0 },
+    frames_dropped: fn() { 0 },
+    cpu_ms: fn() { -1.0 },
+    thread_cpu_ms: fn() { -1.0 },
+    display_hz: fn() { 0.0 },
+    env: fn(_) { "" },
+    set_app_state: fn(_) { () },
+    system_dark: fn() { false },
+    font_scale: fn() { 1.0 },
+    native_pointing: fn() { 0 },
+    pointing: fn() { -1 },
+    keyboard: fn() { -1 },
+    a11y_on: fn() { false },
+    a11y_tree: fn(_) { () },
+    set_dark: fn(_) { () },
+    set_sideways: fn(_) { () },
+    set_turnable: fn(_) { false },
+    share: fn(_, _, _, _) { false },
+    perf_state: fn() { -1 },
+    set_perf: fn(_) { () },
+    perf_line: fn(_) { () },
+    perf_where: fn() { "" },
+    perf_size: fn() { 0.0 },
+    perf_read: fn() { b"" },
+    perf_open: fn(_) { false },
+    reveal_file: fn(_, _) { false },
+    shared_in: fn() { "" },
+    shared_in_file: fn(_) { b"" },
+    app_version: fn() { 0 },
+    update_fetch: fn(_, _, _, _, _, _) { () },
+    update_apply: fn(_) { () },
+    update_state: fn() { "" },
+    install_package: fn(_, _) { () },
+    drive: fn(_, _) { false },
+    image_load: fn(_, _) { 0 },
+    image_load_bytes: fn(_, _) { 0 },
+    image_info: fn(_, _) { 0 },
+    image_free: fn(_) { () },
+    image_pixels: fn(_, _) { false },
+    drawn_pixels: fn(_, _, _, _, _) { false },
+    drawn_pixels_of: fn(_, _, _, _, _, _, _, _, _) { false },
+    view_site_next: fn(_) { "" },
+    view_site_body: fn(_, _) { b"" },
+    view_site_head: fn(_, _, _, _) { () },
+    view_site_chunk: fn(_, _, _) { () },
+    view_site_end: fn(_, _, _) { () },
+    view_site_state: fn(_) { "" },
+    view_site_load: fn(_, _) { () },
+    view_tell: fn(_, _, _) { () },
+    view_open: fn(_, _) { 0 },
+    view_place: fn(_, _, _, _, _, _, _, _, _, _, _, _, _, _) { () },
+    view_close: fn(_) { () },
+    view_control: fn(_, _, _) { () },
+    view_info: fn(_, _) { -1 },
+    view_read_next: fn(_, _) { 0 },
+    view_read_answer: fn(_, _, _, _, _) { () },
+    pdf_open: fn(_) { 0 },
+    pdf_pages: fn(_) { 0 },
+    pdf_page_size: fn(_, _, _) { () },
+    pdf_page_load: fn(_, _, _) { 0 },
+    pdf_close: fn(_) { () },
+    view_text: fn(_, _) { None },
+    view_still: fn(_) { b"" },
+    save_file: fn(_, _) { false },
+    word_at: fn(_, _) { (-1, -1) },
+    open_url: fn(_) { false },
+    over_done: fn(_) { () },
+    open_tab: fn(_) { false },
+    hold_words: fn(_, _, _) { () },
+    post_take: fn() { 0 },
+    post_next: fn() { None },
+    ref_begin: fn(_, _, _, _) { () },
+    ref_text: fn(_, _, _, _, _, _, _, _) { () },
+    ref_end: fn(_) { false },
+    ref_frame: fn(_) { false },
+    bl_start: fn(_, _) { 0 },
+    bl_port: fn(_) { 0 },
+    bl_open: fn(_, _) { 0 },
+    bl_back: fn(_) { "" },
+    bl_end: fn(_) { () },
+    pw_able: fn() { false },
+    pw_run: fn(_) { 0 },
+    pw_out: fn(_) { "" },
+    pw_end: fn(_) { () },
+    af_able: fn() { false },
+    af_ask: fn(_) { 0 },
+    af_take: fn() { "" },
+    af_end: fn() { () },
+    wa_able: fn() { false },
+    wa_get: fn(_) { 0 },
+    wa_out: fn(_) { "" },
+    wa_end: fn(_) { () },
+    pk_start: fn(_) { 0 },
+    pk_state: fn(_) { 0 },
+    pk_count: fn(_) { 0 },
+    pk_name: fn(_, _) { "" },
+    pk_bytes: fn(_, _) { b"" },
+    pk_info: fn(_, _) { "" },
+    pk_end: fn(_) { () },
+    kp_begin: fn(_, _, _) { 0 },
+    kp_append: fn(_, _) { 0 },
+    kp_finish: fn(_) { () },
+    kp_state: fn(_) { 0 },
+    kp_where: fn(_) { "" },
+    kp_end: fn(_) { () },
+    ga_access: fn() { 0 },
+    ga_ask: fn() { () },
+    ga_answers: fn() { 0 },
+    ga_read: fn() { 0 },
+    ga_read_state: fn(_) { 0 },
+    ga_read_rows: fn(_) { "" },
+    ga_read_end: fn(_) { () },
+    pk_photo: fn(_) { 0 },
+    cs_known: fn(_) { 0 },
+    cs_decode: fn(_, _) { "" },
+    mk_start: fn(_, _) { 0 },
+    mk_state: fn(_) { 0 },
+    mk_png: fn(_) { b"" },
+    nt_show: fn(_, _, _, _, _) { () },
+    rn_dirty: fn(_, _, _, _) { () },
+    rn_glass_light_angle: fn(_) { () },
+    nv_bar: fn(_) { 0 },
+    nv_able: fn() { false },
+    nt_cancel: fn(_) { () },
+    nt_state: fn(_) { 0 },
+    nt_text: fn(_) { "" },
+    st_audio_here: fn() { 0 },
+    st_audio: fn(_, _) { () },
+    st_audio_played: fn(_) { 0.0 },
+    st_audio_queued: fn(_) { 0.0 },
+    st_audio_wanted: fn(_) { 0.0 },
+    st_audio_volume: fn(_, _) { () },
+    st_frame_shown: None,
+    st_flush: fn(_, _) { () },
+    st_layers: fn() { 0 },
+    st_pointer: fn(_, _, _, _, _, _) { () },
+    st_pointer_named: None,
+    st_pointer_at: fn(_, _, _, _) { () },
+    st_direct: fn(_, _, _, _) { () },
+    st_h265_here: fn() { 0 },
+    st_hevc: fn(_, _, _, _) { () },
+    st_av1_here: fn() { 0 },
+    st_av1: fn(_, _, _, _) { () },
+    st_open: fn() { 0 },
+    st_h264: fn(_, _, _, _) { () },
+    st_frame: fn(_, _, _, _) { () },
+    st_jpeg: fn(_, _, _) { () },
+    st_next: fn(_) { "" },
+    st_show: fn(_, _) { () },
+    st_close: fn(_) { () },
+    st_h264_here: fn() { 0 },
+    st_feeds: fn() { 0 },
+    st_codec: fn(_, _, _) { () },
+    cl_read: fn() { 0 },
+    cl_state: fn(_) { 0 },
+    cl_picture: fn(_) { 0 },
+    tm_open: fn(_, _) { 0 },
+    tm_write: fn(_, _) { () },
+    tm_resize: fn(_, _, _, _, _) { () },
+    tm_frame: fn(_, _) { b"" },
+    tm_modes: fn(_) { 0 },
+    tm_scroll: fn(_, _, _) { () },
+    tm_select: fn(_, _, _, _, _, _) { 0 },
+    tm_text: fn(_, _) { "" },
+    tm_mouse: fn(_, _, _, _, _, _, _, _, _, _) { b"" },
+    tm_close: fn(_) { () },
+    cl_text: fn(_) { "" },
+    cl_png: fn(_) { b"" },
+    cl_files: fn(_) { 0 },
+    cl_file_name: fn(_, _) { "" },
+    cl_file: fn(_, _) { b"" },
+    cl_end: fn(_) { () },
+    cl_set: fn(_, _, _) { () },
+    dv_copy_shown: fn() { 0 },
+    dv_key_catch: fn(_) { () },
+    dv_ime_inset: fn() { 0.0 },
+    dv_keep_awake: fn(_) { () },
+    dv_haptic: fn(_) { () },
+    dv_ime_action: fn(_) { () },
+    dv_ime_let_go: fn() { () },
+    ncall_call: fn(_, _) { 0 },
+    ncall_state: fn(_) { 0 },
+    ncall_result: fn(_) { "" },
+    ncall_end: fn(_) { () },
+    words_spaced: None,
+    window_set_title: fn(_, _) { () },
+    auto_launch: fn() { false },
+    set_auto_launch: fn(_) { false },
+    hotkey_set: fn(_, _) { false },
+    hotkey_clear: fn(_) { () },
+    pointer_lock: fn(_) { () },
+    pointer_locked: fn() { false },
+    pointer_delta: fn(_) { () },
+    gamepads: fn(_) { 0 },
+    glyphs_ahead_able: fn() { false },
+    has_local_fonts: fn() { false },
+    face_set_ligatures: fn(_, _) { () },
+    set_host_autospace: fn(_) { () },
+    local_font_info: fn() { "" },
+    has_async_local_font_info: fn() { true },
+  }
+}
+
+///|
+pub fn Host::window_corner_at(self : Host, k : Int) -> Double {
+  match self.window_corner_at {
+    Some(f) => f(k)
+    None => (self.window_corner)()
+  }
+}
+
+///|
+pub fn Host::clock_at_wall(self : Host, ms : Double) -> Double {
+  match self.clock_at_wall {
+    Some(f) => f(ms)
+    None => ms - ((self.wall_ms)() - (self.now)())
+  }
+}
+
+///|
+pub fn Host::request_frame_on(self : Host) -> Unit {
+  match self.request_frame_on {
+    Some(f) => f()
+    None => (self.request_frame)()
+  }
+}
+
+///|
+pub fn Host::frames_paced(self : Host, hz : Double) -> Unit {
+  match self.frames_paced {
+    Some(f) => f(hz)
+    None => self.request_frame_on()
+  }
+}
+
+///|
+pub fn Host::words_spaced(self : Host) -> Int {
+  match self.words_spaced {
+    Some(f) => f()
+    None => words_spaced_of(self)
+  }
+}
+
+///|
+pub fn Host::clipboard_set_html(self : Host, text : String, html : String) -> Unit {
+  match self.clipboard_set_html {
+    Some(f) => f(text, html)
+    None => (self.clipboard_set)(text)
+  }
+}
+
+///|
+pub fn Host::lines_on_pixels(self : Host) -> Bool {
+  match self.lines_on_pixels {
+    Some(f) => f()
+    None => {
+      let o = FixedArray::make(6, -1.0)
+      (self.font_metrics)(15.0, 400, 0, o)
+      o[5] == 1.0
+    }
+  }
+}
+
+///|
+pub fn Host::st_frame_shown(self : Host, id : Int, data : Bytes, key : Int, ts : Double, show : Int) -> Int {
+  match self.st_frame_shown {
+    Some(f) => f(id, data, key, ts, show)
+    None =>
+      if show != 0 {
+        (self.st_frame)(id, data, key, ts)
+        1
+      } else {
+        0
+      }
+  }
+}
+
+///|
+pub fn Host::st_pointer_named(
+  self : Host,
+  id : Int,
+  key : String,
+  png : () -> Bytes,
+  w : Double,
+  h : Double,
+  hx : Double,
+  hy : Double,
+) -> Unit {
+  match self.st_pointer_named {
+    Some(f) => f(id, key, png, w, h, hx, hy)
+    None => (self.st_pointer)(id, png(), w, h, hx, hy)
+  }
 }
-
-///|
-impl Host with glyph_put(_, _, _, _) {
-  ()
-}
-
-///|
-impl Host with atlas_size(_, _) {
-  0
-}
-
-///|
-impl Host with glyphs_ahead(_, _, _) {
-  ()
-}
-
-///|
-impl Host with glyphs_ahead_able(_) {
-  false
-}
-
-///|
-impl Host with glyph_picture(_, _, _) {
-  false
-}
-
-///|
-impl Host with atlas_put(_, _, _, _, _, _) {
-  false
-}
-
-///|
-impl Host with face_add(_, _, _, _) {
-  false
-}
-
-///|
-impl Host with face_add_bytes(_, _, _, _) {
-  false
-}
-
-///|
-impl Host with face_clear(_, _) {
-  ()
-}
-
-///|
-impl Host with face_add_family(_, _, _) {
-  false
-}
-
-///|
-impl Host with local_font_families(_) {
-  ""
-}
-
-///|
-impl Host with atlas_generation(_) {
-  0
-}
-
-///|
-impl Host with present(_, _, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with groups_here(_) {
-  false
-}
-
-///|
-impl Host with group_set(_, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with group_drop(_, _) {
-  ()
-}
-
-///|
-impl Host with set_ime(_, _, _, _, _, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with text_menu(_, _, _, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with text_menu_own(_, _) {
-  ()
-}
-
-///|
-impl Host with edit_can(_, _) {
-  ()
-}
-
-///|
-impl Host with clipboard_set(_, _) {
-  ()
-}
-
-///|
-/// (a host that puts no HTML on its clipboard: the words alone)
-impl Host with clipboard_set_html(self, text, _) {
-  self.clipboard_set(text)
-}
-
-///|
-impl Host with clipboard_set_secret(_, _, _) {
-  ()
-}
-
-///|
-impl Host with clipboard_secret_off(_) {
-  ()
-}
-
-///|
-impl Host with clipboard_set_image(_, _) {
-  ()
-}
-
-///|
-impl Host with log(_, _) {
-  ()
-}
-
-///|
-impl Host with bench_mode(_) {
-  0
-}
-
-///|
-impl Host with set_outside(_, _) {
-  false
-}
-
-///|
-impl Host with answers_by_frame(_, _) {
-  false
-}
-
-///|
-impl Host with rows_on_pixels(_) {
-  false
-}
-
-///|
-impl Host with keeps_sources(_) {
-  false
-}
-
-///|
-impl Host with lines_on_pixels(self) {
-  let o = FixedArray::make(6, -1.0)
-  self.font_metrics(15.0, 400, 0, o)
-  o[5] == 1.0
-}
-
-///|
-impl Host with script_step(_, step, _) {
-  "\{step}: this host takes no such step of a script"
-}
-
-///|
-impl Host with frame_awaiting(_, _, _) {
-  ()
-}
-
-///|
-impl Host with own_clock(_) {
-  false
-}
-
-///|
-impl Host with reduce_motion(_) {
-  false
-}
-
-///|
-impl Host with keys_platform(_) {
-  -1
-}
-
-///|
-impl Host with exit(_, _) {
-  ()
-}
-
-///|
-impl Host with mem_bytes(_) {
-  -1.0
-}
-
-///|
-impl Host with set_back(_, _) {
-  ()
-}
-
-///|
-impl Host with back_enabled(_, _) {
-  ()
-}
-
-///|
-impl Host with reduce_transparency(_) {
-  false
-}
-
-///|
-impl Host with increase_contrast(_) {
-  false
-}
-
-///|
-impl Host with thermal_throttled(_) {
-  false
-}
-
-///|
-impl Host with gpu_ms(_) {
-  -1.0
-}
-
-///|
-impl Host with frames_dropped(_) {
-  0
-}
-
-///|
-impl Host with cpu_ms(_) {
-  -1.0
-}
-
-///|
-impl Host with thread_cpu_ms(_) {
-  -1.0
-}
-
-///|
-impl Host with display_hz(_) {
-  0.0
-}
-
-///|
-impl Host with env(_, _) {
-  ""
-}
-
-///|
-impl Host with set_app_state(_, _) {
-  ()
-}
-
-///|
-impl Host with a11y_on(_) {
-  false
-}
-
-///|
-impl Host with a11y_tree(_, _) {
-  ()
-}
-
-///|
-impl Host with font_scale(_) {
-  1.0
-}
-
-///|
-impl Host with system_dark(_) {
-  false
-}
-
-///|
-impl Host with native_pointing(_) {
-  0
-}
-
-///|
-impl Host with pointing(_) {
-  -1
-}
-
-///|
-impl Host with keyboard(_) {
-  -1
-}
-
-///|
-impl Host with set_dark(_, _) {
-  ()
-}
-
-///|
-impl Host with set_sideways(_, _) {
-  ()
-}
-
-///|
-impl Host with set_turnable(_, _) {
-  false
-}
-
-///|
-impl Host with share(_, _, _, _, _) {
-  false
-}
-
-///|
-impl Host with perf_state(_) {
-  -1
-}
-
-///|
-impl Host with set_perf(_, _) {
-  ()
-}
-
-///|
-impl Host with perf_line(_, _) {
-  ()
-}
-
-///|
-impl Host with perf_where(_) {
-  ""
-}
-
-///|
-impl Host with perf_size(_) {
-  0.0
-}
-
-///|
-impl Host with perf_open(_, _) {
-  false
-}
-
-///|
-impl Host with reveal_file(_, _, _) {
-  false
-}
-
-///|
-impl Host with perf_read(_) {
-  b""
-}
-
-///|
-impl Host with shared_in(_) {
-  ""
-}
-
-///|
-impl Host with shared_in_file(_, _) {
-  b""
-}
-
-///|
-impl Host with app_version(_) {
-  0
-}
-
-///|
-impl Host with update_fetch(_, _, _, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with update_apply(_, _) {
-  ()
-}
-
-///|
-impl Host with update_state(_) {
-  ""
-}
-
-///|
-impl Host with install_package(_, _, _) {
-  ()
-}
-
-///|
-impl Host with drive(_, _, _) {
-  false
-}
-
-///|
-impl Host with image_load(_, _, _) {
-  0
-}
-
-///|
-impl Host with image_load_bytes(_, _, _) {
-  0
-}
-
-///|
-impl Host with image_info(_, _, _) {
-  0
-}
-
-///|
-impl Host with image_free(_, _) {
-  ()
-}
-
-///|
-impl Host with image_pixels(_, _, _) {
-  false
-}
-
-///|
-impl Host with drawn_pixels(_, _, _, _, _, _) {
-  false
-}
-
-///|
-impl Host with drawn_pixels_of(_, _, _, _, _, _, _, _, _, _) {
-  false
-}
-
-///|
-impl Host with view_site_next(_, _) {
-  ""
-}
-
-///|
-impl Host with view_site_body(_, _, _) {
-  b""
-}
-
-///|
-impl Host with view_site_head(_, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with view_site_chunk(_, _, _, _) {
-  ()
-}
-
-///|
-impl Host with view_site_end(_, _, _, _) {
-  ()
-}
-
-///|
-impl Host with view_site_state(_, _) {
-  ""
-}
-
-///|
-impl Host with view_site_load(_, _, _) {
-  ()
-}
-
-///|
-impl Host with view_tell(_, _, _, _) {
-  ()
-}
-
-///|
-impl Host with view_open(_, _, _) {
-  0
-}
-
-///|
-impl Host with view_place(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with view_close(_, _) {
-  ()
-}
-
-///|
-impl Host with view_control(_, _, _, _) {
-  ()
-}
-
-///|
-impl Host with view_info(_, _, _) {
-  -1
-}
-
-///|
-impl Host with view_read_next(_, _, _) {
-  0
-}
-
-///|
-impl Host with view_read_answer(_, _, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with pdf_open(_, _) {
-  0
-}
-
-///|
-impl Host with pdf_pages(_, _) {
-  0
-}
-
-///|
-impl Host with pdf_page_size(_, _, _, _) {
-  ()
-}
-
-///|
-impl Host with pdf_page_load(_, _, _, _) {
-  0
-}
-
-///|
-impl Host with pdf_close(_, _) {
-  ()
-}
-
-///|
-impl Host with view_text(_, _, _) {
-  None
-}
-
-///|
-impl Host with view_still(_, _) {
-  b""
-}
-
-///|
-impl Host with save_file(_, _, _) {
-  false
-}
-
-///|
-impl Host with word_at(_, _, _) {
-  (-1, -1)
-}
-
-///|
-impl Host with open_url(_, _) {
-  false
-}
-
-///|
-impl Host with over_done(_, _) {
-  ()
-}
-
-///|
-impl Host with open_tab(_, _) {
-  false
-}
-
-///|
-impl Host with hold_words(_, _, _, _) {
-  ()
-}
-
-///|
-impl Host with post_take(_) {
-  0
-}
-
-///|
-impl Host with post_next(_) {
-  None
-}
-
-///|
-impl Host with ref_begin(_, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with ref_text(_, _, _, _, _, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with ref_end(_, _) {
-  false
-}
-
-///|
-impl Host with ref_frame(_, _) {
-  false
-}
-
-///|
-impl Host with bl_start(_, _, _) {
-  0
-}
-
-///|
-impl Host with bl_port(_, _) {
-  0
-}
-
-///|
-impl Host with bl_open(_, _, _) {
-  0
-}
-
-///|
-impl Host with bl_back(_, _) {
-  ""
-}
-
-///|
-impl Host with bl_end(_, _) {
-  ()
-}
-
-///|
-impl Host with pw_able(_) {
-  false
-}
-
-///|
-impl Host with pw_run(_, _) {
-  0
-}
-
-///|
-impl Host with pw_out(_, _) {
-  ""
-}
-
-///|
-impl Host with pw_end(_, _) {
-  ()
-}
-
-///|
-impl Host with af_able(_) {
-  false
-}
-
-///|
-impl Host with af_ask(_, _) {
-  0
-}
-
-///|
-impl Host with af_take(_) {
-  ""
-}
-
-///|
-impl Host with af_end(_) {
-  ()
-}
-
-///|
-impl Host with wa_able(_) {
-  false
-}
-
-///|
-impl Host with wa_get(_, _) {
-  0
-}
-
-///|
-impl Host with wa_out(_, _) {
-  ""
-}
-
-///|
-impl Host with wa_end(_, _) {
-  ()
-}
-
-///|
-impl Host with pk_start(_, _) {
-  0
-}
-
-///|
-impl Host with pk_state(_, _) {
-  0
-}
-
-///|
-impl Host with pk_count(_, _) {
-  0
-}
-
-///|
-impl Host with pk_name(_, _, _) {
-  ""
-}
-
-///|
-impl Host with pk_bytes(_, _, _) {
-  b""
-}
-
-///|
-impl Host with pk_info(_, _, _) {
-  ""
-}
-
-///|
-impl Host with pk_end(_, _) {
-  ()
-}
-
-///|
-impl Host with kp_begin(_, _, _, _) {
-  0
-}
-
-///|
-impl Host with kp_append(_, _, _) {
-  0
-}
-
-///|
-impl Host with kp_finish(_, _) {
-  ()
-}
-
-///|
-impl Host with kp_state(_, _) {
-  0
-}
-
-///|
-impl Host with kp_where(_, _) {
-  ""
-}
-
-///|
-impl Host with kp_end(_, _) {
-  ()
-}
-
-///|
-impl Host with ga_access(_) {
-  0
-}
-
-///|
-impl Host with ga_ask(_) {
-  ()
-}
-
-///|
-impl Host with ga_answers(_) {
-  0
-}
-
-///|
-impl Host with ga_read(_) {
-  0
-}
-
-///|
-impl Host with ga_read_state(_, _) {
-  0
-}
-
-///|
-impl Host with ga_read_rows(_, _) {
-  ""
-}
-
-///|
-impl Host with ga_read_end(_, _) {
-  ()
-}
-
-///|
-impl Host with pk_photo(_, _) {
-  0
-}
-
-///|
-impl Host with cs_known(_, _) {
-  0
-}
-
-///|
-impl Host with cs_decode(_, _, _) {
-  ""
-}
-
-///|
-impl Host with mk_start(_, _, _) {
-  0
-}
-
-///|
-impl Host with mk_state(_, _) {
-  0
-}
-
-///|
-impl Host with mk_png(_, _) {
-  b""
-}
-
-///|
-impl Host with nt_show(_, _, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with rn_dirty(_, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with rn_glass_light_angle(_, _) {
-  ()
-}
-
-///|
-impl Host with nv_bar(_, _) {
-  0
-}
-
-///|
-impl Host with nv_able(_) {
-  false
-}
-
-///|
-impl Host with nt_cancel(_, _) {
-  ()
-}
-
-///|
-impl Host with nt_state(_, _) {
-  0
-}
-
-///|
-impl Host with nt_text(_, _) {
-  ""
-}
-
-///|
-impl Host with st_open(_) {
-  0
-}
-
-///|
-impl Host with st_h264(_, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with st_frame(_, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with st_jpeg(_, _, _, _) {
-  ()
-}
-
-///|
-impl Host with st_next(_, _) {
-  ""
-}
-
-///|
-impl Host with st_show(_, _, _) {
-  ()
-}
-
-///|
-impl Host with st_close(_, _) {
-  ()
-}
-
-///|
-impl Host with st_feeds(_) {
-  0
-}
-
-///|
-impl Host with st_codec(_, _, _, _) {
-  ()
-}
-
-///|
-impl Host with st_h264_here(_) {
-  0
-}
-
-///|
-impl Host with cl_read(_) {
-  0
-}
-
-///|
-impl Host with cl_state(_, _) {
-  0
-}
-
-///|
-impl Host with cl_picture(_, _) {
-  0
-}
-
-///|
-impl Host with tm_open(_, _, _) {
-  0
-}
-
-///|
-impl Host with tm_write(_, _, _) {
-  ()
-}
-
-///|
-impl Host with tm_resize(_, _, _, _, _, _) {
-  ()
-}
-
-///|
-impl Host with tm_frame(_, _, _) {
-  b""
-}
-
-///|
-impl Host with tm_modes(_, _) {
-  0
-}
-
-///|
-impl Host with tm_scroll(_, _, _, _) {
-  ()
-}
-
-///|
-impl Host with tm_select(_, _, _, _, _, _, _) {
-  0
-}
-
-///|
-impl Host with tm_text(_, _, _) {
-  ""
-}
-
-///|
-impl Host with tm_mouse(_, _, _, _, _, _, _, _, _, _, _) {
-  b""
-}
-
-///|
-impl Host with tm_close(_, _) {
-  ()
-}
-
-///|
-impl Host with cl_text(_, _) {
-  ""
-}
-
-///|
-impl Host with cl_png(_, _) {
-  b""
-}
-
-///|
-impl Host with cl_files(_, _) {
-  0
-}
-
-///|
-impl Host with cl_file_name(_, _, _) {
-  ""
-}
-
-///|
-impl Host with cl_file(_, _, _) {
-  b""
-}
-
-///|
-impl Host with cl_end(_, _) {
-  ()
-}
-
-///|
-impl Host with cl_set(_, _, _, _) {
-  ()
-}
-
-///|
-impl Host with dv_copy_shown(_) {
-  0
-}
-
-///|
-impl Host with dv_key_catch(_, _) {
-  ()
-}
-
-///|
-impl Host with dv_ime_inset(_) {
-  0.0
-}
-
-///|
-impl Host with dv_keep_awake(_, _) {
-  ()
-}
-
-///|
-impl Host with dv_haptic(_, _) {
-  ()
-}
-
-///|
-impl Host with dv_ime_action(_, _) {
-  ()
-}
-
-///|
-impl Host with dv_ime_let_go(_) {
-  ()
-}
-
-///|
-impl Host with ncall_call(_, _, _) {
-  0
-}
-
-///|
-impl Host with ncall_state(_, _) {
-  0
-}
-
-///|
-impl Host with ncall_result(_, _) {
-  ""
-}
-
-///|
-impl Host with ncall_end(_, _) {
-  ()
-}
-
-///|
-priv struct NoHost {}
-
-///|
-impl Host for NoHost
 
 ///|
 // set as the program starts (mbui/host's init), or by a Tester for its test
-let current : Ref[&Host] = { val: NoHost::{  } }
+let current : Ref[Host] = { val: Host::noop() }
 
 ///|
 /// Who answers from now on: the platform's (mbui/host's init, as the program starts), a Tester's fake.
-pub fn set_host(h : &Host) -> Unit {
+pub fn set_host(h : Host) -> Unit {
   current.val = h
   sideways_now.set(false)
   turnable_now.set(false)
@@ -1675,7 +734,7 @@ pub fn set_host(h : &Host) -> Unit {
 ///|
 /// Who answers now: the platform's in a program with mbui/host, asked before a Tester gives its fake (a film's,
 /// ui/src/film: its text and pictures the platform's, Tester::new's `live`).
-pub fn host() -> &Host {
+pub fn host() -> Host {
   current.val
 }
 
@@ -1685,7 +744,7 @@ pub fn host() -> &Host {
 /// top row is it (macOS: the window's buttons in it, 16 in and centred on its first 44; the app drags the window by
 /// it, Ctx::window_drag). Nothing where there is no window to size (iOS, Android, a browser's page).
 pub fn window_setup(min_w : Double, min_h : Double, w : Double, h : Double, inset? : Bool = false) -> Unit {
-  current.val.window_setup(min_w, min_h, w, h, inset)
+  (current.val.window_setup)(min_w, min_h, w, h, inset)
 }
 
 ///|
@@ -1694,20 +753,20 @@ pub fn window_setup(min_w : Double, min_h : Double, w : Double, h : Double, inse
 /// the system shows the app's window itself (iOS, Android, a browser's page). Each desktop's host keeps its own way
 /// (the Mac's see-through, Windows' cloaked by its compositor, Linux's made and not shown till then).
 pub fn window_hold() -> Unit {
-  current.val.window_hold()
+  (current.val.window_hold)()
 }
 
 ///|
 /// The window held (window_hold) shown now; nothing once it is.
 pub fn window_show() -> Unit {
-  current.val.window_show()
+  (current.val.window_show)()
 }
 
 ///|
 /// Whether the window's buttons are in the app's top row now (an inset window, not full screen): the room the app
 /// leaves them there.
 pub fn window_inset() -> Bool {
-  current.val.window_inset()
+  (current.val.window_inset)()
 }
 
 ///|
@@ -1716,32 +775,32 @@ pub fn window_inset() -> Bool {
 /// they are, over `ms` on a Move's way (Ease::Move), at once where the window is not seen yet. Nothing where the system
 /// has no such buttons there.
 pub fn window_buttons_down(by : Double, ms : Double) -> Unit {
-  current.val.window_buttons_down(by, ms)
+  (current.val.window_buttons_down)(by, ms)
 }
 
 ///|
 /// Whether the desktop's window fills the screen now (macOS's full screen). False where there is no such window.
 pub fn full_screen() -> Bool {
-  current.val.full_screen()
+  (current.val.full_screen)()
 }
 
 ///|
 /// The desktop's window made to fill the screen, or back as it was (macOS's full screen, as its green button does).
 /// Nothing where there is no window to size.
 pub fn set_full_screen(on : Bool) -> Unit {
-  current.val.set_full_screen(on)
+  (current.val.set_full_screen)(on)
 }
 
 ///|
 /// Draw content at this many window points per content point; it takes effect on the next frame.
 pub fn set_window_zoom(zoom : Double) -> Unit {
-  current.val.set_window_zoom(zoom)
+  (current.val.set_window_zoom)(zoom)
 }
 
 ///|
 /// An app's window-wide key, offered before an embedded native page takes it; nonzero when the app took it.
 pub fn set_window_key(f : FuncRef[(Int, Int) -> Int]) -> Unit {
-  current.val.set_window_key(f)
+  (current.val.set_window_key)(f)
 }
 
 ///|
@@ -1749,7 +808,7 @@ pub fn set_window_key(f : FuncRef[(Int, Int) -> Int]) -> Unit {
 /// screen): said as the wheel is handled. A browser's page leaves one the app kept nothing of to the browser, which
 /// zooms the page by it.
 pub fn wheel_kept(kept : Bool) -> Unit {
-  current.val.wheel_kept(kept)
+  (current.val.wheel_kept)(kept)
 }
 
 ///|
@@ -1757,7 +816,7 @@ pub fn wheel_kept(kept : Bool) -> Unit {
 /// concentric with it as with any container's (@ui's corners.mbt). 0 where they are square (filling the screen,
 /// maximised, a browser's page, Windows 10) or where the system says nothing of them.
 pub fn window_corner() -> Double {
-  current.val.window_corner()
+  (current.val.window_corner)()
 }
 
 ///|
@@ -1771,7 +830,7 @@ pub fn window_corner_at(k : Int) -> Double {
 /// The press under way moves the window (a press on the app's own top row, @ui's Ctx::window_drag): the host's from
 /// here, as its title bar's would be.
 pub fn window_drag() -> Unit {
-  current.val.window_drag()
+  (current.val.window_drag)()
 }
 
 ///|
@@ -1779,14 +838,14 @@ pub fn window_drag() -> Unit {
 /// whose system draws no buttons in it: Windows'): 1 minimized, 2 maximized or back as it was, 3 closed (as its close
 /// button closes it). Nothing where there is no such window.
 pub fn window_act(what : Int) -> Unit {
-  current.val.window_act(what)
+  (current.val.window_act)(what)
 }
 
 ///|
 /// Whether the window is maximized now (Windows: what its maximize button brings back as it was). False where there
 /// is no such window.
 pub fn window_zoomed() -> Bool {
-  current.val.window_zoomed()
+  (current.val.window_zoomed)()
 }
 
 ///|
@@ -1795,21 +854,21 @@ pub fn window_zoomed() -> Bool {
 /// pointer rests on it; the press on it the host's, which maximizes the window or brings it back). The pointer there is
 /// the host's, not the app's: window_snap_state says how it stands. Nothing where there is no such window.
 pub fn window_snap(x : Double, y : Double, w : Double, h : Double) -> Unit {
-  current.val.window_snap(x, y, w, h)
+  (current.val.window_snap)(x, y, w, h)
 }
 
 ///|
 /// How the pointer stands on the window's maximize button the app draws (window_snap): 0 not on it, 1 on it, 2
 /// pressing it. The app is drawn again as it changes.
 pub fn window_snap_state() -> Int {
-  current.val.window_snap_state()
+  (current.val.window_snap_state)()
 }
 
 ///|
 /// Whether the app can open a window of its own beside this one (window_open): a desktop's (macOS, Windows, Linux);
 /// false on a phone, a tablet and the web.
 pub fn window_opens() -> Bool {
-  current.val.window_opens()
+  (current.val.window_opens)()
 }
 
 ///|
@@ -1818,14 +877,14 @@ pub fn window_opens() -> Bool {
 /// times as asked (not handed to the one running, as the app started again is), and ends as its window closes or as
 /// this run ends, however it ends. Whether it was started (false where window_opens is not).
 pub fn window_open(what : String) -> Bool {
-  current.val.window_open(what)
+  (current.val.window_open)(what)
 }
 
 ///|
 /// The window this run opened for exactly `what` (window_open) brought to the front, out of the Dock or the taskbar
 /// where it was minimized: whether there is one still open (false once it has closed, and where window_opens is not).
 pub fn window_front(what : String) -> Bool {
-  current.val.window_front(what)
+  (current.val.window_front)(what)
 }
 
 ///|
@@ -1834,41 +893,41 @@ pub fn window_front(what : String) -> Bool {
 /// host that has not that (a phone's, the web's), or a run that is itself a window of its own (MBUI_WINDOW), says
 /// false, and window_open is still its way.
 pub fn windows_in_process() -> Bool {
-  current.val.windows_in_process()
+  (current.val.windows_in_process)()
 }
 
 ///|
 /// Another window of this run, for `what`: its id (1 and up, the first window being 0), 0 where none opened. The app
 /// is asked to draw it as it draws its first (@ui's window_slots.mbt: each window its own tree, the same program).
 pub fn window_open_id(what : String) -> Int {
-  current.val.window_open_id(what)
+  (current.val.window_open_id)(what)
 }
 
 ///|
 /// Window `wid` of this run (window_open_id) out of the Dock where it was minimized and to the front: whether it is
 /// still open.
 pub fn window_front_id(wid : Int) -> Bool {
-  current.val.window_front_id(wid)
+  (current.val.window_front_id)(wid)
 }
 
 ///|
 /// Window `wid` of this run closed (never the first, 0, nor the run): what it showed let go of as the host tells it
 /// closed (an outside event, @ui's window_slots.mbt).
 pub fn window_close_id(wid : Int) -> Unit {
-  current.val.window_close_id(wid)
+  (current.val.window_close_id)(wid)
 }
 
 ///|
 /// The window of this run the host is drawing a frame of or handing input from now (0, the first, between them).
 pub fn window_current() -> Int {
-  current.val.window_current()
+  (current.val.window_current)()
 }
 
 ///|
 /// The title the system shows for window `wid` of this run (0 the first; its title bar, the Dock's and the switcher's
 /// list), from now on. Nothing where the host has no title of a window.
 pub fn window_set_title(wid : Int, title : String) -> Unit {
-  current.val.window_set_title(wid, title)
+  (current.val.window_set_title)(wid, title)
 }
 
 ///|
@@ -1876,14 +935,14 @@ pub fn window_set_title(wid : Int, title : String) -> Unit {
 /// 5 an open hand, 6 a closed hand, 7 a crosshair, 8 what cannot be done, 9 resizing from a top left or bottom right
 /// corner, 10 from a top right or bottom left one. Nothing where there is no pointer.
 pub fn set_cursor(kind : Int) -> Unit {
-  current.val.set_cursor(kind)
+  (current.val.set_cursor)(kind)
 }
 
 ///|
 /// The number on the app's icon (macOS's Dock tile: what waits for the person); 0 none. Nothing where the system
 /// shows none.
 pub fn set_badge(n : Int) -> Unit {
-  current.val.set_badge(n)
+  (current.val.set_badge)(n)
 }
 
 ///|
@@ -1899,7 +958,7 @@ pub fn set_badge(n : Int) -> Unit {
 /// icons (no menu bar's: its items' roles `show`, the window brought back, and `quit`; the Mac leaves it out). Given
 /// again as what it shows changes. Nothing where the system has no menu bar nor such an icon.
 pub fn menu_setup(json : String) -> Unit {
-  current.val.menu_setup(json)
+  (current.val.menu_setup)(json)
 }
 
 ///|
@@ -1907,14 +966,14 @@ pub fn menu_setup(json : String) -> Unit {
 /// starts, `mb_host_app_calls` in `src/host/app_calls.h`), as text the app reads (JSON by its own convention); "" where
 /// the app gave none or says nothing of it. Under a Tester: as it is set (Tester::set_app_said).
 pub fn app_said(name : String) -> String {
-  current.val.app_said(name)
+  (current.val.app_said)(name)
 }
 
 ///|
 /// Something the app asks its own native code to do (`name`, with `arg`): the app's call, as `app_said`. Nothing where
 /// the app gave none. Under a Tester: kept (Tester::app_told).
 pub fn app_tell(name : String, arg : String) -> Unit {
-  current.val.app_tell(name, arg)
+  (current.val.app_tell)(name, arg)
 }
 
 ///|
@@ -1923,14 +982,14 @@ pub fn app_tell(name : String, arg : String) -> Unit {
 /// page's `page.<name>.invalid`, a player's `player.<name>.invalid`, and the messages a site's frame and its host trade
 /// in a browser, `<name>-preview-…`. Where a site keeps what it keeps (its storage, by its origin), so an app keeps it.
 pub fn set_site_name(name : String) -> Unit {
-  current.val.set_site_name(name)
+  (current.val.set_site_name)(name)
 }
 
 ///|
 /// The keys held down now that change what a press or a drag does (shift 1, control 2, option/alt 4, command 8: as a
 /// key's own modifiers are told): what a drag let go does by them (Finder's ⌥ a copy). None where there is no keyboard.
 pub fn mods_held() -> Int {
-  current.val.mods_held()
+  (current.val.mods_held)()
 }
 
 ///|
@@ -1942,19 +1001,19 @@ pub fn run(
   key : FuncRef[(Int, Int) -> Unit],
   text : FuncRef[(Int, String, Int, Int) -> Unit],
 ) -> Unit {
-  current.val.run(title, frame, pointer, wheel, key, text)
+  (current.val.run)(title, frame, pointer, wheel, key, text)
 }
 
 ///|
 pub fn now() -> Double {
-  current.val.now()
+  (current.val.now)()
 }
 
 ///|
 /// The time of day, in ms since 1970 (UTC), as the machine's clock has it: for what is shown of it only (@ui.wall_ms).
 /// A run to a declared moment (a scripted shot) has its own: from a fixed day, on with its frames' clock.
 pub fn wall_ms() -> Double {
-  current.val.wall_ms()
+  (current.val.wall_ms)()
 }
 
 ///|
@@ -1970,14 +1029,14 @@ pub fn clock_at_wall(ms : Double) -> Double {
 /// mouse, a trackpad or a pen (Windows: a touch screen beside a mouse); -1 where the host does not say (its system's
 /// hand: Android's and iOS's fingers, a Mac's pointer).
 pub fn event_finger() -> Int {
-  current.val.event_finger()
+  (current.val.event_finger)()
 }
 
 ///|
 /// How far the machine's local time is ahead of UTC at `at_ms` (ms since 1970), in minutes (its zone and summer time):
 /// for a date or a time of day shown only. A run to a declared moment (a scripted shot) has 0, as its wall_ms is its own.
 pub fn utc_offset_min(at_ms : Double) -> Int {
-  current.val.utc_offset_min(at_ms)
+  (current.val.utc_offset_min)(at_ms)
 }
 
 ///|
@@ -1985,7 +1044,7 @@ pub fn utc_offset_min(at_ms : Double) -> Int {
 /// a touch's own time, which comes before it is handled (a frame's touches
 /// are handled together); negative when the host doesn't say.
 pub fn event_time() -> Double {
-  current.val.event_time()
+  (current.val.event_time)()
 }
 
 ///|
@@ -1993,18 +1052,18 @@ pub fn event_time() -> Double {
 /// screen, in ms: 0 on time, as a host says where it cannot tell (a Tester's, a browser's), and where frames are not
 /// drawn one after the other (the first after a pause).
 pub fn frame_late() -> Double {
-  current.val.frame_late()
+  (current.val.frame_late)()
 }
 
 ///|
 /// The system: 0 macOS, 1 iOS, 2 Android, 3 Windows, 4 a browser, 5 Linux.
 pub fn platform() -> Int {
-  current.val.platform()
+  (current.val.platform)()
 }
 
 ///|
 pub fn request_frame() -> Unit {
-  current.val.request_frame()
+  (current.val.request_frame)()
 }
 
 ///|
@@ -2026,7 +1085,7 @@ pub fn frames_paced(hz : Double) -> Unit {
 
 ///|
 pub fn wake_after(ms : Double) -> Unit {
-  current.val.wake_after(ms)
+  (current.val.wake_after)(ms)
 }
 
 ///|
@@ -2041,7 +1100,7 @@ pub fn font_metrics(
   style : Int,
   out : FixedArray[Double],
 ) -> Unit {
-  current.val.font_metrics(size, weight, style, out)
+  (current.val.font_metrics)(size, weight, style, out)
 }
 
 ///|
@@ -2055,14 +1114,14 @@ pub fn shape(
   style : Int,
   out : FixedArray[Double],
 ) -> Int {
-  current.val.shape(text, size, weight, style, out)
+  (current.val.shape)(text, size, weight, style, out)
 }
 
 ///|
 /// The glyph key of `text` drawn whole as one piece (the way the platform draws it in a line: a word whose letters
 /// join), for `glyph`.
 pub fn text_key(text : String, size : Double, weight : Int, style : Int) -> Int {
-  current.val.text_key(text, size, weight, style)
+  (current.val.text_key)(text, size, weight, style)
 }
 
 ///|
@@ -2094,7 +1153,7 @@ pub fn words_spaced() -> Int {
 /// host's scale; 0: nothing to draw), where its top left is from the pen on the baseline, and 1 where it is in colours
 /// of its own (an emoji), else 0. Drawn again each time it is asked for: the caller asks for what its atlas lacks.
 pub fn glyph(key : Int, out : FixedArray[Double]) -> Unit {
-  current.val.glyph(key, out)
+  (current.val.glyph)(key, out)
 }
 
 ///|
@@ -2102,14 +1161,14 @@ pub fn glyph(key : Int, out : FixedArray[Double]) -> Unit {
 /// (there before the next frame is drawn), over whatever was there: in colour glyphs' own atlas (where the host has
 /// one) `x` is `colour_atlas_u` past its place across in it, as its instances say it.
 pub fn glyph_put(key : Int, x : Int, y : Int) -> Unit {
-  current.val.glyph_put(key, x, y)
+  (current.val.glyph_put)(key, x, y)
 }
 
 ///|
 /// The side of the host's atlas the glyphs of its words are drawn from, in pixels, or (`colour`) of colour glyphs'
 /// own (an emoji's: 0, they are in the words' atlas with the others); 0: none.
 pub fn atlas_size(colour : Bool) -> Int {
-  current.val.atlas_size(colour)
+  (current.val.atlas_size)(colour)
 }
 
 ///|
@@ -2122,13 +1181,13 @@ pub let colour_atlas_u : Int = 16384
 /// shown), for the host to draw ahead, off the frames' thread, so that `glyph` finds them drawn when they come into
 /// view. What `glyph` answers is the same either way: only when the work is done changes. A host may do nothing.
 pub fn glyphs_ahead(keys : FixedArray[Int], n : Int) -> Unit {
-  current.val.glyphs_ahead(keys, n)
+  (current.val.glyphs_ahead)(keys, n)
 }
 
 ///|
 /// Whether the current host supports drawing glyphs ahead off the frames' thread (`glyphs_ahead`).
 pub fn glyphs_ahead_able() -> Bool {
-  current.val.glyphs_ahead_able()
+  (current.val.glyphs_ahead_able)()
 }
 
 ///|
@@ -2137,7 +1196,7 @@ pub fn glyphs_ahead_able() -> Bool {
 /// mask's colour as its cover): what words' halo is blurred from (mbui/ui's halo.mbt). False where the host holds none
 /// or gives none back (no halo drawn then).
 pub fn glyph_picture(key : Int, out : FixedArray[Byte]) -> Bool {
-  current.val.glyph_picture(key, out)
+  (current.val.glyph_picture)(key, out)
 }
 
 ///|
@@ -2145,7 +1204,7 @@ pub fn glyph_picture(key : Int, out : FixedArray[Byte]) -> Bool {
 /// left at pixel `x`, `y`, as `glyph_put` puts a glyph's (there before the next frame is drawn): a halo blurred from
 /// glyphs (mbui/ui's halo.mbt). False where the host takes none (nothing put).
 pub fn atlas_put(x : Int, y : Int, w : Int, h : Int, px : FixedArray[Byte]) -> Bool {
-  current.val.atlas_put(x, y, w, h, px)
+  (current.val.atlas_put)(x, y, w, h, px)
 }
 
 ///|
@@ -2156,38 +1215,71 @@ pub fn atlas_put(x : Int, y : Int, w : Int, h : Int, px : FixedArray[Byte]) -> B
 /// Face `face` set in a family installed on this machine (`family`, as local_font_families names it): its every style
 /// the system's. False where the host has none of that name (or no way to it).
 pub fn face_add_family(face : Int, family : String) -> Bool {
-  current.val.face_add_family(face, family)
+  (current.val.face_add_family)(face, family)
+}
+
+///|
+/// Cheap capability check for whether this host can enumerate locally installed font families without triggering a
+/// synchronous scan.
+pub fn has_local_fonts() -> Bool {
+  (current.val.has_local_fonts)()
 }
 
 ///|
 /// The font families installed on this machine, as a JSON array of their names, in the order of the user's
 /// language (the system's hidden ones left out); "" where the host has no way to them (a phone, a browser).
 pub fn local_font_families() -> String {
-  current.val.local_font_families()
+  (current.val.local_font_families)()
 }
 
 ///|
 pub fn face_add(face : Int, path : String, weight : Int) -> Bool {
-  current.val.face_add(face, path, weight)
+  (current.val.face_add)(face, path, weight)
 }
 
 ///|
 /// As face_add, the font's file being `data` (one the app carries in itself, or has fetched and kept).
 pub fn face_add_bytes(face : Int, data : Bytes, weight : Int) -> Bool {
-  current.val.face_add_bytes(face, data, weight)
+  (current.val.face_add_bytes)(face, data, weight)
 }
 
 ///|
 /// Face `face` given up: what was in it is in the system's face again.
 pub fn face_clear(face : Int) -> Unit {
-  current.val.face_clear(face)
+  (current.val.face_clear)(face)
+}
+
+///|
+/// Whether programming / contextual ligatures (calt, liga, clig) are enabled for face `face`.
+pub fn face_set_ligatures(face : Int, on : Bool) -> Unit {
+  (current.val.face_set_ligatures)(face, on)
+}
+
+///|
+/// Whether the host's own CJK/Latin autospace is enabled (e.g. Core Text on macOS/iOS; env MBUI_AUTOSPACE takes priority).
+pub fn set_host_autospace(on : Bool) -> Unit {
+  (current.val.set_host_autospace)(on)
+}
+
+///|
+/// Metadata for locally installed font families as a JSON array (name, localized, mono, serif, cjk); "" if unavailable
+/// or still scanning in the background.
+pub fn local_font_info() -> String {
+  (current.val.local_font_info)()
+}
+
+///|
+/// Whether the host scans `local_font_info()` asynchronously in the background (true on real desktop hosts; false on
+/// test hosts that only populate `local_font_families()`).
+pub fn has_async_local_font_info() -> Bool {
+  (current.val.has_async_local_font_info)()
 }
 
 ///|
 /// Moves on as what the host drew and measured before is gone: its faces or its scale changed, its atlas lost (a new
 /// drawing surface). Never as its atlas fills: what goes where in it is the caller's (atlas.mbt).
 pub fn atlas_generation() -> Int {
-  current.val.atlas_generation()
+  (current.val.atlas_generation)()
 }
 
 ///|
@@ -2198,14 +1290,14 @@ pub fn present(
   g : Double,
   b : Double,
 ) -> Unit {
-  current.val.present(buf, count, r, g, b)
+  (current.val.present)(buf, count, r, g, b)
 }
 
 ///|
 /// Whether the host keeps groups of instances (group_set) and draws a header of one among a frame's in its place
 /// (kind 13, ui/src/ui/scene.mbt): a row of a list kept, moved, drawn by its header alone.
 pub fn groups_here() -> Bool {
-  current.val.groups_here()
+  (current.val.groups_here)()
 }
 
 ///|
@@ -2214,13 +1306,13 @@ pub fn groups_here() -> Bool {
 /// 33-34; its rect's 0-1 always, a shape's band's first piece 12 by the header's 15). A number is never another
 /// group's.
 pub fn group_set(id : Int, inst : FixedArray[Double], moves : FixedArray[Double], n : Int) -> Unit {
-  current.val.group_set(id, inst, moves, n)
+  (current.val.group_set)(id, inst, moves, n)
 }
 
 ///|
 /// Group `id` let go: no frame presented from here on has a header of it.
 pub fn group_drop(id : Int) -> Unit {
-  current.val.group_drop(id)
+  (current.val.group_drop)(id)
 }
 
 ///|
@@ -2234,7 +1326,7 @@ pub fn set_ime(
   sel_start : Int,
   sel_end : Int,
 ) -> Unit {
-  current.val.set_ime(active, x, y, w, h, text, sel_start, sel_end)
+  (current.val.set_ime)(active, x, y, w, h, text, sel_start, sel_end)
 }
 
 ///|
@@ -2277,7 +1369,7 @@ pub let text_menu_own_most : Int = 8
 /// put away. What is chosen comes as the keys and the paste the field already takes (select all, copy, cut: keys 12,
 /// 13, 14; paste: the clipboard's words as text), the menu then gone. A host with none shows nothing.
 pub fn text_menu(shown : Bool, x : Double, y : Double, w : Double, h : Double, can : Int) -> Unit {
-  current.val.text_menu(shown, x, y, w, h, can)
+  (current.val.text_menu)(shown, x, y, w, h, can)
 }
 
 ///|
@@ -2287,7 +1379,7 @@ pub fn text_menu(shown : Bool, x : Double, y : Double, w : Double, h : Double, c
 /// chosen comes as the key key_menu_own + k, the menu then gone. Android's text toolbar (its overflow where they do
 /// not fit) and iOS's edit menu offer them, the web's bar too; a host with no floating menu nothing.
 pub fn text_menu_own(words : String) -> Unit {
-  current.val.text_menu_own(words)
+  (current.val.text_menu_own)(words)
 }
 
 ///|
@@ -2296,12 +1388,12 @@ pub fn text_menu_own(words : String) -> Unit {
 /// with the pointer where no field has it; an item it does not say is greyed, as the system's fields have theirs. A
 /// host with no menu bar does nothing with it.
 pub fn edit_can(can : Int) -> Unit {
-  current.val.edit_can(can)
+  (current.val.edit_can)(can)
 }
 
 ///|
 pub fn clipboard_set(s : String) -> Unit {
-  current.val.clipboard_set(s)
+  (current.val.clipboard_set)(s)
 }
 
 ///|
@@ -2318,7 +1410,7 @@ pub fn clipboard_set_html(text : String, html : String) -> Unit {
 /// itself `clear_ms` later). Elsewhere as clipboard_set. The app takes it off `clear_ms` later on its own clock
 /// (Ctx::copy_secret: clipboard_secret_off).
 pub fn clipboard_set_secret(s : String, clear_ms~ : Double) -> Unit {
-  current.val.clipboard_set_secret(s, clear_ms)
+  (current.val.clipboard_set_secret)(s, clear_ms)
 }
 
 ///|
@@ -2326,24 +1418,24 @@ pub fn clipboard_set_secret(s : String, clear_ms~ : Double) -> Unit {
 /// (the app's or another's: the system says whether the clipboard changed). As the app ends before then, a desktop
 /// host takes it off itself (Windows).
 pub fn clipboard_secret_off() -> Unit {
-  current.val.clipboard_secret_off()
+  (current.val.clipboard_secret_off)()
 }
 
 ///|
 /// A picture put on the system's clipboard (an image file's bytes: PNG, JPEG…), as a picture other apps paste. A host
 /// with no such clipboard (a browser's page, Android) puts nothing.
 pub fn clipboard_set_image(data : Bytes) -> Unit {
-  current.val.clipboard_set_image(data)
+  (current.val.clipboard_set_image)(data)
 }
 
 ///|
 pub fn log(s : String) -> Unit {
-  current.val.log(s)
+  (current.val.log)(s)
 }
 
 ///|
 pub fn bench_mode() -> Int {
-  current.val.bench_mode()
+  (current.val.bench_mode)()
 }
 
 ///|
@@ -2351,7 +1443,7 @@ pub fn bench_mode() -> Int {
 /// decoded, 2 a native view ready — a page loaded and its picture taken, a video's first frame —; state 1 done, -1
 /// failed), on the main thread, between frames. False where the host sends no such events.
 pub fn set_outside(f : FuncRef[(Int, Int, Int) -> Unit]) -> Bool {
-  current.val.set_outside(f)
+  (current.val.set_outside)(f)
 }
 
 ///|
@@ -2359,14 +1451,14 @@ pub fn set_outside(f : FuncRef[(Int, Int, Int) -> Unit]) -> Bool {
 /// no event: what waits on it reads it again at each frame while it waits. False where the host tells each as it is
 /// done (set_outside).
 pub fn answers_by_frame(kind : Int) -> Bool {
-  current.val.answers_by_frame(kind)
+  (current.val.answers_by_frame)(kind)
 }
 
 ///|
 /// Whether the host draws each glyph on its device's pixels, a list's rows set on them as it moves (@ui's
 /// rows_on_grid): every platform's does.
 pub fn rows_on_pixels() -> Bool {
-  current.val.rows_on_pixels()
+  (current.val.rows_on_pixels)()
 }
 
 ///|
@@ -2374,7 +1466,7 @@ pub fn rows_on_pixels() -> Bool {
 /// a Tester's fake host does, for what it finds to say where to change it; a device's does not, its calls only passing
 /// their places on.
 pub fn keeps_sources() -> Bool {
-  current.val.keeps_sources()
+  (current.val.keeps_sources)()
 }
 
 ///|
@@ -2389,21 +1481,21 @@ pub fn lines_on_pixels() -> Bool {
 /// native view's host says `viewsaid`, the keyboard's height `ime`, the pickers' answers `picks`), `arg` as the script
 /// says it: "" done, else why not.
 pub fn script_step(step : String, arg : String) -> String {
-  current.val.script_step(step, arg)
+  (current.val.script_step)(step, arg)
 }
 
 ///|
 /// As the frame just built left it: how many of the app's asks the host has not answered yet (effect.mb's outside)
 /// and what they are ("" when none). A run to a declared moment keeps its clock still while any is awaited.
 pub fn frame_awaiting(awaiting : Int, what : String) -> Unit {
-  current.val.frame_awaiting(awaiting, what)
+  (current.val.frame_awaiting)(awaiting, what)
 }
 
 ///|
 /// Whether the run is on a clock of its own (its frames', 1/60 s a frame from 0, still while the app awaits the host:
 /// a picture's run, mac_app.m's settle, MBView's shot_at), not the machine's.
 pub fn own_clock() -> Bool {
-  current.val.own_clock()
+  (current.val.own_clock)()
 }
 
 ///|
@@ -2411,24 +1503,24 @@ pub fn own_clock() -> Bool {
 /// Android: animations off, its animator duration scale 0). Read at most
 /// once a second.
 pub fn reduce_motion() -> Bool {
-  current.val.reduce_motion()
+  (current.val.reduce_motion)()
 }
 
 ///|
 /// The system whose keys the person types with, as `platform` numbers them, where it is not the host's own: a
 /// browser's, the system under it (⌥← a word on a Mac's, Ctrl+← on Windows'); -1 the host's own.
 pub fn keys_platform() -> Int {
-  current.val.keys_platform()
+  (current.val.keys_platform)()
 }
 
 ///|
 pub fn exit(code : Int) -> Unit {
-  current.val.exit(code)
+  (current.val.exit)(code)
 }
 
 ///|
 pub fn mem_bytes() -> Double {
-  current.val.mem_bytes()
+  (current.val.mem_bytes)()
 }
 
 ///|
@@ -2439,14 +1531,14 @@ pub fn mem_bytes() -> Double {
 /// back with no gesture), 3 called off; edge 0 the left, 1 the right.
 /// Called before `run`.
 pub fn set_back(back : FuncRef[(Int, Double, Double, Int) -> Unit]) -> Unit {
-  current.val.set_back(back)
+  (current.val.set_back)(back)
 }
 
 ///|
 /// Whether the app takes back now (a page to go back to): when not, the
 /// system does what it does (Android leaves the app).
 pub fn back_enabled(on : Bool) -> Unit {
-  current.val.back_enabled(on)
+  (current.val.back_enabled)(on)
 }
 
 ///|
@@ -2454,7 +1546,7 @@ pub fn back_enabled(on : Bool) -> Unit {
 /// macOS's and iOS's Reduce Transparency, Windows' transparency effects
 /// turned off; Android has no such setting (never).
 pub fn reduce_transparency() -> Bool {
-  current.val.reduce_transparency()
+  (current.val.reduce_transparency)()
 }
 
 ///|
@@ -2462,7 +1554,7 @@ pub fn reduce_transparency() -> Bool {
 /// iOS's Increase Contrast (darker system colours), Windows' high contrast on; Android and Linux have no such setting
 /// an app reads (never).
 pub fn increase_contrast() -> Bool {
-  current.val.increase_contrast()
+  (current.val.increase_contrast)()
 }
 
 ///|
@@ -2470,14 +1562,14 @@ pub fn increase_contrast() -> Bool {
 /// left undone): Android's thermal status moderate or worse (API 29 on), macOS's and iOS's thermal state serious or
 /// critical; Windows and Linux say none an app reads (never). The host asks a frame as it changes.
 pub fn thermal_throttled() -> Bool {
-  current.val.thermal_throttled()
+  (current.val.thermal_throttled)()
 }
 
 ///|
 /// The GPU's time for the last frame it finished, in ms (-1: not known on
 /// this host).
 pub fn gpu_ms() -> Double {
-  current.val.gpu_ms()
+  (current.val.gpu_ms)()
 }
 
 ///|
@@ -2485,34 +1577,34 @@ pub fn gpu_ms() -> Double {
 /// thread slower than the app's (Android's GL thread: FrameMail), since the run began (0: none, or a host that draws
 /// each frame on the app's own thread).
 pub fn frames_dropped() -> Int {
-  current.val.frames_dropped()
+  (current.val.frames_dropped)()
 }
 
 ///|
 /// The CPU's time the whole process has had since it started, every thread's (the app's and what runs beside it: a
 /// core's, the system's for it), in ms (-1: not known on this host): a probe's (MBUI_PROBE) share of a CPU.
 pub fn cpu_ms() -> Double {
-  current.val.cpu_ms()
+  (current.val.cpu_ms)()
 }
 
 ///|
 /// The calling thread's CPU time in ms (-1: unsupported or fake clock): used by the journal to separate OS preemption
 /// from real CPU work.
 pub fn thread_cpu_ms() -> Double {
-  current.val.thread_cpu_ms()
+  (current.val.thread_cpu_ms)()
 }
 
 ///|
 /// The display's refresh rate in Hz (0.0: unknown or fake host).
 pub fn display_hz() -> Double {
-  current.val.display_hz()
+  (current.val.display_hz)()
 }
 
 ///|
 /// An environment variable ("" when unset; in a browser, the page's query
 /// parameter of that name).
 pub fn env(name : String) -> String {
-  current.val.env(name)
+  (current.val.env)(name)
 }
 
 ///|
@@ -2523,14 +1615,14 @@ pub fn env(name : String) -> String {
 /// each change, on the app's thread (Android: before the GL thread pauses). Hosts that never tell leave the app as
 /// shown and in front.
 pub fn set_app_state(f : FuncRef[(Int) -> Unit]) -> Unit {
-  current.val.set_app_state(f)
+  (current.val.set_app_state)(f)
 }
 
 ///|
 /// Whether something reads the app's widgets out (Android: an accessibility service on, TalkBack's or another's): the
 /// app then tells the host what of its widgets changed (`a11y_tree`, @ui's a11y.mbt).
 pub fn a11y_on() -> Bool {
-  current.val.a11y_on()
+  (current.val.a11y_on)()
 }
 
 ///|
@@ -2538,7 +1630,7 @@ pub fn a11y_on() -> Bool {
 /// a11y.mbt's head says it: the nodes that changed, each whole, and the focus). What is asked of one comes back on the
 /// channel `a11y_channel`.
 pub fn a11y_tree(tree : String) -> Unit {
-  current.val.a11y_tree(tree)
+  (current.val.a11y_tree)(tree)
 }
 
 ///|
@@ -2551,7 +1643,7 @@ pub let a11y_channel : String = "a11y"
 /// largest of most phones' steps; Windows' Text size, up to 2.25; Linux's text scaling): words are drawn that much
 /// bigger, as Compose's sp are; lengths are not.
 pub fn font_scale() -> Double {
-  current.val.font_scale()
+  (current.val.font_scale)()
 }
 
 ///|
@@ -2560,14 +1652,14 @@ pub fn font_scale() -> Double {
 /// screen and no mouse or in tablet mode), 2 keyboard and mouse (macOS; iOS and iPadOS with a pointer, Android with a
 /// mouse or a touchpad: DeX, ChromeOS; Windows otherwise), 0 where it cannot tell (the platform's then: @ui).
 pub fn native_pointing() -> Int {
-  current.val.native_pointing()
+  (current.val.native_pointing)()
 }
 
 ///|
 /// What the person points with as the host knows it before any event says (event_finger): 1 a finger, 0 a mouse, a
 /// trackpad or a pen; -1 where it does not say (its system's hand then: @ui).
 pub fn pointing() -> Int {
-  current.val.pointing()
+  (current.val.pointing)()
 }
 
 ///|
@@ -2575,7 +1667,7 @@ pub fn pointing() -> Int {
 /// goes): 1 yes (macOS and Windows always; Android with a physical keyboard of letters among its input devices, iOS and
 /// iPadOS with one connected: GCKeyboard), 0 no, -1 where it cannot tell (the platform's then: @ui).
 pub fn keyboard() -> Int {
-  current.val.keyboard()
+  (current.val.keyboard)()
 }
 
 ///|
@@ -2583,14 +1675,14 @@ pub fn keyboard() -> Int {
 /// prefers-color-scheme): what an app that follows the system shows. Asked each frame; a host asks for a frame when
 /// it changes. Hosts that cannot tell say light.
 pub fn system_dark() -> Bool {
-  current.val.system_dark()
+  (current.val.system_dark)()
 }
 
 ///|
 /// The app is drawn dark (or light) from now on: the host's own parts follow it (Android's status and navigation
 /// bars' icons, the Mac window's title bar). Said when it changes.
 pub fn set_dark(dark : Bool) -> Unit {
-  current.val.set_dark(dark)
+  (current.val.set_dark)(dark)
 }
 
 ///|
@@ -2600,7 +1692,7 @@ pub fn set_dark(dark : Bool) -> Unit {
 /// orientations, the status bar and the home indicator hidden); elsewhere nothing turns.
 pub fn set_sideways(on : Bool) -> Unit {
   sideways_now.set(on)
-  current.val.set_sideways(on)
+  (current.val.set_sideways)(on)
 }
 
 ///|
@@ -2609,7 +1701,7 @@ pub fn set_sideways(on : Bool) -> Unit {
 /// turned (a fixed portrait gets none); `false`, upright only again. Set_sideways still turns it while it asks. Android
 /// and iOS do it where the app is held upright (a phone; a tablet turns anyway); elsewhere nothing changes.
 pub fn set_turnable(on : Bool) -> Unit {
-  turnable_now.set(current.val.set_turnable(on) && on)
+  turnable_now.set((current.val.set_turnable)(on) && on)
 }
 
 ///|
@@ -2647,7 +1739,7 @@ let turnable_now : @signals.Signal[Bool] = @signals.signal(false, same=fn(a, b) 
 /// topic), the stream's is a screen, Apple's the system working for the app. Read it against background, a screen
 /// open, charging and low power.
 pub fn perf_state() -> Int {
-  current.val.perf_state()
+  (current.val.perf_state)()
 }
 
 ///|
@@ -2664,7 +1756,7 @@ pub fn set_perf(on : Bool) -> Unit {
   if perf_state() < 0 {
     return
   }
-  current.val.set_perf(on)
+  (current.val.set_perf)(on)
 }
 
 ///|
@@ -2673,7 +1765,7 @@ pub fn set_perf(on : Bool) -> Unit {
 /// is not kept.
 pub fn perf_line(line : String) -> Unit {
   if perf_recording() {
-    current.val.perf_line(line)
+    (current.val.perf_line)(line)
   }
 }
 
@@ -2681,13 +1773,13 @@ pub fn perf_line(line : String) -> Unit {
 /// Where the performance record's files are, as the device's files show the app's ("Documents/perf"): "" where none is
 /// kept.
 pub fn perf_where() -> String {
-  current.val.perf_where()
+  (current.val.perf_where)()
 }
 
 ///|
 /// How many bytes the performance record's files have on the device now (the last few files, each at most a few MB).
 pub fn perf_size() -> Double {
-  current.val.perf_size()
+  (current.val.perf_size)()
 }
 
 ///|
@@ -2695,42 +1787,42 @@ pub fn perf_size() -> Double {
 /// the system's share sheet (@hostapi.share): a release build's files are nowhere a person can take them from. Empty
 /// where none is kept.
 pub fn perf_read() -> Bytes {
-  current.val.perf_read()
+  (current.val.perf_read)()
 }
 
 ///|
 /// Whether the device can show the performance record's folder, and the logs beside it (perf_open), where it has no
 /// share sheet to hand them on through (Windows).
 pub fn perf_opens() -> Bool {
-  current.val.perf_open(false)
+  (current.val.perf_open)(false)
 }
 
 ///|
 /// The performance record's folder, and the logs beside it, shown in the system's own file manager; false where it
 /// cannot be (perf_opens). Asked off the thread that draws: nothing waits for the file manager.
 pub fn perf_open() -> Bool {
-  current.val.perf_open(true)
+  (current.val.perf_open)(true)
 }
 
 ///|
 /// Whether the device can show a file of its own where it is, in the system's file manager (reveal_file): macOS's
 /// Finder, Windows' Explorer, a Linux desktop's file manager; not a phone's nor the web's.
 pub fn reveals_files() -> Bool {
-  current.val.reveal_file("", false)
+  (current.val.reveal_file)("", false)
 }
 
 ///|
 /// The file at `path` (on this device) shown chosen in its folder in the system's file manager (在访达中显示); false
 /// where it cannot be (reveals_files) or is not there.
 pub fn reveal_file(path : String) -> Bool {
-  path != "" && current.val.reveal_file(path, true)
+  path != "" && (current.val.reveal_file)(path, true)
 }
 
 ///|
 /// Words (`text`), or a file of `data` named `name` (`mime`), handed to another app through the system's share sheet
 /// (Android's chooser, macOS's sharing picker); false where there is none (or no app takes it).
 pub fn share(text : String, name : String, mime : String, data : Bytes) -> Bool {
-  current.val.share(text, name, mime, data)
+  (current.val.share)(text, name, mime, data)
 }
 
 ///|
@@ -2739,19 +1831,19 @@ pub fn share(text : String, name : String, mime : String, data : Bytes) -> Bool 
 /// MBUI_SHARE_FILES, paths split by |, on macOS and iOS for scripted runs), as JSON text `{"text","title","files"}`,
 /// `files` each `{"name","type","size"}` (absent when none); "" when nothing was.
 pub fn shared_in() -> String {
-  current.val.shared_in()
+  (current.val.shared_in)()
 }
 
 ///|
 /// The i-th of the files shared in (`shared_in`'s `files`), taken once: empty after, or where there is none.
 pub fn shared_in_file(i : Int) -> Bytes {
-  current.val.shared_in_file(i)
+  (current.val.shared_in_file)(i)
 }
 
 ///|
 /// This build's version code, as the system has it (Android's); 0 where the app does not update itself.
 pub fn app_version() -> Int {
-  current.val.app_version()
+  (current.val.app_version)()
 }
 
 ///|
@@ -2771,7 +1863,7 @@ pub fn update_fetch(
   now : Bool,
   delta : String,
 ) -> Unit {
-  current.val.update_fetch(url, sha256, size, name, now, delta)
+  (current.val.update_fetch)(url, sha256, size, name, now, delta)
 }
 
 ///|
@@ -2780,7 +1872,7 @@ pub fn update_fetch(
 /// behind), the newer build says `said` in a notification that opens it. Where the person's leave to install apps
 /// is wanted (Android's), the system's page for it is opened first, and once it is given the build is put in place.
 pub fn update_apply(said : String) -> Unit {
-  current.val.update_apply(said)
+  (current.val.update_apply)(said)
 }
 
 ///|
@@ -2790,7 +1882,7 @@ pub fn update_apply(said : String) -> Unit {
 /// one; `away` true where a build ready is put in place by itself while the app is out of sight (Android's); "" where
 /// the app does not update itself.
 pub fn update_state() -> String {
-  current.val.update_state()
+  (current.val.update_state)()
 }
 
 ///|
@@ -2799,7 +1891,7 @@ pub fn update_state() -> String {
 /// (system.mbt `install`: the leave to install apps asked for, or why it failed: "unsupported" where there is no
 /// installer).
 pub fn install_package(name : String, data : Bytes) -> Unit {
-  current.val.install_package(name, data)
+  (current.val.install_package)(name, data)
 }
 
 ///|
@@ -2816,39 +1908,39 @@ pub fn install_package(name : String, data : Bytes) -> Unit {
 /// PATH|PATH…", as the system's drop of them (Linux's linux_app.c drop_drive). False where
 /// the host has no such path (the caller sends it to the app itself).
 pub fn drive(kind : Int, text : String) -> Bool {
-  current.val.drive(kind, text)
+  (current.val.drive)(kind, text)
 }
 
 ///|
 /// Starts decoding the image at `src` (a file path or an http(s) URL);
 /// returns its id.
 pub fn image_load(src : String, max_px : Int) -> Int {
-  current.val.image_load(src, max_px)
+  (current.val.image_load)(src, max_px)
 }
 
 ///|
 /// Starts decoding an encoded image (JPEG, PNG, HEIC, WebP…) in memory.
 pub fn image_load_bytes(data : Bytes, max_px : Int) -> Int {
-  current.val.image_load_bytes(data, max_px)
+  (current.val.image_load_bytes)(data, max_px)
 }
 
 ///|
 /// 0 while decoding, 1 when ready, -1 if it failed. Ready, `out` gets the
 /// decoded width and height and the original's, in pixels.
 pub fn image_info(id : Int, out : FixedArray[Double]) -> Int {
-  current.val.image_info(id, out)
+  (current.val.image_info)(id, out)
 }
 
 ///|
 pub fn image_free(id : Int) -> Unit {
-  current.val.image_free(id)
+  (current.val.image_free)(id)
 }
 
 ///|
 /// A ready image's pixels as decoded (image_info's width by height, rows from the top, RGBA premultiplied) into `out`
 /// (at least w × h × 4 long): false where it is not ready or cannot be read back.
 pub fn image_pixels(id : Int, out : FixedArray[Byte]) -> Bool {
-  current.val.image_pixels(id, out)
+  (current.val.image_pixels)(id, out)
 }
 
 ///|
@@ -2856,7 +1948,7 @@ pub fn image_pixels(id : Int, out : FixedArray[Byte]) -> Bool {
 /// (device pixels from its top left) into `out` (at least w × h × 4 long: RGBA premultiplied, rows from the top): false
 /// where the rectangle is not all in it, or the frame cannot be read back here.
 pub fn drawn_pixels(x : Int, y : Int, w : Int, h : Int, out : FixedArray[Byte]) -> Bool {
-  current.val.drawn_pixels(x, y, w, h, out)
+  (current.val.drawn_pixels)(x, y, w, h, out)
 }
 
 ///|
@@ -2876,7 +1968,7 @@ pub fn drawn_pixels_of(
   h : Int,
   out : FixedArray[Byte],
 ) -> Bool {
-  current.val.drawn_pixels_of(inst, count, r, g, b, scale, w, h, out)
+  (current.val.drawn_pixels_of)(inst, count, r, g, b, scale, w, h, out)
 }
 
 ///|
@@ -2888,43 +1980,43 @@ pub fn drawn_pixels_of(
 /// it, and fails its body once what waits is read: the app ends it). Of a page's or a site's, `{"said":text}`: what
 /// its page's scripts said to the app (`mbuiHost.post(text)`), in the order said.
 pub fn view_site_next(id : Int) -> String {
-  current.val.view_site_next(id)
+  (current.val.view_site_next)(id)
 }
 
 ///|
 /// A request's body (empty when it has none, or the host's web view does not hand it over: Android's).
 pub fn view_site_body(id : Int, req : Int) -> Bytes {
-  current.val.view_site_body(id, req)
+  (current.val.view_site_body)(id, req)
 }
 
 ///|
 /// A request's answer begins: its status and headers (`[[k,v]…]` as JSON text).
 pub fn view_site_head(id : Int, req : Int, status : Int, headers : String) -> Unit {
-  current.val.view_site_head(id, req, status, headers)
+  (current.val.view_site_head)(id, req, status, headers)
 }
 
 ///|
 /// The next piece of a request's answer's body.
 pub fn view_site_chunk(id : Int, req : Int, data : Bytes) -> Unit {
-  current.val.view_site_chunk(id, req, data)
+  (current.val.view_site_chunk)(id, req, data)
 }
 
 ///|
 /// A request's answer ends ("" whole; else why it broke off). A request with no head yet fails with it.
 pub fn view_site_end(id : Int, req : Int, error : String) -> Unit {
-  current.val.view_site_end(id, req, error)
+  (current.val.view_site_end)(id, req, error)
 }
 
 ///|
 /// Where the site's page is: `{"path","back","forward","loading","title"}` as JSON text.
 pub fn view_site_state(id : Int) -> String {
-  current.val.view_site_state(id)
+  (current.val.view_site_state)(id)
 }
 
 ///|
 /// The site's page at `path` of its own host.
 pub fn view_site_load(id : Int, path : String) -> Unit {
-  current.val.view_site_load(id, path)
+  (current.val.view_site_load)(id, path)
 }
 
 ///|
@@ -2939,7 +2031,7 @@ pub fn view_site_load(id : Int, path : String) -> Unit {
 /// 6 (a video) how the host's own reader, where it has one, reads its bytes itself rather than asking the app
 /// (`view_read_next`): what the app's reader of it gave it (still.fail's: a core call; Android's NativeViews.Direct).
 pub fn view_tell(id : Int, what : Int, text : String) -> Unit {
-  current.val.view_tell(id, what, text)
+  (current.val.view_tell)(id, what, text)
 }
 
 ///|
@@ -2949,7 +2041,7 @@ pub fn view_tell(id : Int, what : Int, text : String) -> Unit {
 /// own, each of whose requests the app answers (`view_site_next`). Hidden until placed. 0 when this host has no such
 /// view.
 pub fn view_open(kind : Int, arg : String) -> Int {
-  current.val.view_open(kind, arg)
+  (current.val.view_open)(kind, arg)
 }
 
 ///|
@@ -2982,13 +2074,13 @@ pub fn view_place(
   r3 : Double,
   shown : Bool,
 ) -> Unit {
-  current.val.view_place(id, x, y, w, h, cx0, cy0, cx1, cy1, r0, r1, r2, r3, shown)
+  (current.val.view_place)(id, x, y, w, h, cx0, cy0, cx1, cy1, r0, r1, r2, r3, shown)
 }
 
 ///|
 /// The view gone (its player stopped, its page closed).
 pub fn view_close(id : Int) -> Unit {
-  current.val.view_close(id)
+  (current.val.view_close)(id)
 }
 
 ///|
@@ -2996,7 +2088,7 @@ pub fn view_close(id : Int) -> Unit {
 /// to about `value` ms at once (the nearest key frame: nothing before it decoded); a site: 5 back, 6 forward, 7
 /// reload, 8 laid out at its rect over `value` and drawn at `value` times (a viewport's own size shown smaller).
 pub fn view_control(id : Int, op : Int, value : Double) -> Unit {
-  current.val.view_control(id, op, value)
+  (current.val.view_control)(id, op, value)
 }
 
 ///|
@@ -3008,7 +2100,7 @@ pub fn view_control(id : Int, op : Int, value : Double) -> Unit {
 /// within what it has, nor one while paused), how far on it has what it needs to play (ms; 0 not said), played to its
 /// end (1).
 pub fn view_info(id : Int, out : FixedArray[Double]) -> Int {
-  current.val.view_info(id, out)
+  (current.val.view_info)(id, out)
 }
 
 ///|
@@ -3016,7 +2108,7 @@ pub fn view_info(id : Int, out : FixedArray[Double]) -> Int {
 /// the id of one it let go of (it wants none of what is left of it: the app stops reading it, answers it no more).
 /// Each is answered as its bytes come (`view_read_answer`); the host asks for a frame when one comes.
 pub fn view_read_next(id : Int, out : FixedArray[Double]) -> Int {
-  current.val.view_read_next(id, out)
+  (current.val.view_read_next)(id, out)
 }
 
 ///|
@@ -3025,37 +2117,37 @@ pub fn view_read_next(id : Int, out : FixedArray[Double]) -> Int {
 /// none); `total` the file's whole size (-1 not known: Apple's player needs it, so give it, at the latest with its
 /// last answer); -2: it could not be read (its last: the player fails).
 pub fn view_read_answer(id : Int, req : Int, data : Bytes, total : Double, more : Bool) -> Unit {
-  current.val.view_read_answer(id, req, data, total, more)
+  (current.val.view_read_answer)(id, req, data, total, more)
 }
 
 ///|
 /// A PDF opened from its bytes: its id, or 0 where the host draws none.
 pub fn pdf_open(data : Bytes) -> Int {
-  current.val.pdf_open(data)
+  (current.val.pdf_open)(data)
 }
 
 ///|
 /// How many pages it has; -1 when it could not be opened.
 pub fn pdf_pages(doc : Int) -> Int {
-  current.val.pdf_pages(doc)
+  (current.val.pdf_pages)(doc)
 }
 
 ///|
 /// A page's size in points (`out` [0] width, [1] height).
 pub fn pdf_page_size(doc : Int, page : Int, out : FixedArray[Double]) -> Unit {
-  current.val.pdf_page_size(doc, page, out)
+  (current.val.pdf_page_size)(doc, page, out)
 }
 
 ///|
 /// A page drawn (on white, off the app's thread) at most `max_px` on its longer side: an image's id, as image_load's
 /// (image_info, image_free).
 pub fn pdf_page_load(doc : Int, page : Int, max_px : Int) -> Int {
-  current.val.pdf_page_load(doc, page, max_px)
+  (current.val.pdf_page_load)(doc, page, max_px)
 }
 
 ///|
 pub fn pdf_close(doc : Int) -> Unit {
-  current.val.pdf_close(doc)
+  (current.val.pdf_close)(doc)
 }
 
 ///|
@@ -3063,20 +2155,20 @@ pub fn pdf_close(doc : Int) -> Unit {
 /// read), 2 how a frame grabbed stands (view_control 21 at a time in ms: "1" grabbing, "2" here, "-1" failed, "0"
 /// none, view_control 23 ending one given up); None while not known.
 pub fn view_text(id : Int, what : Int) -> String? {
-  current.val.view_text(id, what)
+  (current.val.view_text)(id, what)
 }
 
 ///|
 /// A video view's frame grabbed (PNG), taken once.
 pub fn view_still(id : Int) -> Bytes {
-  current.val.view_still(id)
+  (current.val.view_still)(id)
 }
 
 ///|
 /// A file put where the system keeps downloads (Android: Downloads, through MediaStore; macOS: ~/Downloads): true
 /// once it is there.
 pub fn save_file(name : String, data : Bytes) -> Bool {
-  current.val.save_file(name, data)
+  (current.val.save_file)(name, data)
 }
 
 ///|
@@ -3084,28 +2176,28 @@ pub fn save_file(name : String, data : Bytes) -> Bool {
 /// BreakIterator, Apple's CFStringTokenizer: a dictionary's words in Chinese and Japanese); (-1, -1) where the host has
 /// no such thing (Windows here) or `off` is in no word.
 pub fn word_at(text : String, off : Int) -> (Int, Int) {
-  current.val.word_at(text, off)
+  (current.val.word_at)(text, off)
 }
 
 ///|
 /// `url` handed to the system: the browser, or the app it belongs to (Android's ACTION_VIEW, macOS's NSWorkspace,
 /// iOS's UIApplication, Windows' ShellExecute). False when nothing took it.
 pub fn open_url(url : String) -> Bool {
-  current.val.open_url(url)
+  (current.val.open_url)(url)
 }
 
 ///|
 /// The app over another app (system.mbt `over`: Android's OverActivity, a share sheet over the app it came from) done:
 /// it goes, back to the app it was over; `open_app`, on into the app's own window. Nothing where it never is over one.
 pub fn over_done(open_app~ : Bool) -> Unit {
-  current.val.over_done(open_app)
+  (current.val.over_done)(open_app)
 }
 
 ///|
 /// A page shown in a browser's tab over the app, the app under it (Android's Custom Tab, the system's browser where
 /// none takes one; iOS's SFSafariViewController); elsewhere as open_url. False when nothing took it.
 pub fn open_tab(url : String) -> Bool {
-  current.val.open_tab(url)
+  (current.val.open_tab)(url)
 }
 
 ///|
@@ -3113,27 +2205,27 @@ pub fn open_tab(url : String) -> Bool {
 /// core's loopback listeners: Android's foreground service, in `channel`, named as the system's settings list it);
 /// said before the browser opens, kept for the next. Other hosts keep no notice.
 pub fn hold_words(channel~ : String, title~ : String, body~ : String) -> Unit {
-  current.val.hold_words(channel, title, body)
+  (current.val.hold_words)(channel, title, body)
 }
 
 ///|
 /// What was posted from outside the frames since the last take (`mb_post`, any thread: post.h), taken now as a frame
 /// begins: how many. They are handed on one at a time (`post_next`), in the order posted.
 pub fn post_take() -> Int {
-  current.val.post_take()
+  (current.val.post_take)()
 }
 
 ///|
 /// The next message taken (`post_take`): its channel, its JSON and the bytes beside it (empty: none). None when all
 /// taken are handed on, or dropped since (`mb_post_drop`: a core stopped).
 pub fn post_next() -> (String, String, Bytes)? {
-  current.val.post_next()
+  (current.val.post_next)()
 }
 
 ///|
 /// Starts a picture `w`×`h` points at `scale` pixels a point, on a ground of `bg` (0xRRGGBB).
 pub fn ref_begin(w : Double, h : Double, scale : Double, bg : Int) -> Unit {
-  current.val.ref_begin(w, h, scale, bg)
+  (current.val.ref_begin)(w, h, scale, bg)
 }
 
 ///|
@@ -3151,371 +2243,371 @@ pub fn ref_text(
   color : Int,
   out : FixedArray[Double],
 ) -> Unit {
-  current.val.ref_text(text, size, weight, style, x, base, color, out)
+  (current.val.ref_text)(text, size, weight, style, x, base, color, out)
 }
 
 ///|
 /// The picture written as `name`.png.
 pub fn ref_end(name : String) -> Bool {
-  current.val.ref_end(name)
+  (current.val.ref_end)(name)
 }
 
 ///|
 /// The window's picture as `name`.png: the frame last drawn, or (Android, a browser) the one drawn next; the caller
 /// keeps both the same.
 pub fn ref_frame(name : String) -> Bool {
-  current.val.ref_frame(name)
+  (current.val.ref_frame)(name)
 }
 
 ///|
 fn bl_start(path : String, done : String) -> Int {
-  current.val.bl_start(path, done)
+  (current.val.bl_start)(path, done)
 }
 
 ///|
 fn bl_port(id : Int) -> Int {
-  current.val.bl_port(id)
+  (current.val.bl_port)(id)
 }
 
 ///|
 fn bl_open(id : Int, url : String) -> Int {
-  current.val.bl_open(id, url)
+  (current.val.bl_open)(id, url)
 }
 
 ///|
 fn bl_back(id : Int) -> String {
-  current.val.bl_back(id)
+  (current.val.bl_back)(id)
 }
 
 ///|
 fn bl_end(id : Int) -> Unit {
-  current.val.bl_end(id)
+  (current.val.bl_end)(id)
 }
 
 // This device's password manager (passwords.mbt): `op`, run with the arguments given (a JSON array), how it ended.
 
 ///|
 fn pw_able() -> Bool {
-  current.val.pw_able()
+  (current.val.pw_able)()
 }
 
 ///|
 fn pw_run(args : String) -> Int {
-  current.val.pw_run(args)
+  (current.val.pw_run)(args)
 }
 
 ///|
 fn pw_out(id : Int) -> String {
-  current.val.pw_out(id)
+  (current.val.pw_out)(id)
 }
 
 ///|
 fn pw_end(id : Int) -> Unit {
-  current.val.pw_end(id)
+  (current.val.pw_end)(id)
 }
 
 // The system's autofill (autofill.mbt): a login of a site asked of its service, the one picked taken.
 
 ///|
 fn af_able() -> Bool {
-  current.val.af_able()
+  (current.val.af_able)()
 }
 
 ///|
 fn af_ask(host : String) -> Int {
-  current.val.af_ask(host)
+  (current.val.af_ask)(host)
 }
 
 ///|
 fn af_take() -> String {
-  current.val.af_take()
+  (current.val.af_take)()
 }
 
 ///|
 fn af_end() -> Unit {
-  current.val.af_end()
+  (current.val.af_end)()
 }
 
 // This device's passkeys (passkeys.mbt): a sign-in signed, how it ended.
 
 ///|
 fn wa_able() -> Bool {
-  current.val.wa_able()
+  (current.val.wa_able)()
 }
 
 ///|
 fn wa_get(ask : String) -> Int {
-  current.val.wa_get(ask)
+  (current.val.wa_get)(ask)
 }
 
 ///|
 fn wa_out(id : Int) -> String {
-  current.val.wa_out(id)
+  (current.val.wa_out)(id)
 }
 
 ///|
 fn wa_end(id : Int) -> Unit {
-  current.val.wa_end(id)
+  (current.val.wa_end)(id)
 }
 
 ///|
 fn pk_start(kind : Int) -> Int {
-  current.val.pk_start(kind)
+  (current.val.pk_start)(kind)
 }
 
 ///|
 fn pk_state(id : Int) -> Int {
-  current.val.pk_state(id)
+  (current.val.pk_state)(id)
 }
 
 ///|
 fn pk_count(id : Int) -> Int {
-  current.val.pk_count(id)
+  (current.val.pk_count)(id)
 }
 
 ///|
 fn pk_name(id : Int, i : Int) -> String {
-  current.val.pk_name(id, i)
+  (current.val.pk_name)(id, i)
 }
 
 ///|
 fn pk_info(id : Int, i : Int) -> String {
-  current.val.pk_info(id, i)
+  (current.val.pk_info)(id, i)
 }
 
 ///|
 fn pk_bytes(id : Int, i : Int) -> Bytes {
-  current.val.pk_bytes(id, i)
+  (current.val.pk_bytes)(id, i)
 }
 
 ///|
 fn pk_end(id : Int) -> Unit {
-  current.val.pk_end(id)
+  (current.val.pk_end)(id)
 }
 
 ///|
 fn kp_begin(name : String, mime : String, way : Int) -> Int {
-  current.val.kp_begin(name, mime, way)
+  (current.val.kp_begin)(name, mime, way)
 }
 
 ///|
 fn kp_append(id : Int, data : Bytes) -> Int {
-  current.val.kp_append(id, data)
+  (current.val.kp_append)(id, data)
 }
 
 ///|
 fn kp_finish(id : Int) -> Unit {
-  current.val.kp_finish(id)
+  (current.val.kp_finish)(id)
 }
 
 ///|
 fn kp_state(id : Int) -> Int {
-  current.val.kp_state(id)
+  (current.val.kp_state)(id)
 }
 
 ///|
 fn kp_where(id : Int) -> String {
-  current.val.kp_where(id)
+  (current.val.kp_where)(id)
 }
 
 ///|
 fn kp_end(id : Int) -> Unit {
-  current.val.kp_end(id)
+  (current.val.kp_end)(id)
 }
 
 ///|
 fn ga_access() -> Int {
-  current.val.ga_access()
+  (current.val.ga_access)()
 }
 
 ///|
 fn ga_ask() -> Unit {
-  current.val.ga_ask()
+  (current.val.ga_ask)()
 }
 
 ///|
 fn ga_answers() -> Int {
-  current.val.ga_answers()
+  (current.val.ga_answers)()
 }
 
 ///|
 fn ga_read() -> Int {
-  current.val.ga_read()
+  (current.val.ga_read)()
 }
 
 ///|
 fn ga_read_state(id : Int) -> Int {
-  current.val.ga_read_state(id)
+  (current.val.ga_read_state)(id)
 }
 
 ///|
 fn ga_read_rows(id : Int) -> String {
-  current.val.ga_read_rows(id)
+  (current.val.ga_read_rows)(id)
 }
 
 ///|
 fn ga_read_end(id : Int) -> Unit {
-  current.val.ga_read_end(id)
+  (current.val.ga_read_end)(id)
 }
 
 ///|
 fn pk_photo(src : String) -> Int {
-  current.val.pk_photo(src)
+  (current.val.pk_photo)(src)
 }
 
 ///|
 fn cs_known(charset : String) -> Int {
-  current.val.cs_known(charset)
+  (current.val.cs_known)(charset)
 }
 
 ///|
 fn cs_decode(data : Bytes, charset : String) -> String {
-  current.val.cs_decode(data, charset)
+  (current.val.cs_decode)(data, charset)
 }
 
 ///|
 fn mk_start(image : Bytes, marks : String) -> Int {
-  current.val.mk_start(image, marks)
+  (current.val.mk_start)(image, marks)
 }
 
 ///|
 fn mk_state(id : Int) -> Int {
-  current.val.mk_state(id)
+  (current.val.mk_state)(id)
 }
 
 ///|
 fn mk_png(id : Int) -> Bytes {
-  current.val.mk_png(id)
+  (current.val.mk_png)(id)
 }
 
 ///|
 fn nt_show(channel : String, tag : String, title : String, body : String, opens : String) -> Unit {
-  current.val.nt_show(channel, tag, title, body, opens)
+  (current.val.nt_show)(channel, tag, title, body, opens)
 }
 
 ///|
 fn nv_bar(spec : String) -> Int {
-  current.val.nv_bar(spec)
+  (current.val.nv_bar)(spec)
 }
 
 ///|
 fn nt_cancel(tag : String) -> Unit {
-  current.val.nt_cancel(tag)
+  (current.val.nt_cancel)(tag)
 }
 
 ///|
 fn nt_state(what : Int) -> Int {
-  current.val.nt_state(what)
+  (current.val.nt_state)(what)
 }
 
 ///|
 fn nt_text(what : Int) -> String {
-  current.val.nt_text(what)
+  (current.val.nt_text)(what)
 }
 
 ///|
 fn st_open() -> Int {
-  current.val.st_open()
+  (current.val.st_open)()
 }
 
 ///|
 fn st_h264(id : Int, avcc : Bytes, w : Int, h : Int) -> Unit {
-  current.val.st_h264(id, avcc, w, h)
+  (current.val.st_h264)(id, avcc, w, h)
 }
 
 ///|
 fn st_frame(id : Int, data : Bytes, key : Int, ts : Double) -> Unit {
-  current.val.st_frame(id, data, key, ts)
+  (current.val.st_frame)(id, data, key, ts)
 }
 
 ///|
 fn st_jpeg(id : Int, data : Bytes, ts : Double) -> Unit {
-  current.val.st_jpeg(id, data, ts)
+  (current.val.st_jpeg)(id, data, ts)
 }
 
 ///|
 fn st_next(id : Int) -> String {
-  current.val.st_next(id)
+  (current.val.st_next)(id)
 }
 
 ///|
 fn st_show(id : Int, ts : Double) -> Unit {
-  current.val.st_show(id, ts)
+  (current.val.st_show)(id, ts)
 }
 
 ///|
 fn st_close(id : Int) -> Unit {
-  current.val.st_close(id)
+  (current.val.st_close)(id)
 }
 
 ///|
 fn st_h264_here() -> Int {
-  current.val.st_h264_here()
+  (current.val.st_h264_here)()
 }
 
 ///|
 fn st_feeds() -> Int {
-  current.val.st_feeds()
+  (current.val.st_feeds)()
 }
 
 ///|
 fn st_codec(id : Int, cmd : String, data : Bytes) -> Unit {
-  current.val.st_codec(id, cmd, data)
+  (current.val.st_codec)(id, cmd, data)
 }
 
 ///|
 fn cl_read() -> Int {
-  current.val.cl_read()
+  (current.val.cl_read)()
 }
 
 ///|
 fn cl_state(id : Int) -> Int {
-  current.val.cl_state(id)
+  (current.val.cl_state)(id)
 }
 
 ///|
 fn cl_picture(id : Int) -> Int {
-  current.val.cl_picture(id)
+  (current.val.cl_picture)(id)
 }
 
 ///|
 fn tm_open(cols : Int, rows : Int) -> Int {
-  current.val.tm_open(cols, rows)
+  (current.val.tm_open)(cols, rows)
 }
 
 ///|
 fn tm_write(id : Int, data : Bytes) -> Unit {
-  current.val.tm_write(id, data)
+  (current.val.tm_write)(id, data)
 }
 
 ///|
 fn tm_resize(id : Int, cols : Int, rows : Int, cw : Int, ch : Int) -> Unit {
-  current.val.tm_resize(id, cols, rows, cw, ch)
+  (current.val.tm_resize)(id, cols, rows, cw, ch)
 }
 
 ///|
 fn tm_frame(id : Int, flags : Int) -> Bytes {
-  current.val.tm_frame(id, flags)
+  (current.val.tm_frame)(id, flags)
 }
 
 ///|
 fn tm_modes(id : Int) -> Int {
-  current.val.tm_modes(id)
+  (current.val.tm_modes)(id)
 }
 
 ///|
 fn tm_scroll(id : Int, kind : Int, value : Int) -> Unit {
-  current.val.tm_scroll(id, kind, value)
+  (current.val.tm_scroll)(id, kind, value)
 }
 
 ///|
 fn tm_select(id : Int, kind : Int, x0 : Int, y0 : Int, x1 : Int, y1 : Int) -> Int {
-  current.val.tm_select(id, kind, x0, y0, x1, y1)
+  (current.val.tm_select)(id, kind, x0, y0, x1, y1)
 }
 
 ///|
 fn tm_text(id : Int, sel : Int) -> String {
-  current.val.tm_text(id, sel)
+  (current.val.tm_text)(id, sel)
 }
 
 ///|
@@ -3531,102 +2623,102 @@ fn tm_mouse(
   cw : Int,
   ch : Int,
 ) -> Bytes {
-  current.val.tm_mouse(id, action, button, mods, x, y, w, h, cw, ch)
+  (current.val.tm_mouse)(id, action, button, mods, x, y, w, h, cw, ch)
 }
 
 ///|
 fn tm_close(id : Int) -> Unit {
-  current.val.tm_close(id)
+  (current.val.tm_close)(id)
 }
 
 ///|
 fn cl_text(id : Int) -> String {
-  current.val.cl_text(id)
+  (current.val.cl_text)(id)
 }
 
 ///|
 fn cl_png(id : Int) -> Bytes {
-  current.val.cl_png(id)
+  (current.val.cl_png)(id)
 }
 
 ///|
 fn cl_files(id : Int) -> Int {
-  current.val.cl_files(id)
+  (current.val.cl_files)(id)
 }
 
 ///|
 fn cl_file_name(id : Int, i : Int) -> String {
-  current.val.cl_file_name(id, i)
+  (current.val.cl_file_name)(id, i)
 }
 
 ///|
 fn cl_file(id : Int, i : Int) -> Bytes {
-  current.val.cl_file(id, i)
+  (current.val.cl_file)(id, i)
 }
 
 ///|
 fn cl_end(id : Int) -> Unit {
-  current.val.cl_end(id)
+  (current.val.cl_end)(id)
 }
 
 ///|
 fn cl_set(text : String, png : Bytes, label : String) -> Unit {
-  current.val.cl_set(text, png, label)
+  (current.val.cl_set)(text, png, label)
 }
 
 ///|
 fn dv_copy_shown() -> Int {
-  current.val.dv_copy_shown()
+  (current.val.dv_copy_shown)()
 }
 
 ///|
 fn dv_key_catch(on : Int) -> Unit {
-  current.val.dv_key_catch(on)
+  (current.val.dv_key_catch)(on)
 }
 
 ///|
 fn dv_ime_inset() -> Double {
-  current.val.dv_ime_inset()
+  (current.val.dv_ime_inset)()
 }
 
 ///|
 fn dv_keep_awake(on : Int) -> Unit {
-  current.val.dv_keep_awake(on)
+  (current.val.dv_keep_awake)(on)
 }
 
 ///|
 fn dv_haptic(kind : Int) -> Unit {
-  current.val.dv_haptic(kind)
+  (current.val.dv_haptic)(kind)
 }
 
 ///|
 fn dv_ime_action(kind : Int) -> Unit {
-  current.val.dv_ime_action(kind)
+  (current.val.dv_ime_action)(kind)
 }
 
 ///|
 fn dv_ime_let_go() -> Unit {
-  current.val.dv_ime_let_go()
+  (current.val.dv_ime_let_go)()
 }
 
 ///|
 fn ncall_call(name : String, params : String) -> Int {
-  current.val.ncall_call(name, params)
+  (current.val.ncall_call)(name, params)
 }
 
 ///|
 fn ncall_state(id : Int) -> Int {
-  current.val.ncall_state(id)
+  (current.val.ncall_state)(id)
 }
 
 ///|
 fn ncall_result(id : Int) -> String {
-  current.val.ncall_result(id)
+  (current.val.ncall_result)(id)
 }
 
 ///|
 fn ncall_end(id : Int) -> Unit {
-  current.val.ncall_end(id)
+  (current.val.ncall_end)(id)
 }
 
 ///|
@@ -3634,66 +2726,32 @@ fn ncall_end(id : Int) -> Unit {
 /// and draws only those parts again, the rest as it drew it: said once for each part before
 /// `present`; `w` < 0, all of it; once with `w` 0, none. A frame nothing was said for is drawn whole.
 pub fn render_dirty(x : Double, y : Double, w : Double, h : Double) -> Unit {
-  current.val.rn_dirty(x, y, w, h)
+  (current.val.rn_dirty)(x, y, w, h)
 }
 
 ///|
 /// Set the global ambient light axis angle (radians) for liquid glass surfaces on the active renderer.
 pub fn set_glass_light_angle(radians : Double) -> Unit {
-  current.val.rn_glass_light_angle(radians)
+  (current.val.rn_glass_light_angle)(radians)
 }
 
 ///|
-impl Host with st_audio_here(_) { 0 }
+fn st_audio_here() -> Int { (current.val.st_audio_here)() }
 
 ///|
-impl Host with st_audio(_, _, _) { () }
+fn st_audio(id : Int, data : Bytes) -> Unit { (current.val.st_audio)(id, data) }
 
 ///|
-fn st_audio_here() -> Int { current.val.st_audio_here() }
+fn st_audio_played(id : Int) -> Double { (current.val.st_audio_played)(id) }
 
 ///|
-fn st_audio(id : Int, data : Bytes) -> Unit { current.val.st_audio(id, data) }
+fn st_audio_queued(id : Int) -> Double { (current.val.st_audio_queued)(id) }
 
 ///|
-impl Host with st_audio_played(_, _) { 0.0 }
+fn st_audio_wanted(id : Int) -> Double { (current.val.st_audio_wanted)(id) }
 
 ///|
-impl Host with st_audio_queued(_, _) { 0.0 }
-
-///|
-impl Host with st_audio_wanted(_, _) { 0.0 }
-
-///|
-impl Host with st_audio_volume(_, _, _) { () }
-
-///|
-fn st_audio_played(id : Int) -> Double { current.val.st_audio_played(id) }
-
-///|
-fn st_audio_queued(id : Int) -> Double { current.val.st_audio_queued(id) }
-
-///|
-fn st_audio_wanted(id : Int) -> Double { current.val.st_audio_wanted(id) }
-
-///|
-fn st_audio_volume(id : Int, v : Double) -> Unit { current.val.st_audio_volume(id, v) }
-
-///|
-/// A frame with whether it is to be shown (`show` 0: decoded for what comes after it, never shown): 1 the host took
-/// it, 0 it did not (the app lets it go itself). A host with nothing for frames not shown takes a shown one as
-/// `st_frame` and none other.
-impl Host with st_frame_shown(self, id, data, key, ts, show) {
-  if show != 0 {
-    self.st_frame(id, data, key, ts)
-    1
-  } else {
-    0
-  }
-}
-
-///|
-impl Host with st_flush(_, _, _) { () }
+fn st_audio_volume(id : Int, v : Double) -> Unit { (current.val.st_audio_volume)(id, v) }
 
 ///|
 fn st_frame_shown(id : Int, data : Bytes, key : Int, ts : Double, show : Int) -> Int {
@@ -3701,100 +2759,53 @@ fn st_frame_shown(id : Int, data : Bytes, key : Int, ts : Double, show : Int) ->
 }
 
 ///|
-fn st_flush(id : Int, drain : Int) -> Unit { current.val.st_flush(id, drain) }
+fn st_flush(id : Int, drain : Int) -> Unit { (current.val.st_flush)(id, drain) }
 
 ///|
-impl Host with st_layers(_) { 0 }
-
-///|
-fn st_layers() -> Int { current.val.st_layers() }
-
-///|
-impl Host with st_pointer(_, _, _, _, _, _, _) { () }
-
-///|
-/// The pointer's picture told with the name the app gives it (`key`), made (`png`) only by a host that draws it.
-impl Host with st_pointer_named(self, id, _, png, w, h, hx, hy) { self.st_pointer(id, png(), w, h, hx, hy) }
-
-///|
-impl Host with st_pointer_at(_, _, _, _, _) { () }
+fn st_layers() -> Int { (current.val.st_layers)() }
 
 ///|
 fn st_pointer_at(id : Int, x : Double, y : Double, shown : Int) -> Unit {
-  current.val.st_pointer_at(id, x, y, shown)
+  (current.val.st_pointer_at)(id, x, y, shown)
 }
-
-///|
-impl Host with st_direct(_, _, _, _, _) { () }
 
 ///|
 fn st_direct(id : Int, route : Double, after : Double, what : Int) -> Unit {
-  current.val.st_direct(id, route, after, what)
+  (current.val.st_direct)(id, route, after, what)
 }
-impl Host with st_h265_here(_) { 0 }
+///|
+fn st_h265_here() -> Int { (current.val.st_h265_here)() }
 
 ///|
-impl Host with st_hevc(_, _, _, _, _) { () }
+fn st_hevc(id : Int, hvcc : Bytes, w : Int, h : Int) -> Unit { (current.val.st_hevc)(id, hvcc, w, h) }
 
 ///|
-fn st_h265_here() -> Int { current.val.st_h265_here() }
+fn st_av1_here() -> Int { (current.val.st_av1_here)() }
 
 ///|
-fn st_hevc(id : Int, hvcc : Bytes, w : Int, h : Int) -> Unit { current.val.st_hevc(id, hvcc, w, h) }
-
-///|
-impl Host with st_av1_here(_) { 0 }
-
-///|
-impl Host with st_av1(_, _, _, _, _) { () }
-
-///|
-fn st_av1_here() -> Int { current.val.st_av1_here() }
-
-///|
-fn st_av1(id : Int, av1c : Bytes, w : Int, h : Int) -> Unit { current.val.st_av1(id, av1c, w, h) }
-
-///|
-impl Host with auto_launch(_) {
-  false
-}
-
-///|
-impl Host with set_auto_launch(_, _) {
-  false
-}
-
-///|
-impl Host with hotkey_set(_, _, _) {
-  false
-}
-
-///|
-impl Host with hotkey_clear(_, _) {
-  ()
-}
+fn st_av1(id : Int, av1c : Bytes, w : Int, h : Int) -> Unit { (current.val.st_av1)(id, av1c, w, h) }
 
 ///|
 /// Whether the app is registered to start automatically at user login.
 pub fn auto_launch() -> Bool {
-  current.val.auto_launch()
+  (current.val.auto_launch)()
 }
 
 ///|
 /// Enable or disable starting the app automatically at user login. Returns true on success.
 pub fn set_auto_launch(enabled : Bool) -> Bool {
-  current.val.set_auto_launch(enabled)
+  (current.val.set_auto_launch)(enabled)
 }
 
 ///|
 /// Register a desktop global hotkey (`accel`, e.g. "CmdOrCtrl+Shift+Space") under `id`.
 /// Triggered hotkeys arrive as host posts on channel `"mbui.hotkey"` with `{"id":"<id>"}`.
 pub fn hotkey_set(id : String, accel : String) -> Bool {
-  current.val.hotkey_set(id, accel)
+  (current.val.hotkey_set)(id, accel)
 }
 
 ///|
 /// Unregister a previously registered global hotkey by `id`.
 pub fn hotkey_clear(id : String) -> Unit {
-  current.val.hotkey_clear(id)
+  (current.val.hotkey_clear)(id)
 }

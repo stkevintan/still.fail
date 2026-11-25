@@ -97,7 +97,7 @@ test "大屏, built as a host builds: words a mouse picked in a message have 引
 
 ///|
 /// A chat ending with a long agent reply like the reported selection: a wrapped list item, followed by another item.
-fn pick_list_tester(calls : Array[Made], w? : Double = 1280.0) -> @ui.Tester {
+fn pick_list_tester(calls : Array[Made], w? : Double = 1280.0, lang? : @signals.Signal[String]) -> @ui.Tester {
   new_run()
   let text = "好，表 14 保持现状，不加说明。\n\n通读找到的问题里，还剩这些没定（编号沿用之前的）：\n- **7–12**：数字和单位前后不统一。两组 A1/b1 配置；同一批 400 项，系统统计数写成了 218/219/220 三个数；运行预算 20 和 50 分钟；501 和 509 s；sample 数 2,100 和 2,220；表 17 的列没标清楚。\n- **19–21**：可选。摘要补\"than the official Example evaluation\"；表 18 填上 115 s；写明 App 0.8.0b64。\n\n你点编号我就改；都不改的话，就可以收尾合并 #123 了。"
   let md : Json = [
@@ -119,6 +119,18 @@ fn pick_list_tester(calls : Array[Made], w? : Double = 1280.0) -> @ui.Tester {
     topic_read: fn(name, params) {
       let tp = base.topic(name, params).get().snapshot()
       match (name, tp.value) {
+        ("prefs", _) =>
+          match lang {
+            Some(ls) if ls.get() != "" => {
+              let o = match tp.value {
+                Some(Object(m)) => m.copy()
+                _ => {}
+              }
+              o["lang"] = Json::string(ls.get())
+              { ..tp, value: Some(Json::object(o)) }
+            }
+            _ => tp
+          }
         ("chat", Some(Object(o))) => {
           let messages = match o.get("messages") {
             Some(Array(a)) => a.copy()
@@ -434,4 +446,83 @@ test "大屏, words a mouse picked in a message, the list then scrolled on till 
   let (_, by2, _, _) = words_rect(t, "表 18")
   assert_true(by2 < 800.0, msg="the words back in sight: \{by2}")
   assert_true(pill_over(t, by2) is Some(_), msg="引用 over the words again")
+}
+
+///|
+test "大屏, selectionIntent enabled: mouse selection shows 40pt dual-button 引用 | 戳一下 glass bar, hides on scroll out and returns on scroll back, and 戳一下 opens Poke popover at real anchor" {
+  let calls : Array[Made] = []
+  let lang = @signals.signal("")
+  let t = pick_list_tester(calls, lang~)
+  t.check_looks(false)
+  @sfbase.selection_intent_feature.set(true)
+  t.draw()
+  let (bx, by, bw, bh) = words_rect(t, "表 18")
+  mouse_dragged(t, bx + 1.0, by + bh / 2.0, bx + bw - 1.0, by + bh / 2.0)
+  t.run_for(@ui.move_most_ms)
+  guard t.words().filter(fn(w) { w.0 == "引用" && w.2 < by && w.2 > by - 60.0 }) is [(_, qx, qy, qw, qh, _), ..] else {
+    fail("no 引用 in dual-button bar")
+  }
+  guard t.words().filter(fn(w) { w.0 == "戳一下" && w.2 < by && w.2 > by - 60.0 }) is [(_, px, _, _, _, _), ..] else {
+    fail("no 戳一下 in dual-button bar")
+  }
+  assert_true(px > qx + qw, msg="戳一下 sits to the right of 引用")
+  // Single 40pt liquid glass pill + hairline rule_down divider between the two actions
+  let glass = t.drawn_glass().filter(fn(g) { holds_middle(g.0, g.1, g.2, g.3, (qx, qy, qw, qh)) })
+  assert_eq(glass.length(), 1, msg="single liquid glass capsule")
+  assert_eq(glass[0].4, 6)
+  assert_true((glass[0].3 - 40.0).abs() < 0.5, msg="height 40pt: \{glass[0].3}")
+  let seps = t.drawn_rects().filter(fn(r) {
+    (r.2 - @sf.rule_w).abs() < 0.1 && (r.3 - 16.0).abs() < 0.5 && r.0 >= qx + qw && r.0 <= px
+  })
+  assert_eq(seps.length(), 1, msg="hairline rule_down separator between 引用 and 戳一下")
+
+  // Switching language while the selection stays open updates both visible labels and a11y button names live
+  lang.set("en")
+  t.stepped()
+  t.run_for(@ui.move_most_ms)
+  assert_true(
+    t.words().iter().any(fn(w) { w.0 == "Quote" && w.2 < by && w.2 > by - 60.0 }) &&
+    t.query(Button, label="Quote") is Some(_),
+    msg="Quote updated live on language switch",
+  )
+  assert_true(
+    t.words().iter().any(fn(w) { w.0 == "Poke" && w.2 < by && w.2 > by - 60.0 }) &&
+    t.query(Button, label="Poke") is Some(_),
+    msg="Poke updated live on language switch",
+  )
+  lang.set("")
+  t.stepped()
+  t.run_for(@ui.move_most_ms)
+  assert_true(
+    t.query(Button, label="引用") is Some(_) && t.query(Button, label="戳一下") is Some(_),
+    msg="Chinese labels restored live",
+  )
+
+  // Scroll out of sight -> dual bar hidden; scroll back -> dual bar returns
+  let mut turned = 0
+  while turned < 12 {
+    t.wheel(900.0, 400.0, -150.0)
+    t.run_for(@ui.move_most_ms)
+    turned = turned + 1
+    if words_rect(t, "表 18").1 > 820.0 {
+      break
+    }
+  }
+  assert_true(t.words().filter(fn(w) { w.0 == "戳一下" }).is_empty(), msg="dual bar hidden when scrolled out")
+  for _ in 0..<turned {
+    t.wheel(900.0, 400.0, 150.0)
+    t.run_for(@ui.move_most_ms)
+  }
+  let (_, by2, _, _) = words_rect(t, "表 18")
+  guard t.words().filter(fn(w) { w.0 == "戳一下" && w.2 < by2 && w.2 > by2 - 60.0 }) is [(_, px2, py2, pw2, ph2, _), ..] else {
+    fail("dual bar did not return after scrolling back")
+  }
+
+  // Click 戳一下 -> calls chat.selectionIntent and opens Poke popover
+  t.run_for(@ui.double_click_ms)
+  mouse_clicked(t, px2 + pw2 / 2.0, py2 + ph2 / 2.0)
+  t.run_for(@ui.move_most_ms)
+  assert_eq(named(calls, "chat.selectionIntent").length(), 1, msg="chat.selectionIntent called")
+  assert_true(t.find("轻量模型结合当前对话上下文") is Some(_), msg="Poke popover opened with reply")
+  @sfbase.selection_intent_feature.set(false)
 }

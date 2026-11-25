@@ -521,6 +521,34 @@ fn tabs_node(v : @view.View, s : ScreenSess, u : ScreenUi, done : () -> Unit, cl
 }
 
 ///|
+/// Append `url` into the topmost open chat's composer draft (or copy to clipboard when no chat is on the stack).
+fn send_url_to_open_chat(src : Source, url : String) -> Unit {
+  guard url != "" else { return }
+  let pages = @sfbase.app.nav.pages()
+  let mut i = pages.length() - 1
+  while i >= 0 {
+    if pages[i] is Chat(r) {
+      let w = @sfbase.writing(src, r.station + ":" + r.session)
+      let cur = @signals.untracked(fn() { w.text.get() })
+      let next = if cur == "" {
+        url
+      } else if cur.has_suffix("\n") || cur.has_suffix(" ") {
+        cur + url
+      } else {
+        cur + " " + url
+      }
+      w.field.set(next)
+      @sfbase.writing_text(src, w, next)
+      @sfbase.toast_later(@sf.t("web-pages.remote.urlSent"))
+      return
+    }
+    i -= 1
+  }
+  @ui.clipboard_set(url)
+  @sfbase.toast_later(@sf.t("web-pages.remote.urlCopied"))
+}
+
+///|
 /// A new tab (＋, ⌘T): there at once on its blank page, its address bar taking the keys, while the station makes it.
 fn new_tab_from(s : ScreenSess, u : ScreenUi) -> Unit {
   let listed = browser_tabs_of(s).1.map(fn(t) { text(Some(t), "id") })

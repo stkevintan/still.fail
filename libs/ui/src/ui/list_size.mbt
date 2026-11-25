@@ -459,7 +459,7 @@ priv struct Sizes {
 }
 
 ///|
-impl Moving for Sizes with rest_at(self, now, frame) {
+fn Sizes::rest_at(self : Sizes, now : Double, frame : Int) -> Double {
   ignore(frame)
   // (over: at rest, whatever is kept of a way gone by)
   // (a hair past now, a sum of ms rounded off: at rest, as at its end)
@@ -469,6 +469,12 @@ impl Moving for Sizes with rest_at(self, now, frame) {
   } else {
     -1.0
   }
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn Sizes::as_moving(self : Sizes) -> Moving {
+  Moving::new(fn(now, frame) { self.rest_at(now, frame) })
 }
 
 

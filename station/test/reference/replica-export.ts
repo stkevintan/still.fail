@@ -19,22 +19,67 @@
 //   and there no more): a `gone` record.
 // A batch is read inside one read transaction: what it says is the database at one moment.
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { zstdCompressSync } from "node:zlib";
 import { runtimeKind } from "../../src/agents/runtime.ts";
 import { type Places, type Passed, type Told, nothingTold } from "../../src/replica/export.ts";
+import { MANIFEST_GC_GRACE_MS, encodeTranscriptManifest } from "../../src/replica/manifest.ts";
 import { type Head, type Rec, type Row, BATCH, BATCH_BYTES, Folded, TABLES, VERSION, attachedPaths, batchName, batchSpan, decodeBatch, encodeBatch, genName, keyOf, runsOf } from "./replica-format.ts";
-import { storage, transcriptSources } from "./transcript-paths.ts";
+import { type Look, type Looking, storage, transcriptSourcesLooking } from "./transcript-paths.ts";
 export * from "../../src/replica/export.ts";
 
 export const CHUNK_PLAIN_BYTES = 4 * 1024 * 1024;
 export const TRANSCRIPT_PASS_FILES = 512;
 export const TRANSCRIPT_PASS_BYTES = 32 * 1024 * 1024;
+export const TRANSCRIPT_PASS_DELETES = 2000;
 export const CHUNK_GC_GRACE_MS = 10 * 60_000;
 
 const ONE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_.@+-]*$/;
+
+function isMissingError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+function isPrunedBrainRel(relParts: readonly string[]): boolean {
+  return (
+    (relParts.length === 1 && relParts[0] === "scratch") ||
+    (relParts.length === 2 && relParts[0] === ".system_generated" && relParts[1] === "steps") ||
+    (relParts.length === 3 && relParts[0] === ".system_generated" && relParts[1] === "logs" && relParts[2] === "chunks")
+  );
+}
+
+function isPrunedBrainPath(dataDir: string, p: string): boolean {
+  const rel = relative(dataDir, p);
+  if (rel === "" || rel.startsWith("..")) return false;
+  const parts = rel.split(sep);
+  if (
+    parts.length < 8 ||
+    parts[0] !== "homes" ||
+    !ONE_SEGMENT.test(parts[1]!) ||
+    parts[2] !== "agy" ||
+    parts[3] !== ".gemini" ||
+    parts[4] !== "antigravity-cli" ||
+    parts[5] !== "brain" ||
+    !ONE_SEGMENT.test(parts[6]!)
+  ) {
+    return false;
+  }
+  if (parts[7] === "scratch") return true;
+  if (parts.length >= 9 && parts[7] === ".system_generated" && parts[8] === "steps") return true;
+  if (parts.length >= 10 && parts[7] === ".system_generated" && parts[8] === "logs" && parts[9] === "chunks") return true;
+  return false;
+}
+
+function pathUnderAnyDir(p: string, dirs: Set<string>): boolean {
+  for (const d of dirs) {
+    const prefix = d.endsWith(sep) ? d : d + sep;
+    if (p === d || p.startsWith(prefix)) return true;
+  }
+  return false;
+}
 
 function isTranscriptPath(dataDir: string, path: string): boolean {
   const rel = relative(dataDir, path);
@@ -167,10 +212,23 @@ export type ExporterOptions = {
   transcriptPassFiles?: number;
   /// Max changed transcript bytes processed per pass before yielding (default 32 MiB).
   transcriptPassBytes?: number;
+  /// Max deleted transcript records (`tr_del`) processed per pass before yielding (default 2000).
+  transcriptPassDeletes?: number;
   /// Grace period (ms) before orphan transcript chunks are removed from disk (default 10 minutes; 0 for immediate GC).
   chunkGcGraceMs?: number;
   /// False: batches left as they were written, never folded (a test's, to restore a generation from them as written).
   fold?: boolean;
+  /// True: emit compact `transcriptManifest` heads in IPC `pass()` results (TS runner enables via `--compact-heads`; default false for MoonBit compatibility).
+  compactHeads?: boolean;
+  /// Optional test-only hooks to inject deterministic filesystem faults (works even when running as root).
+  testFaults?: {
+    onReaddir?: (dir: string) => void;
+    readdirError?: (path: string) => NodeJS.ErrnoException | null;
+    finderReaddirError?: (path: string) => NodeJS.ErrnoException | null;
+    lstatError?: (path: string) => NodeJS.ErrnoException | null;
+    readShort?: (path: string, offset: number) => boolean;
+    otherKind?: (path: string) => boolean;
+  };
 };
 
 export class Exporter {
@@ -182,6 +240,19 @@ export class Exporter {
   #known = false;
   /// Whether a transcript scan was deferred or truncated by budget and must continue in the next pass.
   #transcriptsPending = false;
+  readonly #tfCache = new Map<string, Record<string, number>>();
+  /// Where a transcript sweep cut short by the pass budget goes on, by workspace: the first path it did not get to.
+  readonly #transcriptCursor = new Map<string, string>();
+  /// Workspaces whose paths this sweep has gone through to the end; only their `tr_del`s may be left.
+  readonly #transcriptScanDone = new Set<string>();
+  /// Workspaces this sweep is done with, `tr_del`s too.
+  readonly #transcriptWsDone = new Set<string>();
+  /// A pass told of transcripts while a sweep was under way: what it told of may lie behind the cursor, so another
+  /// sweep follows this one.
+  #transcriptResweep = false;
+  readonly #manifestCache = new Map<string, { rootHash: string; leafHashes: string[] }>();
+  #manifestLive = new Set<string>();
+  readonly #manifestSupersededAt = new Map<string, number>();
   #closed = false;
   /// This run of the exporter: a generation's head lists the runs that wrote it (a copy that holds a run this station's
   /// own does not know was written by one rolled back).
@@ -200,6 +271,9 @@ export class Exporter {
   }
   get #transcriptPassBytes(): number {
     return this.#o.transcriptPassBytes !== undefined && this.#o.transcriptPassBytes > 0 ? this.#o.transcriptPassBytes : TRANSCRIPT_PASS_BYTES;
+  }
+  get #transcriptPassDeletes(): number {
+    return this.#o.transcriptPassDeletes !== undefined && this.#o.transcriptPassDeletes > 0 ? this.#o.transcriptPassDeletes : TRANSCRIPT_PASS_DELETES;
   }
   get #chunkGcGraceMs(): number {
     return this.#o.chunkGcGraceMs !== undefined && this.#o.chunkGcGraceMs >= 0 ? this.#o.chunkGcGraceMs : CHUNK_GC_GRACE_MS;
@@ -243,6 +317,27 @@ export class Exporter {
     this.#state.exec("DELETE FROM meta WHERE k <> 'after'; DELETE FROM digests; DELETE FROM threads; DELETE FROM sent; DELETE FROM entering; DELETE FROM transcript_files; DELETE FROM transcript_chunk_gc;");
     this.#known = false;
     this.#transcriptsPending = false;
+    this.#forgetSweep();
+    this.#tfCache.clear();
+    this.#manifestCache.clear();
+    this.#manifestLive.clear();
+    this.#manifestSupersededAt.clear();
+  }
+
+  #forgetSweep(): void {
+    this.#endSweep();
+    this.#transcriptResweep = false;
+  }
+
+  /// A sweep over: the next starts from each workspace's first path.
+  #endSweep(): void {
+    this.#transcriptCursor.clear();
+    this.#transcriptScanDone.clear();
+    this.#transcriptWsDone.clear();
+  }
+
+  #inTranscriptSweep(): boolean {
+    return this.#transcriptCursor.size > 0 || this.#transcriptScanDone.size > 0 || this.#transcriptWsDone.size > 0;
   }
 
   setPlaces(places: Places): void {
@@ -272,7 +367,15 @@ export class Exporter {
     this.#state.prepare("DELETE FROM threads WHERE ws = ?").run(ws);
     this.#state.prepare("DELETE FROM sent WHERE ws = ?").run(ws);
     this.#state.prepare("DELETE FROM entering WHERE ws = ?").run(ws);
-    this.#state.prepare("DELETE FROM transcript_files WHERE ws = ?").run(ws);
+    const dropped = Number(this.#state.prepare("DELETE FROM transcript_files WHERE ws = ?").run(ws).changes);
+    this.#tfCache.delete(ws);
+    this.#manifestCache.delete(ws);
+    // Its transcripts are written again, all of them: none is behind a cursor of the generation before. A workspace
+    // with none exported (one with nothing written has no generation directory, so comes here every pass) asks for no scan.
+    this.#transcriptCursor.delete(ws);
+    this.#transcriptScanDone.delete(ws);
+    this.#transcriptWsDone.delete(ws);
+    if (dropped > 0) this.#transcriptsPending = true;
     return gen;
   }
 
@@ -295,6 +398,9 @@ export class Exporter {
   pass(told: Told): Passed {
     const { home, workspaces } = this.#places;
     if (home === null || workspaces.length === 0) return { heads: {}, more: false, wrote: 0, read: 0 };
+    // A pass that fails leaves what it was to do as it found it: it may have said the transcripts were done.
+    const known = this.#known;
+    const pending = this.#transcriptsPending;
     this.#state.exec("BEGIN IMMEDIATE");
     try {
       const passed = this.#pass(told, home, workspaces);
@@ -302,6 +408,11 @@ export class Exporter {
       return passed;
     } catch (e) {
       this.#state.exec("ROLLBACK");
+      this.#tfCache.clear();
+      this.#manifestCache.clear();
+      this.#forgetSweep();
+      this.#known = known;
+      this.#transcriptsPending = pending;
       throw e;
     }
   }
@@ -442,6 +553,8 @@ export class Exporter {
     const scanTranscripts = !this.#known || wantTranscripts || this.#transcriptsPending;
     const sessRows: Row[] = [];
     const runRows = new Map<string, Row[]>();
+    /// Whether `sessRows` and `runRows` hold the sessions already (the small tables were read whole this pass).
+    let loadedTranscriptSessions = false;
     this.#db.exec("BEGIN");
     try {
       // What was deleted, as told.
@@ -507,22 +620,7 @@ export class Exporter {
           }
         }
         this.#known = true;
-      } else if (scanTranscripts) {
-        for (const table of ["sessions", "runtime_sessions"] as const) {
-          for (let after = 0; ; ) {
-            const rows = all(pageOf(table), after, PAGE);
-            for (const r of rows) {
-              if (table === "sessions") sessRows.push(r);
-              else if (typeof r.session_key === "string") {
-                let xs = runRows.get(r.session_key);
-                if (xs === undefined) runRows.set(r.session_key, (xs = []));
-                xs.push(r);
-              }
-            }
-            if (rows.length < PAGE) break;
-            after = num(rows[rows.length - 1]!._rowid);
-          }
-        }
+        loadedTranscriptSessions = true;
       }
       // What changed in place, as told.
       for (const key of told.sessions) sessionRows(key);
@@ -599,16 +697,29 @@ export class Exporter {
         say(ws, { file: f.hash, size: f.size, path });
       }
     }
+    let sweepCompleted = false;
     if (scanTranscripts) {
+      if (wantTranscripts && this.#inTranscriptSweep()) this.#transcriptResweep = true;
       if (more) {
         this.#transcriptsPending = true;
       } else {
+        // The sessions the transcripts are found by, read only once the logs are caught up and outside the pass's row
+        // budget: read before, on a station with more sessions than PASS_ROWS, they used up every pass's budget ahead
+        // of the logs, so `more` never came false and nothing after them (logs, transcripts) was exported again.
+        if (!loadedTranscriptSessions) this.#transcriptSessions(sessRows, runRows);
         const transcriptsMore = this.#exportTranscripts(outs, sessRows, runRows, wsOfSession, say);
         if (transcriptsMore) {
           this.#transcriptsPending = true;
           more = true;
         } else {
-          this.#transcriptsPending = false;
+          sweepCompleted = true;
+          if (this.#transcriptResweep) {
+            this.#transcriptResweep = false;
+            this.#transcriptsPending = true;
+            more = true;
+          } else {
+            this.#transcriptsPending = false;
+          }
         }
       }
     }
@@ -619,12 +730,41 @@ export class Exporter {
         this.#write(ws, out);
         wrote++;
       }
-      heads[ws] = out.head;
+      heads[ws] = this.#o.compactHeads === true ? this.#compactHead(ws, out.head) : out.head;
     }
-    if (scanTranscripts && !this.#transcriptsPending) {
+    if (this.#o.compactHeads === true) {
+      this.#gcManifests(outs);
+    }
+    // After each whole sweep, a sweep to follow or not: never in the middle of one.
+    if (sweepCompleted) {
       this.#gcTranscriptChunks();
     }
     return { heads, more, wrote, read: this.#read };
+  }
+
+  /// Every session and runtime session, for finding transcripts by: in a short read of their own, not counted in the
+  /// pass's rows.
+  #transcriptSessions(sessRows: Row[], runRows: Map<string, Row[]>): void {
+    this.#db.exec("BEGIN");
+    try {
+      for (const table of ["sessions", "runtime_sessions"] as const) {
+        for (let after = 0; ; ) {
+          const rows = this.#q(pageOf(table)).all(after, PAGE) as Row[];
+          for (const r of rows) {
+            if (table === "sessions") sessRows.push(r);
+            else if (typeof r.session_key === "string") {
+              let xs = runRows.get(r.session_key);
+              if (xs === undefined) runRows.set(r.session_key, (xs = []));
+              xs.push(r);
+            }
+          }
+          if (rows.length < PAGE) break;
+          after = num(rows[rows.length - 1]!._rowid);
+        }
+      }
+    } finally {
+      this.#db.exec("COMMIT");
+    }
   }
 
   #sessionWs(table: string, row: Row, wsOf: (ws: unknown) => string): string[] {
@@ -680,13 +820,22 @@ export class Exporter {
     }
     const runs = [...head.runs];
     if (runs.length === 0 || runs[runs.length - 1]!.run !== this.run) runs.push({ run: this.run, from: first });
-    const tf = this.#transcriptFilesMap(ws);
+    let tf = this.#tfCache.get(ws);
+    if (tf === undefined) {
+      tf = this.#transcriptFilesMap(ws);
+      this.#tfCache.set(ws, tf);
+    }
     const next: Head = {
       ...head, made, to: n, batches: [...head.batches, ...names], runs: runs.slice(-RUNS_KEPT), files: { ...head.files, ...out.files },
       chats: (this.#state.prepare("SELECT COUNT(*) AS n FROM threads WHERE ws = ?").get(ws) as { n: number }).n,
       messages: head.messages + out.messages,
     };
-    if (Object.keys(tf).length > 0) next.transcriptFiles = tf;
+    let hasTf = false;
+    for (const _ in tf) {
+      hasTf = true;
+      break;
+    }
+    if (hasTf) next.transcriptFiles = tf;
     else delete next.transcriptFiles;
     out.head = this.#fold(dir, next, out.gone);
   }
@@ -787,20 +936,180 @@ export class Exporter {
     try {
       if (statSync(chunk).isFile()) return chunk; // sync: in the export's own thread (worker.ts)
     } catch {}
+    const manifest = join(this.#o.replica, "manifests", hash);
+    try {
+      if (statSync(manifest).isFile()) return manifest; // sync: in the export's own thread (worker.ts)
+    } catch {}
     return null;
   }
 
-  #walkTranscriptDir(dir: string, add: (path: string) => void): void {
+  #lstatPath(p: string) {
+    const err = this.#o.testFaults?.lstatError?.(p);
+    if (err) throw err;
+    return lstatSync(p, { bigint: true }); // sync: in the export's own thread (worker.ts)
+  }
+
+  #readdirEntries(dir: string) {
+    this.#o.testFaults?.onReaddir?.(dir);
+    const err = this.#o.testFaults?.readdirError?.(dir);
+    if (err) throw err;
+    return readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)); // sync: in the export's own thread (worker.ts)
+  }
+
+  #dirUnreadableChecked(dir: string): boolean {
+    this.#o.testFaults?.onReaddir?.(dir);
+    const faultErr = this.#o.testFaults?.readdirError?.(dir);
+    if (faultErr) return !isMissingError(faultErr);
+    try {
+      const d = opendirSync(dir); // sync: in the export's own thread (worker.ts)
+      d.closeSync();
+      return false;
+    } catch (e) {
+      return !isMissingError(e);
+    }
+  }
+
+  #walkTranscriptDir(
+    dir: string,
+    add: (path: string) => void,
+    onError: (dir: string) => void = () => {},
+    onUnreadablePath: (path: string) => void = () => {},
+  ): void {
     let entries;
     try {
-      entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)); // sync: in the export's own thread (worker.ts)
-    } catch {
+      entries = this.#readdirEntries(dir);
+    } catch (e) {
+      if (!isMissingError(e)) onError(dir);
       return;
     }
     for (const e of entries) {
       const p = join(dir, e.name);
-      if (e.isDirectory()) this.#walkTranscriptDir(p, add);
-      else if (e.isFile()) add(p);
+      const forceOther = this.#o.testFaults?.otherKind?.(p) === true;
+      if (!forceOther && e.isDirectory()) this.#walkTranscriptDir(p, add, onError, onUnreadablePath);
+      else if (!forceOther && e.isFile()) add(p);
+      else if (forceOther || !e.isSymbolicLink()) {
+        try {
+          const st = this.#lstatPath(p);
+          if (st.isFile()) add(p);
+          else if (st.isDirectory()) this.#walkTranscriptDir(p, add, onError, onUnreadablePath);
+        } catch (err) {
+          if (!isMissingError(err)) {
+            onUnreadablePath(p);
+            onError(p);
+          }
+        }
+      }
+    }
+  }
+
+  #walkBrainDir(
+    brainRoot: string,
+    dir: string,
+    relParts: string[],
+    add: (path: string) => void,
+    onError: (dir: string) => void,
+    onUnreadablePath: (path: string) => void,
+  ): void {
+    if (isPrunedBrainRel(relParts)) return;
+    let entries;
+    try {
+      entries = this.#readdirEntries(dir);
+    } catch (e) {
+      if (!isMissingError(e)) onError(dir);
+      return;
+    }
+    for (const e of entries) {
+      const p = join(dir, e.name);
+      const forceOther = this.#o.testFaults?.otherKind?.(p) === true;
+      if (!forceOther && e.isDirectory()) {
+        const nextRel = [...relParts, e.name];
+        if (isPrunedBrainRel(nextRel)) continue;
+        this.#walkBrainDir(brainRoot, p, nextRel, add, onError, onUnreadablePath);
+      } else if (!forceOther && e.isFile()) {
+        add(p);
+      } else if (forceOther || !e.isSymbolicLink()) {
+        try {
+          const st = this.#lstatPath(p);
+          if (st.isFile()) add(p);
+          else if (st.isDirectory()) {
+            const nextRel = [...relParts, e.name];
+            if (!isPrunedBrainRel(nextRel)) this.#walkBrainDir(brainRoot, p, nextRel, add, onError, onUnreadablePath);
+          }
+        } catch (err) {
+          if (!isMissingError(err)) {
+            onUnreadablePath(p);
+            onError(p);
+          }
+        }
+      }
+    }
+  }
+
+  #lookTranscriptSources<T>(looking: Looking<T>, onUnreadableDir: (dir: string) => void): T {
+    const rolloutUnder = (dir: string, id: string): string | null => {
+      let entries;
+      try {
+        const finderFault = this.#o.testFaults?.finderReaddirError?.(dir);
+        if (finderFault) throw finderFault;
+        entries = this.#readdirEntries(dir);
+      } catch (e) {
+        if (!isMissingError(e)) onUnreadableDir(dir);
+        return null;
+      }
+      for (const entry of entries) {
+        const name = entry.name;
+        const p = join(dir, name);
+        let isSubDir = entry.isDirectory();
+        if (!isSubDir && !entry.isFile()) {
+          try {
+            isSubDir = statSync(p).isDirectory(); // sync: in the export's own thread (worker.ts)
+          } catch {
+            isSubDir = false;
+          }
+        }
+        if (isSubDir) {
+          const found = rolloutUnder(p, id);
+          if (found !== null) return found;
+        } else if (name.startsWith("rollout-") && name.endsWith(`${id}.jsonl`)) {
+          return p;
+        } else if (name.startsWith("rollout-") && name.endsWith(`${id}.jsonl.zst`)) {
+          return p.slice(0, -".zst".length);
+        }
+      }
+      return null;
+    };
+    const answer = (look: Look): unknown => {
+      switch (look.ask) {
+        case "there":
+          return existsSync(look.path); // sync: in the export's own thread (worker.ts)
+        case "file":
+          try {
+            return statSync(look.path).isFile(); // sync: in the export's own thread (worker.ts)
+          } catch {
+            return false;
+          }
+        case "names":
+          try {
+            this.#o.testFaults?.onReaddir?.(look.path);
+            const faultErr = this.#o.testFaults?.finderReaddirError?.(look.path) ?? this.#o.testFaults?.readdirError?.(look.path);
+            if (faultErr) throw faultErr;
+            return readdirSync(look.path); // sync: in the export's own thread (worker.ts)
+          } catch (e) {
+            if (!isMissingError(e)) onUnreadableDir(look.path);
+            return null;
+          }
+        case "real":
+          try {
+            return realpathSync(look.path); // sync: in the export's own thread (worker.ts)
+          } catch {
+            return null;
+          }
+        case "rollout":
+          return rolloutUnder(look.path, look.id);
+      }
+    };
+    for (let step = looking.next(); ; step = looking.next(answer(step.value))) {
+      if (step.done) return step.value;
     }
   }
 
@@ -812,11 +1121,29 @@ export class Exporter {
     say: (ws: string, rec: Rec) => void,
   ): boolean {
     const byWs = new Map<string, Map<string, string | null>>();
-    for (const ws of outs.keys()) byWs.set(ws, new Map());
+    const unreadableDirsByWs = new Map<string, Set<string>>();
+    const unreadablePathsByWs = new Map<string, Set<string>>();
+    for (const ws of outs.keys()) {
+      byWs.set(ws, new Map());
+      unreadableDirsByWs.set(ws, new Set());
+      unreadablePathsByWs.set(ws, new Set());
+    }
+    // The brains walked in each workspace: sessions of one workspace sharing a brain walk it once.
+    const walkedBrains = new Map<string, Set<string>>();
     for (const sess of sessRows) {
       const ws = wsOfSession(sess.ws);
       const foundMap = byWs.get(ws);
       if (foundMap === undefined) continue;
+      // A workspace whose transcripts are all exported this sweep is not looked at again until the next one.
+      if (this.#transcriptWsDone.has(ws)) continue;
+      const unreadableDirs = unreadableDirsByWs.get(ws)!;
+      const unreadablePathsWs = unreadablePathsByWs.get(ws)!;
+      const addUnreadableDir = (d: string) => {
+        unreadableDirs.add(d);
+      };
+      const addUnreadablePath = (p: string) => {
+        unreadablePathsWs.add(p);
+      };
       const key = typeof sess.key === "string" ? sess.key : "";
       const sRuntime = typeof sess.runtime === "string" ? sess.runtime : "";
       const origRuntime = typeof sess.original_runtime === "string" ? sess.original_runtime : sRuntime;
@@ -848,15 +1175,20 @@ export class Exporter {
         .filter((r) => runtimeKind(r.runtime) !== null)
         .map((r) => ({ id: r.id, runtime: runtimeKind(r.runtime)!, profile: r.profile }));
       if (validSources.length > 0) {
-        const found = transcriptSources(this.#o.dataDir, [], validSources, places, { anywhere: true });
+        const found = this.#lookTranscriptSources(
+          transcriptSourcesLooking(this.#o.dataDir, [], validSources, places, { anywhere: true }),
+          addUnreadableDir,
+        );
         for (const t of found.paths) {
           addPath(storage(t.path));
           if (t.runtime === "claude") {
             const id = t.path.slice(t.path.lastIndexOf(sep) + 1).replace(/\.jsonl$/, "");
             const sub = join(dirname(t.path), id);
             try {
-              if (statSync(sub).isDirectory()) this.#walkTranscriptDir(sub, addPath); // sync: in the export's own thread (worker.ts)
-            } catch {}
+              if (this.#lstatPath(sub).isDirectory()) this.#walkTranscriptDir(sub, addPath, addUnreadableDir, addUnreadablePath);
+            } catch (e) {
+              if (!isMissingError(e)) addUnreadableDir(sub);
+            }
           }
         }
       }
@@ -867,52 +1199,88 @@ export class Exporter {
         addPath(join(cli, "conversations", `${r.id}.db-wal`));
         addPath(join(cli, "annotations", `${r.id}.pbtxt`));
         const brain = join(cli, "brain", r.id);
+        let walked = walkedBrains.get(ws);
+        if (walked === undefined) walkedBrains.set(ws, (walked = new Set()));
+        if (walked.has(brain)) continue;
+        walked.add(brain);
         try {
-          if (statSync(brain).isDirectory()) this.#walkTranscriptDir(brain, addPath); // sync: in the export's own thread (worker.ts)
-        } catch {}
+          if (this.#lstatPath(brain).isDirectory()) this.#walkBrainDir(brain, brain, [], addPath, addUnreadableDir, addUnreadablePath);
+        } catch (e) {
+          if (!isMissingError(e)) addUnreadableDir(brain);
+        }
       }
     }
     const chunkBytes = this.#chunkBytes;
     const maxFiles = this.#transcriptPassFiles;
     const maxBytes = this.#transcriptPassBytes;
+    const maxDeletes = this.#transcriptPassDeletes;
     const chunksDir = join(this.#o.replica, "chunks");
     let doneFiles = 0;
     let doneBytes = 0;
+    let doneDeletes = 0;
     let truncated = false;
-    for (const [ws, foundMap] of byWs) {
+    const parentUnreadableCache = new Map<string, boolean>();
+    const ancestorLstatCache = new Map<string, "dir" | "other" | "err">();
+    const byCodeUnits = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+    for (const ws of [...byWs.keys()].sort(byCodeUnits)) {
       if (truncated) break;
-      const paths = [...foundMap.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      if (this.#transcriptWsDone.has(ws)) continue;
+      const foundMap = byWs.get(ws)!;
+      const unreadableDirs = unreadableDirsByWs.get(ws)!;
+      const unreadablePaths = unreadablePathsByWs.get(ws)!;
+      const paths = [...foundMap.keys()].sort(byCodeUnits);
+      const existingByPath = new Map<string, { room: string | null; size: number; mtime: number }>();
+      for (const row of this.#state.prepare("SELECT path, room, size, mtime FROM transcript_files WHERE ws = ?").all(ws) as { path: string; room: string | null; size: number; mtime: number }[]) {
+        existingByPath.set(row.path, { room: row.room, size: row.size, mtime: row.mtime });
+      }
       const active = new Set<string>();
       let wsTruncated = false;
+      const scanDone = this.#transcriptScanDone.has(ws);
+      const cursor = this.#transcriptCursor.get(ws);
       for (const path of paths) {
+        // A path is found whether or not it is there (a `.db-wal`, an annotation): one gone is not kept.
         let st;
         try {
-          st = lstatSync(path, { bigint: true }); // sync: in the export's own thread (worker.ts)
-        } catch {
+          st = this.#lstatPath(path);
+        } catch (e) {
+          if (!isMissingError(e)) unreadablePaths.add(path);
           continue;
         }
         if (!st.isFile()) continue;
-        active.add(path);
+        // Gone through already in this sweep: kept as found, not read again until the next sweep.
+        if (scanDone || (cursor !== undefined && path < cursor)) {
+          active.add(path);
+          continue;
+        }
         const room = foundMap.get(path) ?? null;
         const size = Number(st.size);
         const mtime = Number(st.mtimeNs / 1_000_000n);
         const mode = Number(st.mode) & 0o777;
-        const existing = this.#state.prepare("SELECT room, size, mtime FROM transcript_files WHERE ws = ? AND path = ?").get(ws, path) as { room: string | null; size: number; mtime: number } | undefined;
-        if (existing !== undefined && existing.size === size && existing.mtime === mtime && existing.room === room) continue;
+        const existing = existingByPath.get(path);
+        if (existing !== undefined && existing.size === size && existing.mtime === mtime && existing.room === room) {
+          active.add(path);
+          continue;
+        }
         if (doneFiles > 0 && (doneFiles >= maxFiles || doneBytes >= maxBytes)) {
           truncated = true;
           wsTruncated = true;
+          this.#transcriptCursor.set(ws, path);
           break;
         }
         const chunks: string[] = [];
         let readBytes = 0;
-        const fd = openSync(path, "r"); // sync: in the export's own thread (worker.ts)
+        let readFailed = false;
+        let fd: number | null = null;
         try {
+          fd = openSync(path, "r"); // sync: in the export's own thread (worker.ts)
           const buf = Buffer.allocUnsafe(Math.min(chunkBytes, Math.max(size, 1)));
           for (let offset = 0; offset < size; ) {
             const want = Math.min(chunkBytes, size - offset);
-            const n = readSync(fd, buf, 0, want, offset); // sync: in the export's own thread (worker.ts)
-            if (n <= 0) break;
+            const n = this.#o.testFaults?.readShort?.(path, offset) ? 0 : readSync(fd, buf, 0, want, offset); // sync: in the export's own thread (worker.ts)
+            if (n <= 0) {
+              readFailed = true;
+              break;
+            }
             const plain = buf.subarray(0, n);
             const plainHash = createHash("sha256").update(plain).digest("hex");
             const known = this.#state.prepare("SELECT chunk_hash FROM transcript_chunks WHERE plain_hash = ?").get(plainHash) as { chunk_hash: string } | undefined;
@@ -930,35 +1298,146 @@ export class Exporter {
             offset += n;
             readBytes = offset;
           }
+        } catch {
+          readFailed = true;
         } finally {
-          closeSync(fd); // sync: in the export's own thread (worker.ts)
+          if (fd !== null) closeSync(fd); // sync: in the export's own thread (worker.ts)
         }
+        if (readFailed || readBytes !== size) {
+          unreadablePaths.add(path);
+          continue;
+        }
+        active.add(path);
         this.#state.prepare("INSERT OR REPLACE INTO transcript_files (ws, path, room, size, mtime, mode, chunks_json) VALUES (?, ?, ?, ?, ?, ?, ?)").run(ws, path, room, size, mtime, mode, JSON.stringify(chunks));
+        this.#tfCache.delete(ws);
+        this.#manifestCache.delete(ws);
         say(ws, { tr: path, room, size, mtime, mode, chunks });
         doneFiles++;
         doneBytes += readBytes;
       }
-      if (!wsTruncated) {
-        for (const row of this.#state.prepare("SELECT path FROM transcript_files WHERE ws = ? ORDER BY path").all(ws) as { path: string }[]) {
-          if (!active.has(row.path)) {
-            this.#state.prepare("DELETE FROM transcript_files WHERE ws = ? AND path = ?").run(ws, row.path);
-            say(ws, { tr_del: row.path });
-          }
+      const oldPaths = [...existingByPath.keys()].sort(byCodeUnits);
+      if (wsTruncated) {
+        // The derived caches no longer exported go whatever else is found: by their path alone, so a sweep that keeps
+        // being cut short still lets them go. That path says it, not the disk: no readability check is needed.
+        let deletedInWs = false;
+        for (const oldPath of oldPaths) {
+          if (active.has(oldPath) || !isPrunedBrainPath(this.#o.dataDir, oldPath)) continue;
+          if (doneDeletes >= maxDeletes) break;
+          this.#state.prepare("DELETE FROM transcript_files WHERE ws = ? AND path = ?").run(ws, oldPath);
+          deletedInWs = true;
+          say(ws, { tr_del: oldPath });
+          doneDeletes++;
         }
+        if (deletedInWs) {
+          this.#tfCache.delete(ws);
+          this.#manifestCache.delete(ws);
+        }
+      } else {
+        this.#transcriptCursor.delete(ws);
+        this.#transcriptScanDone.add(ws);
+        let deletedInWs = false;
+        let deletesCut = false;
+        for (const oldPath of oldPaths) {
+          if (active.has(oldPath) || unreadablePaths.has(oldPath) || pathUnderAnyDir(oldPath, unreadableDirs)) continue;
+          if (!isPrunedBrainPath(this.#o.dataDir, oldPath)) {
+            const dataRoot = resolve(this.#o.dataDir);
+            const rel = relative(dataRoot, resolve(oldPath));
+            if (rel !== "" && !rel.startsWith("..")) {
+              const parts = rel.split(sep);
+              const ancestors: string[] = [];
+              let cur = dataRoot;
+              let keep = false;
+              let allRealDirs = true;
+              for (let i = 0; i + 1 < parts.length; i++) {
+                cur = join(cur, parts[i]!);
+                let kind = ancestorLstatCache.get(cur);
+                if (kind === undefined) {
+                  try {
+                    const st = this.#lstatPath(cur);
+                    kind = st.isDirectory() ? "dir" : "other";
+                  } catch (e) {
+                    kind = isMissingError(e) ? "other" : "err";
+                  }
+                  ancestorLstatCache.set(cur, kind);
+                }
+                if (kind === "err") {
+                  keep = true;
+                  break;
+                }
+                if (kind !== "dir") {
+                  allRealDirs = false;
+                  break;
+                }
+                ancestors.push(cur);
+              }
+              if (keep) continue;
+              if (allRealDirs) {
+                let existsOnDisk = false;
+                try {
+                  this.#lstatPath(oldPath);
+                  existsOnDisk = true;
+                } catch (e) {
+                  if (!isMissingError(e)) continue;
+                }
+                if (existsOnDisk) {
+                  const checkDir = (d: string): boolean => {
+                    let bad = parentUnreadableCache.get(d);
+                    if (bad === undefined) {
+                      bad = this.#dirUnreadableChecked(d);
+                      parentUnreadableCache.set(d, bad);
+                    }
+                    return bad;
+                  };
+                  let ancestorUnreadable = checkDir(dataRoot);
+                  if (!ancestorUnreadable) {
+                    for (const a of ancestors) {
+                      if (checkDir(a)) {
+                        ancestorUnreadable = true;
+                        break;
+                      }
+                    }
+                  }
+                  if (ancestorUnreadable) continue;
+                }
+              }
+            }
+          }
+          if (doneDeletes >= maxDeletes) {
+            truncated = true;
+            deletesCut = true;
+            break;
+          }
+          this.#state.prepare("DELETE FROM transcript_files WHERE ws = ? AND path = ?").run(ws, oldPath);
+          deletedInWs = true;
+          say(ws, { tr_del: oldPath });
+          doneDeletes++;
+        }
+        if (deletedInWs) {
+          this.#tfCache.delete(ws);
+          this.#manifestCache.delete(ws);
+        }
+        if (!deletesCut) this.#transcriptWsDone.add(ws);
       }
     }
+    if (!truncated) this.#endSweep();
     return truncated;
   }
 
   #transcriptFilesMap(ws: string): Record<string, number> {
+    const rows = this.#state.prepare("SELECT chunks_json FROM transcript_files WHERE ws = ?").all(ws) as { chunks_json: string }[];
+    if (rows.length === 0) return {};
+    const chunkSizes = new Map<string, number>();
+    for (const r of this.#state.prepare("SELECT chunk_hash, comp_size FROM transcript_chunks").all() as { chunk_hash: string; comp_size: number }[]) {
+      if (!chunkSizes.has(r.chunk_hash)) chunkSizes.set(r.chunk_hash, num(r.comp_size));
+    }
     const sizes = new Map<string, number>();
-    for (const row of this.#state.prepare("SELECT chunks_json FROM transcript_files WHERE ws = ?").all(ws) as { chunks_json: string }[]) {
+    for (const row of rows) {
       const chunks = JSON.parse(row.chunks_json) as string[];
       for (const ch of chunks) {
         if (sizes.has(ch)) continue;
-        const r = this.#state.prepare("SELECT comp_size FROM transcript_chunks WHERE chunk_hash = ? LIMIT 1").get(ch) as { comp_size: number } | undefined;
-        let sz = r?.comp_size ?? 0;
-        if (r === undefined) {
+        let sz = chunkSizes.get(ch);
+        if (sz === undefined) {
+          sz = 0;
           try {
             sz = statSync(join(this.#o.replica, "chunks", ch)).size; // sync: in the export's own thread (worker.ts)
           } catch {}
@@ -1020,6 +1499,101 @@ export class Exporter {
       if (!live.has(row.chunk_hash) && !keptOnDisk.has(row.chunk_hash)) {
         this.#state.prepare("DELETE FROM transcript_chunks WHERE plain_hash = ?").run(row.plain_hash);
       }
+    }
+  }
+
+  #compactHead(ws: string, head: Head): Head {
+    const tf = head.transcriptFiles;
+    let hasTf = false;
+    if (tf !== undefined) {
+      for (const _ in tf) {
+        hasTf = true;
+        break;
+      }
+    }
+    if (!hasTf || tf === undefined) {
+      this.#manifestCache.delete(ws);
+      const { transcriptManifest: _, ...rest } = head;
+      return rest;
+    }
+    const manifestsDir = join(this.#o.replica, "manifests");
+    const cached = this.#manifestCache.get(ws);
+    let rootHash: string;
+    if (cached !== undefined && existsSync(join(manifestsDir, cached.rootHash))) { // sync: in the export's own thread (worker.ts)
+      rootHash = cached.rootHash;
+    } else {
+      const enc = encodeTranscriptManifest(tf);
+      const leafHashes: string[] = [];
+      for (const [lh, { bytes }] of enc.leaves) {
+        leafHashes.push(lh);
+        const lp = join(manifestsDir, lh);
+        if (!existsSync(lp)) writeWhole(lp, bytes, true); // sync: in the export's own thread (worker.ts)
+      }
+      const rp = join(manifestsDir, enc.rootHash);
+      if (!existsSync(rp)) writeWhole(rp, enc.rootBytes, true); // sync: in the export's own thread (worker.ts)
+      this.#manifestCache.set(ws, { rootHash: enc.rootHash, leafHashes });
+      rootHash = enc.rootHash;
+    }
+    const { transcriptFiles: _, ...rest } = head;
+    return { ...rest, transcriptManifest: rootHash };
+  }
+
+  #gcManifests(outs: Map<string, Out>): void {
+    const now = this.#o.now();
+    const manifestsDir = join(this.#o.replica, "manifests");
+    const live = new Set<string>();
+    for (const [ws, out] of outs) {
+      const cached = this.#manifestCache.get(ws);
+      if (cached !== undefined) {
+        live.add(cached.rootHash);
+        for (const lh of cached.leafHashes) live.add(lh);
+      } else if (out.head.transcriptFiles !== undefined) {
+        let hasTf = false;
+        for (const _ in out.head.transcriptFiles) {
+          hasTf = true;
+          break;
+        }
+        if (hasTf) {
+          const enc = encodeTranscriptManifest(out.head.transcriptFiles);
+          live.add(enc.rootHash);
+          for (const lh of enc.leaves.keys()) live.add(lh);
+        }
+      }
+    }
+    for (const h of live) this.#manifestSupersededAt.delete(h);
+    for (const prev of this.#manifestLive) {
+      if (!live.has(prev) && !this.#manifestSupersededAt.has(prev)) {
+        this.#manifestSupersededAt.set(prev, now);
+      }
+    }
+    this.#manifestLive = live;
+    let names: string[];
+    try {
+      const faultErr = this.#o.testFaults?.readdirError?.(manifestsDir);
+      if (faultErr) throw faultErr;
+      names = readdirSync(manifestsDir); // sync: in the export's own thread (worker.ts)
+    } catch {
+      return;
+    }
+    const onDisk = new Set<string>();
+    for (const name of names) {
+      onDisk.add(name);
+      if (live.has(name)) continue;
+      const supersededAt = this.#manifestSupersededAt.get(name);
+      if (supersededAt === undefined) {
+        // First time this process observes an unreferenced file on disk (e.g. after restart):
+        // record `now` and grant a full 10-minute grace period before reclaiming.
+        this.#manifestSupersededAt.set(name, now);
+      } else if (now - supersededAt >= MANIFEST_GC_GRACE_MS) {
+        const p = join(manifestsDir, name);
+        try {
+          rmSync(p, { force: true }); // sync: in the export's own thread (worker.ts)
+        } catch {}
+        this.#manifestSupersededAt.delete(name);
+      }
+    }
+    for (const k of [...this.#manifestSupersededAt.keys()]) {
+      if (!onDisk.has(k)) this.#manifestSupersededAt.delete(k);
     }
   }
 

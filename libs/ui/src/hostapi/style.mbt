@@ -38,8 +38,8 @@ pub let style_proportional : Int = 64
 
 ///|
 /// The faces a host is given (face_add) for the app's three places: its own words (every font a style says nothing
-/// else of), what people wrote (style_words), code (style_mono). Faces 4 to 15 are drawn only where a style names them
-/// (style_face). A place with no face registered is in the system's.
+/// else of), what people wrote (style_words), code (style_mono), and their CJK companions (4 to 6). Faces 4 to 31
+/// are drawn where a style names them (style_face). A place with no face registered is in the system's.
 pub let face_ui : Int = 1
 
 ///|
@@ -49,17 +49,40 @@ pub let face_text : Int = 2
 pub let face_code : Int = 3
 
 ///|
-/// How many faces a host keeps (1 to faces_most - 1).
-pub let faces_most : Int = 16
+pub let face_ui_cjk : Int = 4
 
 ///|
-/// The style bits that name face `face` (1 to 15) whatever else the style says: what is set in it is in it.
+pub let face_text_cjk : Int = 5
+
+///|
+pub let face_code_cjk : Int = 6
+
+///|
+/// First face slot reserved for local/preview/try faces (7..30). Changes to slots `>= face_try` only invalidate
+/// shape/metric cache entries referencing that slot, never triggering a global `words_forgotten()`.
+pub let face_try : Int = 7
+
+///|
+/// Reserved sentinel face slot that is never registered in the app. Hosts resolve unregistered explicit slots to OS
+/// system font `0`, allowing live previews of "System Default" to bypass any custom face registered on `face_ui`.
+pub let face_sys_default : Int = 31
+
+///|
+/// How many faces a host keeps (1 to faces_most - 1).
+pub let faces_most : Int = 32
+
+///|
+/// The style bitmask covering the 5-bit face slot (bits 8..12, 0x1F00).
+pub let style_face_bits : Int = 31 << 8
+
+///|
+/// The style bits that name face `face` (1 to 31) whatever else the style says: what is set in it is in it.
 pub fn style_face(face : Int) -> Int {
-  (face & 15) << 8
+  (face & 31) << 8
 }
 
 ///|
 /// The face a style names (style_face), 0 none.
 pub fn face_of_style(style : Int) -> Int {
-  (style >> 8) & 15
+  (style >> 8) & 31
 }

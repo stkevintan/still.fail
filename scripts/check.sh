@@ -363,6 +363,9 @@ if part ts; then
   if touches '^scripts/native(\.ts|-download-test\.mjs)$'; then
     step "natives: a download asked again after a 5xx" node scripts/native-download-test.mjs
   fi
+  if touches '^scripts/native\.ts$|^test/native-rustup-lock\.test\.ts$'; then
+    step "natives: rustup toolchain and target setup serialized across workers" node --test test/native-rustup-lock.test.ts
+  fi
   # A release's deltas within the job's end, the package and its feed put after them (apps/mbui/scripts/beta.sh publish).
   if touches '^apps/mbui/scripts/beta\.sh$|^scripts/beta-deadline'; then
     step "preview publish: deltas bounded by the job's end" bash scripts/beta-deadline-test.sh

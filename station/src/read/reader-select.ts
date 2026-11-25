@@ -49,13 +49,13 @@ export const READER_MODES = {
   },
   search: {
     allowShadow: false,
-    pionImplemented: false,
+    pionImplemented: true,
     sideEffect: "read-with-side-effects",
     note: "Transcript and history search: attaches SQLite/shell_dir and shares transcript hints (--builder search)",
   },
   "live-locator": {
     allowShadow: false,
-    pionImplemented: false,
+    pionImplemented: true,
     sideEffect: "read-with-side-effects",
     note: "Live transcript locator: attaches SQLite/shell_dir (--builder live-locator)",
   },
@@ -115,7 +115,7 @@ export const READER_MODES = {
   },
   "usage-counter": {
     allowShadow: false,
-    pionImplemented: false,
+    pionImplemented: true,
     sideEffect: "write-db",
     note: "Usage transcript scan and SQLite writes (--builder usage-counter)",
   },
@@ -300,7 +300,9 @@ export type ReaderFallbackReason =
   | "shadow-forbidden"
   | "pion-mode-unimplemented"
   | "pion-binary-missing"
-  | "pion-binary-unsupported-mode";
+  | "pion-binary-unsupported-mode"
+  | "pion-probe-pending"
+  | "pion-probe-failed";
 
 export type ReaderSelection = {
   readonly mode: ReaderMode;
@@ -504,5 +506,14 @@ export function resolveReaderEngine(
     rawRequested: parsed.rawText,
     source,
     fallback: false,
+  };
+}
+
+/// Test-only helper to temporarily toggle `READER_MODES[mode].pionImplemented` without changing production defaults.
+export function setReaderModeImplementedForTest(mode: ReaderMode, implemented: boolean): () => void {
+  const prev = READER_MODES[mode].pionImplemented;
+  (READER_MODES[mode] as { pionImplemented: boolean }).pionImplemented = implemented;
+  return () => {
+    (READER_MODES[mode] as { pionImplemented: boolean }).pionImplemented = prev;
   };
 }

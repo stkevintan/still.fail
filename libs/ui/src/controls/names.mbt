@@ -84,7 +84,11 @@ fn digits(s : Array[Char], from : Int, to : Int) -> String {
   while k < to && s[k] == '0' {
     k += 1
   }
-  String::from_array(s[k:to])
+  let sb = StringBuilder(capacity=to - k)
+  for i in k..<to {
+    sb.write_char(s[i])
+  }
+  sb.to_string()
 }
 
 ///|

@@ -1,4 +1,4 @@
-# still.fail app pages, chat nodes, block reuse, and Farview (for agents)
+# still.fail app pages, chat nodes, and block reuse (for agents)
 
 ## Page lists and keyed chat nodes
 
@@ -16,9 +16,3 @@
 - The node-based chat page, its composer (`composer_node`), and the new-chat page (`new_chat_node`) are the only chat page on every screen (`chat_page_made`). Do not host the old composer inside a node-based page.
 - Share all non-rendering composer logic between both views (`composer_state.mbt`, `apps/mbui/src/sfbase/compose_given.mbt`, `composer_send.mbt`) without duplicating it.
 - Express width-responsive layout changes as property bindings (`By` on gap, margin, size), never structural `pick`/`show` branches on `width()` (detlint `width-structure` only falls).
-
-## Farview client (`apps/mbui/src/sfpages/farview_tab.mbt`)
-
-- Draw chat Farview tabs using `fvclient` from the private `AFK-surf/farview-legacy` repository. Never copy its source into this repository.
-- Pin the commit in `apps/mbui/farview.pin`, reference it in `apps/mbui/moon.work`, and fetch it into `deps/farview` via `apps/mbui/scripts/farview.sh` and `apps/mbui/scripts/env.sh` (CI uses read-only `FARVIEW_DEPLOY_KEY`). Update the client by updating `farview.pin`.
-- In environments without access to `AFK-surf/farview-legacy` (such as forks), test locally with an uncommitted stand-in, note it in the PR, and open the PR ready for review (never draft) so upstream CI runs the full build.

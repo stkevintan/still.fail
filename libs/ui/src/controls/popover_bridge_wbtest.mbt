@@ -171,7 +171,7 @@ test "bar_pill_group_node menu performs iOS 27.0 LiquidMorphPhysics with upward 
   let rest_pill_w = init_glass[1].2
 
   // Three-anchor optical boundary invariant:
-  // stage=0.0 == glass_bar_pill(), stage=0.5 == luminous 0x88/blur=5.0/bezel=18/refr=14, stage=1.0 == glass_menu()
+  // stage=0.0 == glass_bar_pill(), stage=0.5 == luminous 0x93/blur=4.0/bezel=18/refr=16/chroma=0.045, stage=1.0 == glass_menu()
   let pill_gl = @glass.liquid_bar_pill_glass(solid=panel_ground())
   let clear_gl = glass_menu_morph(0.0)
   let mid_gl = glass_menu_morph(0.5)
@@ -179,12 +179,17 @@ test "bar_pill_group_node menu performs iOS 27.0 LiquidMorphPhysics with upward 
   let frosted_gl = glass_menu_morph(1.0)
   assert_eq(clear_gl.tint, pill_gl.tint, msg="stage=0.0 tint bit-identical to glass_bar_pill")
   assert_eq(clear_gl.blur, pill_gl.blur, msg="stage=0.0 blur bit-identical to glass_bar_pill")
-  assert_eq(mid_gl.tint & 0xFFL, 0x88L, msg="stage=0.5 droplet uses 0x88 mid-frosted alpha")
-  assert_true((mid_gl.blur - 4.5).abs() < 1.0e-9, msg="stage=0.5 droplet uses 4.5pt blur: \{mid_gl.blur}")
+  assert_true((clear_gl.chroma - 0.06).abs() < 1.0e-9, msg="stage=0.0 chroma matches bar_pill: \{clear_gl.chroma}")
+  assert_eq(mid_gl.tint & 0xFFL, 0x93L, msg="stage=0.5 light droplet uses 0x93 mid-translucent alpha")
+  assert_true((mid_gl.blur - 4.0).abs() < 1.0e-9, msg="stage=0.5 droplet uses 4.0pt blur: \{mid_gl.blur}")
   assert_true((mid_gl.bezel - 18.0).abs() < 1.0e-9, msg="stage=0.5 droplet uses 18.0pt bezel: \{mid_gl.bezel}")
-  assert_true((mid_gl.refraction - 15.0).abs() < 1.0e-9, msg="stage=0.5 droplet uses 15.0pt refraction: \{mid_gl.refraction}")
+  assert_true((mid_gl.refraction - 16.0).abs() < 1.0e-9, msg="stage=0.5 droplet uses 16.0pt refraction: \{mid_gl.refraction}")
+  assert_true((mid_gl.chroma - 0.045).abs() < 1.0e-9, msg="stage=0.5 droplet uses 0.045 chroma: \{mid_gl.chroma}")
   assert_eq(frosted_gl.tint, rest_gl.tint, msg="stage=1.0 tint bit-identical to glass_menu")
   assert_eq(frosted_gl.blur, rest_gl.blur, msg="stage=1.0 blur bit-identical to glass_menu")
+  assert_eq(frosted_gl.bezel, rest_gl.bezel, msg="stage=1.0 bezel bit-identical to glass_menu")
+  assert_eq(frosted_gl.refraction, rest_gl.refraction, msg="stage=1.0 refraction bit-identical to glass_menu")
+  assert_eq(frosted_gl.chroma, rest_gl.chroma, msg="stage=1.0 chroma bit-identical to glass_menu")
 
   // Open menu and settle (>= 600ms): Archive + Menu (2 instances), 0 kind==8 lens overhead at rest, clean audit
   open.set(true)

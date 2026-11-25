@@ -35,7 +35,7 @@ import { ErrorReports, builtKey } from "./ops/telemetry.ts";
 import { answer, langOfBrowser } from "./ops/loopback.ts";
 import { ownPorts } from "./ops/own.ts";
 import { version } from "./ops/version.ts";
-import { AdminApi, AgentsSide, AdminHost, CheckpointsLive, ControlPlane, DeviceSources, Events, Grants, Helper, HelperFolders, Key, MeshNative, MeshSide, Own, Parts, Paths, Peers, Previous, ReaderConfig, Readers, ReadersAndStore, RigSide, ScreenRegistry, StationConfig, StationDrive, StationPacked, Up } from "./services.ts";
+import { AdminApi, AgentsSide, AdminHost, CheckpointsLive, ControlPlane, DeviceSources, Events, Grants, Helper, HelperFolders, Key, MeshNative, MeshSide, Own, Parts, Paths, Peers, Previous, ReaderConfig, Readers, ReadersAndStore, RigSide, ScreenRegistry, StationConfig, StationDrive, StationPacked, Up, restoreReaderConfig } from "./services.ts";
 import { VaultLive } from "./vault/module.ts";
 import { AdbLive } from "./adb/module.ts";
 import { TerminalsLive } from "./terminals/module.ts";
@@ -233,7 +233,7 @@ function run() {
   });
   hearLines((line) => stationLog.add(line));
   // A lost station's chats brought here to take back (replica/restore.ts): put in before the store opens.
-  const beforeStore = () => takeBackSoon(data, join(data, "stillfail.db"), wall.now()).then(
+  const beforeStore = () => takeBackSoon(data, join(data, "stillfail.db"), wall.now(), undefined, { readers: restoreReaderConfig(settings.raw()) }).then(
     (restored) => { if (restored !== null) log.info("copies", "a lost station's chats taken back", { station: restored.origin, from: restored.from }); },
     (e: Error) => log.error("copies", "a lost station's chats not taken back", { error: e.message }),
   );

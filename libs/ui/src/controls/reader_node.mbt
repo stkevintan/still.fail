@@ -576,7 +576,7 @@ fn reader_chunk_node(
     // (its words said of this block for what is picked of them; the passages a page marks on it lent to its paragraphs)
     @ui.picked_of(m, reader_block_key(k)) |> ignore
     match marks {
-      Some(ms) => m.lends(md_lits, fn() { (ms.lits)(k) }) |> ignore
+      Some(ms) => m.lends(md_lits, fn() { (ms.lits)(k).map(fn(l) { (l.0, l.1, None) }) }) |> ignore
       None => ()
     }
     let words = if book.markdown {
@@ -1525,7 +1525,6 @@ fn reader_narrow_chrome(
               fn() { { ..paper(), ground: paper().raised } },
               fn(v) { r.draft.set(v) },
               fn(to) {
-                r.draft.set(-1.0)
                 match r.book.untracked() {
                   Some(b) if b.length > 0 && b.chunks.length() > 0 => {
                     let (chunk, offset) = b.at((to * b.length.to_double()).round().to_int())
@@ -1533,7 +1532,15 @@ fn reader_narrow_chrome(
                   }
                   _ => ()
                 }
+                r.draft.set(-1.0)
               },
+              disabled=fn() {
+                match r.book.get() {
+                  Some(b) => b.length <= 0
+                  None => true
+                }
+              },
+              lens_enabled=false,
             )
           })
           |> ignore

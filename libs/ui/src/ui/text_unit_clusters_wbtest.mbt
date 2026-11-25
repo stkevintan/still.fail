@@ -107,6 +107,8 @@ test "lazy Shaped::breaks: nowrap and multi-run rich_prep skip per-run line_brea
     max_lines: 0,
     faces: 0,
     shaped_in: 0,
+    cjk_override: None,
+    code_cjk_override: None,
   }
   let prep = rich_prep(r)
   assert_eq(prep.brk.length(), prep.starts.length())

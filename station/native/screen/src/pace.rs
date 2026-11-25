@@ -9,6 +9,7 @@ pub const AUTO_FPS: u32 = 60;
 /// The most a view may ask.
 pub const MAX_FPS: u32 = 120;
 /// A key frame at least this often (ms), however many pictures a second come.
+#[allow(dead_code)]
 pub const KEY_EVERY_MS: f64 = 10_000.0;
 
 /// The frame rate the encoder is set for (its rate control's bits a picture, its GOP, each picture's duration): the one
@@ -22,11 +23,13 @@ pub fn encoder_fps(asked: Option<u32>) -> u32 {
 
 /// When a key frame is due by time (a GOP counted in pictures comes later the fewer there are): KEY_EVERY_MS after the
 /// last one, sent or asked.
+#[allow(dead_code)]
 #[derive(Default)]
 pub struct KeyClock {
     last: Option<f64>,
 }
 
+#[allow(dead_code)]
 impl KeyClock {
     /// Whether the next picture should be a key frame (ms); none before the first, which is one anyway.
     pub fn due(&self, now: f64) -> bool {
@@ -40,15 +43,14 @@ impl KeyClock {
 }
 
 /// An encoder that keeps the bit rate its rate control started at (encode.rs `keeps_rate`) is started anew at the one
-/// asked (`restart`, its next picture a key frame) when that is RESTART_DOWN of it or less and RESTART_DOWN_MS went
-/// since it last started (the link carries less: each frame too large holds the next back), or RESTART_UP times it or
-/// more and RESTART_UP_MS went (as the pace goes up a step at a time: a key frame every so often, not at each step);
-/// with a key frame going anyway, whenever they differ by RESTART_ANY or more.
-pub const RESTART_DOWN: f64 = 0.8;
-pub const RESTART_DOWN_MS: f64 = 1000.0;
+/// asked (`restart`, its next picture a key frame) only on a substantial rate change (>= 30% drop or >= 50% rise)
+/// after a >= 3000 ms cooldown, preventing IDR storms and stutters from small bitrate fluctuations; with an explicit
+/// key frame going anyway, whenever they differ by RESTART_ANY or more.
+pub const RESTART_DOWN: f64 = 0.7;
+pub const RESTART_DOWN_MS: f64 = 3000.0;
 pub const RESTART_UP: f64 = 1.5;
-pub const RESTART_UP_MS: f64 = 1000.0;
-pub const RESTART_ANY: f64 = 0.05;
+pub const RESTART_UP_MS: f64 = 3000.0;
+pub const RESTART_ANY: f64 = 0.15;
 
 /// Whether an encoder whose rate control runs at `at` is started anew at `asked`, `since` ms after it last started,
 /// the next picture going as a key frame anyway (`key`) or not.
@@ -82,6 +84,14 @@ impl Gate {
     /// Whether a picture may go now (ms).
     pub fn open(&self, now: f64) -> bool {
         self.gap.is_none() || now >= self.due
+    }
+
+    /// Milliseconds remaining until the gate opens (0.0 if already open).
+    pub fn wait_ms(&self, now: f64) -> f64 {
+        match self.gap {
+            None => 0.0,
+            Some(_) => (self.due - now).max(0.0),
+        }
     }
 
     /// One went at `now` (ms).
@@ -176,29 +186,40 @@ mod tests {
 
     #[test]
     fn an_encoder_keeping_its_rate_starts_anew_now_and_then() {
-        // Lowered: at once, a second after it last started; not by a little.
-        assert!(restarts(25_000_000, 6_000_000, 1000.0, false));
-        assert!(!restarts(25_000_000, 6_000_000, 900.0, false));
-        assert!(!restarts(25_000_000, 21_000_000, 60_000.0, false));
-        // Raised: by half again, a second on.
-        assert!(restarts(6_000_000, 9_000_000, 1000.0, false));
-        assert!(!restarts(6_000_000, 9_000_000, 900.0, false));
+        // Lowered: >= 30% drop after >= 3000 ms cooldown; small drops (< 30%) or within cooldown do not restart.
+        assert!(restarts(25_000_000, 17_500_000, 3000.0, false));
+        assert!(!restarts(25_000_000, 6_000_000, 2900.0, false));
+        assert!(!restarts(25_000_000, 19_000_000, 60_000.0, false));
+        // Raised: >= 50% rise after >= 3000 ms cooldown.
+        assert!(restarts(6_000_000, 9_000_000, 3000.0, false));
+        assert!(!restarts(6_000_000, 9_000_000, 2900.0, false));
         assert!(!restarts(6_000_000, 8_000_000, 60_000.0, false));
-        // A key frame going anyway: as soon as it differs at all (as the station asks: by 5 % or more).
-        assert!(restarts(6_000_000, 6_400_000, 0.0, true));
-        assert!(!restarts(6_000_000, 6_100_000, 0.0, true));
-        // A view's start (1.5 Mbit/s, up by half each 0.5 s to a 4K desktop's own, ~25 Mbit/s): every other step,
-        // then near enough (the next key frame takes the rest).
+        // A key frame going anyway: restarts when differing by >= 15%, ignores small jitter.
+        assert!(restarts(6_000_000, 7_000_000, 0.0, true));
+        assert!(!restarts(6_000_000, 6_500_000, 0.0, true));
+        // A view's start (1.5 Mbit/s, up by half each 0.5 s to a 4K desktop's own, ~25 Mbit/s): restarts are spaced
+        // by at least 3 s so ramp-up never causes an IDR storm.
         let (mut at, mut since, mut asked, mut times) = (1_500_000u32, 0.0, 1_500_000f64, 0);
-        for _ in 0..8 {
+        for _ in 0..16 {
             asked = (asked * 1.5).min(24_883_200.0);
             since += 500.0;
             if restarts(at, asked as u32, since, false) {
                 (at, since, times) = (asked as u32, 0.0, times + 1);
             }
         }
-        assert_eq!(times, 3);
+        assert_eq!(times, 1);
         assert!(asked < at as f64 * RESTART_UP, "{at}");
+    }
+
+    #[test]
+    fn gate_wait_ms_reports_remaining_slot_time() {
+        let mut gate = Gate::new(Some(60));
+        assert_eq!(gate.wait_ms(0.0), 0.0);
+        gate.went(0.0);
+        assert!(gate.wait_ms(0.0) > 8.0);
+        assert_eq!(gate.wait_ms(20.0), 0.0);
+        let unpaced = Gate::new(None);
+        assert_eq!(unpaced.wait_ms(0.0), 0.0);
     }
 
     #[test]

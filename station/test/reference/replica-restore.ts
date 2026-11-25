@@ -6,6 +6,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { zstdDecompressSync } from "node:zlib";
 import { HASH, type Head, type Rec, type Row, Folded, OWN_LOG, RESTORE_ORDER, THREAD_COLUMNS, asHead, attachedPaths, bumpedTs, decodeBatch } from "./replica-format.ts";
+import { type ManifestBudget, parseLeafManifest, parseRootManifest } from "../../src/replica/manifest.ts";
 import { headFile } from "./replica-export.ts";
 import { FORMER_OWN_NAMES, STILLFAIL_CONNECT, STILLFAIL_SURFACE } from "../../src/store/rows.ts";
 import { NotEmpty, type Outcome, type Ready, carriedTo, copyDir, moved, outcomeFile, readyFile, restoreDir } from "../../src/replica/restore.ts";
@@ -72,6 +73,15 @@ const RESTORED = "CREATE TABLE IF NOT EXISTS replica_restored (origin TEXT NOT N
 export function build(db: string, dir: string, files: string, dataDir: string, now = 0, merge = false, connects: Record<string, string> = {}, ws?: string | null): Built {
   const head = asHead(JSON.parse(readFileSync(headFile(dir), "utf8"))); // sync: the tests' reference only
   if (head === null) throw new Error("no copy here, or one of a newer station's");
+  if (head.transcriptManifest !== undefined) {
+    const budget: ManifestBudget = { bytes: 0, entries: 0 };
+    const rootBytes = readFileSync(join(files, head.transcriptManifest)); // sync: the tests' reference only
+    const root = parseRootManifest(rootBytes, head.transcriptManifest, budget);
+    for (const [bucket, leafHash] of Object.entries(root.buckets)) {
+      const leafBytes = readFileSync(join(files, leafHash)); // sync: the tests' reference only
+      parseLeafManifest(leafBytes, leafHash, bucket, budget);
+    }
+  }
   const d = new DatabaseSync(db, { timeout: 30_000 });
   const rows: Record<string, number> = {};
   try {

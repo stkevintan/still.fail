@@ -26,6 +26,7 @@ CTFontRef mb_platform_font(double size, int weight, int mono) {
 void mb_atlas_upload(int color, int x, int y, int w, int h, const void *px) {
   (void)color, (void)x, (void)y, (void)w, (void)h, (void)px;
 }
+void mb_host_request_frame(void) {}
 int mb_render_snapshot(const char *path) {
   (void)path;
   return 0;
@@ -118,7 +119,7 @@ static int face_family(int face, NSString *family) {
   if (descs.count == 0) return 0;
   face_descs[face] = descs;
   face_weights[face] = weights;
-  faces_changed();
+  face_changed(face);
   return 1;
 }
 
@@ -133,14 +134,14 @@ static int face_file(int face, const char *path) {
   face_descs[face] = [NSMutableArray arrayWithObject:(__bridge id)CFArrayGetValueAtIndex(ds, 0)];
   face_weights[face] = [NSMutableArray arrayWithObject:@0];
   CFRelease(ds);
-  faces_changed();
+  face_changed(face);
   return 1;
 }
 
 static void face_none(int face) {
   [face_descs[face] removeAllObjects];
   [face_weights[face] removeAllObjects];
-  faces_changed();
+  face_changed(face);
 }
 
 // Digits one width in the face set now (style_tabular, 32), and not without it where `proportional` (the face's own
@@ -341,6 +342,170 @@ static void ahead_page(void) {
   int left = 0;
   for (int i = 0; i < n; i++) left += ahead_of[@(key_base(keys[i]))] != nil;
   CHECK(left == 0, "%d glyphs still asked ahead, all their phases taken", left);
+}
+
+static void drain_ahead_queues(void) {
+  dispatch_sync(ahead_q, ^{
+                });
+  dispatch_sync(ahead_rest_q, ^{
+                });
+}
+
+static BOOL drawn_eq(MBDrawn *d, MBDrawn *r) {
+  if (!d || !r) return NO;
+  return d.pw == r.pw && d.ph == r.ph && d.color == r.color && CGRectEqualToRect(d.b, r.b) &&
+         (!d.px || !r.px ? d.px == r.px : memcmp(d.px, r.px, (size_t)d.pw * d.ph * (d.color ? 4 : 1)) == 0);
+}
+
+// Re-requesting glyphs after eviction/consumption, active single-phase re-request, same-batch double-phase re-request,
+// old MBAhead new-batch double-phase with duplicate key, and full-queue continuation for already-active entries.
+static void ahead_rewarm(void) {
+  ahead_ensure();
+  drain_ahead_queues();
+
+  // 1. Idle eviction/consumption re-request: after all 4 phases taken (ahead_of == nil), re-request phase 1 alone.
+  {
+    int k = key_of(@"重", 19, 0);
+    CHECK(k >= 0, "rewarm 1: no key");
+    int32_t init[1] = {k};
+    mb_host_glyphs_ahead(init, 1);
+    drain_ahead_queues();
+    for (int s = 0; s < SUB_COUNT; s++) {
+      MBDrawn *d = drawn_ahead(k, s);
+      CHECK(d != nil, "rewarm 1: initial phase %d missing", s);
+    }
+    CHECK(ahead_of[@(k)] == nil, "rewarm 1: ahead_of not cleared after taking all 4 phases");
+    CHECK(entries[k].subs_queued == SUB_ALL, "rewarm 1: subs_queued=%u", entries[k].subs_queued);
+
+    int32_t req[1] = {k | (1 << 26)};
+    mb_host_glyphs_ahead(req, 1);
+    drain_ahead_queues();
+    glyph_entry *e = &entries[k];
+    MBDrawn *got1 = drawn_ahead(k, 1);
+    MBDrawn *ref1 =
+        draw_cluster(texts[k], font_for(e->size, e->weight, e->style), e->style, e->dx, sub_dx(1), text_scale);
+    CHECK(drawn_eq(got1, ref1), "rewarm 1: phase 1 not drawn or not byte-identical");
+    CHECK(drawn_ahead(k, 0) == nil && drawn_ahead(k, 2) == nil && drawn_ahead(k, 3) == nil,
+          "rewarm 1: unexpected extra phases drawn");
+    CHECK(ahead_of[@(k)] == nil, "rewarm 1: ahead_of still set after consuming phase 1");
+  }
+
+  // 2. Active single-phase consumed re-request: take phase 0 only, keep same MBAhead pointer, re-request phase 0.
+  {
+    int k = key_of(@"热", 19, 0);
+    CHECK(k >= 0, "rewarm 2: no key");
+    int32_t init[1] = {k};
+    mb_host_glyphs_ahead(init, 1);
+    drain_ahead_queues();
+    CHECK(drawn_ahead(k, 0) != nil, "rewarm 2: initial phase 0 missing");
+    MBAhead *kept = ahead_of[@(k)];
+    CHECK(kept != nil, "rewarm 2: ahead_of nil while phases 1..3 remain");
+
+    int32_t req[1] = {k | (0 << 26)};
+    mb_host_glyphs_ahead(req, 1);
+    drain_ahead_queues();
+    CHECK(ahead_of[@(k)] == kept, "rewarm 2: ahead_of replaced instead of reusing same MBAhead");
+    glyph_entry *e = &entries[k];
+    MBDrawn *got0 = drawn_ahead(k, 0);
+    MBDrawn *ref0 =
+        draw_cluster(texts[k], font_for(e->size, e->weight, e->style), e->style, e->dx, sub_dx(0), text_scale);
+    CHECK(drawn_eq(got0, ref0), "rewarm 2: re-warmed phase 0 not byte-identical");
+    for (int s = 1; s < SUB_COUNT; s++) {
+      CHECK(drawn_ahead(k, s) != nil, "rewarm 2: remaining phase %d lost", s);
+    }
+    CHECK(ahead_of[@(k)] == nil, "rewarm 2: ahead_of not cleared after draining all phases");
+  }
+
+  // 3. Same-batch double-phase re-request: subs_queued = 0b0011, batch asks phase 0 and phase 1 together.
+  {
+    int k = key_of(@"双", 19, 0);
+    CHECK(k >= 0, "rewarm 3: no key");
+    entries[k].subs_queued = 0x3;
+    int32_t req[2] = {k | (0 << 26), k | (1 << 26)};
+    mb_host_glyphs_ahead(req, 2);
+    drain_ahead_queues();
+    glyph_entry *e = &entries[k];
+    for (int s = 0; s < 2; s++) {
+      MBDrawn *got = drawn_ahead(k, s);
+      MBDrawn *ref =
+          draw_cluster(texts[k], font_for(e->size, e->weight, e->style), e->style, e->dx, sub_dx(s), text_scale);
+      CHECK(drawn_eq(got, ref), "rewarm 3: phase %d not byte-identical", s);
+    }
+    for (int s = 2; s < SUB_COUNT; s++) {
+      CHECK(drawn_ahead(k, s) != nil, "rewarm 3: unqueued phase %d missing", s);
+    }
+    CHECK(ahead_of[@(k)] == nil, "rewarm 3: ahead_of not cleared");
+  }
+
+  // 4. Old MBAhead new-batch double-phase with duplicate key: phases 2..3 remain, batch asks [0, 1, 0].
+  {
+    int k = key_of(@"复", 19, 0);
+    CHECK(k >= 0, "rewarm 4: no key");
+    int32_t init[1] = {k};
+    mb_host_glyphs_ahead(init, 1);
+    drain_ahead_queues();
+    CHECK(drawn_ahead(k, 0) != nil && drawn_ahead(k, 1) != nil, "rewarm 4: initial phases 0..1 missing");
+    MBAhead *old_a = ahead_of[@(k)];
+    CHECK(old_a != nil, "rewarm 4: ahead_of nil while phases 2..3 remain");
+
+    int32_t req[3] = {k | (0 << 26), k | (1 << 26), k | (0 << 26)};
+    mb_host_glyphs_ahead(req, 3);
+    drain_ahead_queues();
+    CHECK(ahead_of[@(k)] == old_a, "rewarm 4: ahead_of pointer changed");
+    glyph_entry *e = &entries[k];
+    for (int s = 0; s < 2; s++) {
+      MBDrawn *got = drawn_ahead(k, s);
+      MBDrawn *ref =
+          draw_cluster(texts[k], font_for(e->size, e->weight, e->style), e->style, e->dx, sub_dx(s), text_scale);
+      CHECK(drawn_eq(got, ref), "rewarm 4: phase %d not byte-identical", s);
+    }
+    for (int s = 2; s < SUB_COUNT; s++) {
+      CHECK(drawn_ahead(k, s) != nil, "rewarm 4: phase %d lost", s);
+    }
+    CHECK(ahead_of[@(k)] == nil, "rewarm 4: ahead_of not cleared");
+  }
+
+  // 5. Full queue does not break early: later already-active entry still re-warms when an earlier new entry cannot fit.
+  {
+    int k_active = key_of(@"满", 19, 0);
+    int k_new = key_of(@"新", 19, 0);
+    CHECK(k_active >= 0 && k_new >= 0, "rewarm 5: no keys");
+    int32_t init[1] = {k_active};
+    mb_host_glyphs_ahead(init, 1);
+    drain_ahead_queues();
+    CHECK(drawn_ahead(k_active, 0) != nil, "rewarm 5: initial phase 0 missing");
+    MBAhead *active_a = ahead_of[@(k_active)];
+    CHECK(active_a != nil, "rewarm 5: active entry missing");
+
+    // Pin front of ahead_order as drawing so drop_oldest_drawn() returns NO, and pad to AHEAD_MOST.
+    NSMutableArray<MBAhead *> *dummies = [NSMutableArray new];
+    MBAhead *blocker = [MBAhead new];
+    blocker.key = -100;
+    blocker.drawing = 1;
+    [ahead_order insertObject:blocker atIndex:0];
+    [dummies addObject:blocker];
+    while ((int)ahead_order.count < AHEAD_MOST) {
+      MBAhead *d = [MBAhead new];
+      d.key = -100 - (int)dummies.count;
+      [ahead_order addObject:d];
+      [dummies addObject:d];
+    }
+
+    int32_t req[2] = {k_new | (0 << 26), k_active | (0 << 26)};
+    mb_host_glyphs_ahead(req, 2);
+    drain_ahead_queues();
+    CHECK(ahead_of[@(k_new)] == nil, "rewarm 5: new key unexpectedly inserted at full capacity");
+    glyph_entry *e = &entries[k_active];
+    MBDrawn *got0 = drawn_ahead(k_active, 0);
+    MBDrawn *ref0 =
+        draw_cluster(texts[k_active], font_for(e->size, e->weight, e->style), e->style, e->dx, sub_dx(0), text_scale);
+    CHECK(drawn_eq(got0, ref0), "rewarm 5: active entry after full-queue miss did not re-warm phase 0");
+    for (int s = 1; s < SUB_COUNT; s++) CHECK(drawn_ahead(k_active, s) != nil, "rewarm 5: phase %d lost", s);
+    blocker.drawing = 0;
+    for (MBAhead *d in dummies) [ahead_order removeObject:d];
+    CHECK(ahead_order.count == 0, "rewarm 5: ahead_order not clean (%lu)", (unsigned long)ahead_order.count);
+  }
+  printf("ahead_rewarm: ok\n");
 }
 
 // The keys forgotten only where MoonBit reads the generation (keys_sweep): the faces changed in a frame keep them
@@ -582,8 +747,43 @@ int main(int argc, char **argv) {
     cut_cjk(@"Hiragino Sans");
     rests_in_turn();
     ahead_page();
+    ahead_rewarm();
     shape_parity();
     keys_bounded();
+    // Preview slot (face >= 7) mutations must not bump atlas_generation or invalidate primary slot 1 glyph keys
+    {
+      CHECK(face_family(1, @"Helvetica"), "set slot 1 to Helvetica");
+      mb_host_atlas_generation();
+      int g0 = mb_host_atlas_generation();
+      int k1 = key_of(@"字", 14, 0);
+      CHECK(k1 >= 0, "no key for primary slot 1");
+      double out[8] = {0};
+      mb_host_glyph(k1, out);
+      CHECK(out[2] > 0, "primary slot 1 key did not draw before preview");
+      int style7 = 7 << 8;
+      CHECK(face_family(7, @"Menlo"), "set preview slot 7 to Menlo");
+      int k7a = key_of(@"A", 14, style7);
+      CHECK(k7a >= 0, "no key for preview slot 7 (Menlo)");
+      mb_host_face_clear(7);
+      CHECK(face_family(7, @"PingFang SC"), "set preview slot 7 to PingFang SC");
+      int k7b = key_of(@"A", 14, style7);
+      CHECK(k7b >= 0 && k7b != k7a, "preview slot 7 key collided across family change: %d vs %d", k7a, k7b);
+      CHECK(mb_host_atlas_generation() == g0, "preview slot 7 bumped atlas_generation: %d -> %d", g0, mb_host_atlas_generation());
+      double out2[8] = {0};
+      mb_host_glyph(k1, out2);
+      CHECK(out2[2] > 0 && out2[2] == out[2] && out2[3] == out[3], "primary slot 1 key invalidated after preview slot 7 mutations");
+      mb_host_face_clear(7);
+      face_none(1);
+    }
+    // style_serif (4) | style_words (16) must stay serif (face_id == 0) even when face_text (slot 2) is registered
+    CTFontDescriptorRef serif_test_desc = CTFontDescriptorCreateWithNameAndSize(CFSTR("Menlo"), 15.0);
+    CHECK(serif_test_desc != NULL, "create Menlo descriptor");
+    if (serif_test_desc) {
+      face_descs[2] = [NSMutableArray arrayWithObject:(__bridge_transfer id)serif_test_desc];
+      CHECK(face_id(4 | 16) == 0, "style_serif | style_words must exempt reader serif from face_text");
+      CHECK(face_id(16) == 2, "style_words without style_serif still uses face_text");
+      mb_host_face_clear(2);
+    }
   }
   if (failed) return 1;
   printf("apple_text_test: ok\n");

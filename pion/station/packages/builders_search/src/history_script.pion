@@ -1,0 +1,502 @@
+// 1:1 port of `station/mb/src/history/script.mbt`:
+// Codex code-mode `tools.<name>({...})` literal call extraction & `strip_wrapping`.
+
+import "base_codec"
+import "js_json"
+import "jscase"
+
+fn script_code_of(ch : String) -> Int {
+  let u = js_json::utf16_units(ch)
+  if u.length() == 0 {
+    return 0
+  }
+  if u.length() >= 2 && u[0] >= 0xD800 && u[0] <= 0xDBFF && u[1] >= 0xDC00 && u[1] <= 0xDFFF {
+    return 0x10000 + ((u[0] - 0xD800) << 10) + (u[1] - 0xDC00)
+  }
+  u[0]
+}
+
+fn script_ws_at(src : Array[String], i : Int) -> Bool {
+  if i < 0 || i >= src.length() {
+    return false
+  }
+  let u = js_json::utf16_units(src[i])
+  u.length() == 1 && jscase::is_white_space(u[0])
+}
+
+fn script_at(src : Array[String], i : Int) -> Option[String] {
+  if i >= 0 && i < src.length() {
+    Some(src[i])
+  } else {
+    None
+  }
+}
+
+fn script_ident_start(c : Option[String]) -> Bool {
+  match c {
+    Some(s) => is_alphabetic(script_code_of(s)) || s == "_" || s == "$"
+    None => false
+  }
+}
+
+fn script_ident_part(c : Option[String]) -> Bool {
+  match c {
+    Some(s) => is_alphanumeric(script_code_of(s)) || s == "_" || s == "$"
+    None => false
+  }
+}
+
+fn join_pts(src : Array[String], start : Int, end : Int) -> String {
+  let sb = StringBuilder::new()
+  for i in start..<end {
+    sb.write_string(src[i])
+  }
+  sb.to_string()
+}
+
+fn find_pts_from(src : Array[String], from : Int, needle : String) -> Option[Int] {
+  let n = js_json::points(needle)
+  let last = src.length() - (n.length() - 1)
+  if last <= from {
+    return None
+  }
+  for i in from..<last {
+    let mut all = true
+    for k in 0..<n.length() {
+      match script_at(src, i + k) {
+        Some(v) => {
+          if v != n[k] {
+            all = false
+            break
+          }
+        }
+        None => {
+          all = false
+          break
+        }
+      }
+    }
+    if all {
+      return Some(i)
+    }
+  }
+  None
+}
+
+fn units_starts_at(u : Array[Int], prefix : String, from : Int) -> Bool {
+  let p = js_json::utf16_units(prefix)
+  if from < 0 || from + p.length() > u.length() {
+    return false
+  }
+  for i in 0..<p.length() {
+    if u[from + i] != p[i] {
+      return false
+    }
+  }
+  true
+}
+
+/// The White_Space at `from` (UTF-16 offset): `(end_utf16_offset, utf8_bytes_count)`.
+fn units_spaces_at(u : Array[Int], from : Int) -> (Int, Int) {
+  let mut end = from
+  let mut bytes = 0
+  while end < u.length() && jscase::is_white_space(u[end]) {
+    let c = u[end]
+    bytes = bytes + (if c < 0x80 { 1 } else if c < 0x800 { 2 } else { 3 })
+    end = end + 1
+  }
+  (end, bytes)
+}
+
+/// transcript.ts `stripWrapping`: `text(await )`, `await` and `text()` out until none left.
+fn strip_wrapping(rest : String) -> String {
+  let mut s = rest
+  while true {
+    let before = s
+    let out = StringBuilder::new()
+    let cs = js_json::points(s)
+    let u = js_json::utf16_units(s)
+    let starts : Array[Int] = []
+    let mut unit = 0
+    for idx in 0..<cs.length() {
+      starts.push(unit)
+      unit = unit + js_json::utf16_len(cs[idx])
+    }
+    let mut i = 0
+    while i < cs.length() {
+      let here = starts[i]
+      if units_starts_at(u, "text(", here) {
+        let (trimmed, skipped) = units_spaces_at(u, here + 5)
+        if units_starts_at(u, "await", trimmed) {
+          let (t2, skipped2) = units_spaces_at(u, trimmed + 5)
+          if units_starts_at(u, ")", t2) {
+            i = i + 5 + skipped + 5 + skipped2 + 1
+            continue
+          }
+        } else if units_starts_at(u, ")", trimmed) {
+          i = i + 5 + skipped + 1
+          continue
+        }
+      }
+      if units_starts_at(u, "await", here) {
+        i = i + 5
+        continue
+      }
+      out.write_string(cs[i])
+      i = i + 1
+    }
+    s = out.to_string()
+    if s == before {
+      return s
+    }
+  }
+  s
+}
+
+fn hex_value(h : String) -> Option[Int] {
+  let body = if str_has_prefix(h, "+") { str_slice_bytes(h, 1, h.to_bytes().length()) } else { h }
+  let raw = body.to_bytes()
+  if raw.length() == 0 {
+    return None
+  }
+  let mut v = 0
+  for i in 0..<raw.length() {
+    match base_codec::hex_digit(raw[i].to_int() & 0xFF) {
+      Some(d) => v = v * 16 + d
+      None => return None
+    }
+  }
+  Some(v)
+}
+
+fn number_len(s : String) -> Option[Int] {
+  let raw = s.to_bytes()
+  let n = raw.length()
+  let is_digit = fn(idx : Int) -> Bool {
+    if idx < n {
+      let c = raw[idx].to_int() & 0xFF
+      c >= 48 && c <= 57
+    } else {
+      false
+    }
+  }
+  let mut i = 0
+  if i < n && (raw[i].to_int() & 0xFF) == 45 {
+    i = i + 1
+  }
+  if !is_digit(i) {
+    return None
+  }
+  while is_digit(i) {
+    i = i + 1
+  }
+  if i < n && (raw[i].to_int() & 0xFF) == 46 && is_digit(i + 1) {
+    i = i + 1
+    while is_digit(i) {
+      i = i + 1
+    }
+  }
+  if i < n {
+    let ch = raw[i].to_int() & 0xFF
+    if ch == 101 || ch == 69 {
+      let mut j = i + 1
+      if j < n {
+        let sg = raw[j].to_int() & 0xFF
+        if sg == 43 || sg == 45 {
+          j = j + 1
+        }
+      }
+      if is_digit(j) {
+        while is_digit(j) {
+          j = j + 1
+        }
+        i = j
+      }
+    }
+  }
+  Some(i)
+}
+
+struct LitCursor {
+  src : Array[String]
+  mut pos : Int
+}
+
+fn LitCursor::space(self : LitCursor) -> Unit {
+  while script_ws_at(self.src, self.pos) {
+    self.pos = self.pos + 1
+  }
+}
+
+fn LitCursor::read_string(self : LitCursor) -> Option[String] {
+  let quote = self.src[self.pos]
+  self.pos = self.pos + 1
+  let out = StringBuilder::new()
+  while self.pos < self.src.length() && self.src[self.pos] != quote {
+    if quote == "`" && self.src[self.pos] == "$" {
+      match script_at(self.src, self.pos + 1) {
+        Some("{") => return None
+        _ => ()
+      }
+    }
+    if self.src[self.pos] == "\\" {
+      let next = match script_at(self.src, self.pos + 1) {
+        Some(v) => v
+        None => return None
+      }
+      if next == "u" {
+        if self.pos + 6 > self.src.length() {
+          return None
+        }
+        let code = match hex_value(join_pts(self.src, self.pos + 2, self.pos + 6)) {
+          Some(c) => c
+          None => return None
+        }
+        if code >= 0xD800 && code <= 0xDFFF {
+          return None
+        }
+        out.write_string(js_json::sanitize_str([code]))
+        self.pos = self.pos + 6
+        continue
+      }
+      if next == "n" {
+        out.write_string("\n")
+      } else if next == "t" {
+        out.write_string("\t")
+      } else if next == "r" {
+        out.write_string("\r")
+      } else if next == "b" {
+        out.write_byte(8 as Byte)
+      } else if next == "f" {
+        out.write_byte(12 as Byte)
+      } else if next == "v" {
+        out.write_byte(11 as Byte)
+      } else if next == "0" {
+        out.write_byte(0 as Byte)
+      } else {
+        out.write_string(next)
+      }
+      self.pos = self.pos + 2
+      continue
+    }
+    out.write_string(self.src[self.pos])
+    self.pos = self.pos + 1
+  }
+  match script_at(self.src, self.pos) {
+    Some(q) => {
+      if q != quote {
+        return None
+      }
+    }
+    None => return None
+  }
+  self.pos = self.pos + 1
+  Some(out.to_string())
+}
+
+fn LitCursor::read_value(self : LitCursor) -> Option[js_json::JValue] {
+  self.space()
+  let c = match script_at(self.src, self.pos) {
+    Some(v) => v
+    None => return None
+  }
+  if c == "{" {
+    self.pos = self.pos + 1
+    let fields : Array[(Array[Int], js_json::JValue)] = []
+    while true {
+      self.space()
+      match script_at(self.src, self.pos) {
+        Some("}") => {
+          self.pos = self.pos + 1
+          return Some(js_json::JValue::Obj(fields))
+        }
+        _ => ()
+      }
+      let key_str = match script_at(self.src, self.pos) {
+        Some("\"") | Some("'") => {
+          match self.read_string() {
+            Some(k) => k
+            None => return None
+          }
+        }
+        _ => {
+          let start = self.pos
+          if !script_ident_start(script_at(self.src, self.pos)) {
+            return None
+          }
+          while self.pos < self.src.length() && script_ident_part(script_at(self.src, self.pos)) {
+            self.pos = self.pos + 1
+          }
+          join_pts(self.src, start, self.pos)
+        }
+      }
+      self.space()
+      match script_at(self.src, self.pos) {
+        Some(":") => self.pos = self.pos + 1
+        _ => return None
+      }
+      let v = match self.read_value() {
+        Some(v_lit) => v_lit
+        None => return None
+      }
+      let ku = js_json::utf16_units(key_str)
+      let mut replaced = false
+      for idx in 0..<fields.length() {
+        let (ek, _) = fields[idx]
+        if js_json::units_eq(ek, ku) {
+          fields[idx] = (ku, v)
+          replaced = true
+          break
+        }
+      }
+      if !replaced {
+        fields.push((ku, v))
+      }
+      self.space()
+      match script_at(self.src, self.pos) {
+        Some(",") => self.pos = self.pos + 1
+        Some("}") => {
+          self.pos = self.pos + 1
+          return Some(js_json::JValue::Obj(fields))
+        }
+        _ => return None
+      }
+    }
+    None
+  } else if c == "[" {
+    self.pos = self.pos + 1
+    let items : Array[js_json::JValue] = []
+    while true {
+      self.space()
+      match script_at(self.src, self.pos) {
+        Some("]") => {
+          self.pos = self.pos + 1
+          return Some(js_json::JValue::Arr(items))
+        }
+        _ => ()
+      }
+      let v = match self.read_value() {
+        Some(v_lit) => v_lit
+        None => return None
+      }
+      items.push(v)
+      self.space()
+      match script_at(self.src, self.pos) {
+        Some(",") => self.pos = self.pos + 1
+        Some("]") => {
+          self.pos = self.pos + 1
+          return Some(js_json::JValue::Arr(items))
+        }
+        _ => return None
+      }
+    }
+    None
+  } else if c == "\"" || c == "'" || c == "`" {
+    match self.read_string() {
+      Some(s) => Some(js_json::JValue::Str(js_json::utf16_units(s)))
+      None => None
+    }
+  } else {
+    let end = if self.pos + 64 < self.src.length() { self.pos + 64 } else { self.src.length() }
+    let rest = join_pts(self.src, self.pos, end)
+    if str_has_prefix(rest, "true") {
+      self.pos = self.pos + 4
+      return Some(js_json::JValue::Bool(true))
+    }
+    if str_has_prefix(rest, "false") {
+      self.pos = self.pos + 5
+      return Some(js_json::JValue::Bool(false))
+    }
+    if str_has_prefix(rest, "null") {
+      self.pos = self.pos + 4
+      return Some(js_json::JValue::Null)
+    }
+    let len = match number_len(rest) {
+      Some(l) => l
+      None => return None
+    }
+    self.pos = self.pos + len
+    match js_json::parse(str_slice_bytes(rest, 0, len)) {
+      Ok(parsed) => Some(parsed)
+      Err(_) => None
+    }
+  }
+}
+
+fn read_literal(src : Array[String], from : Int) -> Option[(js_json::JValue, Int)] {
+  let cur = LitCursor::{ src: src, pos: from }
+  match cur.read_value() {
+    Some(v) => Some((v, cur.pos))
+    None => None
+  }
+}
+
+/// transcript.ts `scriptCalls`.
+pub fn script_calls(script : String) -> (Array[(String, js_json::JValue)], Bool) {
+  let src = js_json::points(script)
+  let calls : Array[(String, js_json::JValue)] = []
+  let mut rest = script
+  let mut i = 0
+  while true {
+    let found = match find_pts_from(src, i, "tools.") {
+      Some(p) => p
+      None => break
+    }
+    let mut j = found + 6
+    let name_start = j
+    while j < src.length() && script_ident_part(script_at(src, j)) {
+      j = j + 1
+    }
+    let name = join_pts(src, name_start, j)
+    let first_ok = script_ident_start(script_at(src, name_start))
+    while script_ws_at(src, j) {
+      j = j + 1
+    }
+    i = found + 6
+    let open_paren = match script_at(src, j) {
+      Some("(") => true
+      _ => false
+    }
+    if !first_ok || !open_paren {
+      continue
+    }
+    let (value, end) = match read_literal(src, j + 1) {
+      Some(pair) => pair
+      None => continue
+    }
+    let mut k = end
+    while script_ws_at(src, k) {
+      k = k + 1
+    }
+    let close_paren = match script_at(src, k) {
+      Some(")") => true
+      _ => false
+    }
+    if !close_paren {
+      continue
+    }
+    calls.push((name, value))
+    let whole = join_pts(src, found, k + 1)
+    match str_find_bytes(rest, whole) {
+      Some(p) => {
+        let rb = rest.to_bytes()
+        let wb = whole.to_bytes()
+        rest = str_slice_bytes(rest, 0, p) + str_slice_bytes(rest, p + wb.length(), rb.length())
+      }
+      None => ()
+    }
+    i = k + 1
+  }
+  let stripped = strip_wrapping(rest)
+  let stripped_pts = js_json::points(stripped)
+  let mut only_ws = true
+  for idx in 0..<stripped_pts.length() {
+    let c = stripped_pts[idx]
+    if !script_ws_at([c], 0) && c != ";" {
+      only_ws = false
+      break
+    }
+  }
+  let only = calls.length() > 0 && only_ws
+  (calls, only)
+}

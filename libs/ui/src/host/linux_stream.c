@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "linux.h"
+#include "stream_pace.h"
 
 #define vlog(...) (fprintf(stdout, __VA_ARGS__), fputc('\n', stdout), fflush(stdout))
 #include "linux_gst.h"
@@ -42,13 +43,26 @@ typedef struct {
 typedef struct {
   guint64 n;
   double ts;
+  double arrived_ms;
 } Fed;
+
+typedef struct {
+  Frame *frame;
+  double arrived_ms;
+  double base_ms;
+  uint8_t immediate;
+} PacedFrame;
 
 typedef struct {
   int id, closed, busy;
   Decoder *dec;
   // (under lock) what it says, oldest first; frames decoded, not shown yet; JPEGs waiting, their stamps
   GQueue events, decoded, jobs;
+  // (under lock) adaptive jitter buffer for H.264 frames (stream_pace.h), ticked by linux_app.c's GdkFrameClock
+  mb_pace_t pace;
+  GQueue paced;
+  int pace_drawn;
+  int pace_idle_ticks;
   // (the main thread's) the one shown: its pixels until they are its texture, then its texture
   Frame *shown;
   GLuint tex;
@@ -73,6 +87,16 @@ static void frame_free(Frame *f) {
   g_free(f->px);
   g_free(f->yuv.data);
   g_free(f);
+}
+
+static void paced_frame_free(PacedFrame *pf) {
+  if (!pf) return;
+  frame_free(pf->frame);
+  g_free(pf);
+}
+
+static double linux_now_ms(void) {
+  return (double)g_get_monotonic_time() / 1000.0;
 }
 
 // (under lock) an event for the app: its frame asked for
@@ -169,6 +193,8 @@ int32_t mb_host_stream_open(void) {
   g_queue_init(&s->events);
   g_queue_init(&s->decoded);
   g_queue_init(&s->jobs);
+  g_queue_init(&s->paced);
+  mb_pace_init(&s->pace);
   g_ptr_array_add(streams, s);
   return s->id;
 }
@@ -208,7 +234,93 @@ static void fed_let_go(Stream *s, guint64 n) {
   }
 }
 
-// a frame decoded (a streaming thread's): it kept and said, those fed before it and not out passed over
+// (under lock) emit one due paced frame into s->decoded with client wait_us
+static void pace_emit_locked(Stream *s, PacedFrame *pf, double now) {
+  Frame *fr = pf->frame;
+  uint32_t wait_us = mb_pace_wait_us(pf->arrived_ms, now);
+  g_queue_push_tail(&s->decoded, fr);
+  char *t = stamp(fr->ts);
+  say_locked(s, wait_us > 0 ? g_strdup_printf("f %s %d %d %u", t, fr->w, fr->h, wait_us)
+                            : g_strdup_printf("f %s %d %d", t, fr->w, fr->h));
+  g_free(t);
+  s->pace_drawn = 1;
+  g_free(pf);
+}
+
+// (under lock) trim excess due paced frames via four-state catch-up and report wait_us
+static int pace_trim_locked(Stream *s, double now, int draws) {
+  int due = 0;
+  for (GList *l = s->paced.head; l; l = l->next) {
+    PacedFrame *pf = l->data;
+    if (!mb_pace_is_due(&s->pace, pf->frame->ts, pf->base_ms, pf->immediate, now)) break;
+    due++;
+  }
+  if (due <= 0) {
+    mb_pace_trim(&s->pace, 0, draws, 0.0, now, NULL);
+    return 0;
+  }
+  PacedFrame *head = g_queue_peek_head(&s->paced);
+  int drop = mb_pace_trim(&s->pace, due, draws, head->arrived_ms, now, NULL);
+  int dropped = 0;
+  while (drop > 0 && !g_queue_is_empty(&s->paced)) {
+    PacedFrame *old = g_queue_pop_head(&s->paced);
+    uint32_t wait_us = mb_pace_wait_us(old->arrived_ms, now);
+    char *t = stamp(old->frame->ts);
+    say_locked(s, wait_us > 0 ? g_strdup_printf("d %s %u", t, wait_us) : g_strdup_printf("d %s", t));
+    g_free(t);
+    paced_frame_free(old);
+    drop--;
+    dropped = 1;
+  }
+  return dropped;
+}
+
+// (under lock) clear paced queue
+static void pace_clear_locked(Stream *s) {
+  g_queue_clear_full(&s->paced, (GDestroyNotify)paced_frame_free);
+  s->pace_drawn = 0;
+  s->pace_idle_ticks = 0;
+  mb_pace_reset(&s->pace);
+}
+
+// Called from linux_app.c's GTK GdkFrameClock on_tick (hardware VSync, main thread).
+// Sets *wake_out = 1 if any stream emitted or dropped a frame; returns 1 while any stream needs further VSync ticks.
+int mb_linux_stream_tick(int *wake_out) {
+  int wake = 0;
+  int keep = 0;
+  double now = linux_now_ms();
+  g_mutex_lock(&lock);
+  if (streams) {
+    for (guint i = 1; i < streams->len; i++) {
+      Stream *s = g_ptr_array_index(streams, i);
+      if (!s || s->closed) continue;
+      if (g_queue_is_empty(&s->paced) && !s->pace_drawn && s->pace_idle_ticks == 0) continue;
+      s->pace_drawn = 0;
+      if (pace_trim_locked(s, now, 1)) wake = 1;
+      int drew = 0;
+      PacedFrame *head = g_queue_peek_head(&s->paced);
+      if (head && mb_pace_is_due(&s->pace, head->frame->ts, head->base_ms, head->immediate, now)) {
+        g_queue_pop_head(&s->paced);
+        pace_emit_locked(s, head, now);
+        drew = 1;
+        wake = 1;
+      }
+      if (drew || !g_queue_is_empty(&s->paced)) {
+        s->pace_idle_ticks = 0;
+        keep = 1;
+      } else if (++s->pace_idle_ticks < MB_PACE_IDLE_STOP_TICKS) {
+        keep = 1;
+      } else {
+        s->pace_idle_ticks = 0;
+      }
+    }
+  }
+  g_mutex_unlock(&lock);
+  if (wake_out) *wake_out = wake;
+  return keep;
+}
+
+// a frame decoded (a streaming thread's): paced by stream_pace.h, those fed before it and not out passed over
 static int on_decoded(void *sink, gpointer data) {
   Stream *s = data;
   void *sample = NULL;
@@ -219,6 +331,7 @@ static int on_decoded(void *sink, gpointer data) {
   int got = gs_sample_yuv(sample, &yuv);
   guint64 n = b && b->pts != GCLOCK_NONE ? b->pts / 1000000 : 0;
   gs.gst_mini_object_unref(sample);
+  int wake = 0;
   g_mutex_lock(&lock);
   Fed *f = NULL;
   if (s->dec && !s->closed) {
@@ -228,22 +341,48 @@ static int on_decoded(void *sink, gpointer data) {
     else f = NULL;
   }
   if (f && got) {
+    double now = linux_now_ms();
+    double arrived = f->arrived_ms > 0.0 ? f->arrived_ms : now;
+    s->pace_idle_ticks = 0;
+    mb_pace_arrival_t obs = mb_pace_observe(&s->pace, f->ts, arrived);
+    while (g_queue_get_length(&s->paced) >= MB_PACE_QUEUE_CAP) {
+      PacedFrame *old = g_queue_pop_head(&s->paced);
+      uint32_t wait_us = mb_pace_wait_us(old->arrived_ms, now);
+      char *t = stamp(old->frame->ts);
+      say_locked(s, wait_us > 0 ? g_strdup_printf("d %s %u", t, wait_us) : g_strdup_printf("d %s", t));
+      g_free(t);
+      paced_frame_free(old);
+      wake = 1;
+    }
+    int was_empty = g_queue_is_empty(&s->paced);
     Frame *fr = g_new0(Frame, 1);
     fr->ts = f->ts, fr->w = yuv.w, fr->h = yuv.h, fr->yuv = yuv;
-    g_queue_push_tail(&s->decoded, fr);
-    char *t = stamp(f->ts);
-    say_locked(s, g_strdup_printf("f %s %d %d", t, yuv.w, yuv.h));
-    g_free(t);
+    PacedFrame *pf = g_new0(PacedFrame, 1);
+    pf->frame = fr;
+    pf->arrived_ms = obs.arrived_ms;
+    pf->base_ms = obs.base_ms;
+    pf->immediate = obs.immediate;
+    g_queue_push_tail(&s->paced, pf);
+    if (pace_trim_locked(s, now, 0)) wake = 1;
+    PacedFrame *head = g_queue_peek_head(&s->paced);
+    if (was_empty && !s->pace_drawn && head &&
+        mb_pace_is_due(&s->pace, head->frame->ts, head->base_ms, head->immediate, now)) {
+      g_queue_pop_head(&s->paced);
+      pace_emit_locked(s, head, now);
+      wake = 1;
+    }
+    if (!g_queue_is_empty(&s->paced) || s->pace_drawn) wake = 1;
     got = 0;
   } else if (f) {
     char *t = stamp(f->ts);
     say_locked(s, g_strdup_printf("d %s", t));
     g_free(t);
+    wake = 1;
   }
   g_mutex_unlock(&lock);
   g_free(f);
   if (got) g_free(yuv.data);
-  mb_app_wake();
+  if (wake) mb_app_wake();
   return 0;
 }
 
@@ -262,6 +401,7 @@ static void decoder_stop(Stream *s) {
   d->pipe = d->src = d->bus = NULL;
   g_mutex_lock(&lock);
   fed_let_go(s, (guint64)-1);
+  pace_clear_locked(s);
   g_mutex_unlock(&lock);
   mb_app_wake();
 }
@@ -345,7 +485,7 @@ void mb_host_stream_frame(int32_t id, moonbit_bytes_t data, int32_t key, double 
   GstBufferHead *b = gs.gst_buffer_new_memdup(data, (gsize)Moonbit_array_length(data));
   b->pts = ++d->next * 1000000;
   Fed *f = g_new(Fed, 1);
-  f->n = d->next, f->ts = ts;
+  f->n = d->next, f->ts = ts, f->arrived_ms = linux_now_ms();
   g_mutex_lock(&lock);
   g_queue_push_tail(&d->fed, f);
   g_mutex_unlock(&lock);
@@ -421,6 +561,7 @@ void mb_host_stream_close(int32_t id) {
   if (!s) return;
   g_mutex_lock(&lock);
   s->closed = 1;
+  pace_clear_locked(s);
   g_queue_clear_full(&s->events, g_free);
   g_queue_clear_full(&s->decoded, (GDestroyNotify)frame_free);
   Job *j;

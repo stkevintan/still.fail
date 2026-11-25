@@ -1,0 +1,936 @@
+// 1:1 port of `station/mb/src/usagecount/record.mbt`:
+// SQLite writes for usage calls, usage_files cursor/cutoff/anchor/speed, and compact context state.
+// Zero raw transaction SQL: all write transactions go exclusively through `sql_db::Db::tx_err`.
+
+import "base_codec"
+import "js_json"
+import "sql_db"
+
+pub struct For {
+  pub turn : base_codec::Json
+  pub person : base_codec::Json
+  pub thread : base_codec::Json
+  pub profile : base_codec::Json
+}
+
+pub struct File {
+  pub session : Option[String]
+  pub offset : Double
+  pub model : Option[String]
+  pub speed : Option[String]
+}
+
+pub struct DoubleCell {
+  pub mut value : Double
+}
+
+pub struct Write {
+  pub path : String
+  pub file : File
+  pub runtime : String
+  pub calls : Array[(Call, For)]
+  pub min_new_at : Option[Double]
+  pub changed : DoubleCell
+  pub cutoff : Double
+  pub anchor : String
+}
+
+pub let COMPACTED_FROM : Double = 50000.0
+
+fn opt_str(s : Option[String]) -> base_codec::Json {
+  match s {
+    Some(v) => base_codec::json_str(v)
+    None => base_codec::json_null()
+  }
+}
+
+fn opt_num(d : Option[Double]) -> base_codec::Json {
+  match d {
+    Some(v) => base_codec::json_num(v)
+    None => base_codec::json_null()
+  }
+}
+
+pub fn text_of(v : base_codec::Json) -> Option[String] {
+  match v {
+    base_codec::Json::Str(s) => Some(s)
+    _ => None
+  }
+}
+
+pub fn num_of(v : base_codec::Json) -> Option[Double] {
+  match v {
+    base_codec::Json::Num(d, _) => Some(d)
+    _ => None
+  }
+}
+
+pub struct Schema {
+  pub mut compact : Bool
+  pub mut incremental : Option[Bool]
+}
+
+pub fn Schema::new() -> Schema {
+  Schema::{ compact: false, incremental: None }
+}
+
+pub fn Schema::has_compact(self : Schema, db : sql_db::Db) -> Result[Bool, String] {
+  if self.compact {
+    return Ok(true)
+  }
+  match db_one(
+    db,
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name IN ('usage_contexts', 'usage_compact_since') LIMIT 1",
+    [],
+  ) {
+    Ok(Some(_)) => {
+      self.compact = true
+      Ok(true)
+    }
+    Ok(None) => Ok(false)
+    Err(e) => Err(e)
+  }
+}
+
+pub fn Schema::totals_complete(self : Schema, db : sql_db::Db, session : String) -> Result[Bool, String] {
+  let incremental = match self.incremental {
+    Some(known) => known
+    None => {
+      let known = match db_one(
+        db,
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'usage_totals_incremental'",
+        [],
+      ) {
+        Ok(Some(_)) => true
+        Ok(None) => false
+        Err(e) => return Err(e)
+      }
+      self.incremental = Some(known)
+      known
+    }
+  }
+  if !incremental {
+    return Ok(true)
+  }
+  match db_one(db, "SELECT done FROM usage_totals_source_sessions WHERE session = ?", [base_codec::json_str(session)]) {
+    Ok(Some(row)) => Ok(opt_d_eq(num_of(row_field(row, "done")), 1.0))
+    Ok(None) => Ok(false)
+    Err(e) => Err(e)
+  }
+}
+
+// ── JValue helpers ──
+
+fn jopt_num(d : Option[Double]) -> js_json::JValue {
+  match d {
+    Some(v) => js_json::JValue::Num(v)
+    None => js_json::JValue::Null
+  }
+}
+
+fn jopt_str(s : Option[String]) -> js_json::JValue {
+  match s {
+    Some(v) => js_json::JValue::Str(js_json::utf16_units(v))
+    None => js_json::JValue::Null
+  }
+}
+
+fn jval_of_json(j : base_codec::Json) -> js_json::JValue {
+  match j {
+    base_codec::Json::Null => js_json::JValue::Null
+    base_codec::Json::Bool(b) => js_json::JValue::Bool(b)
+    base_codec::Json::Num(d, _) => js_json::JValue::Num(d)
+    base_codec::Json::Str(s) => js_json::JValue::Str(js_json::utf16_units(s))
+    base_codec::Json::Arr(items) => {
+      let out : Array[js_json::JValue] = []
+      for i in 0..<items.length() {
+        out.push(jval_of_json(items[i]))
+      }
+      js_json::JValue::Arr(out)
+    }
+    base_codec::Json::Obj(fields) => {
+      let out : Array[(Array[Int], js_json::JValue)] = []
+      for i in 0..<fields.length() {
+        let (k, v) = fields[i]
+        out.push((js_json::utf16_units(k), jval_of_json(v)))
+      }
+      js_json::JValue::Obj(out)
+    }
+  }
+}
+
+fn jobj_put(obj : js_json::JValue, key : String, v : js_json::JValue) -> Unit {
+  match obj {
+    js_json::JValue::Obj(entries) => {
+      let ku = js_json::utf16_units(key)
+      for i in 0..<entries.length() {
+        let (k, _) = entries[i]
+        if js_json::units_eq(k, ku) {
+          entries[i] = (ku, v)
+          return
+        }
+      }
+      entries.push((ku, v))
+    }
+    _ => ()
+  }
+}
+
+fn jobj_delete(obj : js_json::JValue, key : String) -> Unit {
+  match obj {
+    js_json::JValue::Obj(entries) => {
+      let ku = js_json::utf16_units(key)
+      let mut idx = -1
+      for i in 0..<entries.length() {
+        let (k, _) = entries[i]
+        if js_json::units_eq(k, ku) {
+          idx = i
+          break
+        }
+      }
+      if idx >= 0 {
+        let mut j = idx
+        while j + 1 < entries.length() {
+          entries[j] = entries[j + 1]
+          j = j + 1
+        }
+        let _ = entries.pop()
+      }
+    }
+    _ => ()
+  }
+}
+
+fn jis(v : Option[js_json::JValue], s : Option[String]) -> Bool {
+  match (v, s) {
+    (Some(js_json::JValue::Null), None) => true
+    (Some(js_json::JValue::Str(u)), Some(t)) => js_json::units_eq(u, js_json::utf16_units(t))
+    _ => false
+  }
+}
+
+fn jobj_from(pairs : Array[(String, js_json::JValue)]) -> js_json::JValue {
+  let entries : Array[(Array[Int], js_json::JValue)] = []
+  for i in 0..<pairs.length() {
+    let (k, v) = pairs[i]
+    entries.push((js_json::utf16_units(k), v))
+  }
+  js_json::JValue::Obj(entries)
+}
+
+// ── recent contexts ──
+
+pub struct Owner {
+  pub runtime : base_codec::Json
+  pub model : base_codec::Json
+  pub fast : base_codec::Json
+}
+
+fn json_eq(a : base_codec::Json, b : base_codec::Json) -> Bool {
+  sql_db::stringify_json(a) == sql_db::stringify_json(b)
+}
+
+fn same_owner(a : Owner, b : Owner) -> Bool {
+  json_eq(a.runtime, b.runtime) && json_eq(a.model, b.model) && json_eq(a.fast, b.fast)
+}
+
+pub struct Snapshot {
+  pub state : js_json::JValue
+  pub stored : Bool
+  pub invalid : Bool
+  pub after : Option[Double]
+  pub owner : Option[Owner]
+}
+
+fn fresh_state(uncertain : Bool) -> js_json::JValue {
+  jobj_from([
+    ("calls", js_json::JValue::Arr([])),
+    ("turns", js_json::JValue::Arr([])),
+    ("uncertain", js_json::JValue::Bool(uncertain)),
+  ])
+}
+
+pub fn context_snapshot(db : sql_db::Db, session : String) -> Result[Snapshot, String] {
+  let row = match db_one(
+    db,
+    "SELECT t.compact_context AS state, sc.context_uncertain AS invalid, sc.context_after AS after, sc.context_runtime AS runtime, sc.context_model AS model, sc.context_fast AS fast FROM usage_minute_scope sc LEFT JOIN usage_totals t ON t.session = sc.session AND t.runtime = sc.context_runtime AND t.model = sc.context_model AND t.fast = sc.context_fast WHERE sc.session = ?",
+    [base_codec::json_str(session)],
+  ) {
+    Ok(r) => r
+    Err(e) => return Err(e)
+  }
+  let invalid = match row {
+    Some(r) => opt_d_eq(num_of(row_field(r, "invalid")), 1.0)
+    None => false
+  }
+  let (state, stored) = match row {
+    Some(r) => {
+      match row_field(r, "state") {
+        base_codec::Json::Null => (fresh_state(invalid), false)
+        base_codec::Json::Str(text) => {
+          match js_json::parse(text) {
+            Ok(v) => (v, true)
+            Err(e) => return Err(e)
+          }
+        }
+        other => (jval_of_json(other), true)
+      }
+    }
+    None => (fresh_state(invalid), false)
+  }
+  let owner : Option[Owner] = match row {
+    Some(r) => {
+      match row_field(r, "runtime") {
+        base_codec::Json::Null => None
+        rt => Some(Owner::{ runtime: rt, model: row_field(r, "model"), fast: row_field(r, "fast") })
+      }
+    }
+    None => None
+  }
+  let after = match row {
+    Some(r) => num_of(row_field(r, "after"))
+    None => None
+  }
+  Ok(Snapshot::{ state: state, stored: stored, invalid: invalid, after: after, owner: owner })
+}
+
+pub fn keep_recent(
+  db : sql_db::Db,
+  session : String,
+  owner : Owner,
+  state : js_json::JValue,
+  previous : Option[Owner],
+) -> Result[Unit, String] {
+  let s = base_codec::json_str(session)
+  let same = match previous {
+    Some(p) => same_owner(p, owner)
+    None => false
+  }
+  match previous {
+    Some(p) => {
+      if !same {
+        match db.run(
+          "UPDATE usage_totals SET compact_context = NULL WHERE session = ? AND runtime = ? AND model = ? AND fast = ?",
+          [s, p.runtime, p.model, p.fast],
+        ) {
+          Ok(_) => ()
+          Err(e) => return Err(e.message)
+        }
+      }
+    }
+    None => ()
+  }
+  match db.run(
+    "INSERT INTO usage_totals (session, runtime, model, fast, calls, input, cache_read, cache_write, cache_write_long, output, compact_context) VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?) ON CONFLICT (session, runtime, model, fast) DO UPDATE SET compact_context = excluded.compact_context",
+    [s, owner.runtime, owner.model, owner.fast, base_codec::json_str(js_json::stringify(state))],
+  ) {
+    Ok(_) => ()
+    Err(e) => return Err(e.message)
+  }
+  if same {
+    return Ok(())
+  }
+  match db.run(
+    "INSERT INTO usage_minute_scope (session, ws, done, context_runtime, context_model, context_fast) VALUES (?, (SELECT ws FROM sessions WHERE key = ?), 1, ?, ?, ?) ON CONFLICT (session) DO UPDATE SET context_runtime = excluded.context_runtime, context_model = excluded.context_model, context_fast = excluded.context_fast WHERE context_runtime IS NOT excluded.context_runtime OR context_model IS NOT excluded.context_model OR context_fast IS NOT excluded.context_fast",
+    [s, s, owner.runtime, owner.model, owner.fast],
+  ) {
+    Ok(_) => Ok(())
+    Err(e) => Err(e.message)
+  }
+}
+
+pub fn seed_context(db : sql_db::Db, session : String) -> Result[Option[Snapshot], String] {
+  let snapshot = match context_snapshot(db, session) {
+    Ok(s) => s
+    Err(e) => return Err(e)
+  }
+  if snapshot.stored || snapshot.invalid {
+    return Ok(Some(snapshot))
+  }
+  let s = base_codec::json_str(session)
+  let row = match db_one(
+    db,
+    "SELECT u.usage, s.runtime_session_id AS runtime, r.at AS began FROM session_usage u JOIN sessions s ON s.key = u.session LEFT JOIN runtime_sessions r ON r.session_key = s.key AND r.id = s.runtime_session_id WHERE u.session = ?",
+    [s],
+  ) {
+    Ok(Some(r)) => r
+    Ok(None) => return Ok(Some(snapshot))
+    Err(e) => return Err(e)
+  }
+  let (runtime, began) = match (row_field(row, "runtime"), num_of(row_field(row, "began"))) {
+    (base_codec::Json::Str(rt), Some(bg)) => (rt, bg)
+    _ => return Ok(Some(snapshot))
+  }
+  let old = match row_field(row, "usage") {
+    base_codec::Json::Str(text) => {
+      match js_json::parse(text) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+    }
+    _ => return Err("a session's usage is not JSON")
+  }
+  match old {
+    js_json::JValue::Obj(_) => ()
+    _ => return Err("a session's usage is not an object")
+  }
+  let total = match db_one(db, "SELECT COALESCE(SUM(calls), 0) AS n FROM usage_totals WHERE session = ? AND calls > 0", [s]) {
+    Ok(Some(r)) => match num_of(row_field(r, "n")) {
+      Some(v) => v
+      None => 0.0
+    }
+    Ok(None) => 0.0
+    Err(e) => return Err(e)
+  }
+  let model = js_json::jval_at(Some(old), "model")
+  let window = js_json::jval_at(Some(old), "contextWindow")
+  let model_ok = match model {
+    Some(js_json::JValue::Null) => true
+    Some(js_json::JValue::Str(_)) => true
+    _ => false
+  }
+  let window_ok = match window {
+    Some(js_json::JValue::Null) => true
+    Some(js_json::JValue::Num(_)) => true
+    _ => false
+  }
+  let last = match js_json::jval_num_of(js_json::jval_at(Some(old), "lastCallAt")) {
+    Some(l) => l
+    None => return Ok(Some(snapshot))
+  }
+  if !opt_d_eq(js_json::jval_num_of(js_json::jval_at(Some(old), "modelCalls")), total) || last < began || !model_ok || !window_ok {
+    return Ok(Some(snapshot))
+  }
+  let model_val = match model {
+    Some(m) => m
+    None => js_json::JValue::Null
+  }
+  let window_val = match window {
+    Some(w) => w
+    None => js_json::JValue::Null
+  }
+  let saved = jobj_from([
+    ("runtimeSession", js_json::JValue::Str(js_json::utf16_units(runtime))),
+    ("model", model_val),
+    ("contextWindow", window_val),
+    ("lastCallAt", js_json::JValue::Num(last)),
+  ])
+  let opt_keys = ["contextTokens", "cacheMs", "rereadCost"]
+  for i in 0..<opt_keys.length() {
+    let name = opt_keys[i]
+    match js_json::jval_at(Some(old), name) {
+      Some(js_json::JValue::Num(v)) => jobj_put(saved, name, js_json::JValue::Num(v))
+      _ => ()
+    }
+  }
+  let owner = match db_one(db, "SELECT runtime, model, fast FROM usage_totals WHERE session = ? ORDER BY runtime, model, fast LIMIT 1", [s]) {
+    Ok(Some(r)) => Owner::{ runtime: row_field(r, "runtime"), model: row_field(r, "model"), fast: row_field(r, "fast") }
+    Ok(None) => return Ok(Some(snapshot))
+    Err(e) => return Err(e)
+  }
+  let state = jobj_from([
+    ("calls", js_json::JValue::Arr([])),
+    ("turns", js_json::JValue::Arr([])),
+    ("uncertain", js_json::JValue::Bool(false)),
+    ("saved", saved),
+  ])
+  match keep_recent(db, session, owner, state, snapshot.owner) {
+    Ok(_) => Ok(None)
+    Err(e) => Err(e)
+  }
+}
+
+fn call_before(a : js_json::JValue, b : js_json::JValue) -> Bool {
+  let x = match js_json::jval_num_of(js_json::jval_at(Some(a), "at")) {
+    Some(v) => v
+    None => 0.0
+  }
+  let y = match js_json::jval_num_of(js_json::jval_at(Some(b), "at")) {
+    Some(v) => v
+    None => 0.0
+  }
+  if x != y {
+    return x < y
+  }
+  match (js_json::jval_at(Some(a), "id"), js_json::jval_at(Some(b), "id")) {
+    (Some(js_json::JValue::Str(p)), Some(js_json::JValue::Str(q))) => js_json::units_compare(p, q) < 0
+    _ => false
+  }
+}
+
+pub fn note_contexts(
+  db : sql_db::Db,
+  session : String,
+  runtime : String,
+  calls : Array[(Call, For)],
+  read : Option[Snapshot],
+) -> Result[Unit, String] {
+  let snapshot = match read {
+    Some(s) => s
+    None => {
+      match context_snapshot(db, session) {
+        Ok(s) => s
+        Err(e) => return Err(e)
+      }
+    }
+  }
+  let state = snapshot.state
+  let mut changed = false
+  let mut target : Option[Call] = None
+  for idx in 0..<calls.length() {
+    let (call, of) = calls[idx]
+    let saved_opt : Option[js_json::JValue] = match js_json::jval_at(Some(state), "saved") {
+      Some(js_json::JValue::Obj(entries)) => Some(js_json::JValue::Obj(entries))
+      _ => None
+    }
+    match saved_opt {
+      Some(sv) => {
+        match js_json::jval_num_of(js_json::jval_at(Some(sv), "lastCallAt")) {
+          Some(l) => {
+            if call.at < l {
+              let has_cache = match js_json::jval_at(Some(sv), "cacheMs") {
+                Some(_) => true
+                None => false
+              }
+              let has_reread = match js_json::jval_at(Some(sv), "rereadCost") {
+                Some(_) => true
+                None => false
+              }
+              if has_cache || has_reread {
+                jobj_delete(sv, "cacheMs")
+                jobj_delete(sv, "rereadCost")
+                changed = true
+              }
+              continue
+            }
+            if call.at == l {
+              jobj_delete(state, "saved")
+              jobj_put(state, "calls", js_json::JValue::Arr([]))
+              jobj_put(state, "turns", js_json::JValue::Arr([]))
+              jobj_put(state, "uncertain", js_json::JValue::Bool(true))
+              match db.run(
+                "UPDATE usage_minute_scope SET context_uncertain = 1, context_after = (SELECT at FROM usage INDEXED BY usage_session WHERE session = ? ORDER BY at DESC LIMIT 1) WHERE session = ?",
+                [base_codec::json_str(session), base_codec::json_str(session)],
+              ) {
+                Ok(_) => ()
+                Err(e) => return Err(e.message)
+              }
+            }
+          }
+          None => ()
+        }
+      }
+      None => ()
+    }
+
+    let recent = js_json::jval_arr(js_json::jval_at(Some(state), "calls"))
+    let previous : Option[js_json::JValue] = if recent.length() > 0 { Some(recent[recent.length() - 1]) } else { None }
+    let turn = text_of(of.turn)
+    let next = jobj_from([
+      ("id", js_json::JValue::Str(js_json::utf16_units(call.id))),
+      ("turn", jopt_str(turn)),
+      ("profile", jopt_str(text_of(of.profile))),
+      ("model", jopt_str(call.model)),
+      ("context", jopt_num(call.context)),
+      ("window", jopt_num(call.window)),
+      ("at", js_json::JValue::Num(call.at)),
+      ("fast", js_json::JValue::Bool(call.fast)),
+      ("cacheWrite", js_json::JValue::Num(call.cache_write)),
+      ("cacheWriteLong", js_json::JValue::Num(call.cache_write_long)),
+    ])
+    let ordered = match previous {
+      None => true
+      Some(p) => {
+        match js_json::jval_num_of(js_json::jval_at(Some(p), "at")) {
+          Some(pat) => {
+            call.at > pat ||
+            (call.at == pat &&
+              match js_json::jval_at(Some(p), "id") {
+                Some(js_json::JValue::Str(pid)) => js_json::units_compare(pid, js_json::utf16_units(call.id)) < 0
+                _ => false
+            })
+          }
+          None => false
+        }
+      }
+    }
+    if !ordered {
+      jobj_put(state, "uncertain", js_json::JValue::Bool(true))
+      jobj_put(state, "turns", js_json::JValue::Arr([]))
+    } else {
+      let turns = js_json::jval_arr(js_json::jval_at(Some(state), "turns"))
+      let last_turn : Option[js_json::JValue] = if turns.length() > 0 { Some(turns[turns.length() - 1]) } else { None }
+      let differs = match last_turn {
+        None => true
+        Some(t) => !jis(js_json::jval_at(Some(t), "id"), turn)
+      }
+      if differs || turns.length() == 0 {
+        let list = match js_json::jval_at(Some(state), "turns") {
+          Some(js_json::JValue::Arr(items)) => items
+          _ => {
+            let items : Array[js_json::JValue] = []
+            jobj_put(state, "turns", js_json::JValue::Arr(items))
+            items
+          }
+        }
+        list.push(jobj_from([("id", jopt_str(turn)), ("compacted", js_json::JValue::Bool(false))]))
+        if list.length() > 2 {
+          let trimmed : Array[js_json::JValue] = []
+          for ti in 1..<list.length() {
+            trimmed.push(list[ti])
+          }
+          jobj_put(state, "turns", js_json::JValue::Arr(trimmed))
+          jobj_put(state, "uncertain", js_json::JValue::Bool(false))
+        }
+      }
+      match previous {
+        Some(p) => {
+          match (js_json::jval_num_of(js_json::jval_at(Some(p), "context")), call.context, call.model) {
+            (Some(pc), Some(cc), Some(model)) => {
+              if pc >= COMPACTED_FROM &&
+              cc * 2.0 < pc &&
+              jis(js_json::jval_at(Some(p), "profile"), text_of(of.profile)) &&
+              jis(js_json::jval_at(Some(p), "model"), Some(model)) {
+                let list = js_json::jval_arr(js_json::jval_at(Some(state), "turns"))
+                if list.length() > 0 {
+                  jobj_put(list[list.length() - 1], "compacted", js_json::JValue::Bool(true))
+                }
+              }
+            }
+            _ => ()
+          }
+        }
+        None => ()
+      }
+    }
+    let list = match js_json::jval_at(Some(state), "calls") {
+      Some(js_json::JValue::Arr(items)) => items
+      _ => {
+        let items : Array[js_json::JValue] = []
+        jobj_put(state, "calls", js_json::JValue::Arr(items))
+        items
+      }
+    }
+    list.push(next)
+    for i in 1..<list.length() {
+      let mut j = i
+      while j > 0 && call_before(list[j], list[j - 1]) {
+        let tmp = list[j]
+        list[j] = list[j - 1]
+        list[j - 1] = tmp
+        j = j - 1
+      }
+    }
+    if list.length() > 5 {
+      let trimmed : Array[js_json::JValue] = []
+      let start = list.length() - 5
+      for ci in start..<list.length() {
+        trimmed.push(list[ci])
+      }
+      jobj_put(state, "calls", js_json::JValue::Arr(trimmed))
+    }
+    changed = true
+    target = Some(call)
+  }
+  let owner : Option[Owner] = match target {
+    Some(t) =>
+    Some(
+      Owner::{
+        runtime: base_codec::json_str(runtime),
+        model: base_codec::json_str(match t.model {
+          Some(m) => m
+          None => ""
+        }),
+        fast: base_codec::json_num(if t.fast { 1.0 } else { 0.0 }),
+      },
+    )
+    None => snapshot.owner
+  }
+  if changed {
+    match owner {
+      Some(o) => return keep_recent(db, session, o, state, snapshot.owner)
+      None => ()
+    }
+  }
+  Ok(())
+}
+
+// ── calls and positions ──
+
+pub let BEGIN_USAGE_FILE_SQL : String = "INSERT INTO usage_files (path, session, offset, model, counter_cutoff, counter_anchor, speed) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?8) ON CONFLICT(path) DO UPDATE SET session = CASE WHEN ?7 THEN excluded.session ELSE usage_files.session END, offset = CASE WHEN ?7 THEN excluded.offset ELSE usage_files.offset END, model = CASE WHEN ?7 THEN excluded.model ELSE usage_files.model END, speed = CASE WHEN ?7 THEN excluded.speed ELSE usage_files.speed END, counter_cutoff = CASE WHEN ?7 THEN excluded.counter_cutoff ELSE COALESCE(usage_files.counter_cutoff, excluded.counter_cutoff) END, counter_anchor = CASE WHEN ?7 THEN excluded.counter_anchor ELSE COALESCE(usage_files.counter_anchor, excluded.counter_anchor) END"
+
+let INSERT_COMPACT_SQL : String = "INSERT INTO usage (id, at, session, turn, thread, person, profile, runtime, model, subagent, fast, input, cache_read, cache_write, cache_write_long, output, calls, context, context_window, gen_ms, gen_output, rollup_counted, compact_counted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, CASE WHEN ?20 > 0 THEN ?16 ELSE 0 END, 1, 1)"
+
+let INSERT_PLAIN_SQL : String = "INSERT INTO usage (id, at, session, turn, thread, person, profile, runtime, model, subagent, fast, input, cache_read, cache_write, cache_write_long, output, calls, context, context_window, gen_ms, gen_output, rollup_counted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, CASE WHEN ?20 > 0 THEN ?16 ELSE 0 END, 1) ON CONFLICT (id) DO UPDATE SET output = MAX(output, excluded.output), gen_ms = MAX(gen_ms, excluded.gen_ms), gen_output = CASE WHEN MAX(gen_ms, excluded.gen_ms) > 0 THEN MAX(output, excluded.output) ELSE 0 END"
+
+let UPDATE_COMPACT_SQL : String = "UPDATE usage SET output = MAX(output, ?1), gen_ms = MAX(gen_ms, ?3), gen_output = CASE WHEN MAX(gen_ms, ?3) > 0 THEN MAX(output, ?1) ELSE 0 END WHERE id = ?2 AND (output < ?1 OR gen_ms < ?3)"
+
+let UPSERT_USAGE_FILE_SQL : String = "INSERT INTO usage_files (path, session, offset, model, counter_cutoff, counter_anchor, speed) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT (path) DO UPDATE SET session = excluded.session, offset = excluded.offset, model = excluded.model, counter_cutoff = COALESCE(excluded.counter_cutoff, usage_files.counter_cutoff), counter_anchor = CASE WHEN excluded.counter_cutoff IS NULL THEN usage_files.counter_anchor ELSE excluded.counter_anchor END, speed = excluded.speed WHERE usage_files.session IS NOT excluded.session OR usage_files.offset IS NOT excluded.offset OR usage_files.model IS NOT excluded.model OR usage_files.speed IS NOT excluded.speed OR (excluded.counter_cutoff IS NOT NULL AND (usage_files.counter_cutoff IS NOT excluded.counter_cutoff OR usage_files.counter_anchor IS NOT excluded.counter_anchor))"
+
+pub fn record_calls(
+  db : sql_db::Db,
+  compact : Bool,
+  totals_complete : (String) -> Result[Bool, String],
+  path : base_codec::Json,
+  session_col : base_codec::Json,
+  session_opt : Option[String],
+  offset : base_codec::Json,
+  model : base_codec::Json,
+  speed : base_codec::Json,
+  cutoff : base_codec::Json,
+  anchor : base_codec::Json,
+  runtime : String,
+  calls : Array[(Call, For)],
+  min_new_at : Option[Double],
+  on_change : (Double) -> Unit,
+) -> Result[Int, String] {
+  let mut added = 0
+  let recent : Array[(Call, For)] = []
+  match session_opt {
+    Some(session) => {
+      let mut seeded = false
+      let mut snapshot : Option[Snapshot] = None
+      let insert_sql = if compact { INSERT_COMPACT_SQL } else { INSERT_PLAIN_SQL }
+      for i in 0..<calls.length() {
+        let (c, of) = calls[i]
+        let was : Option[(Double, Double)] = match db_one(db, "SELECT output, gen_ms FROM usage WHERE id = ?", [base_codec::json_str(c.id)]) {
+          Ok(Some(r)) =>
+          Some(
+            (
+              match num_of(row_field(r, "output")) {
+                Some(v) => v
+                None => 0.0
+              },
+              match num_of(row_field(r, "gen_ms")) {
+                Some(v) => v
+                None => 0.0
+              },
+            ),
+          )
+          Ok(None) => None
+          Err(e) => return Err(e)
+        }
+        match was {
+          None => {
+            if c.calls <= 0.0 {
+              continue
+            }
+            match min_new_at {
+              Some(min_at) => {
+                if c.at < min_at {
+                  continue
+                }
+              }
+              None => ()
+            }
+          }
+          Some((o, g)) => {
+            if c.output <= o && c.gen_ms <= g {
+              continue
+            }
+          }
+        }
+        if compact && !seeded {
+          seeded = true
+          let comp = match totals_complete(session) {
+            Ok(v) => v
+            Err(e) => return Err(e)
+          }
+          if comp {
+            match seed_context(db, session) {
+              Ok(s) => snapshot = s
+              Err(e) => return Err(e)
+            }
+          }
+        }
+        let is_existing = match was {
+          Some(_) => true
+          None => false
+        }
+        if is_existing && compact {
+          match db.run(
+            UPDATE_COMPACT_SQL,
+            [base_codec::json_num(c.output), base_codec::json_str(c.id), base_codec::json_num(c.gen_ms)],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(e.message)
+          }
+        } else {
+          match db.run(
+            insert_sql,
+            [
+              base_codec::json_str(c.id),
+              base_codec::json_num(c.at),
+              base_codec::json_str(session),
+              of.turn,
+              of.thread,
+              of.person,
+              of.profile,
+              base_codec::json_str(runtime),
+              opt_str(c.model),
+              base_codec::json_num(if c.subagent { 1.0 } else { 0.0 }),
+              base_codec::json_num(if c.fast { 1.0 } else { 0.0 }),
+              base_codec::json_num(c.input),
+              base_codec::json_num(c.cache_read),
+              base_codec::json_num(c.cache_write),
+              base_codec::json_num(c.cache_write_long),
+              base_codec::json_num(c.output),
+              base_codec::json_num(c.calls),
+              opt_num(c.context),
+              opt_num(c.window),
+              base_codec::json_num(c.gen_ms),
+            ],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(e.message)
+          }
+        }
+        if !is_existing {
+          added = added + 1
+          if compact && !c.subagent {
+            recent.push((c, of))
+          }
+        }
+        on_change(c.at)
+      }
+      if recent.length() > 0 {
+        match note_contexts(db, session, runtime, recent, snapshot) {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+      }
+    }
+    None => ()
+  }
+  match db.run(
+    UPSERT_USAGE_FILE_SQL,
+    [path, session_col, offset, model, cutoff, anchor, speed],
+  ) {
+    Ok(_) => Ok(added)
+    Err(e) => Err(e.message)
+  }
+}
+
+fn record_one(db : sql_db::Db, schema : Schema, w : Write) -> Result[Int, String] {
+  let compact = match schema.has_compact(db) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  record_calls(
+    db,
+    compact,
+    fn(s : String) -> Result[Bool, String] { schema.totals_complete(db, s) },
+    base_codec::json_str(w.path),
+    opt_str(w.file.session),
+    w.file.session,
+    base_codec::json_num(w.file.offset),
+    opt_str(w.file.model),
+    opt_str(w.file.speed),
+    base_codec::json_num(w.cutoff),
+    base_codec::json_str(w.anchor),
+    w.runtime,
+    w.calls,
+    w.min_new_at,
+    fn(at : Double) -> Unit {
+      if at < w.changed.value {
+        w.changed.value = at
+      }
+    },
+  )
+}
+
+/// Write a batch of `Write`s in a single `BEGIN IMMEDIATE` transaction via `Db::tx_err`.
+pub fn record_all(db : sql_db::Db, schema : Schema, writes : Array[Write]) -> Result[Array[Int], String] {
+  if writes.length() == 0 {
+    return Ok([])
+  }
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[Array[Int], String] {
+      let out : Array[Int] = []
+      for i in 0..<writes.length() {
+        match record_one(tx_db, schema, writes[i]) {
+          Ok(n) => out.push(n)
+          Err(e) => return Err(e)
+        }
+      }
+      Ok(out)
+    },
+    fn(e : sql_db::SqlError) -> String { e.message },
+  )
+}
+
+pub struct CounterFile {
+  pub cutoff : Double
+  pub anchor : Option[String]
+}
+
+pub fn counter_file(db : sql_db::Db, path : String) -> Result[Option[CounterFile], String] {
+  match db_one(db, "SELECT counter_cutoff AS cutoff, counter_anchor AS anchor FROM usage_files WHERE path = ?", [base_codec::json_str(path)]) {
+    Ok(Some(r)) => {
+      match num_of(row_field(r, "cutoff")) {
+        Some(cutoff) => Ok(Some(CounterFile::{ cutoff: cutoff, anchor: text_of(row_field(r, "anchor")) }))
+        None => Ok(None)
+      }
+    }
+    Ok(None) => Ok(None)
+    Err(e) => Err(e)
+  }
+}
+
+pub fn usage_file(db : sql_db::Db, path : String) -> Result[Option[File], String] {
+  match db_one(db, "SELECT session, offset, model, speed FROM usage_files WHERE path = ?", [base_codec::json_str(path)]) {
+    Ok(Some(r)) =>
+    Ok(
+      Some(
+        File::{
+          session: text_of(row_field(r, "session")),
+          offset: match num_of(row_field(r, "offset")) {
+            Some(v) => v
+            None => 0.0
+          },
+          model: text_of(row_field(r, "model")),
+          speed: text_of(row_field(r, "speed")),
+        },
+      ),
+    )
+    Ok(None) => Ok(None)
+    Err(e) => Err(e)
+  }
+}
+
+/// Save boundary and position together in a `BEGIN IMMEDIATE` transaction via `Db::tx_err`.
+pub fn begin_counter_file(
+  db : sql_db::Db,
+  path : String,
+  file : File,
+  cutoff : Double,
+  anchor : String,
+  reset : Bool,
+) -> Result[CounterFile, String] {
+  db.tx_err(
+    fn(tx_db : sql_db::Db) -> Result[CounterFile, String] {
+      match tx_db.run(
+        BEGIN_USAGE_FILE_SQL,
+        [
+          base_codec::json_str(path),
+          opt_str(file.session),
+          base_codec::json_num(file.offset),
+          opt_str(file.model),
+          base_codec::json_num(cutoff),
+          base_codec::json_str(anchor),
+          base_codec::json_num(if reset { 1.0 } else { 0.0 }),
+          opt_str(file.speed),
+        ],
+      ) {
+        Ok(_) => ()
+        Err(e) => return Err(e.message)
+      }
+      match counter_file(tx_db, path) {
+        Ok(Some(c)) => Ok(c)
+        Ok(None) => Err("the usage counter's position was not saved")
+        Err(e) => Err(e)
+      }
+    },
+    fn(e : sql_db::SqlError) -> String { e.message },
+  )
+}

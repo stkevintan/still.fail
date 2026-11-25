@@ -766,3 +766,261 @@ test "profiles overview: wide defaults to 概览 with pool switching; narrow def
     }
   }
 }
+
+///|
+test "narrow: profiles 账号 ↔ 概览 holds optimistic selection across delayed profilesOverview and settles on delivery or cancellation" {
+  let make_delayed = fn() {
+    new_run()
+    let base = fixture_app("place-profiles-sum-a")
+    let ready : @signals.Signal[Bool] = @signals.signal(false)
+    let src : Source = {
+      ..base,
+      topic_read: fn(name, params) {
+        if name == "profilesOverview" && !ready.get() {
+          { value: None, error: None, version: 0 }
+        } else {
+          base.topic(name, params).get().snapshot()
+        }
+      },
+    }
+    let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=390.0, h=844.0, platform=2)
+    t.run_for(@ui.move_most_ms)
+    (t, ready)
+  }
+  let seg_visuals = fn(t : @ui.Tester, r0 : (Double, Double, Double, Double), r1 : (Double, Double, Double, Double)) {
+    let lifted_rgb = @ui.tree_theme().lifted >> 8
+    let rects = t
+      .drawn_rects()
+      .filter(fn(d) {
+        (d.4 >> 8) == lifted_rgb &&
+        (d.4 & 0xFFL) > 0x40L &&
+        (d.3 - r0.3).abs() < 2.0 &&
+        d.1 >= r0.1 - 4.0 &&
+        d.1 <= r0.1 + r0.3 &&
+        d.0 >= r0.0 - 4.0 &&
+        d.0 + d.2 <= r1.0 + r1.2 + 4.0
+      })
+    let cy = r0.1 + r0.3 / 2.0
+    let glasses = t
+      .drawn_glass()
+      .filter(fn(g) {
+        ((g.1 + g.3 / 2.0) - cy).abs() < 4.0 &&
+        g.0 + g.2 >= r0.0 - 24.0 &&
+        g.0 <= r1.0 + r1.2 + 24.0
+      })
+    (rects, glasses)
+  }
+  let drag_to_overview = fn(t : @ui.Tester, r0 : (Double, Double, Double, Double), r1 : (Double, Double, Double, Double)) {
+    let y = r0.1 + r0.3 / 2.0
+    let x0 = r0.0 + r0.2 / 2.0
+    let x1 = r1.0 + r1.2 / 2.0
+    t.touch(0, x0, y)
+    t.frame()
+    t.touch(1, (x0 + x1) / 2.0, y)
+    t.frame()
+    t.touch(1, x1, y)
+    t.frame()
+    t.touch(2, x1, y)
+  }
+
+  // Branch A: drag from 账号 to 概览 while profilesOverview is delayed, then deliver it.
+  let (t_a, ready_a) = make_delayed()
+  assert_true(t_a.find("Claude 主账号") is Some(_))
+  assert_true(t_a.find("额度与恢复") is None)
+  let r0_a = t_a.all(Radio, label="账号")[0].rect
+  let r1_a = t_a.all(Radio, label="概览")[0].rect
+  let mid_x_a = (r0_a.0 + r0_a.2 + r1_a.0) / 2.0
+  let r1cx_a = r1_a.0 + r1_a.2 / 2.0
+  drag_to_overview(t_a, r0_a, r1_a)
+  let samples_a = Ref(0)
+  let reached_a = Ref(false)
+  let drifted_a : Array[String] = []
+  t_a.each_frame(
+    Some(fn() {
+      samples_a.val += 1
+      let radios_ov = t_a.all(Radio, label="概览")
+      if radios_ov.is_empty() || radios_ov[0].check != Some(@ui.Check::On) {
+        drifted_a.push("t=\{t_a.time()} overview radio not On")
+      }
+      let (rects, glasses) = seg_visuals(t_a, r0_a, r1_a)
+      if rects.is_empty() && glasses.is_empty() {
+        drifted_a.push("t=\{t_a.time()} missing capsule/lens")
+      }
+      for d in rects {
+        let cx = d.0 + d.2 / 2.0
+        if cx >= mid_x_a {
+          reached_a.val = true
+        } else if reached_a.val {
+          drifted_a.push("t=\{t_a.time()} rect cx=\{cx} drifted back left of mid=\{mid_x_a}")
+        }
+      }
+      for g in glasses {
+        let cx = g.0 + g.2 / 2.0
+        if cx >= mid_x_a {
+          reached_a.val = true
+        } else if reached_a.val {
+          drifted_a.push("t=\{t_a.time()} glass cx=\{cx} drifted back left of mid=\{mid_x_a}")
+        }
+      }
+    }),
+  )
+  t_a.run_for(@ui.move_most_ms)
+  t_a.each_frame(None)
+  assert_true(samples_a.val > 0, msg="branch A must sample wait frames")
+  assert_true(reached_a.val, msg="branch A capsule/lens must reach 概览 during wait")
+  assert_true(drifted_a.is_empty(), msg="branch A drifted during wait: \{drifted_a.join("; ")}")
+  assert_true(t_a.find("Claude 主账号") is Some(_), msg="accounts list stays visible while profilesOverview is pending")
+  assert_true(t_a.find("额度与恢复") is None, msg="overview must not mount before profilesOverview arrives")
+  let (rects_a_wait, glasses_a_wait) = seg_visuals(t_a, r0_a, r1_a)
+  assert_eq(glasses_a_wait.length(), 0, msg="branch A in-flight resting: expected 0 glass lenses")
+  assert_eq(rects_a_wait.length(), 1, msg="branch A in-flight resting: expected 1 resting capsule")
+  assert_true((rects_a_wait[0].0 + rects_a_wait[0].2 / 2.0 - r1cx_a).abs() < 1.0, msg="branch A in-flight capsule must align with 概览")
+  // Deliver delayed profilesOverview -> switches to overview with unique resting capsule aligned to 概览, 0 glass.
+  ready_a.set(true)
+  t_a.run_for(@ui.move_most_ms)
+  assert_true(t_a.find("额度与恢复") is Some(_), msg="overview mounts once profilesOverview arrives")
+  assert_eq(t_a.all(Radio, label="概览")[0].check, Some(@ui.Check::On))
+  let (rects_a, glasses_a) = seg_visuals(t_a, r0_a, r1_a)
+  assert_eq(glasses_a.length(), 0, msg="branch A settled: expected 0 glass lenses")
+  assert_eq(rects_a.length(), 1, msg="branch A settled: expected 1 resting capsule")
+  let tcx_a = rects_a[0].0 + rects_a[0].2 / 2.0
+  assert_true((tcx_a - r1cx_a).abs() < 1.0, msg="branch A capsule \{tcx_a} must align with 概览 \{r1cx_a}")
+
+  // Branch B: drag from 账号 to 概览 while profilesOverview is delayed, then cancel by tapping 账号.
+  let (t_b, ready_b) = make_delayed()
+  let r0_b = t_b.all(Radio, label="账号")[0].rect
+  let r1_b = t_b.all(Radio, label="概览")[0].rect
+  let mid_x_b = (r0_b.0 + r0_b.2 + r1_b.0) / 2.0
+  let r0cx_b = r0_b.0 + r0_b.2 / 2.0
+  drag_to_overview(t_b, r0_b, r1_b)
+  let samples_b = Ref(0)
+  let reached_b = Ref(false)
+  let drifted_b : Array[String] = []
+  t_b.each_frame(
+    Some(fn() {
+      samples_b.val += 1
+      let radios_ov = t_b.all(Radio, label="概览")
+      if radios_ov.is_empty() || radios_ov[0].check != Some(@ui.Check::On) {
+        drifted_b.push("t=\{t_b.time()} overview radio not On")
+      }
+      let (rects, glasses) = seg_visuals(t_b, r0_b, r1_b)
+      if rects.is_empty() && glasses.is_empty() {
+        drifted_b.push("t=\{t_b.time()} missing capsule/lens")
+      }
+      for d in rects {
+        let cx = d.0 + d.2 / 2.0
+        if cx >= mid_x_b {
+          reached_b.val = true
+        } else if reached_b.val {
+          drifted_b.push("t=\{t_b.time()} rect drifted back")
+        }
+      }
+      for g in glasses {
+        let cx = g.0 + g.2 / 2.0
+        if cx >= mid_x_b {
+          reached_b.val = true
+        } else if reached_b.val {
+          drifted_b.push("t=\{t_b.time()} glass drifted back")
+        }
+      }
+    }),
+  )
+  t_b.run_for(@ui.move_most_ms)
+  t_b.each_frame(None)
+  assert_true(samples_b.val > 0, msg="branch B must sample wait frames")
+  assert_true(reached_b.val, msg="branch B capsule/lens must reach 概览 during wait")
+  assert_true(drifted_b.is_empty(), msg="branch B drifted during wait: \{drifted_b.join("; ")}")
+  // Cancel in-flight overview switch by tapping 账号.
+  t_b.tap_text("账号")
+  t_b.run_for(@ui.move_most_ms * 2.0)
+  assert_true(t_b.find("Claude 主账号") is Some(_), msg="branch B stays on accounts list after cancel")
+  assert_true(t_b.find("额度与恢复") is None, msg="branch B must not show overview after cancel")
+  assert_eq(t_b.all(Radio, label="账号")[0].check, Some(@ui.Check::On))
+  let (rects_b, glasses_b) = seg_visuals(t_b, r0_b, r1_b)
+  assert_eq(glasses_b.length(), 0, msg="branch B cancelled: expected 0 glass lenses")
+  assert_eq(rects_b.length(), 1, msg="branch B cancelled: expected 1 resting capsule")
+  let tcx_b = rects_b[0].0 + rects_b[0].2 / 2.0
+  assert_true((tcx_b - r0cx_b).abs() < 1.0, msg="branch B capsule \{tcx_b} must align with 账号 \{r0cx_b}")
+  // Late profilesOverview delivery after cancellation must NOT flip to overview.
+  ready_b.set(true)
+  t_b.run_for(@ui.move_most_ms)
+  assert_true(t_b.find("额度与恢复") is None, msg="late profilesOverview after cancel must not switch to overview")
+  assert_eq(t_b.all(Radio, label="账号")[0].check, Some(@ui.Check::On))
+}
+
+///|
+test "narrow & bar_actions: tapping 多选 while profilesOverview switch is pending cancels switch and preserves multi-select state" {
+  // Verify both: (1) phone Place("profiles") using profiles_page_node's bar_actions 多选,
+  // and (2) pushed Setting(Profiles("")) using profiles_list_node's own actions pill 多选.
+  for pushed in [false, true] {
+    let at = if pushed { "pushed Setting(Profiles)" } else { "Place(profiles) bar_actions" }
+    new_run()
+    let base = fixture_app("place-profiles-sum-a")
+    let ready : @signals.Signal[Bool] = @signals.signal(false)
+    let src : Source = {
+      ..base,
+      topic_read: fn(name, params) {
+        if name == "profilesOverview" && !ready.get() {
+          { value: None, error: None, version: 0 }
+        } else {
+          base.topic(name, params).get().snapshot()
+        }
+      },
+    }
+    let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=390.0, h=844.0, platform=if pushed { 0 } else { 2 })
+    t.run_for(@ui.move_most_ms)
+    if pushed {
+      @ui.view_tree().unwrap().event(t.time(), fn() { app.nav.push(Setting(@settings.Route::Profiles(""))) })
+      t.run_for(page_local_ms + @ui.move_most_ms)
+    }
+    assert_true(t.find("Claude 主账号") is Some(_), msg=at)
+    assert_true(t.find("额度与恢复") is None, msg=at)
+    let r0 = t.all(Radio, label="账号")[0].rect
+    let r1 = t.all(Radio, label="概览")[0].rect
+    // 1. Trigger 概览 switch while profilesOverview is delayed.
+    t.tap_text("概览")
+    t.run_for(@ui.move_most_ms / 2.0)
+    assert_eq(t.all(Radio, label="概览")[0].check, Some(@ui.Check::On), msg="\{at}: optimistic 概览 while pending")
+    assert_true(t.find("额度与恢复") is None, msg="\{at}: still showing accounts while pending")
+    // 2. Tap 多选 before profilesOverview arrives -> cancels pending overview switch and enters multi-select.
+    t.click(Button, label="多选")
+    t.run_for(@ui.move_most_ms)
+    assert_eq(t.all(Radio, label="账号")[0].check, Some(@ui.Check::On), msg="\{at}: 多选 must cancel pending 概览")
+    // 3. Pick an account in multi-select mode.
+    t.tap_text("Claude 主账号")
+    t.run_for(@ui.move_most_ms / 2.0)
+    assert_true(t.find("已选 1") is Some(_), msg="\{at}: expected 1 selected account before delayed overview arrives")
+    // 4. Deliver delayed profilesOverview -> must stay on 账号 with capsule aligned and multi-select + selection preserved.
+    ready.set(true)
+    t.run_for(@ui.move_most_ms)
+    assert_true(t.find("额度与恢复") is None, msg="\{at}: delayed overview must not clobber active multi-select")
+    assert_true(t.find("Claude 主账号") is Some(_), msg=at)
+    assert_true(t.find("已选 1") is Some(_), msg="\{at}: multi-select selection must survive delayed overview delivery")
+    assert_eq(t.all(Radio, label="账号")[0].check, Some(@ui.Check::On), msg=at)
+    let lifted_rgb = @ui.tree_theme().lifted >> 8
+    let rects = t
+      .drawn_rects()
+      .filter(fn(d) {
+        (d.4 >> 8) == lifted_rgb &&
+        (d.4 & 0xFFL) > 0x40L &&
+        (d.3 - r0.3).abs() < 2.0 &&
+        d.1 >= r0.1 - 4.0 &&
+        d.1 <= r0.1 + r0.3 &&
+        d.0 >= r0.0 - 4.0 &&
+        d.0 + d.2 <= r1.0 + r1.2 + 4.0
+      })
+    let cy = r0.1 + r0.3 / 2.0
+    let glasses = t
+      .drawn_glass()
+      .filter(fn(g) {
+        ((g.1 + g.3 / 2.0) - cy).abs() < 4.0 &&
+        g.0 + g.2 >= r0.0 - 24.0 &&
+        g.0 <= r1.0 + r1.2 + 24.0
+      })
+    assert_eq(glasses.length(), 0, msg="\{at}: expected 0 glass at rest")
+    assert_eq(rects.length(), 1, msg="\{at}: expected 1 resting capsule")
+    let tcx = rects[0].0 + rects[0].2 / 2.0
+    let r0cx = r0.0 + r0.2 / 2.0
+    assert_true((tcx - r0cx).abs() < 1.0, msg="\{at}: capsule \{tcx} must align with 账号 \{r0cx}")
+  }
+}

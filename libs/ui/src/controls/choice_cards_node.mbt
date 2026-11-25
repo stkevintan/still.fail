@@ -76,7 +76,14 @@ pub fn choice_cards_node(
             (0.0, 0L)
           }
         }))
-        .shadow(By(fn() { if on() { (1.0, 0.0, theme().p.shadow) } else { (0.0, 0.0, 0L) } }))
+        .shadow(By(fn() {
+          if on() && !@ui.tree_theme().dark {
+            (1.0, 0.0, theme().p.shadow)
+          } else {
+            (0.0, 0.0, 0L)
+          }
+        }))
+        .shadow_outside(Is(true))
         |> ignore
         icon_node(c, "", choice_card_icon, By(ink), name_now=icon) |> ignore
         c.box(fn(w) {

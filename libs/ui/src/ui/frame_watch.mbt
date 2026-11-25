@@ -311,7 +311,7 @@ fn clock_read(loc : SourceLoc) -> Unit {
 /// state): the record names the motion (Mover::told_as) where it was told who it is.
 fn clock_read_here(who? : Mover) -> Unit {
   if @signals.active_sub() is Some(_) {
-    clock_read_by("a motion, the host's clock or its state (Ctx::shows_motion, @hostapi.polled)", who)
+    clock_read_by("a motion, the host's clock or its state (Ctx::shows_motion, @hostapi.call_polled)", who)
     frame_clock.val.get() |> ignore
   }
 }
@@ -398,10 +398,10 @@ fn clock_said(at : String, who : Mover?) -> String {
 let built_motion : Ref[String] = Ref("")
 
 ///|
-/// What the host keeps and changes with no event of its own, read (@hostapi.polled: a browser come back to a login),
-/// is followed as the clock is: what reads it as it is built is built again each frame while it does.
+/// What the host keeps and changes with no event of its own, read (@hostapi.call_polled: a browser come back to a
+/// login), is followed as the clock is: what reads it as it is built is built again each frame while it does.
 fn init {
-  @hostapi.polled.val = fn() { clock_read_here() }
+  @hostapi.set_polled(fn() { clock_read_here() })
 }
 
 ///|

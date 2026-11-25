@@ -10,7 +10,7 @@ type Picture = { data: Buffer; ts: number };
 type Pending = { resolve: (frame: Frame | null) => void; submitted: boolean; ts: number };
 const MAX_PACKET = 16 * 1024 * 1024;
 const OPEN_TIMEOUT = 10_000;
-const RESTART_MS = 1_500;
+const RESTART_MS = 4_000;
 const MIN_RATE = 300_000;
 const MAX_RATE = 60_000_000;
 
@@ -110,12 +110,14 @@ export class X11H264 {
     this.#force = false;
     this.#encoding = Math.round(this.#requested);
     this.#restarted = wall.now();
+    const maxrate = Math.round(this.#encoding * 1.15);
+    const bufsize = Math.max(100_000, Math.round(this.#encoding * 0.25));
+    const maxQp = this.#encoding >= 3_000_000 ? 38 : this.#encoding >= 1_500_000 ? 42 : 48;
     const args = ["-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-video_size", `${this.#size.width}x${this.#size.height}`,
       "-framerate", String(this.#fps), "-i", "pipe:0", "-an", "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "baseline",
-      // Limit key-frame bursts to keep a narrow link from queueing seconds of old pictures. A still screen sharpens
-      // over following frames; veryfast retains small text better than ultrafast at the same constrained rate.
-      "-pix_fmt", "yuv420p", "-g", String(this.#fps * 2), "-b:v", String(this.#encoding), "-maxrate", String(this.#encoding),
-      "-bufsize", String(Math.max(100_000, Math.round(this.#encoding * 0.25))), "-x264-params", "vbv-init=0.5",
+      // Tight VBV (1.15x maxrate, 250ms bufsize), infinite/on-demand GOP, and bitrate-adaptive QP ceiling.
+      "-pix_fmt", "yuv420p", "-g", "999999", "-b:v", String(this.#encoding), "-maxrate", String(maxrate),
+      "-bufsize", String(bufsize), "-qmax", String(maxQp), "-x264-params", `vbv-init=0.5:qpmax=${maxQp}:qpmin=18:scenecut=0`,
       "-threads", "1", "-flvflags", "no_duration_filesize", "-flush_packets", "1", "-f", "flv", "pipe:1"];
     const encoder = spawn(this.#ffmpeg, args, { env: this.#env, stdio: ["pipe", "pipe", "pipe"] });
     this.#encoder = encoder;
@@ -129,11 +131,11 @@ export class X11H264 {
   #submit() {
     const pending = this.#pending;
     if (this.#ended || !pending || pending.submitted || !this.#latest) return;
-    // Lower the rate promptly when the link worsens. Increase it more cautiously: an optimistic estimate on a
-    // narrow link otherwise repeatedly restarts the encoder, disrupting the picture just as it begins to sharpen.
+    // Restart ffmpeg only on substantial bitrate shifts (>= 35% drop or >= 80% rise) with >= 4000ms cooldown
+    // to avoid killing the encoder and flashing black/IDR frames on minor network jitter.
     const elapsed = wall.now() - this.#restarted;
-    const down = this.#requested < this.#encoding * 0.7 && elapsed >= RESTART_MS;
-    const up = this.#requested > this.#encoding * 1.8 && elapsed >= RESTART_MS * 3;
+    const down = this.#requested <= this.#encoding * 0.65 && elapsed >= RESTART_MS;
+    const up = this.#requested >= this.#encoding * 1.8 && elapsed >= RESTART_MS * 2;
     if (!this.#encoder || this.#force || down || up) this.#startEncoder();
     const picture = this.#latest;
     this.#latest = null;

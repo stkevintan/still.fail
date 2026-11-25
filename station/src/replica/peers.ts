@@ -45,7 +45,12 @@ export class PeerPlace implements Place {
     const bytes = bytesOf(got);
     if (bytes === null) return nothingHeld();
     const held = JSON.parse((await readBytes(bytes, MOST)).toString("utf8")) as Held;
-    return { gens: Array.isArray(held?.gens) ? held.gens : [], files: Array.isArray(held?.files) ? held.files : [] };
+    return {
+      gens: Array.isArray(held?.gens) ? held.gens : [],
+      files: Array.isArray(held?.files) ? held.files : [],
+      ...(held?.hasUnverifiedHead === true ? { hasUnverifiedHead: true } : {}),
+      ...(Array.isArray(held?.unverifiedGens) ? { unverifiedGens: held.unverifiedGens } : {}),
+    };
   }
 
   async put(ws: string, origin: string, gen: string, kind: "batch" | "head", name: string, bytes: Buffer): Promise<void> {

@@ -22,6 +22,7 @@
 #include "win.h"
 #include <dwmapi.h>
 #include "post.h"
+#include "frame_late.h"
 #include "term.h"
 #include "app_calls.h"  // the app's own calls
 #include "done_watch.h"
@@ -114,15 +115,23 @@ typedef struct WinSlot {
   // app's handling of the press is over (WM_MB_DRAG: Windows' move is a loop of its own, which draws frames as it goes)
   DWORD drag_time;
   POINT drag_at;
+  // when this window's previous continuous app frame began (-1: none)
+  double last_begin;
+  // whether this window visibly presented a frame in the current frames_round()
+  int presented_this;
 } WinSlot;
 // (each beside the first made fresh as it opens: win_slot_fresh)
-static WinSlot win_slots[MB_WINS] = {{.scale = 1, .window_content_zoom = 1.0}};
+static WinSlot win_slots[MB_WINS] = {{.scale = 1, .window_content_zoom = 1.0, .last_begin = -1.0}};
 static WinSlot *ws = &win_slots[0];
 static int win_active;  // the window in place (0, the first, between frames and input)
 static void win_slot_fresh(WinSlot *w) {
   memset(w, 0, sizeof *w);
   w->scale = 1;
   w->window_content_zoom = 1.0;
+  w->last_begin = -1.0;
+}
+static void reset_all_last_begin(void) {
+  for (int k = 0; k < MB_WINS; k++) win_slots[k].last_begin = -1.0;
 }
 static int win_of(HWND h) {
   if (!h) return -1;
@@ -185,8 +194,8 @@ static double mb_now_ms(void) {
 // How much later than its time the frame before reached the screen (mb_host_frame_late, as the Apple hosts and
 // Android say it): a frame begun right after the one before (the frames running on: Present waits for the display's
 // frame) more than the display's frame after it, that one was late by as much; the first after the loop waited for
-// what came next, or a scripted run's, none. When the last such frame began (-1: the loop waited since).
-static double frame_late, last_begin = -1;
+// what came next, or a scripted run's, none.
+static double frame_late;
 
 // the display's frame (ms), as the compositor goes (as many of its beats as mb_render_present waits)
 static double display_period(void) {
@@ -307,7 +316,12 @@ static void draw_frame(void) {
   int away = rc.right <= 0 || rc.bottom <= 0 || !IsWindowVisible(ws->h) || IsIconic(ws->h);
   if (away) {
     // (none drawn yet: nothing to build at)
-    if (!outside || ws->frame_w <= 0) return;
+    if (!outside || ws->frame_w <= 0) {
+      ws->last_begin = -1.0;
+      return;
+    }
+    frame_late = 0.0;
+    ws->last_begin = -1.0;
     presenting = 0;
     mb_cb.frame(ws->frame_w, ws->frame_h, ws->scale, mb_now_ms());
     presenting = 1;
@@ -326,9 +340,9 @@ static void draw_frame(void) {
   mb_render_set_size(rc.right, rc.bottom, ws->frame_w / ws->window_content_zoom, ws->frame_h / ws->window_content_zoom,
                      ws->scale * ws->window_content_zoom);
   double begins = mb_now_ms();
-  frame_late = last_begin >= 0 && !script ? fmax(0, begins - last_begin - display_period()) : 0;
-  last_begin = begins;
+  frame_late = ws->last_begin >= 0.0 && !script ? mb_frame_late_from_begin(ws->last_begin, begins, display_period(), 0) : 0.0;
   mb_cb.frame(ws->frame_w, ws->frame_h, ws->scale, begins);
+  ws->last_begin = mb_frame_late_next(ws->want_frame, begins);
   frame_counted();
 }
 
@@ -401,6 +415,7 @@ static int any_want_frame(void) {
 // (mb_render_pace): 1 when any was drawn.
 static int frames_round(void) {
   int any = 0;
+  for (int k = 0; k < MB_WINS; k++) win_slots[k].presented_this = 0;
   for (int k = 0; k < MB_WINS; k++) {
     if (!win_slots[k].h) continue;
     if (win_slots[k].want_frame) {
@@ -409,9 +424,18 @@ static int frames_round(void) {
       win_use(k);
       draw_frame();
       win_put_back(back);
-    } else if (mb_render_adaptive_settling(k)) {
-      if (mb_render_adaptive_step(k)) any = 1;
+    } else {
+      win_slots[k].last_begin = -1.0;
+      if (mb_render_adaptive_settling(k)) {
+        if (mb_render_adaptive_step(k)) {
+          any = 1;
+          if (mb_render_last_presented(k)) win_slots[k].presented_this = 1;
+        }
+      }
     }
+  }
+  for (int k = 0; k < MB_WINS; k++) {
+    if (win_slots[k].h && !win_slots[k].presented_this) mb_render_mark_gap(k);
   }
   if (any) frames_paced();
   return any;
@@ -1044,13 +1068,22 @@ static LRESULT wndproc_here(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       if (wp == SIZE_MINIMIZED) mb_render_trim();
       ws->want_frame = 1;
       if (sizing) {
+        reset_all_last_begin();
+        mb_render_mark_gap(-1);
         draw_frame();
         frames_paced();
       }
       return 0;
-    case WM_ENTERSIZEMOVE: sizing = 1; SetTimer(h, 1, 16, NULL); return 0;
+    case WM_ENTERSIZEMOVE:
+      sizing = 1;
+      reset_all_last_begin();
+      mb_render_mark_gap(-1);
+      SetTimer(h, 1, 16, NULL);
+      return 0;
     case WM_EXITSIZEMOVE:
       sizing = 0;
+      reset_all_last_begin();
+      mb_render_mark_gap(-1);
       KillTimer(h, 1);
       // (the first's place kept as it was moved or sized: not a window beside it's)
       if (h == hwnd) place_keep();
@@ -1062,6 +1095,8 @@ static LRESULT wndproc_here(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         mb_host_request_frame();
       }
       if (ws->want_frame) {
+        reset_all_last_begin();
+        mb_render_mark_gap(-1);
         draw_frame();
         frames_paced();
       }
@@ -1326,6 +1361,7 @@ void mb_host_run(moonbit_string_t title, mb_frame_fn frame, mb_pointer_fn pointe
   double ww = setup_w > 0 ? setup_w : 900, wh = setup_h > 0 ? setup_h : 720;
   const char *win = getenv("MBUI_WIN");
   if (win) sscanf(win, "%lfx%lf", &ww, &wh);
+  for (int k = 0; k < MB_WINS; k++) win_slots[k].last_begin = -1.0;
   win_slots[0].inset = setup_inset;
   win_slots[0].min_w = setup_min_w;
   win_slots[0].min_h = setup_min_h;
@@ -1393,7 +1429,8 @@ void mb_host_run(moonbit_string_t title, mb_frame_fn frame, mb_pointer_fn pointe
     if (frames_round()) continue;
     DWORD timeout = wake_at < 0 ? INFINITE : (DWORD)ceil(wake_at - now);
     // (the frames stopped: the next is no later than its time for what the one before took)
-    last_begin = -1;
+    reset_all_last_begin();
+    mb_render_mark_gap(-1);
     MsgWaitForMultipleObjectsEx(0, NULL, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
   }
 }
@@ -1701,6 +1738,7 @@ void mb_host_present(double *buf, int32_t count, double r, double g, double b) {
   if (!presenting) return;
   // (a window held whose frame this is: shown once the compositor has it, held_shown_now)
   int presented = mb_render_present(buf, count, r, g, b);
+  if (mb_render_last_presented(win_active)) ws->presented_this = 1;
   if (presented && ws->held) ws->held = 2;
   if (presented && win_active == 0 && win0_reveal == 1 && !mb_render_pictures_missing() &&
       ws->frame_w > 32.0 && ws->frame_h > 32.0) {

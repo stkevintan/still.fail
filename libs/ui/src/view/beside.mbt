@@ -1080,6 +1080,50 @@ pub fn Tree::words_again(self : Tree) -> Unit {
 }
 
 ///|
+/// Surgically mark only nodes referencing preview/try `face` for relayout and repaint, without incrementing global
+/// `words_redone` (preserving offscreen height caches of unrelated virtual lists).
+pub fn Tree::words_again_for_face(self : Tree, face : Int) -> Unit {
+  if self.rooming >= 0 {
+    self.once_laid_out(fn() { self.words_again_for_face(face) })
+    return
+  }
+  for at, n in self.nodes {
+    if !n.live {
+      continue
+    }
+    let rl = n.look.runs_look
+    let mut hit = false
+    match rl.cjk {
+      Some(ov) if ov.face == face => hit = true
+      _ => ()
+    }
+    if !hit {
+      match rl.code_cjk {
+        Some(ov) if ov.face == face => hit = true
+        _ => ()
+      }
+    }
+    if !hit {
+      for run in n.look.runs {
+        if run.face == Some(face) {
+          hit = true
+          break
+        }
+      }
+    }
+    if hit {
+      self.layout_marked_at(at)
+      self.look_marked_at(at)
+      self.cut_applied(at)
+    }
+  }
+  if face >= 0 && face < self.face_redone.length() {
+    let sig = self.face_redone[face]
+    sig.set(sig.untracked() + 1)
+  }
+}
+
+///|
 /// How many times all its words were measured anew (Tree::words_again), followed: what is laid out by how wide its words
 /// are and keeps something of it (a bar never narrower once open) says it again as they change.
 pub fn View::words_redone(self : View) -> Int {

@@ -17,9 +17,17 @@
 //                  {"closeTab":true}  the page closed its tab (window.close() in a window a page opened)
 // A person's paste is text sent as typed ({"text":…}, where the focus is).
 import { connect, type Socket } from "node:net";
+import type { HelperApp } from "../helper/app.ts";
+import { wall } from "../ops/fibers.ts";
 import { log } from "../ops/log.ts";
-import { type Clip, type ClipType, type Frame, type FrameConfig, type ScreenInput, type ScreenSource, type ScreenView, type ViewOptions, CLIP_TEXT_MAX } from "../screens/source.ts";
+import { type Clip, type ClipType, type Frame, type FrameConfig, type ScreenInput, type ScreenSource, type ScreenVideo, type ScreenView, type ViewOptions, CLIP_TEXT_MAX } from "../screens/source.ts";
 import { chatDir } from "./farview.ts";
+import { type BrowserVideoEncoder, type BrowserVideoEncoderFactory, createBrowserVideoEncoder } from "./video-encode.ts";
+
+let defaultFarviewHelper: HelperApp | null = null;
+export function setFarviewHelper(helper: HelperApp | null): void {
+  defaultFarviewHelper = helper;
+}
 
 export type FramePage = { url: string; title: string };
 /// What a page's new tab is to the tab that asked for it: the new window's id, the asking tab's, and its origin (none:
@@ -37,8 +45,9 @@ type Size = { width: number; height: number; scale: number };
 
 /// The viewport a tab is laid out at with no view saying one (a desktop's window).
 export const DEFAULT_SIZE: Size = { width: 1280, height: 800, scale: 1 };
-/// JPEG quality of the frames asked for: 82, as at 70 small text's edges rang (as the browser's cast, view.ts).
+/// JPEG quality of the frames asked for: 82 in JPEG fallback, 88 as H.264 source input.
 const JPEG_QUALITY = 82;
+const H264_JPEG_QUALITY = 88;
 
 /// One connection to a host's frame port: its lines heard, a picture asked for and its bytes read.
 export class FrameLink {
@@ -63,11 +72,11 @@ export class FrameLink {
   }
 
   /// A picture of the tab now; null when the connection ended first.
-  picture(format: "jpeg" = "jpeg"): Promise<{ header: any; data: Buffer } | null> {
+  picture(format: "jpeg" = "jpeg", quality: number = JPEG_QUALITY): Promise<{ header: any; data: Buffer } | null> {
     if (this.#closed) return Promise.resolve(null);
     return new Promise((resolve) => {
       this.#asked.push(resolve);
-      this.send({ frame: { format, quality: JPEG_QUALITY } });
+      this.send({ frame: { format, quality } });
     });
   }
 
@@ -155,6 +164,8 @@ export class FarviewScreen implements ScreenSource {
   readonly farview = true;
   readonly #session: string;
   readonly #port: number;
+  readonly #helper: HelperApp | null | undefined;
+  readonly #createEncoder: BrowserVideoEncoderFactory | undefined;
   #page: FramePage = { url: "", title: "" };
   #size: Size = DEFAULT_SIZE;
   #watch: FrameLink | null = null;
@@ -167,9 +178,11 @@ export class FarviewScreen implements ScreenSource {
   closedByPage: () => void = () => {};
 
   /// `n`: which of its chat's tabs (0 its first, whose id is the chat's alone).
-  constructor(o: { session: string; port: number; n?: number }) {
+  constructor(o: { session: string; port: number; n?: number; helper?: HelperApp | null; createEncoder?: BrowserVideoEncoderFactory }) {
     this.#session = o.session;
     this.#port = o.port;
+    this.#helper = o.helper;
+    this.#createEncoder = o.createEncoder;
     this.id = `browser:fv_${chatDir(o.session)}${o.n ? `_${o.n}` : ""}`;
   }
 
@@ -239,8 +252,23 @@ export class FarviewScreen implements ScreenSource {
 
   async open(options: ViewOptions): Promise<ScreenView> {
     if (this.#closed) throw new Error("This chat's browser was closed.");
-    if (!options.codecs.includes("jpeg")) throw new Error("This tab is sent as pictures (JPEG), which this app does not take.");
-    const view = new FarviewView(this, new FrameLink(this.#port), options, () => this.#views.delete(view));
+    if (!options.codecs.includes("jpeg") && !options.codecs.includes("h264")) throw new Error("This tab is sent as H.264 or JPEG, which this app does not take.");
+    let encoder: BrowserVideoEncoder | null = null;
+    if (!options.peek && options.codecs.includes("h264")) {
+      const sz = sizeFor(options);
+      encoder = await createBrowserVideoEncoder({
+        helper: this.#helper !== undefined ? this.#helper : defaultFarviewHelper,
+        width: Math.round(sz.width * sz.scale),
+        height: Math.round(sz.height * sz.scale),
+        bitrate: options.bitrate,
+        fps: options.fps,
+        factory: this.#createEncoder,
+      });
+    }
+    if (encoder === null && !options.codecs.includes("jpeg")) {
+      throw new Error("This tab needs H.264 or JPEG, and no H.264 encoder is available.");
+    }
+    const view = new FarviewView(this, new FrameLink(this.#port), options, encoder, () => this.#views.delete(view));
     this.#views.add(view);
     return view;
   }
@@ -257,6 +285,7 @@ class FarviewView implements ScreenView {
   readonly #link: FrameLink;
   readonly #screen: FarviewScreen;
   readonly #gone: () => void;
+  readonly #encoder: BrowserVideoEncoder | null;
   #size: Size;
   /// Who hears what this view's person copies on the tab.
   #copied: ((clip: Clip) => void) | null = null;
@@ -268,9 +297,10 @@ class FarviewView implements ScreenView {
   #closed = false;
   #ts = 0;
 
-  constructor(screen: FarviewScreen, link: FrameLink, o: ViewOptions, gone: () => void) {
+  constructor(screen: FarviewScreen, link: FrameLink, o: ViewOptions, encoder: BrowserVideoEncoder | null, gone: () => void) {
     this.#screen = screen;
     this.#link = link;
+    this.#encoder = encoder;
     this.#gone = gone;
     this.peek = o.peek === true;
     this.#size = sizeFor(o);
@@ -286,6 +316,7 @@ class FarviewView implements ScreenView {
     link.ended = () => this.close();
     // A preview looks at the tab as it is laid out; a view lays it out for its viewer.
     if (!this.peek) link.send({ size: this.#size });
+    if (this.#encoder !== null) void this.#pumpH264();
   }
 
   #poke() {
@@ -294,7 +325,26 @@ class FarviewView implements ScreenView {
     wake?.();
   }
 
+  async #pumpH264() {
+    const encoder = this.#encoder;
+    if (encoder === null) return;
+    try {
+      while (!this.#closed) {
+        while (!this.#closed && this.#seq <= this.#sent) await new Promise<void>((resolve) => (this.#wake = resolve));
+        if (this.#closed) break;
+        const asked = this.#seq;
+        const got = await this.#link.picture("jpeg", H264_JPEG_QUALITY);
+        if (got === null || this.#closed) break;
+        this.#sent = Math.max(asked, Number(got.header.seq) || asked);
+        this.#ts = Math.max(this.#ts + 1, Math.round(wall.now() * 1000));
+        encoder.pushJpeg(got.data, this.#ts);
+      }
+    } catch {}
+    if (!this.#closed) this.close();
+  }
+
   async next(): Promise<Frame | null> {
+    if (this.#encoder !== null) return this.#encoder.next();
     while (!this.#closed && this.#seq <= this.#sent) await new Promise<void>((resolve) => (this.#wake = resolve));
     if (this.#closed) return null;
     const asked = this.#seq;
@@ -311,7 +361,15 @@ class FarviewView implements ScreenView {
     return { ...(config ? { config } : {}), key: true, ts: this.#ts, data: got.data };
   }
 
+  rate(bps: number) {
+    if (!this.#closed && this.#encoder !== null) this.#encoder.setBitrate(bps);
+  }
+
   keyframe() {
+    if (this.#encoder !== null) {
+      this.#encoder.requestKeyframe();
+      return;
+    }
     if (this.#sent >= this.#seq) this.#sent = this.#seq - 1;
     this.#poke();
   }
@@ -335,19 +393,24 @@ class FarviewView implements ScreenView {
 
   bounds(maxWidth: number, maxHeight: number) {
     if (this.peek) return;
-    const size = sizeFor({ maxWidth, maxHeight, codecs: ["jpeg"] });
+    const size = sizeFor({ maxWidth, maxHeight, codecs: this.#encoder ? ["h264", "jpeg"] : ["jpeg"] });
     if (size.width === this.#size.width && size.height === this.#size.height && size.scale === this.#size.scale) return;
     this.#size = size;
     this.#link.send({ size });
   }
 
-  video() {
+  video(): ScreenVideo {
+    if (this.#encoder !== null) {
+      const info = this.#encoder.info();
+      return { capture: "Farview", encoder: info.encoder, hardware: info.hardware };
+    }
     return { capture: "Farview" };
   }
 
   close() {
     if (this.#closed) return;
     this.#closed = true;
+    this.#encoder?.close();
     this.#link.close();
     this.#gone();
     this.#poke();

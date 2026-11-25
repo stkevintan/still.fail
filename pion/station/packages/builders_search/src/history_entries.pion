@@ -1,0 +1,1374 @@
+// 1:1 port of `station/mb/src/history/entries.mbt`:
+// Per-runtime timeline extractors (`dsh`, `pi`, `grok`, `cursor`, `claude`, `codex`),
+// `brief_of` / `brief` (by Unicode code points), and `entry_json`.
+
+import "base_codec"
+import "js_json"
+import "jscase"
+import "sql_db"
+
+fn make_entry(
+  at : Option[String],
+  kind : String,
+  text : String,
+  text_units : Option[Array[Int]] = None,
+  tool : Option[String] = None,
+  ok : Option[Bool] = None,
+  call_id : Option[String] = None,
+  subagent : Bool = false,
+  said : Option[String] = None,
+  in_script : Bool = false,
+) -> Entry {
+  Entry::{
+    at: at,
+    kind: kind,
+    text: text,
+    text_units: text_units,
+    tool: tool,
+    ok: ok,
+    call_id: call_id,
+    subagent: subagent,
+    said: said,
+    in_script: in_script,
+  }
+}
+
+/// First `n` Unicode code points of `text`.
+fn first_chars(text : String, n : Int) -> String {
+  let cs = js_json::points(text)
+  if cs.length() <= n {
+    return text
+  }
+  let sb = StringBuilder::new()
+  for i in 0..<n {
+    sb.write_string(cs[i])
+  }
+  sb.to_string()
+}
+
+let SAYING : Array[String] = [
+  "description",
+  "toolSummary",
+  "command",
+  "cmd",
+  "file_path",
+  "path",
+  "Path",
+  "target_file",
+  "target_directory",
+  "DirectoryPath",
+  "Directory",
+  "SearchDirectory",
+  "SearchPath",
+  "notebook_path",
+  "StartLine",
+  "EndLine",
+  "offset",
+  "limit",
+  "Target",
+  "Replacement",
+  "Content",
+  "Overwrite",
+  "old_string",
+  "new_string",
+  "pattern",
+  "Pattern",
+  "url",
+  "query",
+  "Query",
+  "prompt",
+  "Prompt",
+  "station",
+  "action",
+  "name",
+  "key",
+  "id",
+  "to",
+  "chat",
+  "title",
+  "file",
+  "method",
+  "Role",
+  "Recipient",
+  "Message",
+  "summary",
+  "message",
+  "recipient",
+  "subagent_type",
+  "TypeName",
+  "agent_id",
+  "brief",
+  "task",
+  "text",
+  "reason",
+  "about",
+  "Action",
+  "TaskId",
+  "skill",
+]
+
+let BRIEF_CHARS : Int = 300
+
+let SMALL_CHARS : Int = 600
+
+fn brief_of(input : Option[js_json::JValue]) -> String {
+  match input {
+    Some(js_json::JValue::Obj(entries)) => {
+      let o = js_json::JValue::Obj(entries)
+      let kept : Array[(Array[Int], js_json::JValue)] = []
+      for i in 0..<SAYING.length() {
+        let name = SAYING[i]
+        match o.get(name) {
+          Some(js_json::JValue::Str(u)) => {
+            kept.push((js_json::utf16_units(name), jv_str(first_chars(js_json::sanitize_str(u), BRIEF_CHARS))))
+          }
+          Some(js_json::JValue::Num(n)) => {
+            if !sql_db::is_nan_or_inf(n) {
+              kept.push((js_json::utf16_units(name), js_json::JValue::Num(n)))
+            }
+          }
+          Some(js_json::JValue::Bool(b)) => {
+            kept.push((js_json::utf16_units(name), js_json::JValue::Bool(b)))
+          }
+          Some(js_json::JValue::Arr(xs)) => {
+            let strs : Array[js_json::JValue] = []
+            for j in 0..<xs.length() {
+              match xs[j] {
+                js_json::JValue::Str(u) => strs.push(jv_str(first_chars(js_json::sanitize_str(u), BRIEF_CHARS)))
+                _ => ()
+              }
+            }
+            kept.push((js_json::utf16_units(name), js_json::JValue::Arr(strs)))
+          }
+          _ => ()
+        }
+      }
+      js_json::stringify(js_json::JValue::Obj(kept))
+    }
+    Some(js_json::JValue::Str(u)) => first_chars(js_json::sanitize_str(u), BRIEF_CHARS)
+    Some(v) => first_chars(js_json::stringify(v), BRIEF_CHARS)
+    None => first_chars("null", BRIEF_CHARS)
+  }
+}
+
+fn with_brief(e : Entry, input : Option[js_json::JValue]) -> Entry {
+  Entry::{
+    at: e.at,
+    kind: e.kind,
+    text: e.text,
+    tool: e.tool,
+    ok: e.ok,
+    call_id: e.call_id,
+    subagent: e.subagent,
+    said: Some(brief_of(input)),
+    in_script: e.in_script,
+  }
+}
+
+fn time_iso(time : Option[js_json::JValue]) -> Result[Option[String], String] {
+  match time {
+    Some(js_json::JValue::Num(t)) => {
+      if !sql_db::is_nan_or_inf(t) {
+        match date_iso(t) {
+          Ok(s) => Ok(Some(s))
+          Err(e) => Err(e)
+        }
+      } else {
+        Ok(None)
+      }
+    }
+    _ => Ok(None)
+  }
+}
+
+fn dsh_entry(r : js_json::JValue, out : Array[Entry]) -> Result[Unit, String] {
+  let kind = match jv_string_of(jv_get(Some(r), "type")) {
+    Some(s) => s
+    None => ""
+  }
+  let at = match time_iso(jv_get(Some(r), "time")) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  let data = jv_get(Some(r), "data")
+  let message = match jv_get(data, "message") {
+    Some(m) => Some(m)
+    None => data
+  }
+  if kind == "user/message" {
+    let is_user = match jv_string_of(jv_get(jv_get(data, "source"), "kind")) {
+      Some("user") => true
+      _ => false
+    }
+    if !is_user {
+      return Ok(())
+    }
+    let text = dsh_text(jv_get(data, "content"))
+    if hist_trim(text) != "" {
+      out.push(make_entry(at, "user", clip(text)))
+    }
+  } else if kind == "assistant/message" {
+    match jv_get(message, "content") {
+      Some(js_json::JValue::Arr(blocks)) => {
+        for i in 0..<blocks.length() {
+          let b = Some(blocks[i])
+          let t = jv_string_of(jv_get(b, "type"))
+          let text = match jv_string_of(jv_get(b, "text")) {
+            Some(s) => s
+            None => ""
+          }
+          match t {
+            Some("text") => {
+              if hist_trim(text) != "" {
+                out.push(make_entry(at, "assistant", clip(text)))
+              }
+            }
+            Some("reasoning") => {
+              if hist_trim(text) != "" {
+                out.push(make_entry(at, "thinking", clip(text)))
+              }
+            }
+            Some("tool-call") => {
+              let name = match jv_string_of(jv_get(b, "name")) {
+                Some(s) => s
+                None => ""
+              }
+              let raw = match jv_string_of(jv_get(b, "arguments")) {
+                Some(s) => s
+                None => ""
+              }
+              let (parsed, args) = parsed_args(raw)
+              let input = match parsed {
+                Some(v) => v
+                None => jv_str(raw)
+              }
+              let body = if kept_whole(name) { args } else { clip(args) }
+              let e = make_entry(at, "tool_call", body, tool=Some(name), call_id=jv_string_of(jv_get(b, "id")))
+              out.push(with_brief(e, Some(input)))
+            }
+            _ => ()
+          }
+        }
+      }
+      _ => ()
+    }
+  } else if kind == "tool/result" {
+    let is_err = match jv_get(message, "isError") {
+      Some(js_json::JValue::Bool(true)) => true
+      _ => false
+    }
+    let e = make_entry(
+      at,
+      "tool_result",
+      clip(dsh_text(jv_get(message, "content"))),
+      ok=Some(!is_err),
+      call_id=jv_string_of(jv_get(message, "toolCallId")),
+    )
+    out.push(e)
+  }
+  Ok(())
+}
+
+fn pi_entry(r : js_json::JValue, out : Array[Entry]) -> Unit {
+  match jv_string_of(jv_get(Some(r), "type")) {
+    Some("message") => ()
+    _ => return
+  }
+  let at = jv_string_of(jv_get(Some(r), "timestamp"))
+  let message = jv_get(Some(r), "message")
+  let role = match jv_string_of(jv_get(message, "role")) {
+    Some(s) => s
+    None => ""
+  }
+  if role == "user" {
+    let text = match jv_get(message, "content") {
+      Some(js_json::JValue::Str(u)) => js_json::sanitize_str(u)
+      c => dsh_text(c)
+    }
+    if hist_trim(text) != "" {
+      out.push(make_entry(at, "user", clip(text)))
+    }
+  } else if role == "assistant" {
+    match jv_get(message, "content") {
+      Some(js_json::JValue::Arr(blocks)) => {
+        for i in 0..<blocks.length() {
+          let b = Some(blocks[i])
+          match jv_string_of(jv_get(b, "type")) {
+            Some("text") => {
+              let text = match jv_string_of(jv_get(b, "text")) {
+                Some(s) => s
+                None => ""
+              }
+              if hist_trim(text) != "" {
+                out.push(make_entry(at, "assistant", clip(text)))
+              }
+            }
+            Some("thinking") => {
+              let text = match jv_string_of(jv_get(b, "thinking")) {
+                Some(s) => s
+                None => ""
+              }
+              if hist_trim(text) != "" {
+                out.push(make_entry(at, "thinking", clip(text)))
+              }
+            }
+            Some("toolCall") => {
+              let name = match jv_string_of(jv_get(b, "name")) {
+                Some(s) => s
+                None => ""
+              }
+              let input = jv_get(b, "arguments")
+              let args_val = match input {
+                None | Some(js_json::JValue::Null) => js_json::JValue::Obj([])
+                Some(v) => v
+              }
+              let args = js_json::stringify_pretty(args_val)
+              let body = if kept_whole(name) { args } else { clip(args) }
+              let e = make_entry(at, "tool_call", body, tool=Some(name), call_id=jv_string_of(jv_get(b, "id")))
+              out.push(with_brief(e, input))
+            }
+            _ => ()
+          }
+        }
+      }
+      _ => ()
+    }
+  } else if role == "toolResult" {
+    let is_err = match jv_get(message, "isError") {
+      Some(js_json::JValue::Bool(true)) => true
+      _ => false
+    }
+    let e = make_entry(
+      at,
+      "tool_result",
+      clip(dsh_text(jv_get(message, "content"))),
+      ok=Some(!is_err),
+      call_id=jv_string_of(jv_get(message, "toolCallId")),
+    )
+    out.push(e)
+  }
+}
+
+fn failed_call(text : String) -> Bool {
+  let head = "Failed to call "
+  if !str_has_prefix(text, head) {
+    return false
+  }
+  let raw = text.to_bytes()
+  let mut i = head.to_bytes().length()
+  let start = i
+  while i < raw.length() {
+    let c = raw[i].to_int() & 0xFF
+    if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95 || c == 46 || c == 45 {
+      i = i + 1
+    } else {
+      break
+    }
+  }
+  i > start && i < raw.length() && (raw[i].to_int() & 0xFF) == 58
+}
+
+fn grok_entry(r : js_json::JValue, out : Array[Entry]) -> Unit {
+  let rj = Some(r)
+  let kind = match jv_string_of(jv_get(rj, "type")) {
+    Some(s) => s
+    None => ""
+  }
+  let content = jv_get(rj, "content")
+  if kind == "user" {
+    match jv_get(rj, "synthetic_reason") {
+      Some(_) => return
+      None => ()
+    }
+    match jv_get(rj, "prompt_index") {
+      None => return
+      Some(_) => ()
+    }
+    let raw_text = match content {
+      Some(js_json::JValue::Str(u)) => js_json::sanitize_str(u)
+      c => dsh_text(c)
+    }
+    let text = grok_query(raw_text)
+    if hist_trim(text) != "" {
+      out.push(make_entry(None, "user", clip(text)))
+    }
+  } else if kind == "reasoning" {
+    let text = match jv_get(rj, "summary") {
+      Some(js_json::JValue::Arr(xs)) => {
+        let parts : Array[String] = []
+        for i in 0..<xs.length() {
+          match jv_string_of(jv_get(Some(xs[i]), "text")) {
+            Some(t) => if t != "" { parts.push(t) }
+            None => ()
+          }
+        }
+        str_join(parts, "\n\n")
+      }
+      _ => ""
+    }
+    if hist_trim(text) != "" {
+      out.push(make_entry(None, "thinking", clip(text)))
+    }
+  } else if kind == "assistant" {
+    let text = match content {
+      Some(js_json::JValue::Str(u)) => js_json::sanitize_str(u)
+      c => dsh_text(c)
+    }
+    if hist_trim(text) != "" {
+      out.push(make_entry(None, "assistant", clip(text)))
+    }
+    match jv_get(rj, "tool_calls") {
+      Some(js_json::JValue::Arr(calls)) => {
+        for i in 0..<calls.length() {
+          let c = Some(calls[i])
+          let mut name = match jv_string_of(jv_get(c, "name")) {
+            Some(s) => s
+            None => ""
+          }
+          let raw = match jv_string_of(jv_get(c, "arguments")) {
+            Some(s) => s
+            None => ""
+          }
+          let mut input = jv_str(raw)
+          let args = match js_json::parse(raw) {
+            Ok(parsed) => {
+              input = parsed
+              if name == "use_tool" {
+                match jv_string_of(jv_get(Some(parsed), "tool_name")) {
+                  Some(tool) => {
+                    name = "mcp__" + tool
+                    input = match jv_get(Some(parsed), "tool_input") {
+                      None | Some(js_json::JValue::Null) => js_json::JValue::Obj([])
+                      Some(v) => v
+                    }
+                  }
+                  None => ()
+                }
+              }
+              js_json::stringify_pretty(input)
+            }
+            Err(_) => raw
+          }
+          let body = if kept_whole(name) { args } else { clip(args) }
+          let e = make_entry(None, "tool_call", body, tool=Some(name), call_id=jv_string_of(jv_get(c, "id")))
+          out.push(with_brief(e, Some(input)))
+        }
+      }
+      _ => ()
+    }
+  } else if kind == "tool_result" {
+    let text = match content {
+      Some(js_json::JValue::Str(u)) => js_json::sanitize_str(u)
+      Some(c) => to_text(c)
+      None => to_text(js_json::JValue::Null)
+    }
+    let is_err = match jv_get(rj, "is_error") {
+      Some(js_json::JValue::Bool(true)) => true
+      _ => false
+    }
+    let ok = !is_err && !failed_call(text)
+    out.push(make_entry(None, "tool_result", clip(text), ok=Some(ok), call_id=jv_string_of(jv_get(rj, "tool_call_id"))))
+  }
+}
+
+fn agy_field(u : Array[Int], pos : Int, label : String) -> Option[(String, Int)] {
+  if !units_starts_at(u, label, pos) {
+    return None
+  }
+  let mut i = pos + js_json::utf16_len(label)
+  while i < u.length() && jscase::is_space(u[i]) {
+    i = i + 1
+  }
+  let start = i
+  while i < u.length() && !jscase::is_space(u[i]) {
+    i = i + 1
+  }
+  if i == start {
+    return None
+  }
+  let slice : Array[Int] = []
+  for k in start..<i {
+    slice.push(u[k])
+  }
+  Some((js_json::sanitize_str(slice), i))
+}
+
+fn agy_times(text : String) -> Option[(String, String)] {
+  let u = js_json::utf16_units(text)
+  let (a, after_a) = match agy_field(u, 0, "Created At:") {
+    Some(p) => p
+    None => return None
+  }
+  let next_pos = if after_a + 1 < u.length() && u[after_a] == 13 && u[after_a + 1] == 10 {
+    after_a + 2
+  } else if after_a < u.length() && u[after_a] == 10 {
+    after_a + 1
+  } else {
+    return None
+  }
+  let (b, _) = match agy_field(u, next_pos, "Completed At:") {
+    Some(p) => p
+    None => return None
+  }
+  Some((a, b))
+}
+
+fn cursor_entry(r : js_json::JValue, out : Array[Entry]) -> Result[Unit, String] {
+  let rj = Some(r)
+  let kind = match jv_string_of(jv_get(rj, "type")) {
+    Some(s) => s
+    None => ""
+  }
+  let at = match time_iso(jv_get(rj, "time")) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if kind == "user" || kind == "assistant" || kind == "thinking" {
+    match jv_units_of(jv_get(rj, "text")) {
+      Some(u) => {
+        if hist_trim(js_json::sanitize_str(u)) != "" {
+          let cu = clip_units(u)
+          out.push(make_entry(at, kind, js_json::sanitize_str(cu), text_units=Some(cu)))
+        }
+      }
+      None => ()
+    }
+  } else if kind == "tool" {
+    let mut name = match jv_string_of(jv_get(rj, "name")) {
+      Some(s) => s
+      None => ""
+    }
+    let mut input = match jv_get(rj, "args") {
+      None | Some(js_json::JValue::Null) => js_json::JValue::Obj([])
+      Some(v) => v
+    }
+    if name == "mcp" {
+      match (jv_string_of(jv_get(Some(input), "providerIdentifier")), jv_string_of(jv_get(Some(input), "toolName"))) {
+        (Some(provider), Some(tool)) => {
+          name = "mcp__" + provider + "__" + tool
+          input = match jv_get(Some(input), "args") {
+            None | Some(js_json::JValue::Null) => js_json::JValue::Obj([])
+            Some(v) => v
+          }
+        }
+        _ => ()
+      }
+    }
+    let args = js_json::stringify_pretty(input)
+    let id = jv_string_of(jv_get(rj, "id"))
+    let result_text = cursor_result(jv_get(rj, "result"))
+    let started_at = match time_iso(jv_get(rj, "startedAt")) {
+      Ok(v) => v
+      Err(e) => return Err(e)
+    }
+    let times = agy_times(result_text)
+    let parse_iso_opt = fn(s_opt : Option[String]) -> Result[Option[String], String] {
+      match s_opt {
+        Some(s) => {
+          if s == "" {
+            return Ok(None)
+          }
+          match date_parse(s) {
+            Some(ms) => {
+              match date_iso(ms) {
+                Ok(iso) => Ok(Some(iso))
+                Err(e) => Err(e)
+              }
+            }
+            None => Ok(None)
+          }
+        }
+        None => Ok(None)
+      }
+    }
+    let t0 = match times {
+      Some((a, _)) => Some(a)
+      None => None
+    }
+    let t1 = match times {
+      Some((_, b)) => Some(b)
+      None => None
+    }
+    let call_at = match started_at {
+      Some(a) => Some(a)
+      None => {
+        match parse_iso_opt(t0) {
+          Ok(Some(a)) => Some(a)
+          Ok(None) => at
+          Err(e) => return Err(e)
+        }
+      }
+    }
+    let result_at = match started_at {
+      Some(_) => at
+      None => {
+        match parse_iso_opt(t1) {
+          Ok(Some(a)) => Some(a)
+          Ok(None) => at
+          Err(e) => return Err(e)
+        }
+      }
+    }
+    let body = if kept_whole(name) { args } else { clip(args) }
+    let call = make_entry(call_at, "tool_call", body, tool=Some(name), call_id=id)
+    out.push(with_brief(call, Some(input)))
+    let is_err = match jv_string_of(jv_get(rj, "status")) {
+      Some("error") => true
+      _ => false
+    }
+    out.push(make_entry(result_at, "tool_result", clip(result_text), ok=Some(!is_err), call_id=id))
+  }
+  Ok(())
+}
+
+fn claude_entry(r : js_json::JValue, out : Array[Entry]) -> Unit {
+  let rj = Some(r)
+  let kind = match jv_string_of(jv_get(rj, "type")) {
+    Some(s) => s
+    None => ""
+  }
+  let at = jv_string_of(jv_get(rj, "timestamp"))
+  let subagent = match jv_get(rj, "isSidechain") {
+    Some(js_json::JValue::Bool(true)) => true
+    _ => false
+  }
+  let queued = jv_get(rj, "attachment")
+  if kind == "attachment" {
+    match jv_string_of(jv_get(queued, "type")) {
+      Some("queued_command") => {
+        let prompts : Array[Option[String]] = match jv_get(queued, "prompt") {
+          Some(js_json::JValue::Str(u)) => [Some(js_json::sanitize_str(u))]
+          Some(js_json::JValue::Arr(bs)) => {
+            let ps : Array[Option[String]] = []
+            for i in 0..<bs.length() {
+              let b = Some(bs[i])
+              match jv_string_of(jv_get(b, "type")) {
+                Some("text") => ps.push(jv_string_of(jv_get(b, "text")))
+                _ => ps.push(None)
+              }
+            }
+            ps
+          }
+          _ => []
+        }
+        for i in 0..<prompts.length() {
+          match prompts[i] {
+            Some(text) => {
+              if hist_trim(text) != "" {
+                out.push(make_entry(at, "user", clip(text), subagent=subagent))
+              }
+            }
+            None => ()
+          }
+        }
+        return
+      }
+      _ => ()
+    }
+  }
+  let is_meta = match jv_get(rj, "isMeta") {
+    Some(js_json::JValue::Bool(true)) => true
+    _ => false
+  }
+  if (kind != "user" && kind != "assistant") || is_meta {
+    return
+  }
+  let content = jv_get(jv_get(rj, "message"), "content")
+  match content {
+    Some(js_json::JValue::Str(u)) => {
+      // Align with `station/mb/src/history/entries.mbt:358-363`: filter `claude_command`
+      // BEFORE 4000-code-point clipping so 4000+ leading spaces + `<command-name>` is still filtered.
+      let full_text = js_json::sanitize_str(u)
+      if kind == "user" && claude_command(full_text) {
+        return
+      }
+      let cu = clip_units(u)
+      out.push(make_entry(at, kind, js_json::sanitize_str(cu), text_units=Some(cu), subagent=subagent))
+      return
+    }
+    Some(js_json::JValue::Arr(blocks)) => {
+      for i in 0..<blocks.length() {
+        let b = Some(blocks[i])
+        match jv_string_of(jv_get(b, "type")) {
+          Some("text") => {
+            match jv_units_of(jv_get(b, "text")) {
+              Some(u) => {
+                if u.length() > 0 {
+                  let cu = clip_units(u)
+                  out.push(make_entry(at, kind, js_json::sanitize_str(cu), text_units=Some(cu), subagent=subagent))
+                }
+              }
+              None => ()
+            }
+          }
+          Some("thinking") => {
+            match jv_units_of(jv_get(b, "thinking")) {
+              Some(u) => {
+                if u.length() > 0 {
+                  let cu = clip_units(u)
+                  out.push(make_entry(at, "thinking", js_json::sanitize_str(cu), text_units=Some(cu), subagent=subagent))
+                }
+              }
+              None => ()
+            }
+          }
+          Some("tool_use") => {
+            let name = match jv_string_of(jv_get(b, "name")) {
+              Some(s) => s
+              None => ""
+            }
+            let raw_in = jv_get(b, "input")
+            let input_str = pretty_jv(Some(match raw_in {
+              Some(v) => v
+              None => js_json::JValue::Null
+            }))
+            let body = if kept_whole(name) { input_str } else { clip(input_str) }
+            let e = make_entry(at, "tool_call", body, tool=Some(name), call_id=jv_string_of(jv_get(b, "id")), subagent=subagent)
+            out.push(with_brief(e, raw_in))
+          }
+          Some("tool_result") => {
+            let failed = match jv_get(b, "is_error") {
+              Some(js_json::JValue::Bool(true)) => true
+              _ => false
+            }
+            let c_val = match jv_get(b, "content") {
+              Some(v) => v
+              None => js_json::JValue::Null
+            }
+            let e = make_entry(
+              at,
+              "tool_result",
+              clip(to_text(c_val)),
+              ok=Some(!failed),
+              call_id=jv_string_of(jv_get(b, "tool_use_id")),
+              subagent=subagent,
+            )
+            out.push(e)
+          }
+          _ => ()
+        }
+      }
+    }
+    _ => ()
+  }
+}
+
+fn codex_entry(r : js_json::JValue, state : ReadState, out : Array[Entry]) -> Unit {
+  let rj = Some(r)
+  match jv_string_of(jv_get(rj, "type")) {
+    Some("response_item") => ()
+    _ => return
+  }
+  let p = Some(match jv_get(rj, "payload") {
+    Some(v) => v
+    None => js_json::JValue::Null
+  })
+  let at = jv_string_of(jv_get(rj, "timestamp"))
+  let kind = match jv_string_of(jv_get(p, "type")) {
+    Some(s) => s
+    None => ""
+  }
+  let name = match jv_string_of(jv_get(p, "name")) {
+    Some(s) => s
+    None => ""
+  }
+  let call_id = jv_string_of(jv_get(p, "call_id"))
+  if kind == "message" {
+    let role = match jv_string_of(jv_get(p, "role")) {
+      Some(s) => s
+      None => ""
+    }
+    if role != "user" && role != "assistant" {
+      return
+    }
+    let content = match jv_get(p, "content") {
+      Some(v) => v
+      None => js_json::JValue::Null
+    }
+    let text = if role == "user" { typed_parts(Some(content)) } else { to_text(content) }
+    if role == "user" && injected(text) {
+      return
+    }
+    if hist_trim(text) != "" {
+      out.push(make_entry(at, role, clip(text)))
+    }
+    return
+  }
+  if kind == "reasoning" {
+    let chosen = match jv_get(p, "content") {
+      Some(js_json::JValue::Arr(xs)) => {
+        if xs.length() > 0 {
+          js_json::JValue::Arr(xs)
+        } else {
+          match jv_get(p, "summary") {
+            Some(v) => v
+            None => js_json::JValue::Arr([])
+          }
+        }
+      }
+      _ => {
+        match jv_get(p, "summary") {
+          Some(v) => v
+          None => js_json::JValue::Arr([])
+        }
+      }
+    }
+    let text = to_text(chosen)
+    if hist_trim(text) != "" {
+      out.push(make_entry(at, "thinking", clip(text)))
+    }
+    return
+  }
+  if kind == "custom_tool_call" && name == "exec" {
+    let script = match jv_string_of(jv_get(p, "input")) {
+      Some(s) => s
+      None => ""
+    }
+    let (calls, only) = script_calls(script)
+    if !only {
+      let e = make_entry(at, "tool_call", clip(script), tool=Some("exec"), call_id=call_id)
+      out.push(with_brief(e, Some(jv_str(script))))
+    }
+    for i in 0..<calls.length() {
+      let (tool, args) = calls[i]
+      let id = match call_id {
+        None => None
+        Some(cid) => if only && i == 0 { Some(cid) } else { Some(cid + "#" + i.to_string()) }
+      }
+      let text = js_json::stringify_pretty(args)
+      let body = if is_posting(tool) { text } else { clip(text) }
+      let e = make_entry(at, "tool_call", body, tool=Some(tool), call_id=id)
+      out.push(with_brief(e, Some(args)))
+    }
+    if !only && calls.length() > 0 {
+      match call_id {
+        Some(id) => state.set_count(id, calls.length())
+        None => ()
+      }
+    }
+    return
+  }
+  if kind == "function_call" || kind == "custom_tool_call" {
+    let given = match jv_get(p, "arguments") {
+      None | Some(js_json::JValue::Null) => jv_get(p, "input")
+      Some(g) => Some(g)
+    }
+    let raw = match given {
+      None => ""
+      Some(js_json::JValue::Str(u)) => js_json::sanitize_str(u)
+      Some(g) => js_json::stringify(g)
+    }
+    let (parsed, args) = parsed_args(raw)
+    let input = match parsed {
+      Some(v) => v
+      None => jv_str(raw)
+    }
+    let body = if kept_whole(name) { args } else { clip(args) }
+    let e = make_entry(at, "tool_call", body, tool=Some(name), call_id=call_id)
+    out.push(with_brief(e, Some(input)))
+    return
+  }
+  if kind == "function_call_output" || kind == "custom_tool_call_output" {
+    let out_val = match jv_get(p, "output") {
+      Some(v) => v
+      None => js_json::JValue::Null
+    }
+    let text = to_text(out_val)
+    let mark = "Process exited with code "
+    let failed = match str_find_bytes(text, mark) {
+      Some(pos) => {
+        let raw = text.to_bytes()
+        let next = pos + mark.to_bytes().length()
+        if next < raw.length() {
+          let c = raw[next].to_int() & 0xFF
+          c >= 49 && c <= 57
+        } else {
+          false
+        }
+      }
+      None => false
+    }
+    out.push(make_entry(at, "tool_result", clip(text), ok=Some(!failed), call_id=call_id))
+    let count = match call_id {
+      Some(id) => {
+        match state.inner.get(id) {
+          Some(c) => c
+          None => 0
+        }
+      }
+      None => 0
+    }
+    match call_id {
+      Some(id) => state.remove_key(id)
+      None => ()
+    }
+    let cid_str = match call_id {
+      Some(id) => id
+      None => ""
+    }
+    for i in 0..<count {
+      out.push(
+        make_entry(
+          at,
+          "tool_result",
+          "",
+          ok=Some(!failed),
+          call_id=Some(cid_str + "#" + i.to_string()),
+          in_script=true,
+        ),
+      )
+    }
+  }
+}
+
+// ── in brief (transcript.ts `brief`) ──
+
+fn tool_name(tool : String) -> String {
+  let prefixes = ["mcp__stillfail__", "stillfail__", "stillfail.", "mcp__ember__", "ember__", "ember."]
+  for i in 0..<prefixes.length() {
+    let p = prefixes[i]
+    if str_has_prefix(tool, p) {
+      return str_slice_bytes(tool, p.to_bytes().length(), tool.to_bytes().length())
+    }
+  }
+  tool
+}
+
+fn is_ascii_word(c : Int) -> Bool {
+  (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95
+}
+
+/// `/\b(?:agentId|agent_id|conversationId)["'\s:=]+["']?([A-Za-z0-9_-]{6,})/.exec(text)?.[1]`.
+fn agent_id_in(text : String) -> Option[String] {
+  let u = js_json::utf16_units(text)
+  let n = u.length()
+  let is_id_char = fn(c : Int) -> Bool { is_ascii_word(c) || c == 45 }
+  let is_sep = fn(c : Int) -> Bool { c == 34 || c == 39 || c == 58 || c == 61 || jscase::is_space(c) }
+  let names = ["agentId", "agent_id", "conversationId"]
+  for start in 0..<n {
+    if start > 0 && is_ascii_word(u[start - 1]) {
+      continue
+    }
+    if !is_ascii_word(u[start]) {
+      continue
+    }
+    for ni in 0..<names.length() {
+      let name = names[ni]
+      if !units_starts_at(u, name, start) {
+        continue
+      }
+      let after = start + js_json::utf16_len(name)
+      let mut most = after
+      while most < n && is_sep(u[most]) {
+        most = most + 1
+      }
+      let mut end_sep = most
+      while end_sep > after {
+        let tries : Array[Int] = []
+        if end_sep < n && (u[end_sep] == 34 || u[end_sep] == 39) {
+          tries.push(end_sep + 1)
+        }
+        tries.push(end_sep)
+        for ti in 0..<tries.length() {
+          let from = tries[ti]
+          let mut i = from
+          while i < n && is_id_char(u[i]) {
+            i = i + 1
+          }
+          if i - from >= 6 {
+            let slice : Array[Int] = []
+            for k in from..<i {
+              slice.push(u[k])
+            }
+            return Some(js_json::sanitize_str(slice))
+          }
+        }
+        end_sep = end_sep - 1
+      }
+    }
+  }
+  None
+}
+
+fn ascii_low_char(c : Int) -> Int {
+  if c >= 65 && c <= 90 { c + 32 } else { c }
+}
+
+fn pat_lit(u : Array[Int], at : Int, word : String) -> Array[Int] {
+  let w = js_json::utf16_units(word)
+  if at + w.length() > u.length() {
+    return []
+  }
+  for i in 0..<w.length() {
+    if ascii_low_char(u[at + i]) != ascii_low_char(w[i]) {
+      return []
+    }
+  }
+  [at + w.length()]
+}
+
+fn arr_contains_int(xs : Array[Int], v : Int) -> Bool {
+  for i in 0..<xs.length() {
+    if xs[i] == v {
+      return true
+    }
+  }
+  false
+}
+
+fn pat_many(u : Array[Int], at : Int, pred : (Int) -> Bool, least : Int) -> Array[Int] {
+  let out : Array[Int] = []
+  let mut i = at
+  while i < u.length() && pred(u[i]) {
+    i = i + 1
+    if i - at >= least {
+      out.push(i)
+    }
+  }
+  if least == 0 {
+    out.push(at)
+  }
+  out
+}
+
+fn pat_digits(u : Array[Int], at : Int, n : Int) -> Array[Int] {
+  if at + n > u.length() {
+    return []
+  }
+  for i in 0..<n {
+    if u[at + i] < 48 || u[at + i] > 57 {
+      return []
+    }
+  }
+  [at + n]
+}
+
+fn pat_seq(u : Array[Int], at : Int, parts : Array[(Array[Int], Int) -> Array[Int]]) -> Array[Int] {
+  let mut ends = [at]
+  for i in 0..<parts.length() {
+    let p = parts[i]
+    let next : Array[Int] = []
+    for j in 0..<ends.length() {
+      let res = p(u, ends[j])
+      for k in 0..<res.length() {
+        if !arr_contains_int(next, res[k]) {
+          next.push(res[k])
+        }
+      }
+    }
+    ends = next
+  }
+  ends
+}
+
+fn pat_alt(u : Array[Int], at : Int, ways : Array[(Array[Int], Int) -> Array[Int]]) -> Array[Int] {
+  let out : Array[Int] = []
+  for i in 0..<ways.length() {
+    let res = ways[i](u, at)
+    for j in 0..<res.length() {
+      if !arr_contains_int(out, res[j]) {
+        out.push(res[j])
+      }
+    }
+  }
+  out
+}
+
+fn pat_opt(u : Array[Int], at : Int, p : (Array[Int], Int) -> Array[Int]) -> Array[Int] {
+  let out = p(u, at)
+  if !arr_contains_int(out, at) {
+    out.push(at)
+  }
+  out
+}
+
+fn is_boilerplate(line : String) -> Bool {
+  let u = js_json::utf16_units(line)
+  let n = u.length()
+  let spaces = fn(s : Array[Int], at : Int) -> Array[Int] { pat_many(s, at, jscase::is_space, 1) }
+  let dot = fn(s : Array[Int], at : Int) -> Array[Int] { pat_opt(s, at, fn(a, b) { pat_lit(a, b, ".") }) }
+  let through = fn(s : Array[Int], at : Int) -> Array[Int] {
+    pat_opt(s, at, fn(a, b) { pat_lit(a, b, " through how to approach this") })
+  }
+  let labels = [
+    "Analyze the Request",
+    "Analysis",
+    "Summary",
+    "Plan",
+    "Context",
+    "Goal",
+    "Steps",
+    "Next Steps",
+    "Approach",
+    "Findings",
+    "Observations",
+  ]
+  let match_label = fn(s : Array[Int], at : Int) -> Array[Int] {
+    let out : Array[Int] = []
+    for i in 0..<labels.length() {
+      let r = pat_lit(s, at, labels[i])
+      for j in 0..<r.length() {
+        if !arr_contains_int(out, r[j]) {
+          out.push(r[j])
+        }
+      }
+    }
+    out
+  }
+  let ends = pat_alt(
+    u,
+    0,
+    [
+      fn(s, at) { pat_seq(s, at, [fn(a, b) { pat_lit(a, b, "I'm thinking") }, through, dot]) },
+      fn(s, at) { pat_seq(s, at, [fn(a, b) { pat_lit(a, b, "I am thinking") }, through, dot]) },
+      fn(s, at) {
+        pat_seq(
+          s,
+          at,
+          [
+            fn(a, b) { pat_lit(a, b, "Let's think") },
+            fn(a, b) {
+              pat_opt(
+                a,
+                b,
+                fn(c, d) {
+                  pat_alt(
+                    c,
+                    d,
+                    [
+                      fn(e, f) { pat_seq(e, f, [spaces, fn(g, h) { pat_lit(g, h, "through") }, spaces, fn(g, h) { pat_lit(g, h, "this") }]) },
+                      fn(e, f) { pat_seq(e, f, [spaces, fn(g, h) { pat_lit(g, h, "about") }, spaces, fn(g, h) { pat_lit(g, h, "this") }]) },
+                    ],
+                  )
+                },
+              )
+            },
+            dot,
+          ],
+        )
+      },
+      fn(s, at) {
+        pat_seq(
+          s,
+          at,
+          [
+            fn(a, b) { pat_lit(a, b, "Thinking") },
+            fn(a, b) { pat_opt(a, b, fn(c, d) { pat_seq(c, d, [spaces, fn(e, f) { pat_lit(e, f, "process") }]) }) },
+            dot,
+            fn(a, b) { pat_opt(a, b, fn(c, d) { pat_lit(c, d, ":") }) },
+          ],
+        )
+      },
+      fn(s, at) {
+        pat_seq(
+          s,
+          at,
+          [
+            fn(a, b) { pat_lit(a, b, "Thought") },
+            spaces,
+            fn(a, b) { pat_lit(a, b, "process") },
+            fn(a, b) { pat_opt(a, b, fn(c, d) { pat_lit(c, d, ":") }) },
+          ],
+        )
+      },
+      fn(s, at) { pat_seq(s, at, [fn(a, b) { pat_lit(a, b, "Process") }, fn(a, b) { pat_opt(a, b, fn(c, d) { pat_lit(c, d, ":") }) }]) },
+      fn(s, at) { pat_seq(s, at, [fn(a, b) { pat_lit(a, b, "Reasoning") }, fn(a, b) { pat_opt(a, b, fn(c, d) { pat_lit(c, d, ":") }) }]) },
+      fn(s, at) {
+        pat_seq(
+          s,
+          at,
+          [
+            fn(a, b) {
+              pat_opt(
+                a,
+                b,
+                fn(c, d) {
+                  pat_seq(
+                    c,
+                    d,
+                    [
+                      fn(e, f) { pat_many(e, f, fn(ch) { ch >= 48 && ch <= 57 }, 1) },
+                      fn(e, f) { pat_lit(e, f, ".") },
+                      fn(e, f) { pat_many(e, f, jscase::is_space, 0) },
+                    ],
+                  )
+                },
+              )
+            },
+            fn(a, b) { pat_opt(a, b, fn(c, d) { pat_lit(c, d, "**") }) },
+            match_label,
+            fn(a, b) { pat_lit(a, b, ":") },
+            fn(a, b) { pat_opt(a, b, fn(c, d) { pat_lit(c, d, "**") }) },
+          ],
+        )
+      },
+      fn(s, at) {
+        pat_seq(
+          s,
+          at,
+          [
+            fn(a, b) { pat_opt(a, b, fn(c, d) { pat_lit(c, d, "`") }) },
+            fn(a, b) { pat_digits(a, b, 4) },
+            fn(a, b) { pat_lit(a, b, "-") },
+            fn(a, b) { pat_digits(a, b, 2) },
+            fn(a, b) { pat_lit(a, b, "-") },
+            fn(a, b) { pat_digits(a, b, 2) },
+            fn(a, b) { pat_lit(a, b, "T") },
+            fn(a, b) { pat_many(a, b, fn(ch) { (ch >= 48 && ch <= 57) || ch == 58 || ch == 46 }, 1) },
+            fn(a, b) { pat_lit(a, b, "Z") },
+            fn(a, b) { pat_opt(a, b, fn(c, d) { pat_lit(c, d, "`") }) },
+            fn(a, b) { pat_many(a, b, fn(ch) { ch == 41 || ch == 44 || ch == 46 || ch == 59 || ch == 58 }, 0) },
+          ],
+        )
+      },
+    ],
+  )
+  arr_contains_int(ends, n)
+}
+
+/// transcript.ts `brief`: an entry as shown before opening, plus whether anything was elided.
+pub fn brief(e : Entry) -> (Entry, Bool) {
+  if js_json::points(e.text).length() <= SMALL_CHARS {
+    return (e, false)
+  }
+  if e.kind == "tool_call" {
+    let tn = tool_name(match e.tool {
+      Some(t) => t
+      None => ""
+    })
+    if tn == "chat_post" || tn == "chat_state" || tn == "slack_api" {
+      return (e, false)
+    }
+    let next_text = match e.said {
+      Some(s) => s
+      None => first_chars(e.text, BRIEF_CHARS)
+    }
+    return (
+      Entry::{
+        at: e.at,
+        kind: e.kind,
+        text: next_text,
+        tool: e.tool,
+        ok: e.ok,
+        call_id: e.call_id,
+        subagent: e.subagent,
+        said: e.said,
+        in_script: e.in_script,
+      },
+      true,
+    )
+  }
+  if e.kind == "tool_result" {
+    let mut text = ""
+    match js_json::parse(e.text) {
+      Ok(js_json::JValue::Obj(entries)) => {
+        let v = js_json::JValue::Obj(entries)
+        match v.get("ok") {
+          Some(js_json::JValue::Bool(ok)) => {
+            let obj = match v.get("ts") {
+              Some(js_json::JValue::Str(ts)) => {
+                js_json::JValue::Obj([
+                  (js_json::utf16_units("ok"), js_json::JValue::Bool(ok)),
+                  (js_json::utf16_units("ts"), js_json::JValue::Str(ts)),
+                ])
+              }
+              _ => js_json::JValue::Obj([(js_json::utf16_units("ok"), js_json::JValue::Bool(ok))])
+            }
+            text = js_json::stringify(obj)
+          }
+          _ => ()
+        }
+      }
+      _ => ()
+    }
+    if text == "" {
+      match agent_id_in(e.text) {
+        Some(id) => text = "agentId: " + id
+        None => ()
+      }
+    }
+    return (
+      Entry::{
+        at: e.at,
+        kind: e.kind,
+        text: text,
+        tool: e.tool,
+        ok: e.ok,
+        call_id: e.call_id,
+        subagent: e.subagent,
+        said: e.said,
+        in_script: e.in_script,
+      },
+      true,
+    )
+  }
+  if e.kind == "thinking" {
+    let raw_lines = str_split_lf(e.text)
+    let lines : Array[String] = []
+    for i in 0..<raw_lines.length() {
+      let l = hist_trim(raw_lines[i])
+      if l != "" {
+        lines.push(l)
+      }
+    }
+    let mut first = if lines.length() > 0 { lines[0] } else { "" }
+    for i in 0..<lines.length() {
+      if !is_boilerplate(lines[i]) {
+        first = lines[i]
+        break
+      }
+    }
+    return (
+      Entry::{
+        at: e.at,
+        kind: e.kind,
+        text: first_chars(first, BRIEF_CHARS),
+        tool: e.tool,
+        ok: e.ok,
+        call_id: e.call_id,
+        subagent: e.subagent,
+        said: e.said,
+        in_script: e.in_script,
+      },
+      true,
+    )
+  }
+  (e, false)
+}
+
+/// An entry as JSON, matching `transcript.ts` fields.
+pub fn entry_json(e : Entry, briefed : Bool) -> base_codec::Json {
+  let fields : Array[(String, base_codec::Json)] = [
+    (
+      "at",
+      match e.at {
+        Some(a) => base_codec::json_str(a)
+        None => base_codec::json_null()
+      },
+    ),
+    ("kind", base_codec::json_str(e.kind)),
+    ("text", base_codec::json_str(e.text)),
+  ]
+  match e.tool {
+    Some(t) => fields.push(("tool", base_codec::json_str(t)))
+    None => ()
+  }
+  match e.ok {
+    Some(ok) => fields.push(("ok", base_codec::json_bool(ok)))
+    None => ()
+  }
+  match e.call_id {
+    Some(id) => fields.push(("callId", base_codec::json_str(id)))
+    None => ()
+  }
+  if e.subagent {
+    fields.push(("subagent", base_codec::json_bool(true)))
+  }
+  if briefed {
+    fields.push(("brief", base_codec::json_bool(true)))
+  }
+  if e.in_script {
+    fields.push(("inScript", base_codec::json_bool(true)))
+  }
+  base_codec::json_obj(fields)
+}

@@ -248,7 +248,7 @@ test "what is let go on a window beside the first is that window's, at the same 
   let pick = t.fake.pick_asks.length()
   t.drop_words(50.0, 20.0, "zz", wid=9)
   t.draw()
-  assert_eq(@hostapi.Host::pk_state(t.fake, pick), -1)
+  assert_eq(t.fake.pk_state(pick), -1)
   assert_eq((fields[0].text(), fields[wid].text()), ("ef", "cd"))
   assert_eq((taken[0], taken[wid]), ([], ["/Users/me/a.txt"]))
 }

@@ -108,8 +108,9 @@ test "styles: how many values of each kind the app's screens use" {
   // color 83 to 87.
   // One fewer text style once pushed narrow sub-pages use the single-row floating inline Liquid Glass top bar instead of
   // the second-row 28pt Large Title: text 31 to 30.
+  // One fewer text style once the compact grouped stations list reuses standard row title/meta typography: text 30 to 29.
   inspect(counts.to_string(), content=(
-    #|text 30
+    #|text 29
     #|weight 4
     #|space 22
     #|radius 23

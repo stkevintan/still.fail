@@ -1,0 +1,135 @@
+fn expect(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+fn arr_eq(a : Array[String], b : Array[String]) -> Bool {
+  if a.length() != b.length() {
+    return false
+  }
+  for i in 0..<a.length() {
+    if a[i] != b[i] {
+      return false
+    }
+  }
+  true
+}
+
+test "join matches Node path.posix.join and path.win32.join" {
+  let posix : Array[(Array[String], String)] = [
+    (["/a/b", "c"], "/a/b/c"),
+    (["/a/b/", "c"], "/a/b/c"),
+    (["/a//b", "./c"], "/a/b/c"),
+    (["/a/b", "../c"], "/a/c"),
+    (["a", "..", ".."], ".."),
+    (["/", "..", "x"], "/x"),
+    (["/a/b", "c/"], "/a/b/c/"),
+    (["", ""], "."),
+    (["/x", "grok/sessions"], "/x/grok/sessions"),
+    (["rel/./x", "y"], "rel/x/y"),
+  ]
+  for i in 0..<posix.length() {
+    let (parts, want) = posix[i]
+    let got = join("/", parts)
+    expect(got == want, "posix join got=" + got + " want=" + want)
+  }
+  let win : Array[(Array[String], String)] = [
+    (["C:\\a\\b", "c"], "C:\\a\\b\\c"),
+    (["C:/a/b/", "c"], "C:\\a\\b\\c"),
+    (["C:\\a", "..\\..\\b"], "C:\\b"),
+    (["\\\\srv\\share\\x", "y"], "\\\\srv\\share\\x\\y"),
+    (["C:", "x"], "C:\\x"),
+    (["C:\\a\\b", "grok/sessions"], "C:\\a\\b\\grok\\sessions"),
+    (["\\", "a"], "\\a"),
+    (["\\\\", "a"], "\\a"),
+    (["/", "/a"], "\\a"),
+    (["a", "\\\\b"], "a\\b"),
+    (["foo", "..\\C:bar"], ".\\C:bar"),
+    (["con:foo", "bar"], "con:foo\\bar"),
+    (["com\u{00b9}:foo", "bar"], "com\u{00b9}:foo\\bar"),
+  ]
+  for i in 0..<win.length() {
+    let (parts, want) = win[i]
+    let got = join("\\", parts)
+    expect(got == want, "win join got=" + got + " want=" + want)
+  }
+}
+
+test "dirname, basename, and with_extension on POSIX and Windows" {
+  let posix : Array[(String, String, String, String)] = [
+    ("/a/b", "/a", "b", "/a/b.t.tmp"),
+    ("/a/b/", "/a", "b", "/a/b.t.tmp"),
+    ("/", "/", "", "/.t.tmp"),
+    ("a", ".", "a", "a.t.tmp"),
+    ("a//b", "a/", "b", "a/b.t.tmp"),
+    ("/a", "/", "a", "/a.t.tmp"),
+    ("", ".", "", ".t.tmp"),
+    ("a/b/c.json", "a/b", "c.json", "a/b/c.t.tmp"),
+  ]
+  for i in 0..<posix.length() {
+    let (p, wd, wb, we) = posix[i]
+    expect(dirname("/", p) == wd, "posix dirname(" + p + ")")
+    expect(basename("/", p) == wb, "posix basename(" + p + ")")
+    expect(with_extension("/", p, "t.tmp") == we, "posix with_extension(" + p + ")")
+  }
+  let win : Array[(String, String, String, String)] = [
+    ("C:\\a\\b", "C:\\a", "b", "C:\\a\\b.t.tmp"),
+    ("C:\\", "C:\\", "", "C:\\.t.tmp"),
+    ("C:", "C:", "", "C:\\.t.tmp"),
+    ("C:foo", "C:", "foo", "C:\\foo.t.tmp"),
+    ("\\\\srv\\share\\x", "\\\\srv\\share\\", "x", "\\\\srv\\share\\x.t.tmp"),
+    ("a\\b/c", "a\\b", "c", "a\\b\\c.t.tmp"),
+    ("\\a", "\\", "a", "\\a.t.tmp"),
+    ("C:/x/y/", "C:/x", "y", "C:\\x\\y.t.tmp"),
+    ("a", ".", "a", "a.t.tmp"),
+    ("", ".", "", ".t.tmp"),
+    ("C:\\data\\remote\\used\\x.json", "C:\\data\\remote\\used", "x.json", "C:\\data\\remote\\used\\x.t.tmp"),
+  ]
+  for i in 0..<win.length() {
+    let (p, wd, wb, we) = win[i]
+    expect(dirname("\\", p) == wd, "win dirname(" + p + ")")
+    expect(basename("\\", p) == wb, "win basename(" + p + ")")
+    expect(with_extension("\\", p, "t.tmp") == we, "win with_extension(" + p + ")")
+  }
+}
+
+test "relative_parts and is_absolute on POSIX and Windows" {
+  match relative_parts("/", "a/b") {
+    Some(xs) => expect(arr_eq(xs, ["a", "b"]), "a/b")
+    None => panic("expected Some")
+  }
+  match relative_parts("/", "./a//b/") {
+    Some(xs) => expect(arr_eq(xs, [".", "a", "", "b", ""]), "./a//b/")
+    None => panic("expected Some")
+  }
+  match relative_parts("/", "a\\b") {
+    Some(xs) => expect(arr_eq(xs, ["a\\b"]), "posix backslash literal")
+    None => panic("expected Some")
+  }
+  let bad_posix = ["", "/a", "a/../b", "..", "a/.."]
+  for i in 0..<bad_posix.length() {
+    match relative_parts("/", bad_posix[i]) {
+      None => ()
+      Some(_) => panic("expected None for " + bad_posix[i])
+    }
+  }
+  match relative_parts("\\", "a\\b/c") {
+    Some(xs) => expect(arr_eq(xs, ["a", "b", "c"]), "win a\\b/c")
+    None => panic("expected Some")
+  }
+  let bad_win = [
+    "", "..\\..\\x", "a\\..\\..\\b", "a/..\\b", "C:\\x", "C:x", "c:/x",
+    "\\\\srv\\share\\x", "\\x", "/x", "a:stream", "..", "a\\..",
+  ]
+  for i in 0..<bad_win.length() {
+    match relative_parts("\\", bad_win[i]) {
+      None => ()
+      Some(_) => panic("expected None for " + bad_win[i])
+    }
+  }
+  expect(is_absolute("/", "/a"), "/a abs")
+  expect(!is_absolute("/", "a") && !is_absolute("/", "") && !is_absolute("/", "C:\\a") && !is_absolute("/", "\\a"), "posix not abs")
+  expect(is_absolute("\\", "/a") && is_absolute("\\", "\\a") && is_absolute("\\", "C:\\a") && is_absolute("\\", "c:/a"), "win abs")
+  expect(!is_absolute("\\", "C:a") && !is_absolute("\\", "C:") && !is_absolute("\\", "a\\b") && !is_absolute("\\", "") && !is_absolute("\\", "1:\\a"), "win not abs")
+}

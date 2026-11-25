@@ -2,8 +2,7 @@
 // made as nodes of the window's tree (sfdesk's jobs_tab_node, letters_tab_node; sfpages' things_node): 任务's list,
 // a job picked and its output, a service opening its own tab; agent 往来's chats, one opened and back; 图片、文件和链接's
 // kinds, chosen here and by things_choose; 文件 and a station's 文件 (sfdesk's drive_tab_node.mbt), a folder gone into,
-// a file picked and added to the draft, back to the places; a station's page (sfpages' station_node); and on the tape a
-// Farview tab drawn here (实验性功能 on), its screen (side_farview_node), not an agent's history.
+// a file picked and added to the draft, back to the places; and a station's page (sfpages' station_node).
 
 ///|
 /// 大屏 beside the page, 中屏 the tape's panel (corners_wbtest's windows).
@@ -100,20 +99,6 @@ test "中屏, 大屏: 图片、文件和链接 beside the chat, nodes: its pictu
     assert_true(t.find("build.log") is None, msg="\{win.0}: its files gone")
     assert_true(t.find("首页列表按天分组") is Some(_), msg="\{win.0}: its pull requests")
   }
-}
-
-///|
-test "中屏: a Farview tab on the tape's panel is its screen drawn here, not an agent's history" {
-  let t = side_tab_at("chat-jobs-side", side_tab_windows[1])
-  // (实验性功能's Farview 原生标签页渲染 on: experimental_wbtest.mbt has it off, its pictures)
-  @sfbase.farview_native.set(true)
-  let tab = "screen:" + Json::array([Json::string("ws1/st1"), Json::string("browser:fv_t1")]).stringify()
-  side_change(side_tab_chat, "open", Some(tab))
-  t.run_for(@ui.move_most_ms)
-  assert_eq(side_now(side_tab_chat).1, tab)
-  assert_true(t.find("只看收发") is None, msg="no history's head")
-  // (the panel's body under its bar: the tab's screen, Farview's bar over its stage)
-  assert_true(t.query(Button, label=@sf.t("web-pages.screen.reloadShort")) is Some(_), msg="its screen's bar")
 }
 
 ///|

@@ -52,6 +52,7 @@ else ~/stillfail-deploy:
 Cloudflare: an interactive `wrangler login` (or CLOUDFLARE_API_TOKEN). Docker (OrbStack) builds the relay image.
 """
 import argparse
+import http.client
 import json
 import os
 import re
@@ -268,7 +269,7 @@ def wrangler(*args, env=None, capture=False, input=None):
 
 # The API's secrets that are there only while something is (src/move.ts MOVING, src/guests.ts the rest): `secret bulk`
 # only adds and changes, so one this deploy does not give is taken away, else a cloud once MOVING stays so.
-SWITCHED = ("MOVING", "FORWARD_TO", "FORWARD_SECRET", "GUESTS")
+SWITCHED = ("MOVING", "FORWARD_TO", "FORWARD_SECRET", "GUESTS", "CI_NATIVE_R2_SIGNER")
 
 
 def drop_unset(given: dict, local: Path, env) -> None:
@@ -286,6 +287,72 @@ def account_id() -> str:
     if len(accounts) != 1:
         sys.exit(f"expected one Cloudflare account, got {len(accounts)}")
     return accounts[0]["id"]
+
+
+CI_NATIVE_BUCKET = "stillfail-releases"
+CI_NATIVE_PREFIX = "staged/ci-natives/"
+CI_NATIVE_TTL = 7 * 24 * 60 * 60
+CI_NATIVE_SECRET = "CI_NATIVE_R2_SIGNER"
+
+
+def ci_r2_request(token: str, path: str, method: str = "GET", value=None) -> tuple[int, dict]:
+    """Cloudflare management calls for the CI credential. The token and response bodies stay out of logs."""
+    connection = http.client.HTTPSConnection("api.cloudflare.com", timeout=10)
+    try:
+        payload = json.dumps(value) if value is not None else None
+        connection.request(method, "/client/v4" + path, body=payload, headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "monoid-ci-r2",
+        })
+        response = connection.getresponse()
+        envelope = json.load(response)
+        result = envelope.get("result") if isinstance(envelope, dict) and envelope.get("success") else None
+        return response.status, result if isinstance(result, dict) else {}
+    except (ValueError, OSError, http.client.HTTPException):
+        raise SystemExit(f"Cloudflare CI credential request failed: {method} {path}") from None
+    finally:
+        connection.close()
+
+
+def ci_r2_signer(account: str, token: str) -> str:
+    if not re.fullmatch(r"[a-f0-9]{32}", account) or not token:
+        sys.exit("The monoid CI credential requires the company Cloudflare account and API token")
+    root = f"/accounts/{account}"
+    status, parent = ci_r2_request(token, root + "/tokens/verify")
+    if status != 200 or parent.get("status") != "active":
+        status, parent = ci_r2_request(token, "/user/tokens/verify")
+    if status != 200 or parent.get("status") != "active" or not re.fullmatch(r"[a-f0-9]{32}", str(parent.get("id", ""))):
+        sys.exit(f"Cloudflare could not verify the company token (HTTP {status})")
+    expires_at = int(time.time()) + CI_NATIVE_TTL
+    status, granted = ci_r2_request(token, root + "/r2/temp-access-credentials", "POST", {
+        "bucket": CI_NATIVE_BUCKET,
+        "parentAccessKeyId": parent["id"],
+        "actions": ["PutObject"],
+        "prefixes": [CI_NATIVE_PREFIX],
+        "ttlSeconds": CI_NATIVE_TTL,
+    })
+    fields = ("accessKeyId", "secretAccessKey", "sessionToken")
+    if status != 200 or not all(isinstance(granted.get(key), str) and granted[key] for key in fields):
+        sys.exit(f"Cloudflare could not issue the CI upload credential (HTTP {status})")
+    return json.dumps({**{key: granted[key] for key in fields}, "expiresAt": expires_at})
+
+
+def refresh_ci_r2_signer() -> None:
+    if CLOUD != "monoid":
+        sys.exit("The CI credential is only for STILLFAIL_CLOUD=monoid")
+    token = os.getenv("CLOUDFLARE_API_TOKEN", "")
+    if not token:
+        sys.exit("Refreshing the CI credential requires the company Cloudflare API token")
+    account = account_id()
+    signer = ci_r2_signer(account, token)
+    script = read_template()["name"]
+    status, result = ci_r2_request(token, f"/accounts/{account}/workers/scripts/{script}/secrets", "PUT", {
+        "name": CI_NATIVE_SECRET, "text": signer, "type": "secret_text",
+    })
+    if status != 200 or result.get("name") != CI_NATIVE_SECRET:
+        sys.exit(f"Cloudflare could not update the monoid CI credential (HTTP {status})")
+    print("Refreshed the monoid CI upload credential.", flush=True)
 
 
 def grant_jwk() -> dict:
@@ -520,6 +587,8 @@ def say_web_build(build: Path, beta: bool, account: str, env=None) -> None:
 
 
 def main() -> None:
+    if sys.argv[1:] == ["refresh-ci-r2-signer"]:
+        return refresh_ci_r2_signer()
     if sys.argv[1:2] == ["promote-web"]:
         if len(sys.argv) != 3:
             sys.exit("usage: deploy.py promote-web <directory of a build, or a commit kept in <deploy>/builds>")
@@ -613,14 +682,21 @@ def main() -> None:
             subprocess.run(["node", "website/build.mjs", "--site", site, "--out", f"dist/{part}"], cwd=REPO, check=True)
     # Read only for the parts that take them: keys() makes keys.json where there is none, which a deploy of the static
     # sites alone (CI's web-beta, on a machine without the deploy directory's keys) must not do.
+    ci_native_r2 = CLOUD == "monoid" and env_var("CI_NATIVE_R2") == "on"
+    ci_native_signer = None
+    if ci_native_r2 and "api" in parts and not args.dry_run:
+        ci_native_signer = ci_r2_signer(account, os.getenv("CLOUDFLARE_API_TOKEN", ""))
     secrets_of = {
-        "api": lambda: {**keys(), "GOOGLE_CLIENT_SECRET": web["client_secret"], **apple(), **telemetry(), **push(), **review(), **feedback(), **guests()},
+        "api": lambda: {**keys(), "GOOGLE_CLIENT_SECRET": web["client_secret"], **apple(), **telemetry(), **push(), **review(), **feedback(), **guests(),
+                        **({CI_NATIVE_SECRET: ci_native_signer} if ci_native_signer else {})},
         "relay": lambda: {"ADMIN_TOKEN": keys()["ADMIN_TOKEN"]},
     }
     def deploy(part: str, env) -> None:
         config = {**read_template(PARTS[part]), "account_id": account}
         if part == "api":
             config["vars"] = {**config["vars"], "GOOGLE_CLIENT_ID": web.get("client_id", "dry-run"), "ADMIN_EMAIL": admin_account}
+            if ci_native_r2:
+                config["vars"]["CI_NATIVE_R2_ACCOUNT_ID"] = account
             if not beta:
                 config = without_beta(config)
         local = ROOT / PARTS[part].replace(".jsonc", ".local.json")

@@ -1423,7 +1423,7 @@ fn inst_outer_chosen(a : FixedArray[Double], b : Int, here : Int) -> Unit {
   let beyond = clip_has_outer(here)
   let apart = beyond && clip_is_apart(here)
   let own = if inst_has_outer(a, b) && !(beyond && inst_outer_is(a, b, here + 12)) {
-    clip_cut_depth(a, b + 40, x0, y0, x1, y1, r, sm)
+    clip_cut_depth_fixed(a, b + 40, x0, y0, x1, y1, r, sm)
   } else {
     -1.0e9
   }

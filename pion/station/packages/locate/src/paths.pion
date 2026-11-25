@@ -1,0 +1,805 @@
+// 1:1 port of `station/mb/src/locate/paths.mbt`:
+// Transcript path lookup (`Finder`, `claude_project`, `runtime_kind`, `transcript_dir`,
+// `Said`, `Source`), using `builders_core::ShellClient::shell_sync_json` and `nodepath::join`.
+
+import "base_codec"
+import "builders_core"
+import "js_json"
+import "nodepath"
+
+/// A Codex rollout path a running thread reported (`transcript.ts` `SaidRollout`).
+pub struct Said {
+  pub suffix : String
+  pub mut seen : Bool
+}
+
+/// A runtime session whose transcript is looked for (`live-location-protocol.ts` `LiveSource`).
+pub struct Source {
+  pub id : String
+  pub runtime : String
+  pub profile : Option[String]
+}
+
+struct SaidEntry {
+  dir : String
+  said : Said
+}
+
+struct SaidById {
+  id : String
+  dirs : Map[String, Said]
+  dir_keys : Array[String]
+}
+
+/// Finds transcripts via synchronous shell `fs.stat` / `fs.readdir` / `fs.realpath`
+/// and tracks per-batch hints (`elsewhere`, `rollouts`, `said`).
+pub struct Finder {
+  client : builders_core::ShellClient
+  sep : String
+  mut elsewhere : Map[String, Option[String]]
+  mut elsewhere_keys : Array[String]
+  mut rollouts : Map[String, String]
+  mut rollouts_keys : Array[String]
+  mut said : Map[String, SaidById]
+  mut said_ids : Array[String]
+}
+
+pub fn Finder::new(client : builders_core::ShellClient, sep : String) -> Finder {
+  Finder::{
+    client: client,
+    sep: sep,
+    elsewhere: Map::new(),
+    elsewhere_keys: [],
+    rollouts: Map::new(),
+    rollouts_keys: [],
+    said: Map::new(),
+    said_ids: [],
+  }
+}
+
+fn Finder::set_elsewhere(self : Finder, key : String, value : Option[String]) -> Unit {
+  match self.elsewhere.get(key) {
+    Some(_) => ()
+    None => self.elsewhere_keys.push(key)
+  }
+  self.elsewhere.set(key, value)
+}
+
+fn Finder::set_rollout(self : Finder, key : String, value : String) -> Unit {
+  match self.rollouts.get(key) {
+    Some(_) => ()
+    None => self.rollouts_keys.push(key)
+  }
+  self.rollouts.set(key, value)
+}
+
+fn Finder::set_said_entry(self : Finder, id : String, dir : String, s : Said) -> Unit {
+  let group = match self.said.get(id) {
+    Some(g) => g
+    None => {
+      let g = SaidById::{ id: id, dirs: Map::new(), dir_keys: [] }
+      self.said.set(id, g)
+      self.said_ids.push(id)
+      g
+    }
+  }
+  match group.dirs.get(dir) {
+    Some(_) => ()
+    None => group.dir_keys.push(dir)
+  }
+  group.dirs.set(dir, s)
+}
+
+/// Node's `path.join` respecting `self.sep`.
+pub fn Finder::join(self : Finder, parts : Array[String]) -> String {
+  nodepath::join(self.sep, parts)
+}
+
+fn Finder::stat(self : Finder, path : String) -> Option[String] {
+  match self.client.shell_sync_json("fs.stat", base_codec::json_obj([("path", base_codec::json_str(path))])) {
+    Ok(base_codec::Json::Str(kind)) => Some(kind)
+    _ => None
+  }
+}
+
+fn Finder::is_file(self : Finder, path : String) -> Bool {
+  match self.stat(path) {
+    Some("file") => true
+    _ => false
+  }
+}
+
+fn Finder::is_dir(self : Finder, path : String) -> Bool {
+  match self.stat(path) {
+    Some("dir") => true
+    _ => false
+  }
+}
+
+fn Finder::storage(self : Finder, path : String) -> String {
+  match self.stat(path) {
+    Some(_) => path
+    None => path + ".zst"
+  }
+}
+
+fn Finder::kept(self : Finder, path : String) -> Bool {
+  self.is_file(self.storage(path))
+}
+
+fn Finder::entries(self : Finder, dir : String) -> Option[Array[String]] {
+  match self.client.shell_sync_json("fs.readdir", base_codec::json_obj([("path", base_codec::json_str(dir))])) {
+    Ok(base_codec::Json::Arr(names)) => {
+      let out : Array[String] = []
+      for i in 0..<names.length() {
+        match names[i] {
+          base_codec::Json::Str(s) => out.push(s)
+          _ => ()
+        }
+      }
+      Some(out)
+    }
+    _ => None
+  }
+}
+
+fn Finder::typed_entries(self : Finder, dir : String) -> Option[Array[(String, String)]] {
+  let args = base_codec::json_obj([
+    ("path", base_codec::json_str(dir)),
+    ("types", base_codec::json_bool(true)),
+  ])
+  match self.client.shell_sync_json("fs.readdir", args) {
+    Ok(base_codec::Json::Arr(entries)) => {
+      let out : Array[(String, String)] = []
+      for i in 0..<entries.length() {
+        match entries[i] {
+          base_codec::Json::Arr(pair) => {
+            if pair.length() == 2 {
+              match (pair[0], pair[1]) {
+                (base_codec::Json::Str(name), base_codec::Json::Str(kind)) => out.push((name, kind))
+                _ => ()
+              }
+            }
+          }
+          _ => ()
+        }
+      }
+      Some(out)
+    }
+    _ => None
+  }
+}
+
+fn Finder::real(self : Finder, path : String) -> Option[String] {
+  match self.client.shell_sync_json("fs.realpath", base_codec::json_obj([("path", base_codec::json_str(path))])) {
+    Ok(base_codec::Json::Str(p)) => Some(p)
+    _ => None
+  }
+}
+
+/// `transcript.ts` `transcriptDir`.
+pub fn transcript_dir(runtime : String) -> String {
+  if runtime == "claude" {
+    "projects"
+  } else if runtime == "codex" {
+    "sessions"
+  } else if runtime == "grok" {
+    "grok/sessions"
+  } else if runtime == "cursor" {
+    "cursor/sessions"
+  } else if runtime == "devin" {
+    "devin/sessions"
+  } else if runtime == "hermes" {
+    "hermes/sessions"
+  } else if runtime == "agy" {
+    "agy/sessions"
+  } else if runtime == "pi" {
+    "pi/sessions"
+  } else {
+    "dsh-sessions"
+  }
+}
+
+/// `agents/runtime.ts` `RUNTIME_KINDS`.
+pub fn runtime_kind(runtime : String) -> Bool {
+  runtime == "claude" ||
+  runtime == "codex" ||
+  runtime == "dsh" ||
+  runtime == "grok" ||
+  runtime == "cursor" ||
+  runtime == "devin" ||
+  runtime == "hermes" ||
+  runtime == "agy" ||
+  runtime == "pi"
+}
+
+/// `transcript.ts` `claudeProject`: each UTF-16 code unit other than ASCII letter/digit becomes `-`,
+/// `None` when UTF-16 length > 200.
+pub fn claude_project(cwd : String) -> Option[String] {
+  let units = js_json::utf16_units(cwd)
+  if units.length() > 200 {
+    return None
+  }
+  let out = StringBuilder::new()
+  for i in 0..<units.length() {
+    let c = units[i]
+    if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) {
+      out.write_byte(c as Byte)
+    } else {
+      out.write_byte(45 as Byte) // '-'
+    }
+  }
+  Some(out.to_string())
+}
+
+fn str_has_prefix(s : String, prefix : String) -> Bool {
+  let sb = s.to_bytes()
+  let pb = prefix.to_bytes()
+  if pb.length() > sb.length() {
+    return false
+  }
+  for i in 0..<pb.length() {
+    if sb[i] != pb[i] {
+      return false
+    }
+  }
+  true
+}
+
+fn str_has_suffix(s : String, suffix : String) -> Bool {
+  let sb = s.to_bytes()
+  let pb = suffix.to_bytes()
+  if pb.length() > sb.length() {
+    return false
+  }
+  let off = sb.length() - pb.length()
+  for i in 0..<pb.length() {
+    if sb[off + i] != pb[i] {
+      return false
+    }
+  }
+  true
+}
+
+fn slice_str_bytes(s : String, start : Int, end : Int) -> String {
+  if start >= end {
+    return ""
+  }
+  let raw = s.to_bytes()
+  let sb = StringBuilder::new()
+  for i in start..<end {
+    sb.write_byte(raw[i])
+  }
+  sb.to_string()
+}
+
+fn Finder::placed_in(
+  self : Finder,
+  runtime : String,
+  dir : String,
+  id : String,
+  places : Array[String],
+) -> Option[String] {
+  if runtime != "claude" {
+    return None
+  }
+  for i in 0..<places.length() {
+    let place = places[i]
+    let ways : Array[String] = match self.real(place) {
+      Some(at) => if at == place { [place] } else { [place, at] }
+      None => [place]
+    }
+    for j in 0..<ways.length() {
+      match claude_project(ways[j]) {
+        Some(project) => {
+          let path = self.join([dir, project, id + ".jsonl"])
+          if self.kept(path) {
+            return Some(path)
+          }
+        }
+        None => ()
+      }
+    }
+  }
+  None
+}
+
+fn dsh_version(name : String) -> Option[Double] {
+  if !str_has_prefix(name, "session.v") || !str_has_suffix(name, ".jsonl") {
+    return None
+  }
+  let raw = name.to_bytes()
+  let start = 9
+  let end = raw.length() - 6
+  if end <= start {
+    return None
+  }
+  let mut n = 0.0
+  for i in start..<end {
+    let c = raw[i].to_int() & 0xFF
+    if c < 48 || c > 57 {
+      return None
+    }
+    n = n * 10.0 + (c - 48).to_double()
+  }
+  Some(n)
+}
+
+fn Finder::dsh(self : Finder, root : String, id : String) -> Option[String] {
+  let dirs = match self.entries(root) {
+    Some(ds) => ds
+    None => return None
+  }
+  for i in 0..<dirs.length() {
+    let dir = dirs[i]
+    let names = match self.entries(self.join([root, dir, id])) {
+      Some(ns) => ns
+      None => continue
+    }
+    let mut best_name = ""
+    let mut best_ver = -1.0
+    let mut has_best = false
+    for j in 0..<names.length() {
+      let name = names[j]
+      match dsh_version(name) {
+        Some(v) => {
+          if !has_best || v > best_ver {
+            best_name = name
+            best_ver = v
+            has_best = true
+          }
+        }
+        None => ()
+      }
+    }
+    if has_best {
+      return Some(self.join([root, dir, id, best_name]))
+    }
+  }
+  None
+}
+
+fn Finder::grok(self : Finder, root : String, id : String) -> Option[String] {
+  let dirs = match self.entries(root) {
+    Some(ds) => ds
+    None => return None
+  }
+  for i in 0..<dirs.length() {
+    let path = self.join([root, dirs[i], id, "chat_history.jsonl"])
+    if self.kept(path) {
+      return Some(path)
+    }
+  }
+  None
+}
+
+fn Finder::rollout(self : Finder, dir : String, id : String) -> Option[String] {
+  let entries = match self.typed_entries(dir) {
+    Some(es) => es
+    None => return None
+  }
+  let jsonl_suf = id + ".jsonl"
+  let zst_suf = id + ".jsonl.zst"
+  for i in 0..<entries.length() {
+    let (name, kind) = entries[i]
+    let path = self.join([dir, name])
+    if kind == "dir" || (kind != "file" && self.is_dir(path)) {
+      match self.rollout(path, id) {
+        Some(found) => return Some(found)
+        None => ()
+      }
+    } else if str_has_prefix(name, "rollout-") && str_has_suffix(name, jsonl_suf) {
+      return Some(path)
+    } else if str_has_prefix(name, "rollout-") && str_has_suffix(name, zst_suf) {
+      return Some(slice_str_bytes(path, 0, path.length() - 4))
+    }
+  }
+  None
+}
+
+fn Finder::transcript_in(
+  self : Finder,
+  runtime : String,
+  dir : String,
+  id : String,
+  placed : Bool,
+  anywhere : Bool,
+) -> Option[String] {
+  if runtime == "dsh" {
+    return self.dsh(dir, id)
+  }
+  if runtime == "grok" {
+    return self.grok(dir, id)
+  }
+  if runtime == "cursor" || runtime == "devin" || runtime == "hermes" || runtime == "agy" || runtime == "pi" {
+    let path = self.join([dir, id + ".jsonl"])
+    return if self.kept(path) { Some(path) } else { None }
+  }
+  if runtime == "claude" {
+    let at = dir + "\u{0000}" + id
+    match self.elsewhere.get(at) {
+      Some(None) => if placed { return None }
+      Some(Some(kept)) => if self.kept(kept) { return Some(kept) }
+      None => ()
+    }
+    if !anywhere {
+      return None
+    }
+    let projects = match self.entries(dir) {
+      Some(ps) => ps
+      None => []
+    }
+    for i in 0..<projects.length() {
+      let path = self.join([dir, projects[i], id + ".jsonl"])
+      if self.kept(path) {
+        self.set_elsewhere(at, Some(path))
+        return Some(path)
+      }
+    }
+    if placed {
+      self.set_elsewhere(at, None)
+    }
+    return None
+  }
+  let at = dir + "\u{0000}" + id
+  match self.rollouts.get(at) {
+    Some(kept) => {
+      if self.kept(kept) {
+        return Some(kept)
+      }
+    }
+    None => ()
+  }
+  let found = self.rollout(dir, id)
+  match found {
+    Some(path) => self.set_rollout(at, path)
+    None => ()
+  }
+  found
+}
+
+fn opt_str_eq(a : Option[String], b : Option[String]) -> Bool {
+  match (a, b) {
+    (Some(x), Some(y)) => x == y
+    (None, None) => true
+    _ => false
+  }
+}
+
+fn homes_first(profiles : Array[(String, String)], first : Option[String]) -> Array[String] {
+  let out : Array[String] = []
+  for i in 0..<profiles.length() {
+    let (pid, home) = profiles[i]
+    if opt_str_eq(Some(pid), first) {
+      out.push(home)
+    }
+  }
+  for i in 0..<profiles.length() {
+    let (pid, home) = profiles[i]
+    if !opt_str_eq(Some(pid), first) {
+      out.push(home)
+    }
+  }
+  out
+}
+
+/// `transcript.ts` `transcriptPathsLooking` for one id.
+pub fn Finder::transcript_path(
+  self : Finder,
+  runtime : String,
+  data : String,
+  homes : Array[String],
+  id : String,
+  places : Array[String],
+  anywhere : Bool,
+) -> Option[String] {
+  let shared = self.join([data, "transcripts", runtime])
+  let ways : Array[String] = []
+  let tdir = transcript_dir(runtime)
+  for i in 0..<homes.length() {
+    ways.push(self.join([homes[i], tdir]))
+  }
+  let said_dirs : Array[String] = []
+  if runtime == "codex" {
+    said_dirs.push(shared)
+    for i in 0..<ways.length() {
+      said_dirs.push(ways[i])
+    }
+  }
+  let dirs : Array[String] = [shared]
+  let mut next_way = 0
+  let mut seen : Option[Map[String, Bool]] = None
+  let dir_at = fn(idx : Int) -> Option[String] {
+    while dirs.length() <= idx && next_way < ways.length() {
+      let s = match seen {
+        Some(m) => m
+        None => {
+          let m : Map[String, Bool] = Map::new()
+          let key = match self.real(shared) {
+            Some(r) => r
+            None => shared
+          }
+          m.set(key, true)
+          seen = Some(m)
+          m
+        }
+      }
+      let dir = ways[next_way]
+      next_way = next_way + 1
+      match self.real(dir) {
+        Some(at) => {
+          match s.get(at) {
+            Some(_) => ()
+            None => {
+              s.set(at, true)
+              dirs.push(dir)
+            }
+          }
+        }
+        None => ()
+      }
+    }
+    if idx < dirs.length() {
+      Some(dirs[idx])
+    } else {
+      None
+    }
+  }
+  let in_dirs = fn(look : (String) -> Option[String]) -> Option[String] {
+    let mut i = 0
+    while true {
+      match dir_at(i) {
+        Some(dir) => {
+          match look(dir) {
+            Some(p) => return Some(p)
+            None => i = i + 1
+          }
+        }
+        None => break
+      }
+    }
+    None
+  }
+  let placed = places.length() > 0
+  let mut reported : Option[Said] = None
+  if runtime == "codex" {
+    for i in 0..<said_dirs.length() {
+      let dir = said_dirs[i]
+      let known : Option[Said] = match self.said.get(id) {
+        Some(group) => {
+          match group.dirs.get(dir) {
+            Some(s) => Some(s)
+            None => {
+              let real_dir = match self.real(dir) {
+                Some(r) => r
+                None => dir
+              }
+              group.dirs.get(real_dir)
+            }
+          }
+        }
+        None => None
+      }
+      let said = match known {
+        Some(s) => s
+        None => continue
+      }
+      match reported {
+        None => reported = Some(said)
+        Some(_) => ()
+      }
+      let path = self.join([dir, said.suffix])
+      if self.kept(path) {
+        said.seen = true
+        return Some(path)
+      }
+      if !said.seen && !anywhere {
+        return None
+      }
+    }
+  }
+  let path = match in_dirs(fn(dir : String) -> Option[String] { self.placed_in(runtime, dir, id, places) }) {
+    Some(p) => Some(p)
+    None => in_dirs(fn(dir : String) -> Option[String] { self.transcript_in(runtime, dir, id, placed, anywhere) })
+  }
+  match (path, reported) {
+    (Some(_), Some(said)) => said.seen = true
+    _ => ()
+  }
+  path
+}
+
+/// `transcript.ts` `transcriptSourcesLooking`.
+pub fn Finder::sources(
+  self : Finder,
+  data : String,
+  profiles : Array[(String, String)],
+  sources : Array[Source],
+  places : Array[String],
+  anywhere : Bool = false,
+) -> (Array[(String, String)], Bool) {
+  let paths : Array[(String, String)] = []
+  let mut current = false
+  for i in 0..<sources.length() {
+    let source = sources[i]
+    if !runtime_kind(source.runtime) {
+      current = false
+      continue
+    }
+    let found = self.transcript_path(
+      source.runtime,
+      data,
+      homes_first(profiles, source.profile),
+      source.id,
+      places,
+      anywhere,
+    )
+    match found {
+      Some(path) => {
+        current = true
+        paths.push((path, source.runtime))
+      }
+      None => current = false
+    }
+  }
+  (paths, current)
+}
+
+/// Load one batch's hints from what the station sent (`useTranscriptLocationHints`).
+pub fn Finder::use_hints(self : Finder, hints : base_codec::Json) -> Unit {
+  self.elsewhere = Map::new()
+  self.elsewhere_keys = []
+  self.rollouts = Map::new()
+  self.rollouts_keys = []
+  self.said = Map::new()
+  self.said_ids = []
+  match builders_core::json_get_last(hints, "elsewhere") {
+    Some(base_codec::Json::Arr(pairs)) => {
+      for i in 0..<pairs.length() {
+        match pairs[i] {
+          base_codec::Json::Arr(p) => {
+            if p.length() == 2 {
+              match (p[0], p[1]) {
+                (base_codec::Json::Str(k), base_codec::Json::Str(v)) => self.set_elsewhere(k, Some(v))
+                (base_codec::Json::Str(k), base_codec::Json::Null) => self.set_elsewhere(k, None)
+                _ => ()
+              }
+            }
+          }
+          _ => ()
+        }
+      }
+    }
+    _ => ()
+  }
+  match builders_core::json_get_last(hints, "rollouts") {
+    Some(base_codec::Json::Arr(pairs)) => {
+      for i in 0..<pairs.length() {
+        match pairs[i] {
+          base_codec::Json::Arr(p) => {
+            if p.length() == 2 {
+              match (p[0], p[1]) {
+                (base_codec::Json::Str(k), base_codec::Json::Str(v)) => self.set_rollout(k, v)
+                _ => ()
+              }
+            }
+          }
+          _ => ()
+        }
+      }
+    }
+    _ => ()
+  }
+  match builders_core::json_get_last(hints, "said") {
+    Some(base_codec::Json::Arr(ids)) => {
+      for i in 0..<ids.length() {
+        match ids[i] {
+          base_codec::Json::Arr(entry) => {
+            if entry.length() == 2 {
+              match (entry[0], entry[1]) {
+                (base_codec::Json::Str(id), base_codec::Json::Arr(dirs)) => {
+                  // 1:1 with paths.mbt:433: always create a fresh group for `id` (preserving empty
+                  // `said:[["x",[]]]`), replacing any previous group while keeping first-seen order.
+                  let group = SaidById::{ id: id, dirs: Map::new(), dir_keys: [] }
+                  match self.said.get(id) {
+                    Some(_) => ()
+                    None => self.said_ids.push(id)
+                  }
+                  for j in 0..<dirs.length() {
+                    match dirs[j] {
+                      base_codec::Json::Arr(d) => {
+                        if d.length() == 2 {
+                          match (d[0], d[1]) {
+                            (base_codec::Json::Str(dir), obj) => {
+                              match (
+                                builders_core::json_get_last(obj, "suffix"),
+                                builders_core::json_get_last(obj, "seen"),
+                              ) {
+                                (Some(base_codec::Json::Str(suffix)), Some(seen_val)) => {
+                                  let seen = match seen_val {
+                                    base_codec::Json::Bool(true) => true
+                                    _ => false
+                                  }
+                                  match group.dirs.get(dir) {
+                                    Some(_) => ()
+                                    None => group.dir_keys.push(dir)
+                                  }
+                                  group.dirs.set(dir, Said::{ suffix: suffix, seen: seen })
+                                }
+                                _ => ()
+                              }
+                            }
+                            _ => ()
+                          }
+                        }
+                      }
+                      _ => ()
+                    }
+                  }
+                  self.said.set(id, group)
+                }
+                _ => ()
+              }
+            }
+          }
+          _ => ()
+        }
+      }
+    }
+    _ => ()
+  }
+}
+
+/// Export the batch's hints (`TranscriptLocationHints`).
+pub fn Finder::hints(self : Finder) -> base_codec::Json {
+  let elsewhere : Array[base_codec::Json] = []
+  for i in 0..<self.elsewhere_keys.length() {
+    let k = self.elsewhere_keys[i]
+    let v = match self.elsewhere.get(k) {
+      Some(Some(p)) => base_codec::json_str(p)
+      _ => base_codec::json_null()
+    }
+    elsewhere.push(base_codec::json_arr([base_codec::json_str(k), v]))
+  }
+  let rollouts : Array[base_codec::Json] = []
+  for i in 0..<self.rollouts_keys.length() {
+    let k = self.rollouts_keys[i]
+    match self.rollouts.get(k) {
+      Some(p) => rollouts.push(base_codec::json_arr([base_codec::json_str(k), base_codec::json_str(p)]))
+      None => ()
+    }
+  }
+  let said : Array[base_codec::Json] = []
+  for i in 0..<self.said_ids.length() {
+    let id = self.said_ids[i]
+    match self.said.get(id) {
+      Some(group) => {
+        let entries : Array[base_codec::Json] = []
+        for j in 0..<group.dir_keys.length() {
+          let dir = group.dir_keys[j]
+          match group.dirs.get(dir) {
+            Some(s) => {
+              entries.push(
+                base_codec::json_arr([
+                  base_codec::json_str(dir),
+                  base_codec::json_obj([
+                    ("suffix", base_codec::json_str(s.suffix)),
+                    ("seen", base_codec::json_bool(s.seen)),
+                  ]),
+                ]),
+              )
+            }
+            None => ()
+          }
+        }
+        said.push(base_codec::json_arr([base_codec::json_str(id), base_codec::json_arr(entries)]))
+      }
+      None => ()
+    }
+  }
+  base_codec::json_obj([
+    ("elsewhere", base_codec::json_arr(elsewhere)),
+    ("rollouts", base_codec::json_arr(rollouts)),
+    ("said", base_codec::json_arr(said)),
+  ])
+}

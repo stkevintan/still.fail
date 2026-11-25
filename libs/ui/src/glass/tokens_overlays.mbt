@@ -2,9 +2,9 @@
 
 ///|
 /// Three-anchor continuous optical interpolation for iOS 27.0 in-place liquid-droplet popover morphing:
-/// - `stage == 0.0`: bar-pill anchor (`a=0x67`, `blur=2.0`, `bezel=14`, `refr=20`, `rim=0.60`);
-/// - `stage == 0.5`: mid-flight frosted droplet (`a=0x88`, `blur=4.5`, `bezel=18`, `refr=15`, `rim=0.78`);
-/// - `stage == 1.0`: resting frosted menu anchor (`a=0xBF`, `blur=8.0`, `bezel=16`, `refr=22`, `rim=0.60`).
+/// - `stage == 0.0`: bar-pill anchor (`a=0x67`, `blur=2.0`, `bezel=14`, `refr=20`, `rim=0.60`, `chroma=0.06`);
+/// - `stage == 0.5`: mid-flight translucent droplet (`a=0x93` light / `0x88` dark, `blur=4.0`, `bezel=18`, `refr=16`, `rim=0.78`, `chroma=0.045`);
+/// - `stage == 1.0`: resting translucent menu anchor (`a=0xBF` light / `0xA8` dark, `blur=6.0`, `bezel=20`, `refr=26`, `rim=0.60`, `chroma=0.03`).
 pub fn liquid_menu_morph_glass(
   stage : Double,
   solid? : Int64 = clear,
@@ -19,23 +19,27 @@ pub fn liquid_menu_morph_glass(
     None => is_dark()
   }
   let base_rgb = if d { 0x20202000L } else { 0xFDFCFD00L }
-  let (a_f, blur, bezel, refraction, rim) = if s <= 0.5 {
+  let mid_a = if d { 136.0 } else { 147.0 }
+  let end_a = if d { 168.0 } else { 191.0 }
+  let (a_f, blur, bezel, refraction, rim, chroma) = if s <= 0.5 {
     let u = s * 2.0
     (
-      103.0 + (136.0 - 103.0) * u,
-      2.0 + (4.5 - 2.0) * u,
+      103.0 + (mid_a - 103.0) * u,
+      2.0 + (4.0 - 2.0) * u,
       14.0 + (18.0 - 14.0) * u,
-      20.0 + (15.0 - 20.0) * u,
+      20.0 + (16.0 - 20.0) * u,
       0.60 + (0.78 - 0.60) * u,
+      0.06 + (0.045 - 0.06) * u,
     )
   } else {
     let u = (s - 0.5) * 2.0
     (
-      136.0 + (191.0 - 136.0) * u,
-      4.5 + (8.0 - 4.5) * u,
-      18.0 + (16.0 - 18.0) * u,
-      15.0 + (22.0 - 15.0) * u,
+      mid_a + (end_a - mid_a) * u,
+      4.0 + (6.0 - 4.0) * u,
+      18.0 + (20.0 - 18.0) * u,
+      16.0 + (26.0 - 16.0) * u,
       0.78 + (0.60 - 0.78) * u,
+      0.045 + (0.03 - 0.045) * u,
     )
   }
   let a = a_f.round().to_int64() & 0xFFL
@@ -54,7 +58,7 @@ pub fn liquid_menu_morph_glass(
     rim~,
     bezel~,
     refraction~,
-    chroma=0.0,
+    chroma~,
     merge~,
     layer~,
     break_gap~,
@@ -64,18 +68,19 @@ pub fn liquid_menu_morph_glass(
 
 ///|
 /// Liquid glass material for floating panels (Menu, Popover, List, Disclosure).
-/// Symmetric 75% high-readability liquid glass (`0xFDFCFDBFL` light / `0x202020BFL` dark).
+/// Native iOS 27 calibrated liquid glass (`0xFDFCFDBFL` 75% light / `0x202020A8L` 65.9% dark) with soft `blur=6.0`,
+/// `20/26` bevel refraction, and `0.03` dispersion (paired with shader bright-backdrop relaxation & 1..8pt cushion rim).
 pub fn liquid_panel_glass(solid? : Int64 = clear) -> @paint.Glass {
   let d = is_dark()
   @paint.Glass::liquid(
-    blur=8.0,
-    tint=if d { 0x202020BFL } else { 0xFDFCFDBFL },
+    blur=6.0,
+    tint=if d { 0x202020A8L } else { 0xFDFCFDBFL },
     solid=if solid != clear { solid } else if d { 0x1C1C1EFFL } else { 0xF7F7FAFFL },
     saturation=1.0,
     rim=0.6,
-    bezel=16.0,
-    refraction=22.0,
-    chroma=0.0,
+    bezel=20.0,
+    refraction=26.0,
+    chroma=0.03,
     merge=0.0,
     adaptive=false,
   )

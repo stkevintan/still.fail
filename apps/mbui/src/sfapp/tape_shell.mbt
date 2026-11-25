@@ -74,21 +74,20 @@ fn paned_shell(v : @view.View, src : Source) -> Unit {
 }
 
 ///|
-/// What a wide frame shows over all of it while it is on top: a station's screen (screen_node; a Farview tab, while
-/// 实验性功能's Farview 原生标签页渲染 is on, drawn by sfpages' farview_tab_node), its terminal (terminal_node), a drive's
-/// text read (sfpages' reader_page_node) or its video or song played (sfpages' play_page_node).
+/// What a wide frame shows over all of it while it is on top: a station's screen (screen_node), its terminal
+/// (terminal_node), a drive's text read (sfpages' reader_page_node) or its video or song played (sfpages'
+/// play_page_node).
 #derive(Eq)
 priv enum WideTop {
   Scr(ScreenAt)
-  Far(ScreenAt)
   Term(@sfbase.TerminalAt)
   Read(DriveAt)
   Play(DriveAt)
 }
 
 ///|
-/// Register a wide fullscreen sub-page (`Scr`/`Far`/`Term`/`Read`/`Play`) on the unified overlay stack via
-/// `@sf.fullscreen_overlay_node` without binding Escape (so Escape inside Terminal, Farview browser, or Screen stays
+/// Register a wide fullscreen sub-page (`Scr`/`Term`/`Read`/`Play`) on the unified overlay stack via
+/// `@sf.fullscreen_overlay_node` without binding Escape (so Escape inside Terminal or Screen stays
 /// theirs), wiring system Back (`takes_back`) separately to `close`.
 fn wide_page_overlay(n : @view.View, close : () -> Unit) -> Unit {
   @sf.fullscreen_overlay_node(n, close, dismiss_on_escape=false) |> ignore
@@ -104,7 +103,6 @@ fn wide_page(v : @view.View, src : Source) -> Unit {
     at_once=true,
     fn() {
       match app.nav.top() {
-        Screen(at) if @sfpages.farview_native_screen(at.screen) => Some(Far(at))
         Screen(at) => Some(Scr(at))
         Terminal(at) => Some(Term(at))
         DriveRead(at) => Some(Read(at))
@@ -118,26 +116,6 @@ fn wide_page(v : @view.View, src : Source) -> Unit {
           // (back as the page has it: in 全屏 out of it first, its own back key's; else closed, as the stack's)
           wide_page_overlay(n, fn() { @sfbase.close_page(Screen(at)) |> ignore })
           @sfpages.screen_node(n, src, at, fn() { system_frame_at(n.window_w()) })
-        }
-        Some(Far(at)) => {
-          let close = fn() { @sfbase.close_page(Screen(at)) |> ignore }
-          wide_page_overlay(n, close)
-          let back = fn() {
-            let pages = app.nav.pages()
-            if pages.length() >= 2 { @sfbase.back_label(pages[pages.length() - 2]) } else { @sf.t("common.back") }
-          }
-          @sfpages.farview_pane_node(
-            n,
-            src,
-            at.station,
-            at.screen,
-            title=at.title,
-            back~,
-            on_back=close,
-            on_switch=fn(next) { app.nav.replace(next) },
-            on_close=close,
-            top=window_band_now,
-          )
         }
         Some(Term(at)) => {
           wide_page_overlay(n, fn() { @sfbase.close_page(Terminal(at)) |> ignore })

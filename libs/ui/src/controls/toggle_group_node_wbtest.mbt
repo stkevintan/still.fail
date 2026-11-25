@@ -161,3 +161,69 @@ test "toggle_group_node: 1.0x keeps exact height, Regular keeps 28pt at 1.3x, 2.
     }
   }
 }
+
+///|
+test "toggle_group_node: smooth NodeWay highlight transition with laid == 0 and verified mid-transition alpha" {
+  for dark in [false, true] {
+    set_dark(Some(dark))
+    let k = tog2(kind=Single)
+    k.t.run_for(@ui.move_most_ms)
+    let lifted = @ui.tree_theme().lifted
+    let lifted_alpha_in = fn(label : String) -> Int raise {
+      let r = k.t.get(Button, label~).rect
+      let mut found = 0
+      for dr in k.t.drawn_rects() {
+        if (dr.0 - r.0).abs() < 1.0 && (dr.1 - r.1).abs() < 1.0 && (dr.2 - r.2).abs() < 1.0 && (dr.3 - r.3).abs() < 1.0 {
+          let a = (dr.4 & 0xFFL).to_int()
+          if a > found {
+            found = a
+          }
+        }
+      }
+      found
+    }
+    let full_a = (lifted & 0xFFL).to_int()
+    assert_eq(lifted_alpha_in("列表"), full_a, msg="dark=\{dark}: rest active 列表 must have full lifted alpha")
+    assert_eq(lifted_alpha_in("分栏"), 0, msg="dark=\{dark}: rest inactive 分栏 must have 0 ground alpha")
+    let active_r = k.t.get(Button, label="列表").rect
+    let active_insts = k.t.drawn_instances().filter(fn(a) {
+      a.length() > 6 && a[5] == 0.0 && (a[0] - active_r.0).abs() < 1.0 && (a[1] - active_r.1).abs() < 1.0 && (a[2] - active_r.2).abs() < 1.0 && (a[3] - active_r.3).abs() < 1.0
+    })
+    assert_true(active_insts.length() >= 1, msg="dark=\{dark}: rest active toggle_group rect instance must be present")
+    assert_eq(active_insts.filter(fn(a) { a[6] > 0.0 }).length(), 0, msg="dark=\{dark}: rest active toggle_group must draw zero border")
+    assert_eq(k.t.drawn_instances().filter(fn(a) { a.length() > 6 && a[5] == 2.0 }).length(), 0, msg="dark=\{dark}: rest active toggle_group must draw zero shadow")
+
+    k.t.tree_frames_from_now()
+    k.t.click(Button, label="分栏")
+    // Mid-transition (~70ms of 140ms): zero relayout, both old & new items strictly intermediate
+    k.t.run_for(dur_ms / 2.0)
+    for f in k.t.tree_frames() {
+      assert_eq(f.laid, 0, msg="toggle_group_node selection fade must not relayout: \{Repr(f)}")
+    }
+    let mid_old = lifted_alpha_in("列表")
+    let mid_new = lifted_alpha_in("分栏")
+    assert_true(mid_old > 0 && mid_old < full_a, msg="mid-transition old 列表 alpha must be strictly intermediate: \{mid_old} (full=\{full_a})")
+    assert_true(mid_new > 0 && mid_new < full_a, msg="mid-transition new 分栏 alpha must be strictly intermediate: \{mid_new} (full=\{full_a})")
+    assert_eq(k.t.audit(), [])
+    k.t.run_for(@ui.move_most_ms)
+    assert_eq(tog2_on(k.t), ["分栏"])
+    assert_eq(lifted_alpha_in("列表"), 0, msg="settled old 列表 must fade to 0")
+    assert_eq(lifted_alpha_in("分栏"), full_a, msg="settled new 分栏 must reach full lifted alpha")
+
+    // Deselect to empty in Single mode: mid-transition strictly intermediate, then fades to 0 with laid == 0
+    k.t.tree_frames_from_now()
+    k.t.click(Button, label="分栏")
+    k.t.move_to(0.0, 0.0)
+    k.t.run_for(dur_ms / 2.0)
+    let mid_off = lifted_alpha_in("分栏")
+    assert_true(mid_off > 0 && mid_off < full_a, msg="mid-transition deselect 分栏 alpha must be strictly intermediate: \{mid_off}")
+    k.t.run_for(@ui.move_most_ms)
+    for f in k.t.tree_frames() {
+      assert_eq(f.laid, 0, msg="toggle_group_node empty fade-out must not relayout: \{Repr(f)}")
+    }
+    assert_eq(tog2_on(k.t), [])
+    assert_eq(lifted_alpha_in("分栏"), 0, msg="settled empty 分栏 must fade to 0")
+    assert_eq(k.t.audit(), [])
+  }
+  set_dark(None)
+}

@@ -2123,8 +2123,6 @@ let en : Map[String, String] = {
   "web-pages.experimental.title": "Experimental features",
   "web-pages.experimental.lead": "Features still being completed or explored, off by default on this device alone; turn any off to switch right back.",
   "web-pages.experimental.enabledCount": "{n} on",
-  "web-pages.experimental.farviewNative.title": "Native Farview tab rendering",
-  "web-pages.experimental.farviewNative.description": "Draw Farview browser tabs directly on this device for instant scrolling and typing; turn it off anytime to switch back to screenshots",
   "web-pages.experimental.board.title": "Board view for chats",
   "web-pages.experimental.board.description": "View chats in columns by status, station, or person and manage pending tasks; turning it off returns to the chat list",
   "web-pages.experimental.selectionIntent.title": "Poke",

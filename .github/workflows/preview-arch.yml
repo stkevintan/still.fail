@@ -19,10 +19,6 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
-env:
-  # Farview's client, which the app draws a chat's Farview tab with (apps/mbui/scripts/farview.sh: a private repository,
-  # read by its deploy key)
-  FARVIEW_DEPLOY_KEY: ${{ secrets.FARVIEW_DEPLOY_KEY }}
 jobs:
   linux:
     if: github.repository_owner == 'AFK-surf'

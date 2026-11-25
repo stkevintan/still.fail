@@ -93,11 +93,22 @@ pub fn WordsLook::with_max_lines(self : WordsLook, max_lines : Int) -> WordsLook
 }
 
 ///|
+/// Local CJK companion override for preview cards (zero global cache invalidation): `face` (0 disables CJK companion),
+/// relative `scale` (1.0 = 100%), and `weight_off` (-100 / 0 / +100).
+#derive(Eq, Debug)
+pub(all) struct CjkOverride {
+  face : Int
+  scale : Double
+  weight_off : Int
+}
+
+///|
 /// How a node's words in pieces (View::words_runs) are set where a piece says nothing of it itself, as an old view's
 /// paragraph is (Ctx::rich's): a link's ink and its ground while it is pressed, code's ink and ground and its share of
-/// the words' size, and whether they are a person's words (in the face chosen for those). What changes how big they
-/// are (`code_scale`, `words`, whether code has a ground at all: its room either side, a label kept whole on its line)
-/// lays them out again; their inks (a ground's colour for another) draw them again alone.
+/// the words' size, whether they are a person's words (in the face chosen for those), and an optional local CJK
+/// companion override (`cjk`). What changes how big they are (`code_scale`, `words`, `cjk`, whether code has a ground
+/// at all: its room either side, a label kept whole on its line) lays them out again; their inks (a ground's colour
+/// for another) draw them again alone.
 #derive(Eq, Debug)
 pub(all) struct RunsLook {
   link : Int64
@@ -106,6 +117,8 @@ pub(all) struct RunsLook {
   code_ground : Int64
   code_scale : Double
   words : Bool
+  cjk : CjkOverride?
+  code_cjk : CjkOverride?
 }
 
 ///|
@@ -117,22 +130,25 @@ pub let runs_plain : RunsLook = {
   code_ground: 0x7676801FL,
   code_scale: 0.9,
   words: false,
+  cjk: None,
+  code_cjk: None,
 }
 
 ///|
 /// How its words in pieces are set where a piece says nothing of it itself (RunsLook), as it changes: their sizes
-/// (code's share, a person's words' face) laid out again, their inks drawn again alone.
+/// (code's share, a person's words' face, local CJK override) laid out again, their inks drawn again alone.
 #callsite(autofill(loc))
 pub fn View::runs_look(self : View, look : Live[RunsLook], loc~ : SourceLoc) -> View {
   let tree = self.tree
   let at = self.at
   let (set, ink) = match look {
-    Is(l) => (Is((l.code_scale, l.words, l.code_ground != 0L)), Is((l.link, l.pressed, l.code_ink, l.code_ground)))
+    Is(l) =>
+      (Is((l.code_scale, l.words, l.code_ground != 0L, l.cjk, l.code_cjk)), Is((l.link, l.pressed, l.code_ink, l.code_ground)))
     By(f) =>
       (
         By(fn() {
           let l = f()
-          (l.code_scale, l.words, l.code_ground != 0L)
+          (l.code_scale, l.words, l.code_ground != 0L, l.cjk, l.code_cjk)
         }),
         By(fn() {
           let l = f()
@@ -142,7 +158,7 @@ pub fn View::runs_look(self : View, look : Live[RunsLook], loc~ : SourceLoc) -> 
   }
   self.bind(loc~, RunsSet, set, Both, fn(s) {
     let l = tree.nodes[at].look.runs_look
-    tree.nodes[at].look.runs_look = { ..l, code_scale: s.0, words: s.1 }
+    tree.nodes[at].look.runs_look = { ..l, code_scale: s.0, words: s.1, cjk: s.3, code_cjk: s.4 }
     // (how its words are set said: what follows it told, once this is)
     self.words_told()
   })
@@ -660,6 +676,13 @@ pub fn Tree::measuring_tabular(self : Tree) -> Bool? {
 /// painted by `view_made` at non-integer device scales.
 pub fn Tree::measuring_origin_x(self : Tree) -> Double {
   self.measuring_origin_x
+}
+
+///|
+/// Whether `Tree::measuring_origin_x` holds a real estimated horizontal origin for the node currently being measured
+/// (`false` outside `View::words` measure callbacks, such as unpositioned table or cut-width measurements).
+pub fn Tree::measuring_origin_known(self : Tree) -> Bool {
+  self.measuring_origin_known
 }
 
 ///|

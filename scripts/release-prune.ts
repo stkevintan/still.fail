@@ -20,7 +20,7 @@
 // the same word; the store's other parts never. The stations' own names, Node and the feeds are never touched.
 // CI runs it after `put` (.github/workflows/pipeline.yml). An old file it could not delete stays for the next run's
 // prune: a release already put and told never goes red for it (as scripts/native.ts's prune).
-//   node scripts/release-prune.ts [--dry-run]
+//   node scripts/release-prune.ts [--dry-run] [--ci-natives-only]
 // Needs CLOUDFLARE_API_TOKEN (and CLOUDFLARE_ACCOUNT_ID, else the token's first account).
 
 import { baseFile } from "./release-deltas.ts";
@@ -41,6 +41,16 @@ const BETA_BLOCKMAPS = 30;
 const WEB_FEED = "desktop/web/stillfail-beta-web.json";
 const WEB_ARCHIVE = /^desktop\/web\/stillfail-beta-web-0\.\d+\.(\d+)\.tar\.gz$/;
 const WEB_ARCHIVES = 5;
+const CI_NATIVE_PREFIX = "staged/ci-natives/";
+const CI_NATIVE = /^staged\/ci-natives\/(\d+)-/;
+const CI_NATIVE_SECONDS = 7 * 86400;
+
+/** A branch's native chunks stay as long as the run's receipts. */
+function expiredCiNative(key: string, now: number): boolean | undefined {
+  const native = CI_NATIVE.exec(key);
+  return native ? Number(native[1]) < now - CI_NATIVE_SECONDS : undefined;
+}
+
 /** What a station's job staged, by when (seconds since 1970), and how long it may stay there. */
 const STAGED = /^staged\/(\d+)-/;
 const STAGED_SECONDS = 2 * 24 * 3600;
@@ -154,9 +164,8 @@ export function doomedOf(keys: string[], feeds: Record<string, string>, webNamed
   const webBuilds = keys.map((key) => Number(key.match(WEB_ARCHIVE)?.[1])).filter((n) => Number.isSafeInteger(n)).sort((a, b) => b - a);
 
   return keys.filter((key) => {
-    // A branch's native chunks stay as long as the run's receipts (seven days).
-    const native = /^staged\/ci-natives\/(\d+)-/.exec(key);
-    if (native) return Number(native[1]) < now - 7 * 86400;
+    const native = expiredCiNative(key, now);
+    if (native !== undefined) return native;
     const staged = Number(key.match(STAGED)?.[1]);
     if (Number.isSafeInteger(staged)) return staged < now - STAGED_SECONDS;
     if (SYMBOLS.test(key)) {
@@ -257,6 +266,7 @@ export async function deleteDoomed(doomed: string[], del: (key: string) => Promi
 
 if (import.meta.main) {
   const dryRun = process.argv.includes("--dry-run");
+  const ciNativesOnly = process.argv.includes("--ci-natives-only");
   const token = process.env.CLOUDFLARE_API_TOKEN;
   if (!token) throw new Error("CLOUDFLARE_API_TOKEN is not set");
 
@@ -268,7 +278,12 @@ if (import.meta.main) {
     return response.json();
   };
 
-  const account = process.env.CLOUDFLARE_ACCOUNT_ID || (await json("/accounts")).result[0].id;
+  let account = process.env.CLOUDFLARE_ACCOUNT_ID;
+  if (!account) {
+    const { result: accounts } = await json("/accounts");
+    if (ciNativesOnly && accounts.length !== 1) throw new Error("Expected one Cloudflare account for CI archive cleanup");
+    account = accounts[0].id;
+  }
   const objects = `/accounts/${account}/r2/buckets/${BUCKET}/objects`;
 
   // (each object's last_modified, an ISO 8601 time, when it was written: Cloudflare's R2 List Objects; one not read as a
@@ -276,7 +291,10 @@ if (import.meta.main) {
   const keys: string[] = [];
   const putAt = new Map<string, number>();
   for (let cursor = ""; ;) {
-    const page = await json(`${objects}?per_page=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+    const query = new URLSearchParams({ per_page: "1000" });
+    if (ciNativesOnly) query.set("prefix", CI_NATIVE_PREFIX);
+    if (cursor) query.set("cursor", cursor);
+    const page = await json(`${objects}?${query}`);
     for (const o of page.result as { key: string; last_modified?: unknown }[]) {
       keys.push(o.key);
       const put = typeof o.last_modified === "string" ? Date.parse(o.last_modified) / 1000 : NaN;
@@ -286,22 +304,29 @@ if (import.meta.main) {
     if (!page.result_info?.is_truncated || !cursor) break;
   }
 
-  const feeds: Record<string, string> = {};
-  for (const feed of FEEDS) {
-    const response = await api(`${objects}/${encodeObjectKey(feed)}`);
-    if (response.status === 404) continue;
-    if (!response.ok) throw new Error(`${feed}: ${response.status}`);
-    feeds[feed] = await response.text();
-  }
-  // The web archives: the build the feed names (none: the feed is not out yet, and nothing goes).
-  const webFeed = await api(`${objects}/${encodeObjectKey(WEB_FEED)}`);
-  if (!webFeed.ok && webFeed.status !== 404) throw new Error(`${WEB_FEED}: ${webFeed.status}`);
-  const webNamed = webFeed.ok ? Number((await webFeed.json()).build) : null;
+  const now = Date.now() / 1000;
+  let doomed: string[];
+  if (ciNativesOnly) {
+    doomed = keys.filter((key) => expiredCiNative(key, now) === true);
+    console.log(`${doomed.length} expired CI chunks to delete`);
+  } else {
+    const feeds: Record<string, string> = {};
+    for (const feed of FEEDS) {
+      const response = await api(`${objects}/${encodeObjectKey(feed)}`);
+      if (response.status === 404) continue;
+      if (!response.ok) throw new Error(`${feed}: ${response.status}`);
+      feeds[feed] = await response.text();
+    }
+    // The web archives: the build the feed names (none: the feed is not out yet, and nothing goes).
+    const webFeed = await api(`${objects}/${encodeObjectKey(WEB_FEED)}`);
+    if (!webFeed.ok && webFeed.status !== 404) throw new Error(`${WEB_FEED}: ${webFeed.status}`);
+    const webNamed = webFeed.ok ? Number((await webFeed.json()).build) : null;
 
-  const doomed = doomedOf(keys, feeds, webNamed, Date.now() / 1000, putAt);
-  // (said each, so that what goes can be read from CI's log)
-  for (const key of aheadOf(keys, feeds)) console.log(`above its feed: ${key}`);
-  console.log(`${keys.length} files, ${doomed.length} old installers, deltas, blockmaps, archives, staged files, symbols and readers to delete`);
+    doomed = doomedOf(keys, feeds, webNamed, now, putAt);
+    // (said each, so that what goes can be read from CI's log)
+    for (const key of aheadOf(keys, feeds)) console.log(`above its feed: ${key}`);
+    console.log(`${keys.length} files, ${doomed.length} old installers, deltas, blockmaps, archives, staged files, symbols and readers to delete`);
+  }
   for (const key of doomed) console.log(`  ${key}`);
   if (dryRun) process.exit(0);
   const { deleted, left } = await deleteDoomed(doomed, (key) => api(`${objects}/${encodeObjectKey(key)}`, { method: "DELETE" }));

@@ -9,9 +9,6 @@ inputs:
   tools:
     description: Tools to restore and build
     default: 'mbc chk detlint apk testexe'
-  farview:
-    description: "Fetch Farview's client"
-    default: 'true'
 runs:
   using: composite
   steps:
@@ -195,11 +192,3 @@ runs:
           case " ${{ inputs.tools }} " in *" $t "*) sh "libs/ui/scripts/$t" path >/dev/null ;; esac
         done
         [[ " ${{ inputs.tools }} " != *" pack "* ]] || sh libs/ui/scripts/ui path >/dev/null
-    # Farview's client at the commit apps/mbui/farview.pin names (apps/mbui/scripts/farview.sh), where this checkout has
-    # the app: the job's FARVIEW_DEPLOY_KEY (its workflow's env, from the repository's secret); none (a fork's run), the
-    # app does not build, and what does not build it goes on. Not for a job that builds no app (`farview: 'false'`)
-    - if: inputs.farview == 'true'
-      shell: bash
-      run: |
-        f="$GITHUB_WORKSPACE/apps/mbui/scripts/farview.sh"
-        if [ -f "$f" ]; then sh "$f" || echo "::warning::Farview's client not fetched: the app does not build here"; fi

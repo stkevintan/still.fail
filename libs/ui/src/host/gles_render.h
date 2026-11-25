@@ -380,13 +380,20 @@ static const char *FS =
     "    float u = max(d - 1.20 * hs, 0.0) / (2.80 * hs);\n"
     "    s_cap = 1.28 * 1.847264 * u * u * exp(-u) * medialTaper;\n"
     "    H_opt = 10.6 * hs * refScale;\n"
+    "  } else if (role == 3) {\n"
+    "    float r_lip = 2.15 * hs;\n"
+    "    float L_lip = 0.42 * hs;\n"
+    "    s_lip = 14.5 * exp(-d / L_lip) * (1.0 - smoothstep(0.45 * r_lip, r_lip, d)) * medialTaper;\n"
+    "    float u = max(d - 1.95 * hs, 0.0) / (1.80 * hs);\n"
+    "    float capCut = 1.0 - smoothstep(7.5 * hs, 10.5 * hs, d);\n"
+    "    s_cap = 1.16 * 1.847264 * u * u * exp(-u) * capCut * medialTaper;\n"
+    "    H_opt = 10.6 * hs * refScale;\n"
     "  } else {\n"
     "    float r_lip = 2.15 * hs;\n"
     "    float L_lip = 0.42 * hs;\n"
     "    s_lip = 14.5 * exp(-d / L_lip) * (1.0 - smoothstep(0.45 * r_lip, r_lip, d)) * medialTaper;\n"
     "    float u = max(d - 1.95 * hs, 0.0) / (2.60 * hs);\n"
-    "    float cap_amp = (role == 3) ? 1.16 : 0.56;\n"
-    "    s_cap = cap_amp * 1.847264 * u * u * exp(-u) * medialTaper;\n"
+    "    s_cap = 0.56 * 1.847264 * u * u * exp(-u) * medialTaper;\n"
     "    H_opt = 10.6 * hs * refScale;\n"
     "  }\n"
     "  return vec2(mb_snell_intersect(s_lip - s_cap, ior, H_opt), s_lip);\n"
@@ -755,6 +762,8 @@ static const char *FS =
     "    float darkMixSaved = 0.0;\n"
     "    float lightExtra = 0.0;\n"
     "    bool hasLightEm = false;\n"
+    "    float colChroma = max(max(col.r, col.g), col.b) - min(min(col.r, col.g), col.b);\n"
+    "    float applePanelGate = smoothstep(0.005, 0.02, abs(v_pad.z)) * (1.0 - smoothstep(0.035, 0.05, abs(v_pad.z))) * (1.0 - smoothstep(0.04, 0.08, colChroma));\n"
     "    if (is_clear) {\n"
     "      // iOS 27 clear liquid glass: col.a == 0.0 keeps crystal-clear zero-veil optical lens\n"
     "      // (lifted tab-bar / toggle / slider thumb & loupe), while Glass::clear() (col.a ~ 0.102)\n"
@@ -814,7 +823,8 @@ static const char *FS =
     "      emission = mix(vec3(30.0 / 255.0), vec3(24.0 / 255.0), extra);\n"
     "      transmittance = mix(0.50, 0.0, extra);\n"
     "      lift = mix(0.24, 0.0, extra);\n"
-    "      chromaGain = mix(1.05, 0.0, extra);\n"
+    "      float darkChromaFloor = 0.45 * (1.0 - smoothstep(0.72, 0.84, col.a)) * applePanelGate;\n"
+    "      chromaGain = mix(1.05, darkChromaFloor, extra);\n"
     "      contourStr = 0.88; contourDirAmt = 1.0; bevelShadowStr = 0.036;\n"
     "      glintLum = 1.6; glintFaceGain = 0.0; glintVib = 2.85;\n"
     "    } else {\n"
@@ -848,6 +858,18 @@ static const char *FS =
     "      refractColor = mix(refractColor, lowC, dampW);\n"
     "    }\n"
     "    if (hasLightEm) {\n"
+    "      if (!is_adaptive && lightExtra > 0.001) {\n"
+    "        float brightRelax = smoothstep(0.55, 1.00, luma(lowC)) * (1.0 - smoothstep(0.80, 0.95, col.a)) * applePanelGate;\n"
+    "        if (brightRelax > 0.001) {\n"
+    "          float effExtra = lightExtra * mix(1.0, 0.45, brightRelax);\n"
+    "          float effDens = 0.30 + 0.70 * effExtra;\n"
+    "          lightEmSaved = vec3(253.0 / 255.0, 252.0 / 255.0, 253.0 / 255.0) * effDens;\n"
+    "          lightExtra = effExtra;\n"
+    "          transmittance = mix(0.70, 0.0, effExtra);\n"
+    "          lift = mix(0.16, 0.0, effExtra);\n"
+    "          chromaGain = mix(1.18, 0.0, effExtra);\n"
+    "        }\n"
+    "      }\n"
     "      float bgChroma = max(lowC.r, max(lowC.g, lowC.b)) - min(lowC.r, min(lowC.g, lowC.b));\n"
     "      float lightVeilScale = mix(1.0, 0.65, smoothstep(0.08, 0.40, bgChroma) * regMix * (1.0 - lightExtra));\n"
     "      emission = mix(lightEmSaved * lightVeilScale, darkEmSaved, darkMixSaved);\n"
@@ -895,7 +917,6 @@ static const char *FS =
     "      baseColor = mix(legacyBase, regProjected, regMix);\n"
     "    }\n"
     "    // Honor explicit chromatic tints (non-neutral) if a caller requests colored liquid glass\n"
-    "    float colChroma = max(max(col.r, col.g), col.b) - min(min(col.r, col.g), col.b);\n"
     "    if (colChroma > 0.08 && col.a > 0.001) {\n"
     "      float tintW = col.a <= 0.45\n"
     "        ? col.a * 0.5\n"
@@ -977,6 +998,13 @@ static const char *FS =
     "        float regRim = (regRimGain * regLobe * regEase * (0.185 * regCore + 0.020 * regTail) * (1.0 - regHairline * regShadeMask) + spot * 0.10 * regCore) * regMix;\n"
     "        vec3 rimTarget = clamp(vec3(1.0) + (refractColor - vec3(Y)) * 1.0, 0.0, 1.0);\n"
     "        result = mix(result, rimTarget, clamp(regRim, 0.0, 1.0));\n"
+    "        float panelRimGate = smoothstep(0.48, 0.65, col.a) * (1.0 - smoothstep(0.85, 0.98, col.a)) * applePanelGate;\n"
+    "        if (panelRimGate > 0.001) {\n"
+    "          float cushionEnv = smoothstep(0.55, 1.35, inward) * exp(-max(0.0, inward - 1.0) / 3.0);\n"
+    "          float cushionLobe = max(regLobe, 0.42);\n"
+    "          float cushionStr = (is_dark ? 0.06 : 0.62) * cushionLobe * cushionEnv * panelRimGate * regMix;\n"
+    "          result = mix(result, vec3(1.0), clamp(cushionStr, 0.0, 1.0));\n"
+    "        }\n"
     "      }\n"
     "      if (regHairline > 0.001) {\n"
     "        float regShade = (is_dark ? 0.0 : 0.13) * regShadeMask;\n"
@@ -2792,7 +2820,7 @@ static void ad_forget(void) {
   ad_rb_prev_copied = 0;
   ad_rb_cur = -1;
   ad_last_time = 0.0;
-  ad_settling = 0;
+  __atomic_store_n(&ad_settling, 0, __ATOMIC_RELEASE);
   gad_n = 0;
 }
 
@@ -3112,12 +3140,12 @@ static void ad_finalize_frame(int whole_frame, uint64_t serial) {
     if (s->settle_left > 0.0 && ad_conv_serial[i] >= s->settle_serial) s->settle_left = 0.0;
     if (s->settle_left > 0.0) settling = 1;
   }
-  ad_settling = settling;
+  __atomic_store_n(&ad_settling, settling, __ATOMIC_RELEASE);
 }
 
 static void gl_set_fixed_dt(double dt) { ad_fixed_dt = dt > 0.0 ? dt : 0.0; }
 static void gl_adaptive_reset(void) { ad_forget(); }
-static int gl_adaptive_settling(void) { return ad_settling; }
+static int gl_adaptive_settling(void) { return __atomic_load_n(&ad_settling, __ATOMIC_ACQUIRE); }
 
 static void slots_invalidate(void) {
   for (int i = 0; i < MB_GLASS_SLOTS; i++) slots[i].valid = 0;
@@ -3745,7 +3773,7 @@ static void gl_present_kept(int32_t count, double r, double g, double b) {
   ad_cur_dt = ad_next_dt();
   ad_frame_serial++;
   int whole = !dirty_told || dirty_whole || pictures_missing || views_drawn_in();
-  if (!whole && ad_settling) {
+  if (!whole && gl_adaptive_settling()) {
     for (int i = 0; i < MB_ADAPTIVE_MAX; i++) {
       if (ad_slots[i].active && ad_slots[i].settle_left > 0.0)
         gl_dirty_add(ad_slots[i].cx - ad_slots[i].hx - 4.0, ad_slots[i].cy - ad_slots[i].hy - 4.0,
@@ -3772,7 +3800,7 @@ static void gl_present_kept(int32_t count, double r, double g, double b) {
 }
 
 static int gl_adaptive_step(void) {
-  if (!ad_settling || kept_count <= 0 || !fbuf) return 0;
+  if (!gl_adaptive_settling() || kept_count <= 0 || !fbuf) return 0;
   ad_poll_readbacks();
   int need = 0;
   for (int i = 0; i < MB_ADAPTIVE_MAX; i++) {
@@ -3785,7 +3813,7 @@ static int gl_adaptive_step(void) {
     }
   }
   if (!need) {
-    ad_settling = 0;
+    __atomic_store_n(&ad_settling, 0, __ATOMIC_RELEASE);
     if (!offscreen) {
       if (canvas_ok && canvas_fb) canvas_shown();
       else draw_kept();

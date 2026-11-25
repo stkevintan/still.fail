@@ -674,26 +674,17 @@ pub fn app_tree(src : Source) -> (@view.View) -> Unit {
       @sfbase.language_from_prefs(p)
       @sfbase.stale_build_from_prefs(p)
     })
-    // (the experimental switches of 实验性功能 (Farview 原生标签页渲染, 看板), told before any page of nodes
+    // (the experimental switches of 实验性功能 (看板), told before any page of nodes
     // is made and in the frame a switch is pressed: what is chosen here before the core answers is read with the prefs)
     root.reacts(
       fn() {
         let p = src.topic("prefs", {}).get().value
-        (
-          p,
-          @settings.feature_from(p, "farviewNative"),
-          @settings.feature_from(p, "board"),
-        )
+        (p, @settings.feature_from(p, "board"))
       },
       fn(t) { @sfbase.features_from_prefs(t.0) },
     )
     // (the window's keys as the core's prefs keep them on this device, changed as they are: settings' keymap.mbt)
-    // (and a Farview tab's page's caret's keys, where it has the keyboard: fvclient's stage)
-    root.keymap(By(fn() {
-      let m = @settings.keymap_of(src.topic("prefs", {}).get().value)
-      { ..m, bindings: [..@stage.page_keys(), ..m.bindings] }
-    }))
-    |> ignore
+    root.keymap(By(fn() { @settings.keymap_of(src.topic("prefs", {}).get().value) })) |> ignore
     // (the window's height, what a chat list's and a chat's first window are worked out of wherever they are first
     // asked: sfbase's first_window, chat_first_window; said before any page of nodes is made, as it asks; none before
     // the first frame gives it, what was known kept till then). Read as window().1, not window_h(): the first frame sets
@@ -708,14 +699,15 @@ pub fn app_tree(src : Source) -> (@view.View) -> Unit {
     // (what the app shows, by its kind alone, told the window thread's journal as it changes, on every host: what its
     // hang reports and the device's performance record say; no frame asks it)
     root.reacts(fn() { @sfbase.shown_kind(shown_now(src, root.window_w())) }, @ui.journal_shows)
-    // (to a core that counts what people use (client/core-ts's use-counts.ts: a build given still.fail's project, on
-    // its own cloud), whether to, as the settings say, and while it does what the app shows by that same kind alone,
-    // each as it changes; nothing to one that does not, as under a Tester or a replay)
-    root.reacts(fn() { @sfbase.counts_told(src, @sfbase.shown_kind(shown_now(src, root.window_w()))) }, fn(told) {
+    // (to a core that sends its traces (client/core-ts's trace.ts, on any cloud) or counts what people use (its
+    // use-counts.ts: a build given still.fail's project, on its own cloud), whether to, as the settings say, and while
+    // it counts, what the app shows by that same kind alone, each as it changes; nothing to one that does neither, as
+    // under a Tester or a replay. A core started again is told again by the client: Client::restarted)
+    root.reacts(fn() { @sfbase.reports_told(src, @sfbase.shown_kind(shown_now(src, root.window_w()))) }, fn(told) {
       match told {
         Some((on, kind)) => {
           (src.call)("client.reports", { "on": Json::boolean(on) }, @sfbase.answer_unread)
-          if on {
+          if kind != "" {
             (src.call)("client.shown", { "page": Json::string(kind) }, @sfbase.answer_unread)
           }
         }
@@ -925,12 +917,8 @@ fn lone_tree(v : @view.View, src : Source) -> Unit {
     o.over(Is(true)) |> ignore
     o.box(fn(b) { b.height(By(fn() { Some(window_band_now()) })).moves_window(Is(true)) |> ignore }) |> ignore
   })
-  // a Farview tab, while 实验性功能's Farview 原生标签页渲染 is on: drawn here (sfpages' farview_tab_node), under the
-  // window's top band, as the panel and the phone's page draw it: its page laid out at this window's width as it
-  // changes, not a picture of the tab; any other station's screen (and a Farview tab with it turned off) its page,
-  // sfpages' screen_node, a terminal its own (sfpages' terminal_node), closing it closing the window. Made again for
-  // another page put in its place (a child popup followed, another tab chosen, another of the station's switched to
-  // from its bar: sfbase's lone_page_replace)
+  // a station's screen (sfpages' screen_node), a terminal (sfpages' terminal_pane_node), or a chat's tab, closing it
+  // closing the window. Made again for another page put in its place (sfbase's lone_page_replace)
   // (the window's own, as what started it put it: lone_page, the run's own for a run of its own)
   let shown = @sfbase.lone_shown.val
   shown.set(@sfbase.lone_page.val)
@@ -946,37 +934,17 @@ fn lone_tree(v : @view.View, src : Source) -> Unit {
   v.pick(
     at_once=true,
     fn() {
-      let native = @sfbase.farview_native.get()
       match shown.get() {
-        Some(Screen(at)) => Some((@sfbase.Page::Screen(at), native && @sfpages.farview_screen(at.screen)))
-        Some(Terminal(at)) => Some((@sfbase.Page::Terminal(at), false))
-        Some(SideTab(f)) => Some((@sfbase.Page::SideTab(f), false))
+        Some(Screen(at)) => Some(@sfbase.Page::Screen(at))
+        Some(Terminal(at)) => Some(@sfbase.Page::Terminal(at))
+        Some(SideTab(f)) => Some(@sfbase.Page::SideTab(f))
         _ => None
       }
     },
     fn(q, shown) {
       q.over(Is(true)) |> ignore
       match shown {
-        // (each page's one bar the window's top row, a bar's height at its top, clear of the window's buttons (a Mac's at
-        // its left, Windows' and Linux's at its right) and moving the window where nothing of it takes the press; no way
-        // back, the window's own close (⌘W) closing it)
-        Some((Screen(at), true)) =>
-          @sfpages.farview_pane_node(
-            q,
-            src,
-            at.station,
-            at.screen,
-            title=at.title,
-            on_switch=@sfbase.lone_page_replace,
-            on_close=fn() { lone_closed(q) },
-            bar_pads=fn() {
-              (
-                if @ui.window_keys_left_now() { lone_bar_buttons_in } else { lone_bar_in },
-                @sf.window_end_in(lone_bar_in, roots=@ui.tree_corner_roots_now()),
-              )
-            },
-          )
-        Some((Screen(at), false)) => {
+        Some(Screen(at)) => {
           q.grow(Is(1.0)).min_height(Is(Some(0.0))) |> ignore
           // (its frame the window's top, no band over it at any width: the band is a phone's laid out Small, never a
           // window of its own's)
@@ -988,7 +956,7 @@ fn lone_tree(v : @view.View, src : Source) -> Unit {
             on_close=fn() { lone_closed(q) },
           )
         }
-        Some((Terminal(at), _)) =>
+        Some(Terminal(at)) =>
           @sfpages.terminal_pane_node(
             q,
             src,
@@ -1002,7 +970,7 @@ fn lone_tree(v : @view.View, src : Source) -> Unit {
         // (a chat's tab: drawn as over the whole window, its bar the window's top row, clear of the window's buttons as
         // that bar keeps itself (sf's viewer_bar_node), its 移到侧边 putting it back beside the chat and closing the
         // window: sfdesk's tab_window_node)
-        Some((SideTab(f), _)) => @sfdesk.tab_window_node(q, src, f, top=fn() { 0.0 }, on_close=fn() { lone_closed(q) })
+        Some(SideTab(f)) => @sfdesk.tab_window_node(q, src, f, top=fn() { 0.0 }, on_close=fn() { lone_closed(q) })
         Some(_) => ()
         None => ()
       }
@@ -1036,11 +1004,7 @@ pub fn lone_window_tree(src : Source, wid : Int) -> (@view.View) -> Unit {
     root.reacts(fn() { src.topic("prefs", {}).get().value }, @sfbase.language_from_prefs)
     // (its own size from the menu bar and its keys, apart from the first window's)
     @sfdesk.zoom_actions(root, src, kept=false)
-    root.keymap(By(fn() {
-      let m = @settings.keymap_of(src.topic("prefs", {}).get().value)
-      { ..m, bindings: [..@stage.page_keys(), ..m.bindings] }
-    }))
-    |> ignore
+    root.keymap(By(fn() { @settings.keymap_of(src.topic("prefs", {}).get().value) })) |> ignore
     @ui.set_tree_theme(@sf.ui_theme_now)
     root.sides(By(fn() { sides_room() })) |> ignore
     root.transitions_only() |> ignore
@@ -1084,14 +1048,6 @@ pub fn lone_window_tree(src : Source, wid : Int) -> (@view.View) -> Unit {
     @sf.window_keys_node(root, whole=fn() { true })
   }
 }
-
-///|
-/// How far in from the window's sides a window of its own's one bar stands (lone_tree's Farview tab): at its corner
-/// alone, after a Mac's own buttons at its left.
-let lone_bar_in : Double = 12.0
-
-///|
-let lone_bar_buttons_in : Double = 84.0
 
 ///|
 /// The old frame round window `wid`'s old views (lone_window_tree's): still.fail's theme as the first window's frame has

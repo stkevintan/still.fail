@@ -179,7 +179,6 @@ const OVER_WRITE: Record<string, number> = {
   "edit held": 16,
   "said held": 16,
   "archived held": 120,
-  "member held": 24,
   "message six pages held": 32,
 };
 /// The changes whose reading grows faster than what they write and send with a knob, by the same names and knob: what

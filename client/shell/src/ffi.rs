@@ -124,15 +124,51 @@ pub unsafe extern "C" fn sf_shell_set_media(shell: *const Shell, media: Media, c
 /// `shell` from `sf_shell_start`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sf_shell_screen_ack(shell: *const Shell, call: u64, ts: f64) -> u8 {
+    // SAFETY: forwarded with the same `shell` contract.
+    unsafe { sf_shell_screen_ack_wait(shell, call, ts, 0) }
+}
+
+/// Same as `sf_shell_screen_ack`, carrying the viewer's hold time `wait_us` (µs) before the frame was shown or dropped.
+/// When the view receives media datagrams from a station that advertises datagram ACK support, sends an unreliable
+/// `KIND_ACK` datagram synchronously with zero head-of-line blocking; otherwise falls back to the reliable stream.
+///
+/// # Safety
+/// `shell` from `sf_shell_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sf_shell_screen_ack_wait(shell: *const Shell, call: u64, ts: f64, wait_us: u32) -> u8 {
+    if shell.is_null() {
+        return 0;
+    }
     // SAFETY: made by `sf_shell_start`.
     let shell = unsafe { &*shell };
+    screen_ack(shell, call, ts, wait_us)
+}
+
+pub(crate) fn screen_ack(shell: &Shell, call: u64, ts: f64, wait_us: u32) -> u8 {
     let halves = shell.inner.handles.lock().unwrap().values().find_map(|h| match h {
         Handle::IStream(halves) if halves.tap.lock().unwrap().as_ref().is_some_and(|t| t.call == call) => Some(halves.clone()),
         _ => None,
     });
     let Some(halves) = halves else { return 0 };
-    let mut frame = vec![17u8, 0, 0, 0, 8];
-    frame.extend_from_slice(&(ts.max(0.0).floor() as u64).to_be_bytes());
+    let ts_u64 = ts.max(0.0).floor() as u64;
+    if let Some(target) = halves.ack_dgram.lock().unwrap().as_ref() {
+        if target.peer_capable.load(std::sync::atomic::Ordering::Relaxed) {
+            let dgram = crate::screen_dgram::ack_bytes(target.token, ts_u64, wait_us);
+            if target.conn.send_datagram(bytes::Bytes::copy_from_slice(&dgram)).is_ok() {
+                tally("tap.acks");
+                tally("tap.acks.dgram");
+                return 1;
+            }
+        }
+    }
+    let frame = if wait_us == 0 {
+        let mut frame = Vec::with_capacity(13);
+        frame.extend_from_slice(&[crate::screen_dgram::FRAME_ACK, 0, 0, 0, 8]);
+        frame.extend_from_slice(&ts_u64.to_be_bytes());
+        frame
+    } else {
+        crate::screen_dgram::ack_frame_bytes(ts_u64, wait_us).to_vec()
+    };
     tally("tap.acks");
     shell.runtime.spawn(async move {
         if let Some(send) = halves.send.lock().await.as_mut() {

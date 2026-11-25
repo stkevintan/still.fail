@@ -403,6 +403,7 @@ pub fn act(
   params : Json,
   done? : String = "",
   then? : (Json) -> Unit = fn(_) {  },
+  failed? : () -> Unit = fn() {  },
 ) -> Unit {
   (core.call)(name, params, fn(r) {
     match r {
@@ -418,6 +419,7 @@ pub fn act(
         then(v)
       }
       Err(e) => {
+        failed()
         // The person turned the system's prompt down themselves: nothing to say (as vault_act).
         if text(Some(e), "code") == "user_cancelled" {
           return

@@ -2084,8 +2084,6 @@ let zh : Map[String, String] = {
   "web-pages.experimental.title": "实验性功能",
   "web-pages.experimental.lead": "尚未打磨完成或仍在探索的新功能，默认关闭且仅在本机生效；遇到问题可随时关闭回退。",
   "web-pages.experimental.enabledCount": "已开 {n} 项",
-  "web-pages.experimental.farviewNative.title": "Farview 原生标签页渲染",
-  "web-pages.experimental.farviewNative.description": "浏览器标签页由本机直接排版绘制，滚动和输入即时响应；遇到显示异常可随时关掉切回截图画面",
   "web-pages.experimental.board.title": "对话列表看板视图",
   "web-pages.experimental.board.description": "在主页按状态、机器或成员分列查看对话并管理待派发事项；关闭后自动退回普通对话列表",
   "web-pages.experimental.selectionIntent.title": "戳一下",

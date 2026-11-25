@@ -914,6 +914,8 @@ pub struct Tree {
   mut measuring_tabular : Bool?
   /// estimated horizontal origin (points) of the node currently being measured (Tree::measuring_origin_x)
   mut measuring_origin_x : Double
+  /// whether `measuring_origin_x` is a real estimated node origin (false outside `View::words` measure callbacks)
+  mut measuring_origin_known : Bool
   /// whether each node keeps where in the source it was made and its properties said (source.mbt): a Tester's tree
   sources : Bool
   nodes : Array[Node]
@@ -1076,6 +1078,8 @@ pub struct Tree {
   tapped_anywhere : @signals.Signal[Int]
   /// how many times its words were measured anew for all of them (Tree::words_again: the system's size of words)
   words_redone : @signals.Signal[Int]
+  /// per-slot revision counters for surgical preview-face invalidation (Tree::words_again_for_face), without bumping global words_redone
+  face_redone : FixedArray[@signals.Signal[Int]]
   /// how many times what its rows left out changed, as it was laid out (View::left_out)
   outs_said : @signals.Signal[Int]
   /// what its rows left out changed in this layout, to be told as it is done
@@ -1655,6 +1659,7 @@ pub fn Tree::new(
     held_anywhere: @signals.signal(false, same=fn(a, b) { a == b }),
     tapped_anywhere: @signals.signal(0, same=fn(a, b) { a == b }),
     words_redone: @signals.signal(0, same=fn(a, b) { a == b }),
+    face_redone: FixedArray::makei(32, fn(_) { @signals.signal(0, same=fn(a, b) { a == b }) }),
     outs_said: @signals.signal(0, same=fn(a, b) { a == b }),
     outs_changed: false,
     sizes_due: false,
@@ -1675,6 +1680,7 @@ pub fn Tree::new(
     measure_runs_least,
     measuring_tabular: None,
     measuring_origin_x: 0.0,
+    measuring_origin_known: false,
     sources,
     nodes: [],
     free: [],
@@ -8015,8 +8021,10 @@ pub fn View::words(
     let scale = if nd.words_as_said { 1.0 } else { (tree.env.words_scale)() }
     let prev_tabular = tree.measuring_tabular
     let prev_origin_x = tree.measuring_origin_x
+    let prev_origin_known = tree.measuring_origin_known
     tree.measuring_tabular = look.words_tabular
     tree.measuring_origin_x = tree.estimate_origin_x(at)
+    tree.measuring_origin_known = true
     // (its line breaks kept where it says so, View::words_breaks: measured on their lines as written)
     let (mw, mh) = if look.runs.is_empty() {
       (if look.words_breaks { tree.measure_kept } else { tree.measure })(look.words, look.words_look, offered, scale)
@@ -8048,6 +8056,7 @@ pub fn View::words(
     }
     tree.measuring_tabular = prev_tabular
     tree.measuring_origin_x = prev_origin_x
+    tree.measuring_origin_known = prev_origin_known
     match wm {
       Exactly => (w, mh)
       _ => (mw, mh)

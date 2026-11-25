@@ -22,13 +22,12 @@ pub(all) enum Orientation {
 }
 
 ///|
-/// What can take the focus, as built: its id, its roving group (0 none), the layer it is in (0 the page), its node,
-/// which keys press it (1 Enter, 2 Space), whether a press with the pointer gives it the focus.
+/// What can take the focus, as built: its id, its roving group (0 none), the layer it is in (0 the page), which
+/// keys press it (1 Enter, 2 Space), whether a press with the pointer gives it the focus.
 struct Focusable {
   id : Int
   group : Int
   layer : Int
-  node : Int
   keys : Int
   on_press : Bool
   /// the old view it was built in (view_host.mbt's island_allows), none in a layer of its own
@@ -80,7 +79,7 @@ pub fn Ctx::focusable(self : Ctx, id : Int, node? : Int = -1, keys? : Int = 3, o
     Some(isl) => self.focus_island[id] = isl
     None => self.focus_island.remove(id)
   }
-  let f = { id, group: self.group_cur, layer: self.layer_cur, node, keys, on_press, island }
+  let f = { id, group: self.group_cur, layer: self.layer_cur, keys, on_press, island }
   // (held by its node the way there's 1: by `node`, else by the id's, made or to be: Ctx::id_built)
   let i = if node >= 0 {
     node
@@ -104,7 +103,7 @@ fn Ctx::focusables_found(self : Ctx) -> Unit {
   self.focusables.clear()
   for i in self.tree_order() {
     match self.nodes[i].focus {
-      Some(f) => self.focusables.push({ ..f, node: i })
+      Some(f) => self.focusables.push(f)
       None => ()
     }
   }

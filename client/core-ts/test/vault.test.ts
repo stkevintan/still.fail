@@ -2594,7 +2594,8 @@ async function ownRig(o: { begun: boolean }) {
   await r.core.inner.runner.run(Effect.ignore(r.core.inner.adb.personal().refresh("s1")));
   await r.host.time.pass(500, 10);
   r.take();
-  return { ...r, station: st };
+  // (the same object: `restart` gives it the core started anew)
+  return Object.assign(r, { station: st });
 }
 
 test("no safe mode: the vault is the person's own, encrypted; 开启 begins their own lock with this device on it, the vault in one press, and what a station kept unencrypted from before moved into it and deleted there", async () => {
@@ -4119,3 +4120,130 @@ test("FB-51: the box key ended with no screen lock set again yet: no box key kep
   assert.equal((await r.ask("vault.open", { item: put.id })).plain.fields.value, "b");
   r.core.close();
 });
+
+for (const held of [["box"], ["signer"], ["box", "signer"]] as string[][]) {
+test(`restarted, this device's ${held.join(" and ")} key${held.length > 1 ? "s" : ""} not read yet: its vaults and cards say keyed as the run before read them, never 未获此库授权 for the moment`, async () => {
+  const r = await rig();
+  r.putLock();
+  const { made: id } = await r.ask("vault.setup", {});
+  const put = await r.ask("vault.putItem", { vault: id, plain: { kind: "token", name: "GitHub", fields: { value: "ghp_x" } }, listing: { name: "gh", kind: "token", modes: ["proxy"], hosts: ["api.github.com"], lasts: "hour" } });
+  await r.ask("vault.lock", {});
+  const req: Request = { id: "r_use", ws: "ws", vault: id, item: put.id, session: "k1", chat: "7", mode: "proxy", hosts: ["api.github.com"], reason: "use it", box: boxPublic(fill(9)), at: 1, status: "pending", owner: "a@x.com" };
+  r.st.requests.push(req);
+  r.push("vault-request", req);
+  await r.host.time.pass(500);
+  r.take();
+  // The keys read slowly at start (a desktop's storage and keychain busy as the app opens).
+  let letGo = () => {};
+  const gate = new Promise<void>((done) => (letGo = done));
+  const get = r.host.storageGet.bind(r.host);
+  const secure = r.host.secureGet!.bind(r.host);
+  if (held.includes("box")) r.host.storageGet = (k) => (k === BOX_PUB ? Effect.flatMap(Effect.promise(() => gate), () => get(k)) : get(k));
+  if (held.includes("signer")) r.host.secureGet = (k, o) => (k === Signer.KEY ? Effect.flatMap(Effect.promise(() => gate), () => secure(k, o)) : secure(k, o));
+  await r.restart();
+  const vaults = await r.watch(1, { topic: "vaults", workspace: "ws" });
+  const shown = () => [vaults().setUp, vaults().canSign, vaults().vaults.map((v: any) => v.keyed), vaults().requests.map((x: any) => x.noKey ?? false)];
+  const answers = () => askAnswers(r.core.inner, "ws", [{ request: "r_use", save: false }, { request: "r_save", save: true }]);
+  assert.deepEqual(shown(), [true, true, [true], [false]]);
+  assert.deepEqual(answers(), [{ answer: "approve", lasts: "hour" }, { answer: "approve" }]);
+  letGo();
+  await r.host.time.pass(500);
+  r.take();
+  assert.deepEqual(shown(), [true, true, [true], [false]]);
+  assert.deepEqual(answers(), [{ answer: "approve", lasts: "hour" }, { answer: "approve" }]);
+  r.core.close();
+});
+}
+
+/// Reads of `key` held at the next start till `letGo` (a desktop's storage or keychain busy as the app opens).
+function heldAtStart(r: Awaited<ReturnType<typeof rig>>, key: string): () => void {
+  let letGo = () => {};
+  const gate = new Promise<void>((done) => (letGo = done));
+  const get = r.host.storageGet.bind(r.host);
+  r.host.storageGet = (k) => (k === key ? Effect.flatMap(Effect.promise(() => gate), () => get(k)) : get(k));
+  return () => {
+    r.host.storageGet = get;
+    letGo();
+  };
+}
+
+test("restarted, a secret to keep sealed to this device's older box key: said sealed elsewhere (notHere) before the box key is read as after", async () => {
+  const r = await rig();
+  r.putLock();
+  const { made: id } = await r.ask("vault.setup", {});
+  const req: Request = { id: "r_s", ws: "ws", vault: id, item: "i_new", session: "k1", chat: "7", mode: "proxy", hosts: [], reason: "keep", box: boxPublic(fill(9)), at: 1, status: "pending", owner: "a@x.com", save: { kind: "token", name: "N", modes: ["proxy"], hosts: [] }, sealed: [{ device: "ab".repeat(32), box: boxPublic(fill(77)), secret: "x" }] };
+  r.st.requests.push(req);
+  r.push("vault-request", req);
+  await r.host.time.pass(500);
+  r.take();
+  const letGo = heldAtStart(r, BOX_PUB);
+  await r.restart();
+  const vaults = await r.watch(1, { topic: "vaults", workspace: "ws" });
+  const shown = () => [askAnswers(r.core.inner, "ws", [{ request: "r_s", save: true }]), vaults().requests.map((x: any) => [x.id, x.notHere ?? false, x.noKey ?? false])];
+  assert.deepEqual(shown(), [[{ answer: "notHere" }], [["r_s", true, false]]]);
+  letGo();
+  await r.host.time.pass(500);
+  r.take();
+  assert.deepEqual(shown(), [[{ answer: "notHere" }], [["r_s", true, false]]]);
+  r.core.close();
+});
+
+test("a key that could not be read at a start is not kept as none: the start after shows the vault keyed while it reads it", async () => {
+  const r = await rig();
+  r.putLock();
+  await r.ask("vault.setup", {});
+  await r.host.time.pass(500);
+  for (const what of ["box", "signer"]) {
+    const get = r.host.storageGet.bind(r.host);
+    const secure = r.host.secureGet!.bind(r.host);
+    if (what === "box") r.host.storageGet = (k) => (k === BOX_PUB ? Effect.fail(new HostError("busy")) : get(k));
+    else r.host.secureGet = (k, o) => (k === Signer.KEY ? Effect.fail(new HostError("busy")) : secure(k, o));
+    await r.restart();
+    r.host.storageGet = get;
+    r.host.secureGet = secure;
+    let letGo = () => {};
+    const gate = new Promise<void>((done) => (letGo = done));
+    if (what === "box") r.host.storageGet = (k) => (k === BOX_PUB ? Effect.flatMap(Effect.promise(() => gate), () => get(k)) : get(k));
+    else r.host.secureGet = (k, o) => (k === Signer.KEY ? Effect.flatMap(Effect.promise(() => gate), () => secure(k, o)) : secure(k, o));
+    await r.restart();
+    const vaults = await r.watch(1, { topic: "vaults", workspace: "ws" });
+    assert.deepEqual([vaults().setUp, vaults().canSign, vaults().vaults.map((v: any) => v.keyed)], [true, true, [true]], what);
+    letGo();
+    await r.host.time.pass(500);
+    r.take();
+    assert.deepEqual([vaults().setUp, vaults().canSign, vaults().vaults.map((v: any) => v.keyed)], [true, true, [true]], what);
+    r.host.storageGet = get;
+    r.host.secureGet = secure;
+  }
+  r.core.close();
+});
+
+for (const what of ["pinned", "key"]) {
+  test(`no safe mode, restarted, the person's own lock (${what === "pinned" ? "its chain pinned" : "this device's key in it"}) not read from the device yet: the vaults' page waits, the cards answered as keyed, never 未获此库授权 or 开启 for the moment`, async () => {
+    const r = await ownRig({ begun: true });
+    const { made } = await r.ask("vault.setup", {});
+    const put = await r.ask("vault.putItem", { vault: made, plain: { kind: "token", name: "GitHub", fields: { value: "x" } }, listing: { name: "gh", kind: "token", modes: ["proxy"], hosts: ["a.com"], lasts: "hour" } });
+    const req: Request = { id: "r_use", ws: "ws", vault: made, item: put.id, session: "k1", chat: "7", mode: "proxy", hosts: ["a.com"], reason: "use", box: boxPublic(fill(9)), at: 1, status: "pending", owner: "a@x.com" };
+    r.st.requests.push(req);
+    r.push("vault-request", req);
+    await r.host.time.pass(500);
+    r.take();
+    // (read 1.5 s into the start, by the core's clock)
+    const key = what === "pinned" ? `personal-lock-${hex(utf8("s1"))}` : "personal-signer-id";
+    const get = r.host.storageGet.bind(r.host);
+    r.host.storageGet = (k) => (k === key ? Effect.flatMap(Effect.sleep("1500 millis"), () => get(k)) : get(k));
+    await r.restart();
+    const vaults = await r.watch(1, { topic: "vaults", workspace: "ws" });
+    const answers = () => askAnswers(r.core.inner, "ws", [{ request: "r_use", save: false }, { request: "r_x", save: true }]);
+    assert.equal(vaults(), undefined, "no value yet: the page waits");
+    assert.deepEqual(answers(), [{ answer: "approve", lasts: "hour" }, { answer: "approve" }]);
+    // 允许 pressed meanwhile: it waits for the lock as read from the device, and goes through by it.
+    assert.equal(r.core.inner.adb.personal().loaded("s1"), false);
+    assert.equal((await r.ask("vault.approve", { request: "r_use", scope: "once" })).request, "r_use");
+    r.host.storageGet = get;
+    await r.host.time.pass(500, 10);
+    r.take();
+    assert.deepEqual([vaults().setUp, vaults().canSign, vaults().vaults.map((v: any) => v.keyed)], [true, true, [true]]);
+    r.core.close();
+  });
+}

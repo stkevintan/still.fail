@@ -92,6 +92,8 @@ fn transport(congestion: &str) -> Result<QuicTransportConfig, String> {
     Ok(QuicTransportConfig::builder()
         .congestion_controller_factory(controller)
         .stream_receive_window(iroh::endpoint::VarInt::from_u32(4 * 1024 * 1024))
+        .datagram_send_buffer_size(4 * 1024 * 1024)
+        .datagram_receive_buffer_size(Some(4 * 1024 * 1024))
         .default_path_keep_alive_interval(std::time::Duration::from_secs(1))
         .default_path_max_idle_timeout(std::time::Duration::from_secs(3))
         .max_idle_timeout(Some(iroh::endpoint::VarInt::from_u32(10 * 60_000).into()))
@@ -590,6 +592,9 @@ impl Inner {
                     tap: Mutex::default(),
                     media_out: Default::default(),
                     media_in: Default::default(),
+                    ack_dgram: Mutex::default(),
+                    ack_in: Default::default(),
+                    ack_ready: tokio::sync::watch::channel(false).0,
                 };
                 Ok(Answer::json(json!({ "id": self.keep(Handle::IStream(Arc::new(halves))) })))
             }

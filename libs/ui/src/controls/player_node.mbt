@@ -1247,8 +1247,9 @@ fn speed_node(
 }
 
 ///|
-/// A timeline in `parent` (the old player's desk_play_timeline and phone_timeline): `h` high, its track (4, round) in from
-/// its sides by player_track_inset, what has come over it at 22%, what has played and its head (12 round) in the words;
+/// A timeline in `parent` (the old player's desk_play_timeline and phone_timeline): `h` high, thumb-free Apple-style
+/// fluid scrubber track (5pt rest, 7.5pt hover, 10pt active via paint-layer `ground_drawn`, laid == 0, 0 extra glass)
+/// with full-width buffered segment at 22% and active fill in the words ink;
 /// pressed or dragged along, the picture goes with it frame by frame (Media::scrub_to: each time where a frame starts,
 /// where the file's frames are read), sent there once let go (Media::scrub_done). `pointed`: with a mouse over it (or
 /// dragging), the time where it points over it (a desktop's). Read out a slider of where it is.
@@ -1279,7 +1280,8 @@ fn timeline_node(
       _ => part(s.position)
     }
   }
-  let inset = player_track_inset
+  let swell = @motion.NodeWay::new(0.0)
+  let active = @signals.signal(false)
   parent.box(made_for=loc, fn(room) {
     room.height(Is(Some(h))) |> ignore
     room.by_room(fn(held, r) {
@@ -1288,17 +1290,29 @@ fn timeline_node(
       // time where a frame starts), the frame let go on sent once let go (Media::scrub_done); let go before that where
       // it went down, a tap, there at once,
       // played or paused as it was (Media::seek_near: the nearest key frame)
+      let inset = player_track_inset
       let pending : Ref[(Double, Double)?] = Ref(None)
       let dragging = Ref(false)
       let held_due : Ref[() -> Unit] = Ref(fn() {  })
+      let frac_at = fn(x : Double, w : Double) -> Double? {
+        if w <= 0.0 {
+          None
+        } else {
+          Some(dmin(1.0, dmax(0.0, (x - inset) / dmax(1.0, w - 2.0 * inset))))
+        }
+      }
       let at_x = fn(x : Double, w : Double) -> Double? {
         let d = @signals.untracked(dur)
         if d <= 0.0 {
           None
         } else {
-          let k = dmin(1.0, dmax(0.0, (x - inset) / dmax(1.0, w - 2.0 * inset)))
-          let fr = @signals.untracked(fn() { pn.frames() })
-          Some(fr.snap(k * d))
+          match frac_at(x, w) {
+            Some(k) => {
+              let fr = @signals.untracked(fn() { pn.frames() })
+              Some(fr.snap(k * d))
+            }
+            None => None
+          }
         }
       }
       let scrub = fn(x : Double, w : Double) {
@@ -1315,6 +1329,7 @@ fn timeline_node(
         guard node.val is Some(on) else { return }
         match e.kind {
           Down => {
+            active.set(true)
             pending.val = Some((e.x, e.w))
             dragging.val = false
             // (held a frame, as a frame drawn while it is down saw it held (Ctx::pressed): moved through the time from
@@ -1341,6 +1356,7 @@ fn timeline_node(
           }
           Up => {
             (held_due.val)()
+            held_due.val = fn() {  }
             if dragging.val || pn.p.scrubbing() is Some(_) {
               let target = at_x(e.x, e.w)
               pn.act(fn() { pn.p.scrub_done(at?=target) })
@@ -1356,14 +1372,17 @@ fn timeline_node(
             }
             pending.val = None
             dragging.val = false
+            active.set(false)
           }
           Off => {
             (held_due.val)()
+            held_due.val = fn() {  }
             if pn.p.scrubbing() is Some(_) {
               pn.act(fn() { pn.p.scrub_done() })
             }
             pending.val = None
             dragging.val = false
+            active.set(false)
           }
         }
       }
@@ -1388,57 +1407,67 @@ fn timeline_node(
         disabled=fn() { !pn.on() || dur() <= 0.0 },
         value_text=fn(k) { clock(k * @signals.untracked(dur)) },
         drag~,
-        fn(v, _) {
+        fn(v, sl) {
           node.val = Some(v)
           v.owns(fn() { (held_due.val)() }) |> ignore
-          v.height(Is(Some(h))).padding(Is((inset, 0.0, inset, 0.0))).lines_up(Is(None)) |> ignore
-          v.box(fn(g) { g.grow(Is(1.0)) |> ignore }) |> ignore
-          v.box(fn(track) {
-            track
-            .height(Is(Some(@ui.Space::S1.px())))
-            .radius(Is(@ui.Space::S1.px() / 2.0))
-            .clips(Is(true))
-            .ground(By(fn() { alpha(ink().text, media_track_share) }))
-            |> ignore
-            track.box(fn(c) {
-              c
-              .over(Is(true))
-              .width_share(By(fn() { part(pn.status().buffered) }))
-              .ground(By(fn() { alpha(ink().text, media_came_share) }))
-              |> ignore
-            })
-            |> ignore
-            track.box(fn(c) {
-              c.over(Is(true)).width_share(By(shown)).ground(By(fn() { ink().text })) |> ignore
-            })
-            |> ignore
+          v.reacts(at_start=false, fn() { sl.disabled() }, fn(off) {
+            if off {
+              (held_due.val)()
+              held_due.val = fn() {  }
+              if pn.p.scrubbing() is Some(_) {
+                pn.act(fn() { pn.p.scrub_done() })
+              }
+              pending.val = None
+              dragging.val = false
+              active.set(false)
+            }
           })
-          |> ignore
-          v.box(fn(g) { g.grow(Is(1.0)) |> ignore }) |> ignore
-          // the head where it is
-          v.box(fn(hd) {
-            let d = 2.0 * media_head_r
-            hd
-            .over(Is(true))
-            .width(Is(Some(d)))
-            .height(Is(Some(d)))
-            .radius(Is(media_head_r))
-            .shadow(By(fn() { (media_head_blur, media_head_fall, @ui.tree_theme().color(ShadowC)) }))
-            .ground(By(fn() { ink().text }))
-            .offset(By(fn() { (inset + shown() * dmax(0.0, r.width() - 2.0 * inset) - media_head_r, h / 2.0 - media_head_r) }))
-            .presses(Is(false))
-            |> ignore
+          v.reacts(
+            at_start=false,
+            fn() {
+              if sl.disabled() {
+                0.0
+              } else if active.get() {
+                1.0
+              } else if v.pointer_within() {
+                0.5
+              } else {
+                0.0
+              }
+            },
+            fn(target) { swell.go(v, target, @motion.snappy_damped) },
+          )
+          v.height(Is(Some(h))).padding(Is((inset, 0.0, inset, 0.0))).lines_up(Is(None)) |> ignore
+          let look = @glass.ScrubberLook::new(
+            track_color=fn() { alpha(ink().text, media_track_share) },
+            fill_color=fn() { ink().text },
+            buffered=Some(fn() { part(pn.status().buffered) }),
+            buffered_color=Some(fn() { alpha(ink().text, media_came_share) }),
+            focus_shown=Some(fn() { sl.focus_shown() }),
+            focus_color=Some(fn() { @ui.tree_theme().focus }),
+            disabled=fn() { sl.disabled() },
+          )
+          v.box(fn(slot) {
+            slot.height(Is(Some(h))).fills_across(Is(true)) |> ignore
+            @glass.fluid_scrubber_look(
+              slot,
+              fn(_) { shown() },
+              fn(n) { swell.shown(n) },
+              look,
+              loc~,
+            )
           })
           |> ignore
           // the time where the pointer is over it, over it
           if pointed {
             let at = fn() {
               let x = v.pointer_piece(fn(x, _) { x.round().to_int() })
-              if x < 0 || !pn.on() || dur() <= 0.0 || !(v.pointer_within() || v.pressed()) {
+              if x < 0 || !pn.on() || dur() <= 0.0 || r.width() <= 0.0 || !(v.pointer_within() || v.pressed()) {
                 None
               } else {
                 let track = dmax(1.0, r.width() - 2.0 * inset)
-                Some((x.to_double(), dmin(1.0, dmax(0.0, (x.to_double() - inset) / track))))
+                let cx = dmin(dmax(inset, r.width() - inset), dmax(inset, x.to_double()))
+                Some((cx, dmin(1.0, dmax(0.0, (cx - inset) / track))))
               }
             }
             // det-ok(width-structure): shown while the pointer is over the track; the width only places it, never shows it
@@ -2224,46 +2253,96 @@ fn volume_node(parent : @view.View, pn : PlayerNode, ink : () -> MediaInk, tips 
     )
     |> ignore
     if slider {
+      let step = 1.0 / desk_volume_steps
+      let swell = @motion.NodeWay::new(0.0)
+      let active = @signals.signal(false)
+      let last_vol : Ref[Int] = Ref(-1)
+      let set_at = fn(d : @view.Drag) {
+        if d.w > 0.0 {
+          let frac = dmin(1.0, dmax(0.0, d.x / d.w))
+          let pct = (frac * 100.0).round().to_int()
+          let prev = if last_vol.val >= 0 {
+            last_vol.val
+          } else {
+            (@signals.untracked(shown) * 100.0).round().to_int()
+          }
+          if pct != prev {
+            last_vol.val = pct
+            pn.act(fn() { pn.p.set_volume(pct.to_double() / 100.0) })
+            pn.wake()
+          }
+        }
+      }
+      let drag = fn(d : @view.Drag) {
+        match d.kind {
+          Down => {
+            active.set(true)
+            last_vol.val = (@signals.untracked(shown) * 100.0).round().to_int()
+            set_at(d)
+          }
+          Moved => set_at(d)
+          Up => {
+            set_at(d)
+            active.set(false)
+            last_vol.val = -1
+          }
+          Off => {
+            active.set(false)
+            last_vol.val = -1
+          }
+        }
+      }
       @headless.slider(
         r,
         fn() { t("web-pages.drive.player.volume") },
         shown,
         min=0.0,
         max=1.0,
-        step=1.0 / desk_volume_steps,
+        step~,
         fn(to) {
           pn.act(fn() { pn.p.set_volume(to) })
           pn.wake()
         },
+        thumb_room=0.0,
         disabled=fn() { !pn.on() },
-        fn(v, _) {
-          v.width(Is(Some(desk_volume_w))).height(Is(Some(media_timeline_h()))).lines_up(Is(None)) |> ignore
-          v.box(fn(g) { g.grow(Is(1.0)) |> ignore }) |> ignore
-          v.box(fn(track) {
-            track
-            .height(Is(Some(@ui.Space::S1.px())))
-            .radius(Is(@ui.Space::S1.px() / 2.0))
-            .clips(Is(true))
-            .ground(By(fn() { alpha(ink().text, media_track_share) }))
-            |> ignore
-            track.box(fn(c) { c.over(Is(true)).width_share(By(shown)).ground(By(fn() { ink().text })) |> ignore }) |> ignore
+        drag~,
+        fn(v, sl) {
+          v.reacts(at_start=false, fn() { sl.disabled() }, fn(off) {
+            if off {
+              active.set(false)
+              last_vol.val = -1
+            }
           })
-          |> ignore
-          v.box(fn(g) { g.grow(Is(1.0)) |> ignore }) |> ignore
-          v.box(fn(hd) {
-            let d = 2.0 * media_small_head_r
-            hd
-            .over(Is(true))
-            .width(Is(Some(d)))
-            .height(Is(Some(d)))
-            .radius(Is(media_small_head_r))
-            .shadow(By(fn() { (media_head_blur, media_head_fall, @ui.tree_theme().color(ShadowC)) }))
-            .ground(By(fn() { ink().text }))
-            .offset(By(fn() { (shown() * desk_volume_w - media_small_head_r, media_timeline_h() / 2.0 - media_small_head_r) }))
-            .presses(Is(false))
-            |> ignore
-          })
-          |> ignore
+          v.reacts(
+            at_start=false,
+            fn() {
+              if sl.disabled() {
+                0.0
+              } else if active.get() {
+                1.0
+              } else if v.pointer_within() {
+                0.5
+              } else {
+                0.0
+              }
+            },
+            fn(target) { swell.go(v, target, @motion.snappy_damped) },
+          )
+          v.width(Is(Some(desk_volume_w))).height(Is(Some(media_timeline_h()))).lies_along(Is(Middle)) |> ignore
+          let look = @glass.ScrubberLook::new(
+            track_color=fn() { alpha(ink().text, media_track_share) },
+            fill_color=fn() { ink().text },
+            focus_shown=Some(fn() { sl.focus_shown() }),
+            focus_color=Some(fn() { @ui.tree_theme().focus }),
+            disabled=fn() { sl.disabled() },
+          )
+          @glass.fluid_scrubber_look(
+            v,
+            fn(_) { shown() },
+            fn(n) { swell.shown(n) },
+            look,
+            loc~,
+          )
         },
       )
       |> ignore
@@ -2787,11 +2866,4 @@ fn phone_fingers(
 ///|
 /// How big a still is decoded for the stage (sfbase's stage_px).
 let player_px : Int = 4096
-
-///|
-/// The timeline's head's shadow (Tailwind's sm, as media_head_disc's).
-let media_head_blur : Double = 2.0
-
-///|
-let media_head_fall : Double = 1.0
 

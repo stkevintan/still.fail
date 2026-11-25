@@ -486,6 +486,45 @@ test("calls_are_traces_and_nothing_goes_out_when_tracing_is_off", async () => {
   core.close();
 });
 
+/// A core as an app starts it (no `reports` given): until the app says what its settings say (`client.reports`), its
+/// requests ask stations and the cloud to record nothing and its spans stay here; said on, they go; said off by the
+/// prefs it keeps (where the host keeps no switch of its own), a core started again sends none from its start.
+test("a_core_sends_no_trace_before_its_app_says_its_settings_and_none_from_the_start_where_they_say_off", async () => {
+  const s = stationHost({ ...base(), "GET /memory": { global: "" } });
+  const { host } = s;
+  const core = await Core.create(host, { clock: host.time.clock, sample: 1, wire: () => new HostWire(host) });
+  await host.time.pass(500);
+  const ui = core.connect();
+  call(core, ui, 1, "memory.get", { station: "ws/st" });
+  await host.settle();
+  await host.time.pass(EXPORT_MS * 3);
+  assert.equal(exports(host).length, 0, "nothing sent before it is told");
+  const before = host.requests.map((r) => header(r, "traceparent")).filter((p): p is string => p !== undefined);
+  assert.ok(before.length > 0 && before.every((p) => p.endsWith("-00")), JSON.stringify(before));
+  call(core, ui, 2, "client.reports", { on: true });
+  await host.settle();
+  await host.time.pass(EXPORT_MS + 100);
+  const names = exports(host).flatMap(spansOf).map((x) => x.name);
+  assert.ok(names.includes("memory.get") && names.includes("GET /admin/api/memory"), JSON.stringify(names));
+  // Off in the prefs it keeps: the next core started here sends nothing, told nothing.
+  call(core, ui, 3, "prefs.set", { reports: "off" });
+  await host.settle();
+  await core.close();
+  const sentBefore = exports(host).length;
+  const again = await Core.create(host, { clock: host.time.clock, sample: 1, wire: () => new HostWire(host) });
+  await host.time.pass(500);
+  const ui2 = again.connect();
+  const asked = host.requests.length;
+  call(again, ui2, 1, "memory.get", { station: "ws/st" });
+  await host.settle();
+  await host.time.pass(EXPORT_MS * 3);
+  assert.equal(exports(host).length, sentBefore, "said off by its prefs: nothing sent");
+  assert.equal(again.inner.tracer.on, false);
+  const after = host.requests.slice(asked).map((r) => header(r, "traceparent")).filter((p): p is string => p !== undefined);
+  assert.ok(after.every((p) => p.endsWith("-00")), JSON.stringify(after));
+  await again.close();
+});
+
 test("a_failure_let_go_of_is_a_failed_span_of_its_own", async () => {
   const { host, core } = await started({ ...base(), "GET /memory": { global: "" } }, 1);
   await host.time.pass(EXPORT_MS + 100);
@@ -4383,5 +4422,83 @@ test("default TUI applies to new Claude chats and a manual override lasts for on
     await ask(host, again, again.connect(), 1, "newChat.create", { station: at.station });
     assert.equal(stationPosted(host, "/sessions").at(-1).tui === true, available);
     again.close();
+  }
+});
+
+test("a start is one span of its own: how long each step took, and till the person's own lock was read from the device", async () => {
+  const { host, core } = await started(base(), 1);
+  try {
+    await host.settle();
+    await host.time.pass(EXPORT_MS + 100);
+    const spans = exports(host).flatMap(spansOf).filter((s) => s.name === "core.start");
+    assert.equal(spans.length, 1, "told once");
+    const start = spans[0]!;
+    assert.equal(start.parentSpanId, undefined);
+    const attrs = Object.fromEntries(start.attributes.map((a: J) => [a.key, Object.values(a.value)[0]]));
+    for (const step of ["accounts", "db", "install", "attend", "rest"]) assert.ok(Number(attrs[`stillfail.ms.${step}`]) >= 0, `${step}: ${JSON.stringify(attrs)}`);
+    assert.deepEqual([Number(attrs["stillfail.accounts"]), attrs["stillfail.own_lock_read"]], [1, true]);
+    for (const read of ["own_lock", "signer", "box", "start"]) assert.ok(Number(attrs[`stillfail.${read}_ms`]) >= 0, `${read}: ${JSON.stringify(attrs)}`);
+    assert.ok(!JSON.stringify(start).includes("a@x.com"));
+  } finally {
+    core.close();
+  }
+});
+
+test("a start reads this device's notice settings beside its databases, not after them", async () => {
+  const s = stationHost(base());
+  // (the notice settings and the device's values each answered 200 ms after they are asked, as a disk busy at a start answers)
+  const get = s.host.storageGet.bind(s.host);
+  s.host.storageGet = (k) => (k === "notify" || k.startsWith("device/") ? Effect.flatMap(Effect.sleep("200 millis"), () => get(k)) : get(k));
+  let core: Core | undefined;
+  const making = Core.create(s.host, { clock: s.host.time.clock, sample: 0, wire: () => new HostWire(s.host) }).then((c) => void (core = c));
+  try {
+    await s.host.time.pass(250);
+    assert.notEqual(core, undefined, "made in one wait of 200 ms, not one after the other");
+  } finally {
+    await s.host.time.pass(1_000);
+    await making;
+    core?.close();
+  }
+});
+
+test("a start reads what the device keeps of the person's own lock beside its databases, not after them", async () => {
+  const s = stationHost(base());
+  // (the person's own lock and the device's values each answered 200 ms after they are asked, as a disk busy at a start
+  // answers)
+  const get = s.host.storageGet.bind(s.host);
+  s.host.storageGet = (k) => (k.startsWith("personal-") || k.startsWith("device/") ? Effect.flatMap(Effect.sleep("200 millis"), () => get(k)) : get(k));
+  let core: Core | undefined;
+  const making = Core.create(s.host, { clock: s.host.time.clock, sample: 0, wire: () => new HostWire(s.host) }).then((c) => void (core = c));
+  try {
+    await s.host.time.pass(300);
+    assert.notEqual(core, undefined);
+    const subs = core!.inner.accounts.list().map((a) => a.sub);
+    assert.equal(subs.length, 1);
+    assert.ok(core!.inner.adb.personal().loaded(subs[0]!), "read in one wait of 200 ms, not one after the databases' own");
+  } finally {
+    await s.host.time.pass(1_000);
+    await making;
+    core?.close();
+  }
+});
+
+test("a start whose own lock is never read from the device is told at the deadline, as not read", async () => {
+  const { host, core } = await started(base(), 1, undefined, (x) => {
+    const get = x.host.storageGet.bind(x.host);
+    x.host.storageGet = (k) => (k.startsWith("personal-lock-") ? Effect.never : get(k));
+  });
+  try {
+    await host.time.pass(25_000);
+    await host.time.pass(EXPORT_MS + 100);
+    assert.equal(exports(host).flatMap(spansOf).filter((s) => s.name === "core.start").length, 0, "not told before the deadline");
+    await host.time.pass(5_000 + EXPORT_MS + 100);
+    const spans = exports(host).flatMap(spansOf).filter((s) => s.name === "core.start");
+    assert.equal(spans.length, 1);
+    const attrs = Object.fromEntries(spans[0]!.attributes.map((a: J) => [a.key, Object.values(a.value)[0]]));
+    assert.equal(attrs["stillfail.own_lock_read"], false);
+    assert.equal(attrs["stillfail.own_lock_ms"], undefined);
+    assert.ok(Number(attrs["stillfail.start_ms"]) >= 30_000, JSON.stringify(attrs));
+  } finally {
+    core.close();
   }
 });

@@ -5,8 +5,9 @@
 // and end by closing them, with no deploy and nothing else to sign in to. Only the repository's own can label an issue,
 // and a workflow sends them here when one changes (receiveIncidents).
 import { DurableObject } from "cloudflare:workers";
+import { AwsClient } from "aws4fetch";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
-import { bearerToken, denied, nowSeconds, reply } from "./auth";
+import { bearerToken, denied, nowSeconds, readJson, reply } from "./auth";
 import type { Env } from "./env";
 import { relayName, relayUrls, type Relays } from "./relays";
 
@@ -154,20 +155,54 @@ async function repositoryClaims(request: Request, env: Env): Promise<({ reposito
   return { ...claims, repository: claims.repository };
 }
 
+const NATIVE_CHUNK_MAX = 32 * 1024 * 1024;
+const NATIVE_UPLOAD_TTL_SECONDS = 120;
+
 /** A push of this repository's pipeline can stage a chunk for its other runners. The read receipt names only that chunk. */
 export async function stageNative(request: Request, env: Env): Promise<Response> {
+  const direct = request.method === "POST";
+  const { RELEASES: releases, CI_NATIVE_R2_SIGNER: signer, CI_NATIVE_R2_ACCOUNT_ID: account } = env;
+  if (!releases || (direct && (!signer || !account))) {
+    return reply({ error: "not_found" }, 404);
+  }
   const claims = await repositoryClaims(request, env);
-  if (claims === undefined || !env.RELEASES) return reply({ error: "not_found" }, 404);
+  if (claims === undefined) return reply({ error: "not_found" }, 404);
   if (claims === "unavailable") return reply({ error: "jwks_unavailable" }, 503);
   if (!claims || typeof claims.ref !== "string" || !claims.ref.startsWith("refs/heads/") || claims.ref === "refs/heads/main" ||
     (claims.event_name !== "push" && claims.event_name !== "workflow_dispatch") ||
     claims.workflow_ref !== `${claims.repository}/.github/workflows/pipeline.yml@${claims.ref}` ||
     typeof claims.sha !== "string" || !/^[0-9a-f]{40}$/.test(claims.sha)) return denied();
-  const length = Number(request.headers.get("content-length"));
-  if (!request.body || !Number.isSafeInteger(length) || length <= 0 || length > 32 * 1024 * 1024) return reply({ error: "invalid_length" }, 400);
+  const length = direct
+    ? (await readJson(request, 256).catch(() => null))?.length
+    : Number(request.headers.get("content-length"));
+  if (!request.body || typeof length !== "number" || !Number.isSafeInteger(length) || length <= 0 || length > NATIVE_CHUNK_MAX) {
+    return reply({ error: "invalid_length" }, 400);
+  }
   const receipt = `${nowSeconds()}-${claims.sha}/${crypto.randomUUID()}`;
-  await env.RELEASES.put(`staged/ci-natives/${receipt}`, request.body);
-  return reply({ receipt }, 201, { "cache-control": "no-store" });
+  const key = `staged/ci-natives/${receipt}`;
+  if (direct) {
+    try {
+      const { accessKeyId, secretAccessKey, sessionToken, expiresAt } = JSON.parse(signer!);
+      if (!/^[a-f0-9]{32}$/.test(account!) || ![accessKeyId, secretAccessKey, sessionToken].every((value) =>
+        typeof value === "string" && value.length > 0) || !Number.isSafeInteger(expiresAt)) {
+        return reply({ error: "r2_signer_unavailable" }, 503);
+      }
+      if (expiresAt < nowSeconds() + NATIVE_UPLOAD_TTL_SECONDS) return reply({ error: "not_found" }, 404);
+      const client = new AwsClient({ accessKeyId, secretAccessKey, sessionToken, service: "s3", region: "auto" });
+      const target = new URL(`https://${account}.r2.cloudflarestorage.com/stillfail-releases/${key}`);
+      target.searchParams.set("X-Amz-Expires", String(NATIVE_UPLOAD_TTL_SECONDS));
+      const signed = await client.sign(target.href, {
+        method: "PUT",
+        headers: { "content-length": String(length), "if-none-match": "*" },
+        aws: { signQuery: true, allHeaders: true },
+      });
+      return reply({ receipt, upload: signed.url }, 201);
+    } catch {
+      return reply({ error: "r2_signer_unavailable" }, 503);
+    }
+  }
+  await releases.put(key, request.body);
+  return reply({ receipt }, 201);
 }
 
 /**

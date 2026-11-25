@@ -2,6 +2,7 @@
 // connection): listed to the agents, and each a screen source (`browser:<targetId>`) in the station's Screens while it
 // is there, saying the session that opened it (owners.ts) and closed from a person's app.
 import { ScreenRefused } from "../screens/hub.ts";
+import type { HelperApp } from "../helper/app.ts";
 import type { ClipType, ScreenSource, ScreenView, Screens, ViewOptions } from "../screens/source.ts";
 import { wall } from "../ops/fibers.ts";
 import type { Cdp, CdpEvent } from "./cdp.ts";
@@ -52,6 +53,8 @@ export type TabsParts = {
   ownPasskey?: (targetId: string, rpId: string) => boolean;
   /// Claims and tracks persistent user pages (`user-tabs.ts`) so they stay separate from agent tabs.
   userTabs?: UserTabHooks;
+  /// macOS still.fail Helper for hardware H.264 browser encoding (`frames.encode`).
+  helper?: HelperApp | null;
 };
 
 /// Chrome tells of a tab's new address, not of its title, which the page sets after (Chrome 155): the titles are read
@@ -154,9 +157,15 @@ export class Tabs {
   #rereads: (() => void)[] = [];
   /// Who waits for a tab to come (`arrived`), by its target id.
   readonly #awaited = new Map<string, (() => void)[]>();
+  #helper: HelperApp | null;
 
   constructor(p: TabsParts) {
     this.#p = p;
+    this.#helper = p.helper ?? null;
+  }
+
+  useHelper(helper: HelperApp | null) {
+    this.#helper = helper;
   }
 
   /// Starts watching: the tabs there now come as created.
@@ -326,7 +335,7 @@ export class Tabs {
     options: ViewOptions,
     hooks: { sized(size: { width: number; height: number }): void; used?(): void; ended?(): void },
   ): Promise<ScreenView> {
-    if (!options.codecs.includes("jpeg")) throw new Error("A tab of the station's browser is seen as JPEG frames, which this viewer does not take.");
+    if (!options.codecs.includes("jpeg") && !options.codecs.includes("h264")) throw new Error("A tab of the station's browser is seen as H.264 or JPEG frames, which this viewer does not take.");
     if (this.#closed) throw new Error("This tab is closed.");
     const cdp = await this.#p.connect();
     try {
@@ -335,6 +344,7 @@ export class Tabs {
       let active: ActiveView | null = null;
       const view: TabView = new TabView({
         cdp, session: sessionId, targetId, now: () => this.#p.now(),
+        helper: this.#helper,
         ...(this.#p.ownPasskey ? { ownPasskey: (rpId: string) => this.#p.ownPasskey!(targetId, rpId) } : {}),
         sized: (size) => hooks.sized(size),
         used: () => hooks.used?.(),

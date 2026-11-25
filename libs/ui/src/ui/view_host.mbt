@@ -373,22 +373,33 @@ pub fn set_view_app(make : (@view.View) -> Unit, around? : (Ctx) -> Unit, theme?
 }
 
 ///|
-/// Run a `(Double, Double)` measure callback with `measuring_origin_x` set to `origin_x` and restored afterward.
-fn with_measuring_origin_pair(origin_x : Double, f : () -> (Double, Double)) -> (Double, Double) {
-  let prev = measuring_origin_x.val
+/// Run a `(Double, Double)` measure callback with `measuring_origin_x` and `measuring_origin_known` set and restored
+/// afterward.
+fn with_measuring_origin_pair(
+  origin_x : Double,
+  known : Bool,
+  f : () -> (Double, Double),
+) -> (Double, Double) {
+  let prev_x = measuring_origin_x.val
+  let prev_known = measuring_origin_known.val
   measuring_origin_x.val = origin_x
+  measuring_origin_known.val = known
   let r = f()
-  measuring_origin_x.val = prev
+  measuring_origin_x.val = prev_x
+  measuring_origin_known.val = prev_known
   r
 }
 
 ///|
-/// Run a `Double` measure callback with `measuring_origin_x` set to `origin_x` and restored afterward.
-fn with_measuring_origin_double(origin_x : Double, f : () -> Double) -> Double {
-  let prev = measuring_origin_x.val
+/// Run a `Double` measure callback with `measuring_origin_x` and `measuring_origin_known` set and restored afterward.
+fn with_measuring_origin_double(origin_x : Double, known : Bool, f : () -> Double) -> Double {
+  let prev_x = measuring_origin_x.val
+  let prev_known = measuring_origin_known.val
   measuring_origin_x.val = origin_x
+  measuring_origin_known.val = known
   let r = f()
-  measuring_origin_x.val = prev
+  measuring_origin_x.val = prev_x
+  measuring_origin_known.val = prev_known
   r
 }
 
@@ -409,6 +420,12 @@ fn view_made_now(make : (@view.View) -> Unit) -> Unit {
     match made.val {
       Some(tree) => tree.measuring_origin_x()
       None => 0.0
+    }
+  }
+  let measuring_ox_known = fn() {
+    match made.val {
+      Some(tree) => tree.measuring_origin_known()
+      None => false
     }
   }
   let t = @view.Tree::new(
@@ -439,32 +456,32 @@ fn view_made_now(make : (@view.View) -> Unit) -> Unit {
       })
     },
     measure=fn(words, look, width, scale) {
-      with_measuring_origin_pair(measuring_ox(), fn() {
+      with_measuring_origin_pair(measuring_ox(), measuring_ox_known(), fn() {
         view_words_measure(words, look, width, scale, tabular=measuring_tab())
       })
     },
     measure_runs=fn(runs, look, set, width, scale) {
-      with_measuring_origin_pair(measuring_ox(), fn() {
+      with_measuring_origin_pair(measuring_ox(), measuring_ox_known(), fn() {
         view_runs_measure(runs, look, set, width, scale, tabular=measuring_tab())
       })
     },
     measure_kept=fn(words, look, width, scale) {
-      with_measuring_origin_pair(measuring_ox(), fn() {
+      with_measuring_origin_pair(measuring_ox(), measuring_ox_known(), fn() {
         view_words_measure_kept(words, look, width, scale, tabular=measuring_tab())
       })
     },
     measure_runs_kept=fn(runs, look, set, width, scale) {
-      with_measuring_origin_pair(measuring_ox(), fn() {
+      with_measuring_origin_pair(measuring_ox(), measuring_ox_known(), fn() {
         view_runs_measure_kept(runs, look, set, width, scale, tabular=measuring_tab())
       })
     },
     measure_runs_least=fn(runs, look, set, scale) {
-      with_measuring_origin_double(measuring_ox(), fn() {
+      with_measuring_origin_double(measuring_ox(), measuring_ox_known(), fn() {
         view_runs_least(runs, look, set, scale, tabular=measuring_tab())
       })
     },
     measure_shorter=fn(words, shorter, look, width, scale) {
-      with_measuring_origin_double(measuring_ox(), fn() {
+      with_measuring_origin_double(measuring_ox(), measuring_ox_known(), fn() {
         view_shorter_measure(words, shorter, look, width, scale, tabular=measuring_tab())
       })
     },
@@ -494,7 +511,7 @@ fn view_made_now(make : (@view.View) -> Unit) -> Unit {
         None => Mover::new()
       }
       tree_glide_movers[column] = (who, ends)
-      g().moving(who, ({ ends, } : TreeGlide) as &Moving, what="a list's fling, the tree's")
+      g().moving(who, ({ ends, } : TreeGlide).as_moving(), what="a list's fling, the tree's")
     },
     fn(column) { tree_glide_movers.remove(column) },
   )
@@ -858,7 +875,7 @@ pub fn words_ahead(
     return 0.0
   }
   let text = view_words_set(words, look, kept)
-  with_measuring_origin_double(origin_x, fn() {
+  with_measuring_origin_double(origin_x, true, fn() {
     let (size, line, style, spacing) = (
       view_sp(scale, look.size),
       view_line(scale, look),
@@ -885,9 +902,9 @@ pub fn words_ahead(
     } else {
       tl
     }
-    // Re-queue laid phases even when layout_text hit `s.lay` at a prior origin_x;
-    // identical (key, phase) pairs are deduplicated by `glyphs_ahead_laid_keys`.
-    laid_ahead(tl.shaped.keys, fn(c) { tl.xs[c] + tl.shaped.pad })
+    // Explicitly re-enqueue laid phases even when layout_text hit its memo at the same origin_x, so callers can retry
+    // after host backpressure/eviction (`AHEAD_MOST`) that does not bump `glyph_moves`.
+    laid_ahead(tl.shaped.keys, fn(c) { tl.xs[c] + tl.shaped.pad }) |> ignore
     tl.w
   })
 }
@@ -989,6 +1006,8 @@ fn view_rich(
     max_lines: look.max_lines,
     faces: if set.words { faces_style(true, 0) } else { view_words_style(tabular~) },
     shaped_in: words_shaped_in.get(),
+    cjk_override: set.cjk,
+    code_cjk_override: set.code_cjk,
   }
 }
 
@@ -1125,6 +1144,15 @@ pub fn Ctx::runs_extent(
 fn view_words_rescaled() -> Unit {
   match view_app.val {
     Some(t) => t.words_again()
+    None => ()
+  }
+}
+
+///|
+/// Surgically invalidate only tree nodes referencing preview `face` without disturbing global `words_redone`.
+fn view_words_rescaled_for_face(face : Int) -> Unit {
+  match view_app.val {
+    Some(t) => t.words_again_for_face(face)
     None => ()
   }
 }
@@ -3269,6 +3297,35 @@ fn glyphs_held_drawn() -> Unit {
 }
 
 ///|
+/// A round mark's ground on a line of `lay` whose box is `rect` (a passage lit: View::runs_marks with `round`): about
+/// its words' ink, the same room above it as below, never taller than its line. The line's box sets its words where
+/// its font says (CJK glyphs sit above its middle), so a ground as tall as the box stood further below them than above.
+fn mark_round_rect(
+  lay : RichLayout,
+  rect : (Double, Double, Double, Double),
+  size : Double,
+  cjk : Bool,
+) -> (Double, Double, Double, Double) {
+  let (x, y, w, h) = rect
+  guard size > 0.0 else { return rect }
+  let mid = y + h / 2.0
+  let mut l = -1
+  for i in 0..<lay.line_y.length() {
+    if mid >= lay.line_y[i] && mid < lay.line_y[i] + lay.line_h[i] {
+      l = i
+      break
+    }
+  }
+  guard l >= 0 else { return rect }
+  // (the ink's middle: CJK glyphs' 0.38 em over the baseline, a Latin cap's half: optical_shift_y's)
+  let ink_mid = lay.line_y[l] + lay.line_base[l] - (if cjk { 0.38 * size } else { 0.715 * size * 0.5 })
+  // (as far above it as below, within its line: the nearer of the line's edges sets both)
+  let half = dmax(0.0, dmin(0.75 * size, dmin(ink_mid - y, y + h - ink_mid)))
+  guard half > 0.0 else { return rect }
+  (x, ink_mid - half, w, 2.0 * half)
+}
+
+///|
 /// Optical vertical shift (in points) for a single line of text within its line box:
 /// aligns the visual ink midpoint (Latin cap-height center or CJK em-box center) with the geometric line midpoint
 /// (`line_h * 0.5`), clamped to `[-0.18 * size, 0.18 * size]`.
@@ -3509,6 +3566,9 @@ fn Ctx::view_made(self : Ctx, tree : @view.Tree, c : @view.Content, edge_after? 
     // paragraph's, Ctx::paint_rich's)
     // (what of it is marked, under all of it and under what is picked of it: View::runs_marks, each part its ground and
     // where it says so a line at its foot, each line of it where that line is drawn)
+    // (a round mark's ground round its words' ink, as tall above it as below: mark_round_rect)
+    let mark_size = view_sp(words_scale, c.words_look.size)
+    let mark_cjk = c.runs_marks.iter().any(fn(m) { m.round > 0.0 }) && words_cjk(lay.text)
     for m in c.runs_marks {
       if m.from < m.to {
         // (one unified inline-span painter: merges adjacent rects on the same line when rounded, rounds start/end caps as
@@ -3531,8 +3591,9 @@ fn Ctx::view_made(self : Ctx, tree : @view.Tree, c : @view.Content, edge_after? 
         } else {
           raw
         }
-        for li, rect in lines {
-          let dx = rich_shift_at(lay, rect.1 + rect.3 / 2.0, center_in)
+        for li, line_rect in lines {
+          let rect = if m.round > 0.0 { mark_round_rect(lay, line_rect, mark_size, mark_cjk) } else { line_rect }
+          let dx = rich_shift_at(lay, line_rect.1 + line_rect.3 / 2.0, center_in)
           if (m.ground & 0xFFL) != 0L {
             self.emit_rect(rect.0 + dx, rect.1, rect.2, rect.3, 0.0, m.ground, 0.0, 0L, 1.0)
             if m.round > 0.0 {
@@ -7469,7 +7530,6 @@ fn Ctx::focus_spliced(self : Ctx) -> Array[Focusable] {
         id: tree_said_id(at.id),
         group: 0,
         layer: 0,
-        node: -1,
         keys: at.keys,
         on_press: false,
         island: None,
@@ -8774,8 +8834,14 @@ priv struct TreeGlide {
 }
 
 ///|
-impl Moving for TreeGlide with rest_at(self, _now, _frame) {
+fn TreeGlide::rest_at(self : TreeGlide, _now : Double, _frame : Int) -> Double {
   (self.ends)().unwrap_or(-1.0)
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn TreeGlide::as_moving(self : TreeGlide) -> Moving {
+  Moving::new(fn(now, frame) { self.rest_at(now, frame) })
 }
 
 ///|
@@ -8789,7 +8855,7 @@ fn view_moves(key : String, what : String, rest : (Double) -> Double) -> Unit {
       m
     }
   }
-  g().moving_as(who, ({ rest, } : TreeMoves) as &Moving, what)
+  g().moving_as(who, ({ rest, } : TreeMoves).as_moving(), what)
 }
 
 ///|
@@ -8799,8 +8865,14 @@ priv struct TreeMoves {
 }
 
 ///|
-impl Moving for TreeMoves with rest_at(self, now, _frame) {
+fn TreeMoves::rest_at(self : TreeMoves, now : Double, _frame : Int) -> Double {
   (self.rest)(now)
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn TreeMoves::as_moving(self : TreeMoves) -> Moving {
+  Moving::new(fn(now, frame) { self.rest_at(now, frame) })
 }
 
 ///|

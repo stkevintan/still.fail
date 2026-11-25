@@ -84,6 +84,8 @@ void mb_stream_layout(int sid, double w, double h);
 int mb_stream_route_take(uint64_t route, int kind, int key, uint64_t seq, uint64_t ts, const uint8_t *bytes, size_t len);
 // how a frame taken so is acknowledged to its sender (`ack(route, ts)`, on the main thread), handed over by the engine
 void mb_stream_route_acks(int (*ack)(double route, double ts));
+// same as mb_stream_route_acks, also reporting `wait_us` microseconds spent in the client jitter buffer
+void mb_stream_route_acks_wait(int (*ack)(double route, double ts, uint32_t wait_us));
 
 // text (apple_text.m)
 // drawn at this many pixels a point; a change draws every glyph again

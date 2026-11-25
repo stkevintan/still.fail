@@ -3470,6 +3470,33 @@ int main(void) {
       }
       printf("gles_render: v9_seg_text_roi_diff=%d\n", text_max_diff);
       CHECK(text_max_diff == 0);
+      // Role 3 interior 1.00x vertical text scale (12pt = 36px@3x dark stroke, no ~20% compression)
+      int seg_stroke_span = 0;
+      for (int py = 30 * 3; py <= 50 * 3; py++) {
+        unsigned char *sc = V_PX(px, 62 * 3, py);
+        double sl = 0.2126 * sc[0] + 0.7152 * sc[1] + 0.0722 * sc[2];
+        if (sl < 160.0) seg_stroke_span++;
+      }
+      // Role 3 track pinch (+3.0pt outer grey track pulled white at y=25.5pt, grey at y=29.0pt)
+      double tp[3 * MB_INST];
+      V_RECT(tp, 0, 0, VW, VH, 0, 1.0, 1.0, 1.0, 0);
+      V_RECT(tp + MB_INST, 10.0, 24.0, 140.0, 32.0, 0, 190.0 / 255.0, 190.0 / 255.0, 190.0 / 255.0, 0);
+      V_RECT(tp + 2 * MB_INST, 25, 17.5, 110, 45, 6, 1.0, 1.0, 1.0, -5611);
+      tp[2 * MB_INST + 4] = 22.5; tp[2 * MB_INST + 6] = 1.0; tp[2 * MB_INST + 7] = -48.0;
+      tp[2 * MB_INST + 11] = 0.0; tp[2 * MB_INST + 12] = 1.0; tp[2 * MB_INST + 13] = 9.0;
+      tp[2 * MB_INST + 15] = 1.0; tp[2 * MB_INST + 21] = 9.0; tp[2 * MB_INST + 22] = 0.04; tp[2 * MB_INST + 23] = 0.0;
+      glass_forget();
+      gl_present(tp, 3, 1.0, 1.0, 1.0);
+      unsigned char *pxt = pixels_of_fb(vfb);
+      unsigned char *po = V_PX(pxt, 80 * 3, (int)(25.5 * 3));
+      unsigned char *pi = V_PX(pxt, 80 * 3, (int)(29.0 * 3));
+      double pinch_out_L = 0.2126 * po[0] + 0.7152 * po[1] + 0.0722 * po[2];
+      double pinch_in_L = 0.2126 * pi[0] + 0.7152 * pi[1] + 0.0722 * pi[2];
+      printf("gles_render: v9_seg_scale stroke_span=%dpx pinch_out_L=%.1f pinch_in_L=%.1f\n",
+             seg_stroke_span, pinch_out_L, pinch_in_L);
+      CHECK(seg_stroke_span >= 35 && seg_stroke_span <= 37);
+      CHECK(pinch_out_L > 240.0 && pinch_in_L < 215.0);
+      free(pxt);
       free(px);
       free(px0);
     }
@@ -4000,6 +4027,138 @@ int main(void) {
       CHECK(max_d_veil <= 10);
       CHECK(max_d_blur <= 10);
       CHECK(c60_r > c0_r + 25 && (c60_g - c60_r) < (c0_g - c0_r) - 20);
+    }
+
+    // --- V11-Apple-Panel-Glass: Light 0xBF brightRelax chroma & 1..8pt cushion rim, and 0xFF solid zero leak ---
+    {
+      V_SETUP(2);
+      double pb[2 * MB_INST];
+      V_RECT(pb, 0, 0, VW, VH, 0, 211.0 / 255.0, 232.0 / 255.0, 253.0 / 255.0, 0);
+      V_RECT(pb + MB_INST, 20.0, 10.0, 120.0, 60.0, 6, 253.0 / 255.0, 252.0 / 255.0, 253.0 / 255.0, -98);
+      pb[MB_INST + 4] = 22.0; pb[MB_INST + 6] = 1.0; pb[MB_INST + 7] = 6.0;
+      pb[MB_INST + 11] = 0xBF / 255.0; pb[MB_INST + 12] = 0.6; pb[MB_INST + 13] = 20.0;
+      pb[MB_INST + 14] = 0.0; pb[MB_INST + 15] = 1.0; pb[MB_INST + 21] = 26.0; pb[MB_INST + 22] = 0.03;
+      glass_forget();
+      gl_present(pb, 2, 211.0 / 255.0, 232.0 / 255.0, 253.0 / 255.0);
+      unsigned char *px = pixels_of_fb(vfb);
+      unsigned char *rim = V_PX(px, 80 * 2, 23);
+      unsigned char *mid = V_PX(px, 80 * 2, 68);
+      int mid_br = (int)mid[2] - (int)mid[0];
+      double rim_L = 0.2126 * rim[0] + 0.7152 * rim[1] + 0.0722 * rim[2];
+      double mid_L = 0.2126 * mid[0] + 0.7152 * mid[1] + 0.0722 * mid[2];
+      free(px);
+
+      pb[MB_INST + 11] = 1.0;
+      pb[MB_INST + 20] = -99;
+      glass_forget();
+      gl_present(pb, 2, 211.0 / 255.0, 232.0 / 255.0, 253.0 / 255.0);
+      px = pixels_of_fb(vfb);
+      unsigned char *sr = V_PX(px, 80 * 2, 23);
+      unsigned char *sm = V_PX(px, 80 * 2, 68);
+      double sr_L = 0.2126 * sr[0] + 0.7152 * sr[1] + 0.0722 * sr[2];
+      double sm_L = 0.2126 * sm[0] + 0.7152 * sm[1] + 0.0722 * sm[2];
+      free(px);
+
+      // Light brightRelax monotonicity: 0xBF and 0xCD (frost=0.3) over 0.72 grey vs 0.60 grey
+      V_RECT(pb, 0, 0, VW, VH, 0, 0.60, 0.60, 0.60, 0);
+      pb[MB_INST + 11] = 0xBF / 255.0; pb[MB_INST + 20] = -100; pb[MB_INST + 22] = 0.03;
+      glass_forget(); gl_present(pb, 2, 0.60, 0.60, 0.60);
+      px = pixels_of_fb(vfb);
+      unsigned char *m60 = V_PX(px, 80 * 2, 68);
+      double l60 = 0.2126 * m60[0] + 0.7152 * m60[1] + 0.0722 * m60[2];
+      free(px);
+      V_RECT(pb, 0, 0, VW, VH, 0, 0.72, 0.72, 0.72, 0);
+      pb[MB_INST + 20] = -101;
+      glass_forget(); gl_present(pb, 2, 0.72, 0.72, 0.72);
+      px = pixels_of_fb(vfb);
+      unsigned char *m72 = V_PX(px, 80 * 2, 68);
+      double l72 = 0.2126 * m72[0] + 0.7152 * m72[1] + 0.0722 * m72[2];
+      free(px);
+      V_RECT(pb, 0, 0, VW, VH, 0, 0.60, 0.60, 0.60, 0);
+      pb[MB_INST + 11] = 0xCD / 255.0; pb[MB_INST + 20] = -105; pb[MB_INST + 22] = 0.03;
+      glass_forget(); gl_present(pb, 2, 0.60, 0.60, 0.60);
+      px = pixels_of_fb(vfb);
+      unsigned char *m60c = V_PX(px, 80 * 2, 68);
+      double l60_cd = 0.2126 * m60c[0] + 0.7152 * m60c[1] + 0.0722 * m60c[2];
+      free(px);
+      V_RECT(pb, 0, 0, VW, VH, 0, 0.72, 0.72, 0.72, 0);
+      pb[MB_INST + 20] = -106;
+      glass_forget(); gl_present(pb, 2, 0.72, 0.72, 0.72);
+      px = pixels_of_fb(vfb);
+      unsigned char *m72c = V_PX(px, 80 * 2, 68);
+      double l72_cd = 0.2126 * m72c[0] + 0.7152 * m72c[1] + 0.0722 * m72c[2];
+      free(px);
+
+      // Dark 0xA8 chroma boost (chroma=0.03 vs chroma=0.0) & Dark 0xCC (chroma=0.0) zero drift over (60,120,210)
+      V_RECT(pb, 0, 0, VW, VH, 0, 60.0 / 255.0, 120.0 / 255.0, 210.0 / 255.0, 0);
+      pb[MB_INST + 8] = 32.0 / 255.0; pb[MB_INST + 9] = 32.0 / 255.0; pb[MB_INST + 10] = 32.0 / 255.0;
+      pb[MB_INST + 11] = 0xA8 / 255.0; pb[MB_INST + 20] = -102; pb[MB_INST + 22] = 0.03;
+      glass_forget(); gl_present(pb, 2, 60.0 / 255.0, 120.0 / 255.0, 210.0 / 255.0);
+      px = pixels_of_fb(vfb);
+      unsigned char *da = V_PX(px, 80 * 2, 68);
+      int a8_br = (int)da[2] - (int)da[0];
+      free(px);
+      pb[MB_INST + 20] = -103; pb[MB_INST + 22] = 0.0;
+      glass_forget(); gl_present(pb, 2, 60.0 / 255.0, 120.0 / 255.0, 210.0 / 255.0);
+      px = pixels_of_fb(vfb);
+      unsigned char *db = V_PX(px, 80 * 2, 68);
+      int a8_base_br = (int)db[2] - (int)db[0];
+      free(px);
+      pb[MB_INST + 11] = 0xCC / 255.0; pb[MB_INST + 20] = -104; pb[MB_INST + 22] = 0.0;
+      glass_forget(); gl_present(pb, 2, 60.0 / 255.0, 120.0 / 255.0, 210.0 / 255.0);
+      px = pixels_of_fb(vfb);
+      unsigned char *dc = V_PX(px, 80 * 2, 68);
+      int cc_br = (int)dc[2] - (int)dc[0];
+      free(px);
+
+      // Regular controls (chroma=0.06 vs 0.0) bit-exact zero-diff gate under Light 0x85/0xAB & Dark 0xAB
+      int ctrl_max_diff = 0;
+      int ctrl_hash_eq = 1;
+      struct { int dark; double alpha; double br, bg, bb; } ctrl_cases[3] = {
+        { 0, 0x85 / 255.0, 211.0 / 255.0, 232.0 / 255.0, 253.0 / 255.0 },
+        { 0, 0xAB / 255.0, 211.0 / 255.0, 232.0 / 255.0, 253.0 / 255.0 },
+        { 1, 0xAB / 255.0,  60.0 / 255.0, 120.0 / 255.0, 210.0 / 255.0 },
+      };
+      pb[MB_INST + 7] = 2.0; pb[MB_INST + 12] = 0.6; pb[MB_INST + 13] = 14.0; pb[MB_INST + 21] = 20.0;
+      for (int ci = 0; ci < 3; ci++) {
+        V_RECT(pb, 0, 0, VW, VH, 0, ctrl_cases[ci].br, ctrl_cases[ci].bg, ctrl_cases[ci].bb, 0);
+        pb[MB_INST + 8] = ctrl_cases[ci].dark ? 32.0 / 255.0 : 253.0 / 255.0;
+        pb[MB_INST + 9] = ctrl_cases[ci].dark ? 32.0 / 255.0 : 252.0 / 255.0;
+        pb[MB_INST + 10] = ctrl_cases[ci].dark ? 32.0 / 255.0 : 253.0 / 255.0;
+        pb[MB_INST + 11] = ctrl_cases[ci].alpha;
+        pb[MB_INST + 20] = -110 - ci * 2; pb[MB_INST + 22] = 0.06;
+        glass_forget(); gl_present(pb, 2, ctrl_cases[ci].br, ctrl_cases[ci].bg, ctrl_cases[ci].bb);
+        unsigned char *p06 = pixels_of_fb(vfb);
+        pb[MB_INST + 20] = -111 - ci * 2; pb[MB_INST + 22] = 0.0;
+        glass_forget(); gl_present(pb, 2, ctrl_cases[ci].br, ctrl_cases[ci].bg, ctrl_cases[ci].bb);
+        unsigned char *p00 = pixels_of_fb(vfb);
+        unsigned long long h06 = 14695981039346656037ULL, h00 = 14695981039346656037ULL;
+        for (int ry = 20; ry < 140; ry++) {
+          for (int rx = 40; rx < 280; rx++) {
+            unsigned char *q06 = V_PX(p06, rx, ry);
+            unsigned char *q00 = V_PX(p00, rx, ry);
+            for (int c = 0; c < 3; c++) {
+              int d = abs((int)q06[c] - (int)q00[c]);
+              if (d > ctrl_max_diff) ctrl_max_diff = d;
+              h06 = (h06 ^ q06[c]) * 1099511628211ULL;
+              h00 = (h00 ^ q00[c]) * 1099511628211ULL;
+            }
+          }
+        }
+        if (h06 != h00) ctrl_hash_eq = 0;
+        free(p06); free(p00);
+      }
+
+      printf("gles_render: v11_apple_panel_glass mid_br=%d rim_L=%.1f mid_L=%.1f solid_dL=%.2f l60=%.1f l72=%.1f cd=%.1f->%.1f a8_br=%d/%d cc_br=%d ctrl_diff=%d ctrl_eq=%d\n",
+             mid_br, rim_L, mid_L, fabs(sr_L - sm_L), l60, l72, l60_cd, l72_cd, a8_br, a8_base_br, cc_br, ctrl_max_diff, ctrl_hash_eq);
+      CHECK(mid_br >= 22);
+      CHECK(rim_L >= mid_L + 4.0);
+      CHECK(fabs(sr_L - sm_L) <= 3.0);
+      CHECK(l72 >= l60 + 2.0);
+      CHECK(l72_cd >= l60_cd);
+      CHECK(a8_br - a8_base_br >= 8);
+      CHECK(cc_br >= 43 && cc_br <= 47);
+      CHECK(ctrl_max_diff == 0 && ctrl_hash_eq == 1);
     }
 
     #undef V_RECT

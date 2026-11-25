@@ -11,6 +11,7 @@
 // Farview's instead.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { HelperApp } from "../helper/app.ts";
 import { Fibers } from "../ops/fibers.ts";
 import { PrivateFile } from "../ops/files.ts";
 import { log } from "../ops/log.ts";
@@ -84,6 +85,11 @@ export class Browsers {
   /// The chats' Farview (browser/module.ts): while its config is active, the chats' tabs and sign-ins are there.
   useFarview(f: FarviewTabs) {
     this.#farview = f;
+  }
+
+  /// macOS still.fail Helper for hardware H.264 browser encoding (`frames.encode`).
+  useHelper(helper: HelperApp | null) {
+    this.station.useHelper(helper);
   }
 
   /// The chats' Farview where it is `session`'s chat's browser (farview.ts `activeFor`: the config's, or its agent's

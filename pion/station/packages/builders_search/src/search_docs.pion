@@ -1,0 +1,2025 @@
+// 1:1 port of `station/mb/src/search/docs.mbt` as a resumable per-request stepper (`ReadingStepper`).
+//
+// 12 `@effect.pause` Yield Points State Transition Table (docs.mbt 7 + match.mbt 2 + history.mbt 3):
+//   P1  docs.mbt:418  Reading::thread msg batch loop   — cursor: (after, end, last_rows_len); acc: (last_at, origins, row, sessions, ws, archived, title, body, chat, refs, surface); res: none
+//   P2  docs.mbt:547  Reading::threads every 128 ids   — cursor: (threads_end, threads_after, threads_ids, threads_scoped, id_idx); acc: Pages, scope_pending; res: none (scope_page savepoint already released)
+//   P3  docs.mbt:551  Reading::threads end of page     — cursor: (threads_end, threads_after, threads_scoped, last_ids_len); acc: Pages, scope_pending; res: none
+//   P4  docs.mbt:665  Reading::session_jobs batch loop — cursor: (job_key, job_end, job_after, job_thread, job_current, job_last_rows_len); post-resume re-checks session visibility; res: none
+//   P5  docs.mbt:781  Reading::jobs scoped every 32    — cursor: (scoped_keys, scoped_idx); acc: Pages, session_list_pending; res: none (small_job_scope savepoint already released)
+//   P6  docs.mbt:817  Reading::jobs unscoped per sess  — cursor: (jobs_end_row, jobs_after_row); acc: Pages; res: none
+//   P7  docs.mbt:1070 Reading::run memory per ws       — cursor: (mem_raw, mem_places, mem_idx); acc: Pages; res: none
+//   P8  match.mbt:340 search::answer pause() helper    — emits {"scopePending":true} / {"sessionListPending":true} once per query before yielding; checks cancelled() on resume
+//   P9  match.mbt:348 search::answer final pause       — after Reading::run() (incl. profiles), before materializing Pages::result_raw()
+//   P10 history.mbt:142 Histories::files every 64 src  — cursor: (sess_idx, sources, src_idx, src_visited, src_any, src_paths); post-resume checks keep() + check_visible(key); res: none
+//   P11 history.mbt:236 Histories::mentions per chunk  — cursor: (path_idx, open_text_id, tail, left); res: active `text.open` handle closed EXACTLY ONCE on normal/cancel/15s-timeout/error/EOF
+//   P12 history.mbt:381 Histories::hits per session    — cursor: (sessions, sess_idx, looked, found, hit_sessions, profiles, until); res: none (temp table materialized and dropped synchronously before P12)
+
+import "base_codec"
+import "builders_core"
+import "js_json"
+import "jscase"
+import "sql_db"
+
+let SEARCH_BATCH : Int = 256
+
+let BUILTIN_SKILLS : Array[String] = [
+  "stillfail-chats",
+  "stillfail-jobs",
+  "stillfail-show",
+  "stillfail-viz",
+  "stillfail-browser",
+  "stillfail-login",
+  "stillfail-vault",
+  "stillfail-cron",
+  "stillfail-github-ci",
+  "stillfail-retire",
+  "stillfail-move",
+  "stillfail-leading",
+  "stillfail-feedback",
+]
+
+fn row_field(row : Map[String, base_codec::Json], name : String) -> base_codec::Json {
+  match row.get(name) {
+    Some(v) => v
+    None => base_codec::json_null()
+  }
+}
+
+fn json_text_of(v : base_codec::Json) -> Option[String] {
+  match v {
+    base_codec::Json::Str(s) => Some(s)
+    _ => None
+  }
+}
+
+fn json_num_of(v : base_codec::Json) -> Option[Double] {
+  match v {
+    base_codec::Json::Num(n, _) => Some(n)
+    _ => None
+  }
+}
+
+fn json_is_null(v : base_codec::Json) -> Bool {
+  match v {
+    base_codec::Json::Null => true
+    _ => false
+  }
+}
+
+fn json_val_eq(a : base_codec::Json, b : base_codec::Json) -> Bool {
+  match (a, b) {
+    (base_codec::Json::Null, base_codec::Json::Null) => true
+    (base_codec::Json::Bool(x), base_codec::Json::Bool(y)) => x == y
+    (base_codec::Json::Num(x, _), base_codec::Json::Num(y, _)) => x == y
+    (base_codec::Json::Str(x), base_codec::Json::Str(y)) => x == y
+    (base_codec::Json::Arr(xs), base_codec::Json::Arr(ys)) => {
+      if xs.length() != ys.length() {
+        return false
+      }
+      for i in 0..<xs.length() {
+        if !json_val_eq(xs[i], ys[i]) {
+          return false
+        }
+      }
+      true
+    }
+    (base_codec::Json::Obj(xs), base_codec::Json::Obj(ys)) => {
+      if xs.length() != ys.length() {
+        return false
+      }
+      for i in 0..<xs.length() {
+        let (kx, vx) = xs[i]
+        let (ky, vy) = ys[i]
+        if kx != ky || !json_val_eq(vx, vy) {
+          return false
+        }
+      }
+      true
+    }
+    _ => false
+  }
+}
+
+fn db_one(
+  db : sql_db::Db,
+  sql : String,
+  params : Array[base_codec::Json],
+) -> Result[Option[Map[String, base_codec::Json]], String] {
+  match db.all(sql, params) {
+    Ok(rows) => if rows.length() > 0 { Ok(Some(rows[0])) } else { Ok(None) }
+    Err(e) => Err(e.message)
+  }
+}
+
+fn db_exists(db : sql_db::Db, kind : String, name : String) -> Result[Bool, String] {
+  match db_one(
+    db,
+    "SELECT 1 AS x FROM sqlite_master WHERE type = ? AND name = ?",
+    [base_codec::json_str(kind), base_codec::json_str(name)],
+  ) {
+    Ok(Some(_)) => Ok(true)
+    Ok(None) => Ok(false)
+    Err(e) => Err(e)
+  }
+}
+
+/// legacy-said-build.ts `hasLegacySaid`.
+pub fn has_legacy_said(db : sql_db::Db) -> Result[Bool, String] {
+  let has_view = match db_exists(db, "view", "legacy_said") {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if !has_view {
+    return Ok(false)
+  }
+  let has_meta = match db_exists(db, "table", "legacy_said_meta") {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  if !has_meta {
+    return Err("legacy said view has no metadata")
+  }
+  match db_one(db, "SELECT version, scanned FROM legacy_said_meta WHERE id=1", []) {
+    Ok(Some(m)) => {
+      let ver_ok = match m.get("version") {
+        Some(base_codec::Json::Num(v, _)) => v == 1.0
+        _ => false
+      }
+      let scan_ok = match m.get("scanned") {
+        Some(base_codec::Json::Num(v, _)) => v == 0.0 || v == 1.0
+        _ => false
+      }
+      if ver_ok && scan_ok {
+        Ok(true)
+      } else {
+        Err("legacy said view has an unsupported version")
+      }
+    }
+    Ok(None) => Err("legacy said view has an unsupported version")
+    Err(e) => Err(e)
+  }
+}
+
+fn message_keys_sql(range : String, limit : String, legacy : Bool) -> String {
+  let from = if legacy { "legacy_said" } else { "entries INDEXED BY entries_said" }
+  let extra = if legacy { "" } else { " AND kind = 'message' AND letter IS NULL" }
+  "\n  SELECT n FROM " +
+  from +
+  "\n    WHERE thread = ?1 AND " +
+  range +
+  extra +
+  "\n  UNION ALL\n  SELECT n FROM entries\n    WHERE thread = ?1 AND " +
+  range +
+  " AND kind = 'message' AND letter IS NOT NULL\n  ORDER BY n LIMIT " +
+  limit
+}
+
+fn messages_sql(range : String, limit : String, legacy : Bool) -> String {
+  "SELECT * FROM merged WHERE thread = ?1 AND n IN (" +
+  message_keys_sql(range, limit, legacy) +
+  "\n) ORDER BY n"
+}
+
+fn message_times_sql(range : String, limit : String, legacy : Bool) -> String {
+  "SELECT n, at FROM entries WHERE thread = ?1 AND kind = 'message' AND n IN (" +
+  message_keys_sql(range, limit, legacy) +
+  "\n) ORDER BY n"
+}
+
+fn title_of(row : Map[String, base_codec::Json], first_text : Option[String]) -> String {
+  let given = fn(k : String) -> String {
+    match row.get(k) {
+      Some(base_codec::Json::Str(s)) => jscase::trim_white(s)
+      _ => ""
+    }
+  }
+  let t = given("title")
+  if t != "" {
+    return t
+  }
+  let at = given("auto_title")
+  if at != "" {
+    return at
+  }
+  match row.get("surface") {
+    Some(base_codec::Json::Str("chat")) | Some(base_codec::Json::Str("ember")) | Some(base_codec::Json::Str("stillfail")) => {
+      return "新对话"
+    }
+    _ => ()
+  }
+  let first = js_json::without_mentions(match first_text {
+    Some(s) => s
+    None => ""
+  })
+  let lines = str_split_lf(first)
+  for i in 0..<lines.length() {
+    let raw_words = jscase::split_by(lines[i], jscase::is_white_space)
+    let words : Array[String] = []
+    for j in 0..<raw_words.length() {
+      if raw_words[j] != "" {
+        words.push(raw_words[j])
+      }
+    }
+    let joined = str_join(words, " ")
+    if joined != "" {
+      return joined
+    }
+  }
+  if str_has_prefix(given("channel"), "D") {
+    return "私信"
+  }
+  "新对话"
+}
+
+fn parsed_jval(v : base_codec::Json) -> Option[js_json::JValue] {
+  match v {
+    base_codec::Json::Str(s) => {
+      if s != "" {
+        js_json::jval_try_parse(s)
+      } else {
+        None
+      }
+    }
+    _ => None
+  }
+}
+
+fn jval_to_json_lossy(v : js_json::JValue) -> base_codec::Json {
+  match v {
+    js_json::JValue::Null => base_codec::json_null()
+    js_json::JValue::Bool(b) => base_codec::json_bool(b)
+    js_json::JValue::Num(d) => sql_db::double_to_json(d)
+    js_json::JValue::Str(u) => base_codec::json_str(js_json::sanitize_str(u))
+    js_json::JValue::Arr(xs) => {
+      let out : Array[base_codec::Json] = []
+      for i in 0..<xs.length() {
+        out.push(jval_to_json_lossy(xs[i]))
+      }
+      base_codec::json_arr(out)
+    }
+    js_json::JValue::Obj(entries) => {
+      let out : Array[(String, base_codec::Json)] = []
+      for i in 0..<entries.length() {
+        let (k, item_v) = entries[i]
+        assoc_set(out, js_json::sanitize_str(k), jval_to_json_lossy(item_v))
+      }
+      base_codec::json_obj(out)
+    }
+  }
+}
+
+fn with_runtime(identity : Option[js_json::JValue], runtime : String) -> base_codec::Json {
+  let fields : Array[(String, base_codec::Json)] = []
+  match identity {
+    Some(js_json::JValue::Obj(entries)) => {
+      for i in 0..<entries.length() {
+        let (k, item_v) = entries[i]
+        assoc_set(fields, js_json::sanitize_str(k), jval_to_json_lossy(item_v))
+      }
+    }
+    Some(js_json::JValue::Arr(xs)) => {
+      for i in 0..<xs.length() {
+        assoc_set(fields, i.to_string(), jval_to_json_lossy(xs[i]))
+      }
+    }
+    Some(js_json::JValue::Str(u)) => {
+      let pts = js_json::points(js_json::sanitize_str(u))
+      for i in 0..<pts.length() {
+        assoc_set(fields, i.to_string(), base_codec::json_str(pts[i]))
+      }
+    }
+    _ => ()
+  }
+  assoc_set(fields, "runtime", base_codec::json_str(runtime))
+  base_codec::json_obj(fields)
+}
+
+fn original_runtime(db : sql_db::Db, key : base_codec::Json) -> Result[Option[String], String] {
+  let ordered = match db_exists(db, "index", "runtime_sessions_ordered") {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  let sql = if ordered {
+    "SELECT COALESCE(s.original_runtime,\n  (SELECT r.runtime FROM runtime_sessions r INDEXED BY runtime_sessions_ordered WHERE r.session_key = s.key ORDER BY r.at, r.rowid LIMIT 1),\n  s.runtime) AS runtime FROM sessions s WHERE s.key = ?"
+  } else {
+    "SELECT COALESCE(original_runtime, runtime) AS runtime FROM sessions WHERE key = ?"
+  }
+  match db_one(db, sql, [key]) {
+    Ok(Some(r)) => Ok(json_text_of(row_field(r, "runtime")))
+    Ok(None) => Ok(None)
+    Err(e) => Err(e)
+  }
+}
+
+fn js_string(v : base_codec::Json) -> String {
+  match v {
+    base_codec::Json::Str(s) => s
+    base_codec::Json::Null => "null"
+    base_codec::Json::Bool(true) => "true"
+    base_codec::Json::Bool(false) => "false"
+    base_codec::Json::Num(n, _) => js_json::num_text(n)
+    other => sql_db::stringify_json(other)
+  }
+}
+
+fn job_doc(
+  r : Map[String, base_codec::Json],
+  key : base_codec::Json,
+  session : Map[String, base_codec::Json],
+  thread : Option[base_codec::Json],
+) -> Doc {
+  let port = row_field(r, "port")
+  let body_parts : Array[Option[String]] = []
+  let cmd = row_field(r, "command")
+  body_parts.push(if json_is_null(cmd) { None } else { Some(js_string(cmd)) })
+  let cwd = row_field(r, "cwd")
+  body_parts.push(Some(if json_is_null(cwd) { "" } else { js_string(cwd) }))
+  body_parts.push(Some(if json_is_null(port) { "" } else { ":" + js_string(port) }))
+  let filtered : Array[String] = []
+  for i in 0..<body_parts.length() {
+    match body_parts[i] {
+      Some("") => ()
+      Some(s) => filtered.push(s)
+      None => filtered.push("")
+    }
+  }
+  let chat_key = match json_text_of(row_field(session, "conv")) {
+    Some(c) => if c != "" { base_codec::json_str(c) } else { key }
+    None => key
+  }
+  let refs : Array[(String, base_codec::Json)] = [
+    ("job", row_field(r, "id")),
+    ("session", key),
+    ("chat", chat_key),
+    ("state", row_field(r, "state")),
+  ]
+  if !json_is_null(port) {
+    refs.push(("port", port))
+  }
+  match thread {
+    Some(t) => refs.push(("thread", t))
+    None => ()
+  }
+  Doc::{
+    key: "j:" + js_string(row_field(r, "id")),
+    kind: "job",
+    ws: json_text_of(row_field(session, "ws")),
+    doc_scope: None,
+    title: js_string(row_field(r, "name")),
+    body: str_join(filtered, "\n"),
+    at: json_num_of(row_field(r, "started_at")),
+    refs: refs,
+  }
+}
+
+fn is_ascii_printable(s : String) -> Bool {
+  let b = s.to_bytes()
+  for i in 0..<b.length() {
+    let c = b[i].to_int() & 0xFF
+    if c < 32 || c > 126 {
+      return false
+    }
+  }
+  true
+}
+
+fn is_workspace_id(name : String) -> Bool {
+  let b = name.to_bytes()
+  if b.length() < 1 || b.length() > 128 {
+    return false
+  }
+  for i in 0..<b.length() {
+    let c = b[i].to_int() & 0xFF
+    let ok = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || c == 45
+    if !ok {
+      return false
+    }
+  }
+  true
+}
+
+fn front_field(text : String, key : String) -> Option[String] {
+  if !str_has_prefix(text, "---\n") {
+    return None
+  }
+  let body = str_slice_bytes(text, 4, text.to_bytes().length())
+  let end = match str_find_bytes(body, "\n---") {
+    Some(e) => e
+    None => return None
+  }
+  let header = str_slice_bytes(body, 0, end)
+  let lines = str_split_lf(header)
+  let prefix = key + ":"
+  let plen = prefix.to_bytes().length()
+  for i in 0..<lines.length() {
+    let line = str_strip_cr(lines[i])
+    if str_has_prefix(line, prefix) {
+      let v = jscase::trim(str_slice_bytes(line, plen, line.to_bytes().length()))
+      let vb = v.to_bytes()
+      let mut s = 0
+      let mut e = vb.length()
+      while s < e && (vb[s].to_int() & 0xFF) == 34 {
+        s = s + 1
+      }
+      while e > s && (vb[e - 1].to_int() & 0xFF) == 34 {
+        e = e - 1
+      }
+      return Some(str_slice_bytes(v, s, e))
+    }
+  }
+  None
+}
+
+fn compare_bytes_str(a : String, b : String) -> Int {
+  let ab = a.to_bytes()
+  let bb = b.to_bytes()
+  let n = if ab.length() < bb.length() { ab.length() } else { bb.length() }
+  for i in 0..<n {
+    let d = (ab[i].to_int() & 0xFF) - (bb[i].to_int() & 0xFF)
+    if d != 0 {
+      return d
+    }
+  }
+  ab.length() - bb.length()
+}
+
+fn rust_join(sep : String, a : String, b : String) -> String {
+  let bb = b.to_bytes()
+  let absolute = str_has_prefix(b, "/") ||
+  (sep == "\\" && (str_has_prefix(b, "\\") || (bb.length() >= 2 && (bb[1].to_int() & 0xFF) == 58)))
+  if absolute {
+    b
+  } else if a == "" || str_has_suffix(a, "/") || (sep == "\\" && str_has_suffix(a, "\\")) {
+    a + b
+  } else {
+    a + sep + b
+  }
+}
+
+fn shell_read_text(client : builders_core::ShellClient, path : String, strict : Bool) -> Option[String] {
+  match client.shell_sync_json(
+    "fs.read",
+    base_codec::json_obj([("path", base_codec::json_str(path)), ("strict", base_codec::json_bool(strict))]),
+  ) {
+    Ok(base_codec::Json::Str(s)) => Some(s)
+    _ => None
+  }
+}
+
+fn shell_readdir(client : builders_core::ShellClient, dir : String) -> Option[Array[String]] {
+  match client.shell_sync_json("fs.readdir", base_codec::json_obj([("path", base_codec::json_str(dir))])) {
+    Ok(base_codec::Json::Arr(names)) => {
+      let out : Array[String] = []
+      for i in 0..<names.length() {
+        match names[i] {
+          base_codec::Json::Str(s) => out.push(s)
+          _ => ()
+        }
+      }
+      Some(out)
+    }
+    _ => None
+  }
+}
+
+fn read_config_jval(client : builders_core::ShellClient, data : String, sep : String) -> js_json::JValue {
+  match shell_read_text(client, rust_join(sep, data, "config.json"), false) {
+    Some(text) => {
+      match js_json::parse(text) {
+        Ok(v) => v
+        Err(_) => js_json::JValue::Obj([])
+      }
+    }
+    None => js_json::JValue::Obj([])
+  }
+}
+
+fn agent_home_of(data : String, sep : String, raw : js_json::JValue) -> String {
+  let sub = match jv_string_of(raw.get("agentHome")) {
+    Some(s) => s
+    None => "agent"
+  }
+  rust_join(sep, data, sub)
+}
+
+struct SkillRec {
+  name : String
+  description : String
+  project : Bool
+  builtin : Bool
+  text : String
+  files : Array[(String, String)]
+}
+
+fn memory_docs(
+  client : builders_core::ShellClient,
+  data : String,
+  sep : String,
+  raw : js_json::JValue,
+  ws : Option[String],
+) -> Array[Doc] {
+  let home = match ws {
+    None => agent_home_of(data, sep, raw)
+    Some(w) => rust_join(sep, rust_join(sep, agent_home_of(data, sep, raw), "workspaces"), w)
+  }
+  let path = rust_join(sep, home, "MEMORY.md")
+  let docs : Array[Doc] = []
+  let text = match shell_read_text(client, path, true) {
+    Some(s) => s
+    None => ""
+  }
+  let wsj = match ws {
+    Some(w) => w
+    None => ""
+  }
+  if jscase::trim(text) != "" {
+    docs.push(
+      Doc::{
+        key: "k:" + wsj + ":",
+        kind: "memory",
+        ws: ws,
+        doc_scope: None,
+        title: "MEMORY.md",
+        body: text,
+        at: None,
+        refs: [("path", base_codec::json_str(path))],
+      },
+    )
+  }
+  let dir = rust_join(sep, home, "skills")
+  let skills : Array[SkillRec] = []
+  let entries = match shell_readdir(client, dir) {
+    Some(es) => es
+    None => []
+  }
+  for i in 0..<entries.length() {
+    let name = entries[i]
+    let skill_text = match shell_read_text(client, rust_join(sep, rust_join(sep, dir, name), "SKILL.md"), true) {
+      Some(t) => t
+      None => continue
+    }
+    let description = match front_field(skill_text, "description") {
+      Some(d) => d
+      None => ""
+    }
+    let builtin = arr_contains_str(BUILTIN_SKILLS, name)
+    let sub_entries = match shell_readdir(client, rust_join(sep, dir, name)) {
+      Some(es) => es
+      None => []
+    }
+    let names : Array[String] = []
+    for j in 0..<sub_entries.length() {
+      let n = sub_entries[j]
+      if str_has_suffix(n, ".md") && n != "SKILL.md" && !str_has_prefix(n, "SKILL.conflict-") {
+        names.push(n)
+      }
+    }
+    sort_by(names, compare_bytes_str)
+    let files : Array[(String, String)] = []
+    for j in 0..<names.length() {
+      let f = names[j]
+      match shell_read_text(client, rust_join(sep, rust_join(sep, dir, name), f), true) {
+        Some(t) => files.push((f, t))
+        None => ()
+      }
+    }
+    skills.push(
+      SkillRec::{
+        name: name,
+        description: description,
+        project: str_has_prefix(description, "项目记忆："),
+        builtin: builtin,
+        text: skill_text,
+        files: files,
+      },
+    )
+  }
+  sort_by(
+    skills,
+    fn(a : SkillRec, b : SkillRec) -> Int {
+      let x = (if a.builtin { 1 } else { 0 }) - (if b.builtin { 1 } else { 0 })
+      if x != 0 {
+        return x
+      }
+      let y = (if !a.project { 1 } else { 0 }) - (if !b.project { 1 } else { 0 })
+      if y != 0 {
+        return y
+      }
+      compare_bytes_str(a.name, b.name)
+    },
+  )
+  for i in 0..<skills.length() {
+    let k = skills[i]
+    let parts : Array[String] = [k.description, k.text]
+    for j in 0..<k.files.length() {
+      let (fnm, ftxt) = k.files[j]
+      parts.push(fnm + "\n" + ftxt)
+    }
+    docs.push(
+      Doc::{
+        key: "k:" + wsj + ":" + k.name,
+        kind: "skill",
+        ws: ws,
+        doc_scope: None,
+        title: k.name,
+        body: str_join(parts, "\n"),
+        at: None,
+        refs: [
+          ("skill", base_codec::json_str(k.name)),
+          ("description", base_codec::json_str(k.description)),
+          ("builtin", base_codec::json_bool(k.builtin)),
+          ("project", base_codec::json_bool(k.project)),
+        ],
+      },
+    )
+  }
+  docs
+}
+
+fn memory_workspaces(client : builders_core::ShellClient, data : String, sep : String, raw : js_json::JValue) -> Array[String] {
+  let entries = match shell_readdir(client, rust_join(sep, agent_home_of(data, sep, raw), "workspaces")) {
+    Some(es) => es
+    None => []
+  }
+  let out : Array[String] = []
+  for i in 0..<entries.length() {
+    if is_workspace_id(entries[i]) {
+      out.push(entries[i])
+    }
+  }
+  out
+}
+
+fn profile_docs(raw : js_json::JValue) -> Array[Doc] {
+  let docs : Array[Doc] = []
+  let profiles = match raw.get("profiles") {
+    Some(js_json::JValue::Arr(ps)) => ps
+    _ => return docs
+  }
+  for i in 0..<profiles.length() {
+    let p = profiles[i]
+    let id = match jv_string_of(p.get("id")) {
+      Some(s) => s
+      None => continue
+    }
+    match jv_string_of(p.get("home")) {
+      Some(_) => ()
+      None => continue
+    }
+    let runtime = match jv_string_of(p.get("runtime")) {
+      Some(s) => s
+      None => ""
+    }
+    let model = match jv_string_of(p.get("model")) {
+      Some(s) => s
+      None => ""
+    }
+    let title = match jv_string_of(p.get("name")) {
+      Some(s) => s
+      None => id
+    }
+    let access = p.get("access")
+    let access_field = fn(k : String) -> String {
+      match access {
+        Some(js_json::JValue::Obj(entries)) => {
+          let a = js_json::JValue::Obj(entries)
+          match jv_string_of(a.get(k)) {
+            Some(s) => s
+            None => ""
+          }
+        }
+        _ => ""
+      }
+    }
+    let raw_parts = [id, runtime, model, access_field("kind"), access_field("provider")]
+    let parts : Array[String] = []
+    for j in 0..<raw_parts.length() {
+      if raw_parts[j] != "" {
+        parts.push(raw_parts[j])
+      }
+    }
+    docs.push(
+      Doc::{
+        key: "p:" + id,
+        kind: "profile",
+        ws: Some("*"),
+        doc_scope: None,
+        title: title,
+        body: str_join(parts, "\n"),
+        at: None,
+        refs: [("profile", base_codec::json_str(id)), ("runtime", base_codec::json_str(runtime))],
+      },
+    )
+  }
+  docs
+}
+
+fn is_swallowed_thread_err(msg : String) -> Bool {
+  msg.contains("no such") || msg.contains("archive") || msg.contains("ENOENT")
+}
+
+// ── ReadingStepper state structures ──
+
+struct ThreadMsgState {
+  id : base_codec::Json
+  row : Map[String, base_codec::Json]
+  sessions : Array[Map[String, base_codec::Json]]
+  ws : Option[String]
+  archived : Bool
+  surface : String
+  title : String
+  wants_messages : Bool
+  wants_chat : Bool
+  body : String
+  chat : base_codec::Json
+  refs : Array[(String, base_codec::Json)]
+  end : base_codec::Json
+  mut after : base_codec::Json
+  mut last_at : Option[Double]
+  origins : Map[String, Option[String]]
+  mut last_rows_len : Int
+}
+
+struct SessionJobsState {
+  key : base_codec::Json
+  end : base_codec::Json
+  thread : Option[base_codec::Json]
+  mut current : Map[String, base_codec::Json]
+  mut after : base_codec::Json
+  mut last_rows_len : Int
+}
+
+enum ReadingPhase {
+  Init
+  // Threads phase
+  ThreadsNextPage(base_codec::Json, base_codec::Json) // (end, after)
+  ThreadsWalkIds(base_codec::Json, base_codec::Json, Array[base_codec::Json], Bool, Int) // (end, after, ids, scoped, idx)
+  ThreadsInThread(base_codec::Json, base_codec::Json, Array[base_codec::Json], Bool, Int, ThreadMsgState) // P1
+  ThreadsAfterPage(base_codec::Json, base_codec::Json, Bool, Int) // P3: (end, after, scoped, last_ids_len)
+  // Jobs phase
+  JobsStart
+  JobsScopedWalk(Array[String], Int) // (keys, idx)
+  JobsScopedInSession(Array[String], Int, SessionJobsState) // P4 inside scoped
+  JobsScopedResume(Array[String], Int) // P5 resume
+  JobsUnscopedNext(Map[String, base_codec::Json], Option[Map[String, base_codec::Json]]) // (end_row, after_row)
+  JobsUnscopedInSession(Map[String, base_codec::Json], Option[Map[String, base_codec::Json]], SessionJobsState) // P4 inside unscoped
+  // Memory / skills phase
+  MemoryStart
+  MemoryWalk(js_json::JValue, Array[Option[String]], Int) // P7: (raw_cfg, places, idx)
+  // Profile & final pause (P9)
+  ProfileRun
+  FinalPause // P9 resume -> finish
+  Done
+}
+
+pub enum ReadStepResult {
+  Yielded
+  Finished
+  Failed(String)
+}
+
+pub struct ReadingStepper {
+  data : String
+  sep : String
+  kinds : Option[Array[String]]
+  asker : Asker
+  archived : Bool
+  words : Array[String]
+  pub pages : Pages
+  mut legacy : Bool
+  mut phase : ReadingPhase
+  pub mut scope_pending : Bool
+  pub mut session_list_pending : Bool
+  mut said_scope_pending : Bool
+  mut said_session_list_pending : Bool
+}
+
+pub fn ReadingStepper::new(
+  data : String,
+  sep : String,
+  kinds : Option[Array[String]],
+  asker : Asker,
+  archived : Bool,
+  words : Array[String],
+  limit : Int,
+  offset : Int,
+) -> ReadingStepper {
+  ReadingStepper::{
+    data: data,
+    sep: sep,
+    kinds: kinds,
+    asker: asker,
+    archived: archived,
+    words: words,
+    pages: Pages::new(words, asker, limit, offset),
+    legacy: false,
+    phase: ReadingPhase::Init,
+    scope_pending: false,
+    session_list_pending: false,
+    said_scope_pending: false,
+    said_session_list_pending: false,
+  }
+}
+
+fn ReadingStepper::wants(self : ReadingStepper, kind : String) -> Bool {
+  match self.kinds {
+    None => true
+    Some(ks) => arr_contains_str(ks, kind)
+  }
+}
+
+/// Emit pending notices at pause points (P8: `match.mbt:329-339`).
+fn ReadingStepper::emit_pending(self : ReadingStepper, client : builders_core::ShellClient) -> Unit {
+  if self.scope_pending && !self.said_scope_pending {
+    self.said_scope_pending = true
+    let _ = client.say_line("{\"scopePending\":true}")
+  }
+  if self.session_list_pending && !self.said_session_list_pending {
+    self.said_session_list_pending = true
+    let _ = client.say_line("{\"sessionListPending\":true}")
+  }
+}
+
+fn ReadingStepper::scope_page(
+  self : ReadingStepper,
+  db : sql_db::Db,
+  after : base_codec::Json,
+  end : base_codec::Json,
+) -> Result[Option[Array[base_codec::Json]], String] {
+  let asker = self.asker
+  db.savepoint_swallow_err(
+    "search_scope_page",
+    fn(sp_db : sql_db::Db) -> Result[Option[Array[base_codec::Json]], String] {
+      let db = sp_db
+      let has_tbl = match db_exists(db, "table", "search_scope_meta") {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if !has_tbl {
+        return Ok(None)
+      }
+      match db_one(db, "SELECT version FROM search_scope_meta WHERE id = 1", []) {
+        Ok(Some(v)) => {
+          match v.get("version") {
+            Some(base_codec::Json::Num(n, _)) => if n != 1.0 { return Ok(None) }
+            _ => return Ok(None)
+          }
+        }
+        Ok(None) => return Ok(None)
+        Err(e) => return Err(e)
+      }
+      let meta = match db_one(
+        db,
+        "SELECT version, threads_done, members_done,\n      EXISTS (SELECT 1 FROM search_scope_sessions_dirty LIMIT 1) OR EXISTS (SELECT 1 FROM search_scope_members_dirty LIMIT 1)\n        OR EXISTS (SELECT 1 FROM search_scope_threads_dirty LIMIT 1) AS dirty FROM search_scope_meta WHERE id = 1",
+        [],
+      ) {
+        Ok(Some(m)) => m
+        Ok(None) => return Ok(None)
+        Err(e) => return Err(e)
+      }
+      let is1 = fn(k : String) -> Bool {
+        match meta.get(k) {
+          Some(base_codec::Json::Num(n, _)) => n == 1.0
+          _ => false
+        }
+      }
+      if !is1("version") || !is1("threads_done") || !is1("members_done") || is1("dirty") {
+        return Ok(None)
+      }
+      let scopes : Array[(Int, String)] = [(1, asker.workspace), (2, "")]
+      if asker.workspace != "*" {
+        scopes.push((1, "*"))
+      }
+      if asker.home {
+        scopes.push((0, ""))
+      }
+      let candidates : Array[Double] = []
+      let lim = base_codec::json_int(SEARCH_BATCH)
+      for i in 0..<scopes.length() {
+        let (sk, sw) = scopes[i]
+        let rows = if json_is_null(after) {
+          match db.all(
+            "SELECT thread FROM search_scope_threads WHERE kind = ?1 AND ws = ?2 AND thread <= ?3\n  ORDER BY thread LIMIT ?4",
+            [base_codec::json_int(sk), base_codec::json_str(sw), end, lim],
+          ) {
+            Ok(rs) => rs
+            Err(e) => return Err(e.message)
+          }
+        } else {
+          match db.all(
+            "SELECT thread FROM search_scope_threads WHERE kind = ?1 AND ws = ?2 AND thread > ?3 AND thread <= ?4\n  ORDER BY thread LIMIT ?5",
+            [base_codec::json_int(sk), base_codec::json_str(sw), after, end, lim],
+          ) {
+            Ok(rs) => rs
+            Err(e) => return Err(e.message)
+          }
+        }
+        for j in 0..<rows.length() {
+          match json_num_of(row_field(rows[j], "thread")) {
+            Some(t) => candidates.push(t)
+            None => ()
+          }
+        }
+      }
+      if asker.home {
+        let rows = if json_is_null(after) {
+          match db.all("SELECT thread FROM search_scope_orphans WHERE thread <= ?1 ORDER BY thread LIMIT ?2", [end, lim]) {
+            Ok(rs) => rs
+            Err(e) => return Err(e.message)
+          }
+        } else {
+          match db.all(
+            "SELECT thread FROM search_scope_orphans WHERE thread > ?1 AND thread <= ?2 ORDER BY thread LIMIT ?3",
+            [after, end, lim],
+          ) {
+            Ok(rs) => rs
+            Err(e) => return Err(e.message)
+          }
+        }
+        for j in 0..<rows.length() {
+          match json_num_of(row_field(rows[j], "thread")) {
+            Some(t) => candidates.push(t)
+            None => ()
+          }
+        }
+      }
+      let seen : Map[Int64, Bool] = Map::new()
+      let out : Array[Double] = []
+      for i in 0..<candidates.length() {
+        let c = candidates[i]
+        let ck = c.to_int64()
+        match seen.get(ck) {
+          Some(_) => ()
+          None => {
+            seen.set(ck, true)
+            out.push(c)
+          }
+        }
+      }
+      sort_by(
+        out,
+        fn(a : Double, b : Double) -> Int {
+          if a < b { -1 } else if a > b { 1 } else { 0 }
+        },
+      )
+      let res : Array[base_codec::Json] = []
+      let take_n = if out.length() < SEARCH_BATCH { out.length() } else { SEARCH_BATCH }
+      for i in 0..<take_n {
+        res.push(sql_db::double_to_json(out[i]))
+      }
+      Ok(Some(res))
+    },
+    fn(e : sql_db::SqlError) -> String { e.message },
+  )
+}
+
+fn ReadingStepper::small_job_scope(
+  self : ReadingStepper,
+  db : sql_db::Db,
+  end : String,
+) -> Result[Option[Array[String]], String] {
+  if !is_ascii_printable(self.asker.workspace) || !is_ascii_printable(end) {
+    return Ok(None)
+  }
+  let asker = self.asker
+  let mut pending = false
+  let res = db.savepoint_swallow_err(
+    "search_job_scope",
+    fn(sp_db : sql_db::Db) -> Result[Option[Array[String]], String] {
+      let db = sp_db
+      let has_meta = match db_exists(db, "table", "session_list_meta") {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if !has_meta {
+        return Ok(None)
+      }
+      let meta = match db_one(db, "SELECT version, complete FROM session_list_meta WHERE id = 1", []) {
+        Ok(Some(m)) => m
+        Ok(None) => return Ok(None)
+        Err(e) => return Err(e)
+      }
+      match meta.get("version") {
+        Some(base_codec::Json::Num(v, _)) => if v != 1.0 { return Ok(None) }
+        _ => return Ok(None)
+      }
+      match meta.get("complete") {
+        Some(base_codec::Json::Num(v, _)) => {
+          if v != 1.0 {
+            pending = true
+            return Ok(None)
+          }
+        }
+        _ => {
+          pending = true
+          return Ok(None)
+        }
+      }
+      let scopes : Array[(Int, String)] = [(1, asker.workspace)]
+      if asker.workspace != "*" {
+        scopes.push((1, "*"))
+      }
+      if asker.home {
+        scopes.push((0, ""))
+      }
+      let limit = 64
+      let keys : Array[String] = []
+      let mut read = 0
+      let take = fn(rows : Array[Map[String, base_codec::Json]]) -> Bool {
+        read = read + rows.length()
+        if read > limit {
+          return false
+        }
+        for i in 0..<rows.length() {
+          let r = rows[i]
+          let s = match row_field(r, "session") {
+            base_codec::Json::Str(v) => v
+            _ => return false
+          }
+          let nul_ok = match row_field(r, "nul") {
+            base_codec::Json::Num(v, _) => v == 0.0
+            _ => false
+          }
+          if !is_ascii_printable(s) || !nul_ok {
+            return false
+          }
+          if !arr_contains_str(keys, s) {
+            keys.push(s)
+          }
+        }
+        true
+      }
+      for i in 0..<scopes.length() {
+        let (sk, sw) = scopes[i]
+        let rows = match db.all(
+          "SELECT session, instr(session, char(0)) AS nul FROM session_list_rows WHERE kind = ? AND ws = ?\n  ORDER BY archived, connect, session LIMIT ?",
+          [base_codec::json_int(sk), base_codec::json_str(sw), base_codec::json_int(limit + 1 - read)],
+        ) {
+          Ok(rs) => rs
+          Err(e) => return Err(e.message)
+        }
+        if !take(rows) {
+          return Ok(None)
+        }
+        if sk == 1 {
+          let rows2 = match db.all(
+            "SELECT session, instr(session, char(0)) AS nul FROM session_list_rows\n  WHERE kind = 1 AND ws >= (?1 || char(0)) AND ws < (?1 || char(1)) ORDER BY ws, archived, connect, session LIMIT ?2",
+            [base_codec::json_str(sw), base_codec::json_int(limit + 1 - read)],
+          ) {
+            Ok(rs) => rs
+            Err(e) => return Err(e.message)
+          }
+          if !take(rows2) {
+            return Ok(None)
+          }
+        }
+      }
+      let has_audit = match db_exists(db, "table", "search_job_session_audit") {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if !has_audit {
+        pending = true
+        return Ok(None)
+      }
+      let audit = match db_one(db, "SELECT version, complete FROM search_job_session_audit WHERE id = 1", []) {
+        Ok(Some(a)) => a
+        Ok(None) => return Ok(None)
+        Err(e) => return Err(e)
+      }
+      match audit.get("version") {
+        Some(base_codec::Json::Num(v, _)) => if v != 1.0 { return Ok(None) }
+        _ => return Ok(None)
+      }
+      match audit.get("complete") {
+        Some(base_codec::Json::Num(v, _)) => {
+          if v != 1.0 {
+            pending = true
+            return Ok(None)
+          }
+        }
+        _ => {
+          pending = true
+          return Ok(None)
+        }
+      }
+      let out : Array[String] = []
+      for i in 0..<keys.length() {
+        if compare_units(keys[i], end) <= 0 {
+          out.push(keys[i])
+        }
+      }
+      sort_by(out, compare_units)
+      Ok(Some(out))
+    },
+    fn(e : sql_db::SqlError) -> String { e.message },
+  )
+  if pending {
+    self.session_list_pending = true
+  }
+  res
+}
+
+fn ReadingStepper::init_thread(
+  self : ReadingStepper,
+  db : sql_db::Db,
+  id : base_codec::Json,
+) -> Result[Option[ThreadMsgState], String] {
+  let row = match db_one(db, "SELECT * FROM threads WHERE id = ?", [id]) {
+    Ok(Some(r)) => r
+    Ok(None) => return Ok(None)
+    Err(e) => return Err(e)
+  }
+  let members = match db.all("SELECT session FROM thread_sessions WHERE thread = ? ORDER BY joined_at, rowid", [id]) {
+    Ok(ms) => ms
+    Err(e) => return Err(e.message)
+  }
+  let sessions : Array[Map[String, base_codec::Json]] = []
+  for i in 0..<members.length() {
+    match db_one(db, "SELECT * FROM sessions WHERE key = ?", [row_field(members[i], "session")]) {
+      Ok(Some(s)) => sessions.push(s)
+      Ok(None) => ()
+      Err(e) => return Err(e)
+    }
+  }
+  let home_key = row_field(row, "home")
+  let mut home : Option[Map[String, base_codec::Json]] = None
+  for i in 0..<sessions.length() {
+    if json_val_eq(row_field(sessions[i], "key"), home_key) {
+      home = Some(sessions[i])
+      break
+    }
+  }
+  match home {
+    None => if sessions.length() > 0 { home = Some(sessions[0]) }
+    Some(_) => ()
+  }
+  let ws = match home {
+    Some(h) => json_text_of(row_field(h, "ws"))
+    None => None
+  }
+  if !sees(ws, None, self.asker) {
+    return Ok(None)
+  }
+  let mut all_sess_archived = sessions.length() > 0
+  for i in 0..<sessions.length() {
+    if json_is_null(row_field(sessions[i], "archived_at")) {
+      all_sess_archived = false
+      break
+    }
+  }
+  let archived = !json_is_null(row_field(row, "hidden_at")) || all_sess_archived
+  if self.archived && !archived {
+    return Ok(None)
+  }
+  let surface = if json_val_eq(row_field(row, "surface"), base_codec::json_str("chat")) {
+    "stillfail"
+  } else {
+    "slack"
+  }
+  let first_text = match db_one(
+    db,
+    "SELECT m.text FROM thread_state t JOIN merged m ON m.thread = t.thread AND m.n = t.person_n WHERE t.thread = ?",
+    [id],
+  ) {
+    Ok(Some(r)) => json_text_of(row_field(r, "text"))
+    Ok(None) => None
+    Err(e) => return Err(e)
+  }
+  let title = title_of(row, first_text)
+  let wants_messages = self.wants("message")
+  let wants_chat = self.wants("chat")
+  let body = if wants_chat {
+    let parts : Array[String] = []
+    for i in 0..<sessions.length() {
+      match json_text_of(row_field(sessions[i], "title")) {
+        Some(t) => if t != "" { parts.push(t) }
+        None => ()
+      }
+    }
+    for i in 0..<sessions.length() {
+      match json_text_of(row_field(sessions[i], "model")) {
+        Some(m) => if m != "" { parts.push(m) }
+        None => ()
+      }
+    }
+    str_join(parts, "\n")
+  } else {
+    ""
+  }
+  let chat = match json_text_of(row_field(row, "home")) {
+    Some(h) => {
+      if h != "" {
+        base_codec::json_str(h)
+      } else {
+        if sessions.length() > 0 {
+          match json_text_of(row_field(sessions[0], "key")) {
+            Some(k) => {
+              match sql_db::conversation_of(db, k) {
+                Ok(c) => base_codec::json_str(c)
+                Err(e) => return Err(e.message)
+              }
+            }
+            None => row_field(sessions[0], "key")
+          }
+        } else {
+          base_codec::json_null()
+        }
+      }
+    }
+    None => {
+      if sessions.length() > 0 {
+        match json_text_of(row_field(sessions[0], "key")) {
+          Some(k) => {
+            match sql_db::conversation_of(db, k) {
+              Ok(c) => base_codec::json_str(c)
+              Err(e) => return Err(e.message)
+            }
+          }
+          None => row_field(sessions[0], "key")
+        }
+      } else {
+        base_codec::json_null()
+      }
+    }
+  }
+  let refs : Array[(String, base_codec::Json)] = [
+    ("thread", id),
+    ("chat", chat),
+    ("surface", base_codec::json_str(surface)),
+    ("archived", base_codec::json_bool(archived)),
+  ]
+  match row_field(row, "channel") {
+    base_codec::Json::Str(c) => if c != "" { refs.push(("channel", base_codec::json_str(c))) }
+    base_codec::Json::Num(n, _) => if n != 0.0 && n == n { refs.push(("channel", sql_db::double_to_json(n))) }
+    _ => ()
+  }
+  if !wants_messages && !has(title + "\n" + body, self.words) {
+    return Ok(None)
+  }
+  let end = match db_one(db, "SELECT MAX(n) AS n FROM entries WHERE thread = ?", [id]) {
+    Ok(Some(r)) => row_field(r, "n")
+    Ok(None) => base_codec::json_null()
+    Err(e) => return Err(e)
+  }
+  Ok(
+    Some(
+      ThreadMsgState::{
+        id: id,
+        row: row,
+        sessions: sessions,
+        ws: ws,
+        archived: archived,
+        surface: surface,
+        title: title,
+        wants_messages: wants_messages,
+        wants_chat: wants_chat,
+        body: body,
+        chat: chat,
+        refs: refs,
+        end: end,
+        after: base_codec::json_null(),
+        last_at: None,
+        origins: Map::new(),
+        last_rows_len: SEARCH_BATCH,
+      },
+    ),
+  )
+}
+
+/// Process ONE message batch of a thread; returns `Ok(true)` if paused at P1, `Ok(false)` if thread finished.
+fn ReadingStepper::step_thread_batch(
+  self : ReadingStepper,
+  db : sql_db::Db,
+  st : ThreadMsgState,
+) -> Result[Bool, String] {
+  if json_is_null(st.end) {
+    self.finish_thread(st)
+    return Ok(false)
+  }
+  let first_sql = if st.wants_messages {
+    messages_sql("n <= ?2", "?3", self.legacy)
+  } else {
+    message_times_sql("n <= ?2", "?3", self.legacy)
+  }
+  let next_sql = if st.wants_messages {
+    messages_sql("n > ?2 AND n <= ?3", "?4", self.legacy)
+  } else {
+    message_times_sql("n > ?2 AND n <= ?3", "?4", self.legacy)
+  }
+  let rows = if json_is_null(st.after) {
+    match db.all(first_sql, [st.id, st.end, base_codec::json_int(SEARCH_BATCH)]) {
+      Ok(rs) => rs
+      Err(e) => return Err(e.message)
+    }
+  } else {
+    match db.all(next_sql, [st.id, st.after, st.end, base_codec::json_int(SEARCH_BATCH)]) {
+      Ok(rs) => rs
+      Err(e) => return Err(e.message)
+    }
+  }
+  if rows.length() == 0 {
+    self.finish_thread(st)
+    return Ok(false)
+  }
+  for i in 0..<rows.length() {
+    let r = rows[i]
+    let created = if st.wants_messages { row_field(r, "created_at") } else { row_field(r, "at") }
+    let at = match json_num_of(created) {
+      Some(v) => v
+      None => 0.0
+    }
+    st.last_at = Some(match st.last_at {
+      Some(l) => if at > l { at } else { l }
+      None => at
+    })
+    if !st.wants_messages {
+      continue
+    }
+    let text = match json_text_of(row_field(r, "text")) {
+      Some(s) => s
+      None => ""
+    }
+    let files : Array[String] = []
+    match parsed_jval(row_field(r, "attachments")) {
+      Some(js_json::JValue::Arr(xs)) => {
+        for j in 0..<xs.length() {
+          match jv_string_of(xs[j].get("name")) {
+            Some(n) => if n != "" { files.push(n) }
+            None => ()
+          }
+        }
+      }
+      _ => ()
+    }
+    if jscase::trim(text) == "" && files.length() == 0 {
+      continue
+    }
+    let author_kind = row_field(r, "author_kind")
+    let author = row_field(r, "author")
+    let identity = parsed_jval(row_field(r, "agent_identity"))
+    let mut shown : Option[base_codec::Json] = match identity {
+      Some(v) => Some(jval_to_json_lossy(v))
+      None => None
+    }
+    let has_runtime = match identity {
+      Some(v) => {
+        match v.get("runtime") {
+          Some(js_json::JValue::Str(_)) => true
+          _ => false
+        }
+      }
+      None => false
+    }
+    if json_val_eq(author_kind, base_codec::json_str("agent")) && !has_runtime {
+      let a = sql_db::stringify_json(author)
+      match st.origins.get(a) {
+        Some(_) => ()
+        None => {
+          let found = match original_runtime(db, author) {
+            Ok(Some(rt)) => Some(rt)
+            Ok(None) => {
+              let mut fallback : Option[String] = None
+              for si in 0..<st.sessions.length() {
+                if json_val_eq(row_field(st.sessions[si], "key"), author) {
+                  fallback = json_text_of(row_field(st.sessions[si], "runtime"))
+                  break
+                }
+              }
+              fallback
+            }
+            Err(e) => return Err(e)
+          }
+          st.origins.set(a, found)
+        }
+      }
+      match st.origins.get(a) {
+        Some(Some(runtime)) => {
+          if runtime != "" {
+            shown = Some(with_runtime(identity, runtime))
+          }
+        }
+        _ => ()
+      }
+    }
+    let msg_n = row_field(r, "n")
+    let message_refs : Array[(String, base_codec::Json)] = [
+      ("thread", st.id),
+      ("seq", msg_n),
+      ("chat", st.chat),
+      ("chatTitle", base_codec::json_str(st.title)),
+      ("surface", base_codec::json_str(st.surface)),
+      ("archived", base_codec::json_bool(st.archived)),
+      ("authorKind", author_kind),
+      ("author", author),
+    ]
+    match shown {
+      Some(s) => {
+        if !json_is_null(s) &&
+        !json_val_eq(s, base_codec::json_bool(false)) &&
+        !json_val_eq(s, base_codec::json_num(0.0)) &&
+        !json_val_eq(s, base_codec::json_str("")) {
+          message_refs.push(("agentIdentity", s))
+        }
+      }
+      None => ()
+    }
+    let doc_body = if files.length() > 0 { text + "\n" + str_join(files, "\n") } else { text }
+    self.pages.add(
+      Doc::{
+        key: "m:" + sql_db::stringify_json(st.id) + ":" + sql_db::stringify_json(msg_n),
+        kind: "message",
+        ws: st.ws,
+        doc_scope: None,
+        title: "",
+        body: doc_body,
+        at: json_num_of(row_field(r, "created_at")),
+        refs: message_refs,
+      },
+    )
+  }
+  st.after = row_field(rows[rows.length() - 1], "n")
+  st.last_rows_len = rows.length()
+  Ok(true) // Yield at P1!
+}
+
+fn ReadingStepper::finish_thread(self : ReadingStepper, st : ThreadMsgState) -> Unit {
+  if st.wants_chat {
+    let at = match st.last_at {
+      Some(a) => Some(a)
+      None => json_num_of(row_field(st.row, "created_at"))
+    }
+    self.pages.add(
+      Doc::{
+        key: "c:" + sql_db::stringify_json(st.id),
+        kind: "chat",
+        ws: st.ws,
+        doc_scope: None,
+        title: st.title,
+        body: st.body,
+        at: at,
+        refs: st.refs,
+      },
+    )
+  }
+}
+
+fn init_session_jobs(
+  db : sql_db::Db,
+  key : base_codec::Json,
+  session : Map[String, base_codec::Json],
+) -> Result[Option[SessionJobsState], String] {
+  let end = match db_one(
+    db,
+    "SELECT MAX(rowid) AS n FROM jobs INDEXED BY jobs_by_session WHERE session_key = ?",
+    [key],
+  ) {
+    Ok(Some(r)) => row_field(r, "n")
+    Ok(None) => base_codec::json_null()
+    Err(e) => return Err(e)
+  }
+  if json_is_null(end) {
+    return Ok(None)
+  }
+  let thread = match db_one(
+    db,
+    "SELECT t.id FROM thread_sessions ts JOIN threads t ON t.id = ts.thread WHERE ts.session = ? AND t.surface = 'chat' ORDER BY ts.joined_at DESC, ts.rowid DESC LIMIT 1",
+    [key],
+  ) {
+    Ok(Some(t)) => Some(row_field(t, "id"))
+    Ok(None) => None
+    Err(e) => return Err(e)
+  }
+  Ok(
+    Some(
+      SessionJobsState::{
+        key: key,
+        end: end,
+        thread: thread,
+        current: session,
+        after: base_codec::json_null(),
+        last_rows_len: SEARCH_BATCH,
+      },
+    ),
+  )
+}
+
+/// Process ONE job batch for a session; returns `Ok(true)` if paused at P4, `Ok(false)` if done.
+fn ReadingStepper::step_session_jobs_batch(
+  self : ReadingStepper,
+  db : sql_db::Db,
+  st : SessionJobsState,
+) -> Result[Bool, String] {
+  let rows = if json_is_null(st.after) {
+    match db.all(
+      "SELECT rowid AS seq, id, name, command, cwd, port, state, started_at FROM jobs WHERE session_key = ? AND rowid <= ? ORDER BY rowid LIMIT ?",
+      [st.key, st.end, base_codec::json_int(SEARCH_BATCH)],
+    ) {
+      Ok(rs) => rs
+      Err(e) => return Err(e.message)
+    }
+  } else {
+    match db.all(
+      "SELECT rowid AS seq, id, name, command, cwd, port, state, started_at FROM jobs WHERE session_key = ? AND rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?",
+      [st.key, st.after, st.end, base_codec::json_int(SEARCH_BATCH)],
+    ) {
+      Ok(rs) => rs
+      Err(e) => return Err(e.message)
+    }
+  }
+  if rows.length() == 0 {
+    return Ok(false)
+  }
+  for i in 0..<rows.length() {
+    self.pages.add(job_doc(rows[i], st.key, st.current, st.thread))
+  }
+  st.after = row_field(rows[rows.length() - 1], "seq")
+  st.last_rows_len = rows.length()
+  Ok(true) // Yield at P4!
+}
+
+/// Advance `ReadingStepper` by ONE step until the next pause point (P1–P7, P9), completion, or error.
+/// Caller checks cancellation on resume before calling `step` again (P8).
+pub fn ReadingStepper::step(
+  self : ReadingStepper,
+  db : sql_db::Db,
+  client : builders_core::ShellClient,
+) -> ReadStepResult {
+  while true {
+    match self.phase {
+      ReadingPhase::Init => {
+        match has_legacy_said(db) {
+          Ok(leg) => self.legacy = leg
+          Err(e) => return ReadStepResult::Failed(e)
+        }
+        if self.wants("chat") || self.wants("message") {
+          let end = match db_one(db, "SELECT MAX(id) AS id FROM threads", []) {
+            Ok(Some(r)) => row_field(r, "id")
+            Ok(None) => base_codec::json_null()
+            Err(e) => return ReadStepResult::Failed(e)
+          }
+          if !json_is_null(end) {
+            self.phase = ReadingPhase::ThreadsNextPage(end, base_codec::json_null())
+          } else {
+            self.phase = ReadingPhase::JobsStart
+          }
+        } else {
+          self.phase = ReadingPhase::JobsStart
+        }
+      }
+      ReadingPhase::ThreadsNextPage(end, after) => {
+        let scoped_opt = match self.scope_page(db, after, end) {
+          Ok(v) => v
+          Err(e) => return ReadStepResult::Failed(e)
+        }
+        let (ids, is_scoped) = match scoped_opt {
+          Some(xs) => (xs, true)
+          None => {
+            self.scope_pending = true
+            let rows = if json_is_null(after) {
+              match db.all("SELECT id FROM threads WHERE id <= ? ORDER BY id LIMIT ?", [end, base_codec::json_int(SEARCH_BATCH)]) {
+                Ok(rs) => rs
+                Err(e) => return ReadStepResult::Failed(e.message)
+              }
+            } else {
+              match db.all(
+                "SELECT id FROM threads WHERE id > ? AND id <= ? ORDER BY id LIMIT ?",
+                [after, end, base_codec::json_int(SEARCH_BATCH)],
+              ) {
+                Ok(rs) => rs
+                Err(e) => return ReadStepResult::Failed(e.message)
+              }
+            }
+            let out : Array[base_codec::Json] = []
+            for i in 0..<rows.length() {
+              out.push(row_field(rows[i], "id"))
+            }
+            (out, false)
+          }
+        }
+        if ids.length() == 0 {
+          self.phase = ReadingPhase::JobsStart
+        } else {
+          self.phase = ReadingPhase::ThreadsWalkIds(end, after, ids, is_scoped, 0)
+        }
+      }
+      ReadingPhase::ThreadsWalkIds(end, after, ids, is_scoped, idx) => {
+        if idx >= ids.length() {
+          let next_after = ids[ids.length() - 1]
+          self.phase = ReadingPhase::ThreadsAfterPage(end, next_after, is_scoped, ids.length())
+          self.emit_pending(client)
+          return ReadStepResult::Yielded // P3
+        }
+        let tid = ids[idx]
+        match self.init_thread(db, tid) {
+          Ok(Some(st)) => {
+            match self.step_thread_batch(db, st) {
+              Ok(true) => {
+                self.phase = ReadingPhase::ThreadsInThread(end, after, ids, is_scoped, idx, st)
+                self.emit_pending(client)
+                return ReadStepResult::Yielded // P1
+              }
+              Ok(false) => {
+                // Thread finished without yielding; check P2 mid-page pause
+                let next_idx = idx + 1
+                self.phase = ReadingPhase::ThreadsWalkIds(end, after, ids, is_scoped, next_idx)
+                if (next_idx % 128) == 0 && next_idx < ids.length() {
+                  self.emit_pending(client)
+                  return ReadStepResult::Yielded // P2
+                }
+              }
+              Err(e) => {
+                if !is_swallowed_thread_err(e) {
+                  return ReadStepResult::Failed(e)
+                }
+                let next_idx = idx + 1
+                self.phase = ReadingPhase::ThreadsWalkIds(end, after, ids, is_scoped, next_idx)
+                if (next_idx % 128) == 0 && next_idx < ids.length() {
+                  self.emit_pending(client)
+                  return ReadStepResult::Yielded // P2
+                }
+              }
+            }
+          }
+          Ok(None) => {
+            let next_idx = idx + 1
+            self.phase = ReadingPhase::ThreadsWalkIds(end, after, ids, is_scoped, next_idx)
+            if (next_idx % 128) == 0 && next_idx < ids.length() {
+              self.emit_pending(client)
+              return ReadStepResult::Yielded // P2
+            }
+          }
+          Err(e) => {
+            if !is_swallowed_thread_err(e) {
+              return ReadStepResult::Failed(e)
+            }
+            let next_idx = idx + 1
+            self.phase = ReadingPhase::ThreadsWalkIds(end, after, ids, is_scoped, next_idx)
+            if (next_idx % 128) == 0 && next_idx < ids.length() {
+              self.emit_pending(client)
+              return ReadStepResult::Yielded // P2
+            }
+          }
+        }
+      }
+      ReadingPhase::ThreadsInThread(end, after, ids, is_scoped, idx, st) => {
+        // Resumed after P1
+        if st.last_rows_len < SEARCH_BATCH {
+          self.finish_thread(st)
+          let next_idx = idx + 1
+          self.phase = ReadingPhase::ThreadsWalkIds(end, after, ids, is_scoped, next_idx)
+          if (next_idx % 128) == 0 && next_idx < ids.length() {
+            self.emit_pending(client)
+            return ReadStepResult::Yielded // P2
+          }
+        } else {
+          match self.step_thread_batch(db, st) {
+            Ok(true) => {
+              self.phase = ReadingPhase::ThreadsInThread(end, after, ids, is_scoped, idx, st)
+              self.emit_pending(client)
+              return ReadStepResult::Yielded // P1
+            }
+            Ok(false) => {
+              let next_idx = idx + 1
+              self.phase = ReadingPhase::ThreadsWalkIds(end, after, ids, is_scoped, next_idx)
+              if (next_idx % 128) == 0 && next_idx < ids.length() {
+                self.emit_pending(client)
+                return ReadStepResult::Yielded // P2
+              }
+            }
+            Err(e) => {
+              if !is_swallowed_thread_err(e) {
+                return ReadStepResult::Failed(e)
+              }
+              let next_idx = idx + 1
+              self.phase = ReadingPhase::ThreadsWalkIds(end, after, ids, is_scoped, next_idx)
+              if (next_idx % 128) == 0 && next_idx < ids.length() {
+                self.emit_pending(client)
+                return ReadStepResult::Yielded // P2
+              }
+            }
+          }
+        }
+      }
+      ReadingPhase::ThreadsAfterPage(end, next_after, is_scoped, last_ids_len) => {
+        // Resumed after P3
+        if !is_scoped && last_ids_len < SEARCH_BATCH {
+          self.phase = ReadingPhase::JobsStart
+        } else {
+          self.phase = ReadingPhase::ThreadsNextPage(end, next_after)
+        }
+      }
+      ReadingPhase::JobsStart => {
+        if !self.wants("job") {
+          self.phase = ReadingPhase::MemoryStart
+          continue
+        }
+        let position = "session_key, CAST(session_key AS BLOB) AS bytes, typeof(session_key) AS storage"
+        let end_row = match db_one(
+          db,
+          "SELECT " + position + " FROM jobs INDEXED BY jobs_by_session\n      ORDER BY session_key DESC LIMIT 1",
+          [],
+        ) {
+          Ok(Some(r)) => r
+          Ok(None) => {
+            self.phase = ReadingPhase::MemoryStart
+            continue
+          }
+          Err(e) => return ReadStepResult::Failed(e)
+        }
+        let scoped = match row_field(end_row, "session_key") {
+          base_codec::Json::Str(e_str) => {
+            match self.small_job_scope(db, e_str) {
+              Ok(v) => v
+              Err(e) => return ReadStepResult::Failed(e)
+            }
+          }
+          _ => None
+        }
+        match scoped {
+          Some(keys) => self.phase = ReadingPhase::JobsScopedWalk(keys, 0)
+          None => self.phase = ReadingPhase::JobsUnscopedNext(end_row, None)
+        }
+      }
+      ReadingPhase::JobsScopedWalk(keys, idx) => {
+        if idx >= keys.length() {
+          self.phase = ReadingPhase::MemoryStart
+          continue
+        }
+        let k = base_codec::json_str(keys[idx])
+        let has_job = match db_one(
+          db,
+          "SELECT 1 AS x FROM jobs INDEXED BY jobs_by_session WHERE session_key = ? LIMIT 1",
+          [k],
+        ) {
+          Ok(Some(_)) => true
+          Ok(None) => false
+          Err(e) => return ReadStepResult::Failed(e)
+        }
+        let mut started_sess : Option[SessionJobsState] = None
+        if has_job {
+          match db_one(db, "SELECT * FROM sessions WHERE key = ?", [k]) {
+            Ok(Some(session)) => {
+              if sees(json_text_of(row_field(session, "ws")), None, self.asker) {
+                match init_session_jobs(db, k, session) {
+                  Ok(st_opt) => started_sess = st_opt
+                  Err(e) => return ReadStepResult::Failed(e)
+                }
+              }
+            }
+            Ok(None) => ()
+            Err(e) => return ReadStepResult::Failed(e)
+          }
+        }
+        match started_sess {
+          Some(st) => {
+            match self.step_session_jobs_batch(db, st) {
+              Ok(true) => {
+                self.phase = ReadingPhase::JobsScopedInSession(keys, idx, st)
+                self.emit_pending(client)
+                return ReadStepResult::Yielded // P4
+              }
+              Ok(false) => {
+                let next_idx = idx + 1
+                if (next_idx % 32) == 0 {
+                  self.phase = ReadingPhase::JobsScopedResume(keys, next_idx)
+                  self.emit_pending(client)
+                  return ReadStepResult::Yielded // P5
+                }
+                self.phase = ReadingPhase::JobsScopedWalk(keys, next_idx)
+              }
+              Err(e) => return ReadStepResult::Failed(e)
+            }
+          }
+          None => {
+            let next_idx = idx + 1
+            if (next_idx % 32) == 0 {
+              self.phase = ReadingPhase::JobsScopedResume(keys, next_idx)
+              self.emit_pending(client)
+              return ReadStepResult::Yielded // P5
+            }
+            self.phase = ReadingPhase::JobsScopedWalk(keys, next_idx)
+          }
+        }
+      }
+      ReadingPhase::JobsScopedInSession(keys, idx, st) => {
+        // Resumed after P4: re-check session visibility (`docs.mbt:666-668`)
+        let latest = match db_one(db, "SELECT * FROM sessions WHERE key = ?", [st.key]) {
+          Ok(Some(s)) => {
+            if !sees(json_text_of(row_field(s, "ws")), None, self.asker) {
+              return ReadStepResult::Failed("the session changed while searching; search again")
+            }
+            s
+          }
+          Ok(None) => return ReadStepResult::Failed("the session changed while searching; search again")
+          Err(e) => return ReadStepResult::Failed(e)
+        }
+        if st.last_rows_len < SEARCH_BATCH {
+          let next_idx = idx + 1
+          if (next_idx % 32) == 0 {
+            self.phase = ReadingPhase::JobsScopedResume(keys, next_idx)
+            self.emit_pending(client)
+            return ReadStepResult::Yielded // P5
+          }
+          self.phase = ReadingPhase::JobsScopedWalk(keys, next_idx)
+        } else {
+          st.current = latest
+          match self.step_session_jobs_batch(db, st) {
+            Ok(true) => {
+              self.phase = ReadingPhase::JobsScopedInSession(keys, idx, st)
+              self.emit_pending(client)
+              return ReadStepResult::Yielded // P4
+            }
+            Ok(false) => {
+              let next_idx = idx + 1
+              if (next_idx % 32) == 0 {
+                self.phase = ReadingPhase::JobsScopedResume(keys, next_idx)
+                self.emit_pending(client)
+                return ReadStepResult::Yielded // P5
+              }
+              self.phase = ReadingPhase::JobsScopedWalk(keys, next_idx)
+            }
+            Err(e) => return ReadStepResult::Failed(e)
+          }
+        }
+      }
+      ReadingPhase::JobsScopedResume(keys, next_idx) => {
+        self.phase = ReadingPhase::JobsScopedWalk(keys, next_idx)
+      }
+      ReadingPhase::JobsUnscopedNext(end_row, after_opt) => {
+        let position = "session_key, CAST(session_key AS BLOB) AS bytes, typeof(session_key) AS storage"
+        let bound = fn(row : Map[String, base_codec::Json], p : String) -> String {
+          if json_val_eq(row_field(row, "storage"), base_codec::json_str("text")) {
+            "CAST(" + p + " AS TEXT)"
+          } else {
+            p
+          }
+        }
+        let val_of = fn(row : Map[String, base_codec::Json]) -> base_codec::Json {
+          if json_val_eq(row_field(row, "storage"), base_codec::json_str("text")) {
+            row_field(row, "bytes")
+          } else {
+            row_field(row, "session_key")
+          }
+        }
+        let found = match after_opt {
+          None => {
+            match db_one(
+              db,
+              "SELECT " +
+              position +
+              " FROM jobs INDEXED BY jobs_by_session\n              WHERE session_key <= " +
+              bound(end_row, "?1") +
+              " ORDER BY session_key LIMIT 1",
+              [val_of(end_row)],
+            ) {
+              Ok(r) => r
+              Err(e) => return ReadStepResult::Failed(e)
+            }
+          }
+          Some(a) => {
+            match db_one(
+              db,
+              "SELECT " +
+              position +
+              " FROM jobs INDEXED BY jobs_by_session\n              WHERE session_key > " +
+              bound(a, "?1") +
+              " AND session_key <= " +
+              bound(end_row, "?2") +
+              "\n              ORDER BY session_key LIMIT 1",
+              [val_of(a), val_of(end_row)],
+            ) {
+              Ok(r) => r
+              Err(e) => return ReadStepResult::Failed(e)
+            }
+          }
+        }
+        let row = match found {
+          Some(r) => r
+          None => {
+            self.phase = ReadingPhase::MemoryStart
+            continue
+          }
+        }
+        let next_after = Some(row)
+        let k = row_field(row, "session_key")
+        let mut started_sess : Option[SessionJobsState] = None
+        match db_one(db, "SELECT * FROM sessions WHERE key = ?", [k]) {
+          Ok(Some(session)) => {
+            if sees(json_text_of(row_field(session, "ws")), None, self.asker) {
+              match init_session_jobs(db, k, session) {
+                Ok(st_opt) => started_sess = st_opt
+                Err(e) => return ReadStepResult::Failed(e)
+              }
+            }
+          }
+          Ok(None) => ()
+          Err(e) => return ReadStepResult::Failed(e)
+        }
+        match started_sess {
+          Some(st) => {
+            match self.step_session_jobs_batch(db, st) {
+              Ok(true) => {
+                self.phase = ReadingPhase::JobsUnscopedInSession(end_row, next_after, st)
+                self.emit_pending(client)
+                return ReadStepResult::Yielded // P4
+              }
+              Ok(false) => {
+                self.phase = ReadingPhase::JobsUnscopedNext(end_row, next_after)
+                self.emit_pending(client)
+                return ReadStepResult::Yielded // P6
+              }
+              Err(e) => return ReadStepResult::Failed(e)
+            }
+          }
+          None => {
+            self.phase = ReadingPhase::JobsUnscopedNext(end_row, next_after)
+            self.emit_pending(client)
+            return ReadStepResult::Yielded // P6
+          }
+        }
+      }
+      ReadingPhase::JobsUnscopedInSession(end_row, next_after, st) => {
+        // Resumed after P4: re-check session visibility
+        let latest = match db_one(db, "SELECT * FROM sessions WHERE key = ?", [st.key]) {
+          Ok(Some(s)) => {
+            if !sees(json_text_of(row_field(s, "ws")), None, self.asker) {
+              return ReadStepResult::Failed("the session changed while searching; search again")
+            }
+            s
+          }
+          Ok(None) => return ReadStepResult::Failed("the session changed while searching; search again")
+          Err(e) => return ReadStepResult::Failed(e)
+        }
+        if st.last_rows_len < SEARCH_BATCH {
+          self.phase = ReadingPhase::JobsUnscopedNext(end_row, next_after)
+          self.emit_pending(client)
+          return ReadStepResult::Yielded // P6
+        }
+        st.current = latest
+        match self.step_session_jobs_batch(db, st) {
+          Ok(true) => {
+            self.phase = ReadingPhase::JobsUnscopedInSession(end_row, next_after, st)
+            self.emit_pending(client)
+            return ReadStepResult::Yielded // P4
+          }
+          Ok(false) => {
+            self.phase = ReadingPhase::JobsUnscopedNext(end_row, next_after)
+            self.emit_pending(client)
+            return ReadStepResult::Yielded // P6
+          }
+          Err(e) => return ReadStepResult::Failed(e)
+        }
+      }
+      ReadingPhase::MemoryStart => {
+        if self.wants("skill") || self.wants("memory") {
+          let raw = read_config_jval(client, self.data, self.sep)
+          let places : Array[Option[String]] = [None]
+          let wss = memory_workspaces(client, self.data, self.sep, raw)
+          for i in 0..<wss.length() {
+            places.push(Some(wss[i]))
+          }
+          self.phase = ReadingPhase::MemoryWalk(raw, places, 0)
+        } else {
+          self.phase = ReadingPhase::ProfileRun
+        }
+      }
+      ReadingPhase::MemoryWalk(raw, places, idx) => {
+        if idx >= places.length() {
+          self.phase = ReadingPhase::ProfileRun
+          continue
+        }
+        let ws = places[idx]
+        if sees(ws, None, self.asker) {
+          let docs = memory_docs(client, self.data, self.sep, raw, ws)
+          for i in 0..<docs.length() {
+            if self.wants(docs[i].kind) {
+              self.pages.add(docs[i])
+            }
+          }
+        }
+        self.phase = ReadingPhase::MemoryWalk(raw, places, idx + 1)
+        self.emit_pending(client)
+        return ReadStepResult::Yielded // P7
+      }
+      ReadingPhase::ProfileRun => {
+        if self.wants("profile") {
+          let raw = read_config_jval(client, self.data, self.sep)
+          let docs = profile_docs(raw)
+          for i in 0..<docs.length() {
+            self.pages.add(docs[i])
+          }
+        }
+        self.phase = ReadingPhase::FinalPause
+        self.emit_pending(client)
+        return ReadStepResult::Yielded // P9 (`match.mbt:348`)
+      }
+      ReadingPhase::FinalPause => {
+        self.phase = ReadingPhase::Done
+        return ReadStepResult::Finished
+      }
+      ReadingPhase::Done => return ReadStepResult::Finished
+    }
+  }
+  ReadStepResult::Finished
+}

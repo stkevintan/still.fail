@@ -1,0 +1,1642 @@
+// 1:1 port of `station/mb/src/usagecount/counter.mbt` and `station/mb/src/reader/main.mbt:603-627`.
+// Zero raw transaction SQL: all write transactions go exclusively through `sql_db::Db::tx_err`.
+
+import "base_codec"
+import "builders_core"
+import "host_shim"
+import "locate"
+import "nodepath"
+import "sql_db"
+
+let SKEW_MS : Double = 5000.0
+
+let MARGIN_MS : Double = 60000.0
+
+let WRITE_BATCH : Int = 64
+
+let RECENT_TIMING_PAGE : Int = 256
+
+let UNTIMED_SESSIONS_SQL : String = "SELECT DISTINCT u.session AS session_key FROM usage_files u JOIN sessions s ON s.key = u.session WHERE u.speed IS NULL AND u.offset > 0 AND (s.runtime IN ('claude', 'codex') OR s.original_runtime IN ('claude', 'codex') OR EXISTS (SELECT 1 FROM runtime_sessions r WHERE r.session_key = s.key AND r.runtime IN ('claude', 'codex'))) AND EXISTS (SELECT 1 FROM turns t INDEXED BY turns_by_session WHERE t.session_key = u.session AND (t.ended_at IS NULL OR t.ended_at >= ?))"
+
+let RECENT_RUNNING_TURNS_SQL : String = "SELECT rowid, session_key FROM turns INDEXED BY turns_ended WHERE ended_at IS NULL AND rowid > ? ORDER BY rowid LIMIT 256"
+
+let RECENT_ENDED_FIRST_SQL : String = "SELECT rowid, session_key, ended_at FROM turns INDEXED BY turns_ended WHERE ended_at >= ? ORDER BY ended_at, rowid LIMIT 256"
+
+let RECENT_ENDED_SAME_SQL : String = "SELECT rowid, session_key, ended_at FROM turns INDEXED BY turns_ended WHERE ended_at = ? AND rowid > ? ORDER BY rowid LIMIT 256"
+
+let RECENT_ENDED_AFTER_SQL : String = "SELECT rowid, session_key, ended_at FROM turns INDEXED BY turns_ended WHERE ended_at > ? ORDER BY ended_at, rowid LIMIT 256"
+
+fn pos_inf() -> Double {
+  1.0 / 0.0
+}
+
+fn neg_inf() -> Double {
+  -1.0 / 0.0
+}
+
+struct Counted {
+  session : Option[String]
+  offset : Double
+  model : Option[String]
+  speed : Option[String]
+  cutoff : Option[Double]
+  anchor : Option[String]
+  path : String
+}
+
+struct Session {
+  key : String
+  runtime : String
+  cwd : Option[String]
+  workspace : String
+  runtime_session_id : Option[String]
+  running : Bool
+  created_at : Double
+}
+
+struct Source {
+  id : String
+  runtime : String
+}
+
+pub struct Counter {
+  client : builders_core::ShellClient
+  db : sql_db::Db
+  sep : String
+  finder : locate::Finder
+  schema : Schema
+  mut files : Option[Map[String, Counted]]
+  codex_paths : Map[String, Map[String, String]]
+  mut pending : Array[(Write, String, Counted)]
+  mut pending_calls : Int
+  mut counted : Array[String]
+  mut from : Double
+  mut time_from : Option[Double]
+}
+
+pub fn Counter::new(client : builders_core::ShellClient, db : sql_db::Db, sep : String) -> Counter {
+  Counter::{
+    client: client,
+    db: db,
+    sep: sep,
+    finder: locate::Finder::new(client, sep),
+    schema: Schema::new(),
+    files: None,
+    codex_paths: Map::new(),
+    pending: [],
+    pending_calls: 0,
+    counted: [],
+    from: pos_inf(),
+    time_from: None,
+  }
+}
+
+fn Counter::join(self : Counter, parts : Array[String]) -> String {
+  nodepath::join(self.sep, parts)
+}
+
+fn session_of(r : Map[String, base_codec::Json]) -> Session {
+  Session::{
+    key: match text_of(row_field(r, "key")) {
+      Some(v) => v
+      None => ""
+    },
+    runtime: match text_of(row_field(r, "runtime")) {
+      Some(v) => v
+      None => ""
+    },
+    cwd: text_of(row_field(r, "cwd")),
+    workspace: match text_of(row_field(r, "workspace")) {
+      Some(v) => v
+      None => ""
+    },
+    runtime_session_id: text_of(row_field(r, "runtime_session_id")),
+    running: opt_d_eq(num_of(row_field(r, "running")), 1.0),
+    created_at: match num_of(row_field(r, "created_at")) {
+      Some(v) => v
+      None => 0.0
+    },
+  }
+}
+
+fn Counter::sources(self : Counter, s : Session) -> Result[Array[Source], String] {
+  let rows = match self.db.all(
+    "SELECT r.id, COALESCE(r.runtime, s.original_runtime, s.runtime) AS runtime, r.profile FROM sessions s CROSS JOIN runtime_sessions r ON r.session_key = s.key WHERE s.key = ? ORDER BY r.at, r.rowid",
+    [base_codec::json_str(s.key)],
+  ) {
+    Ok(rs) => rs
+    Err(e) => return Err(e.message)
+  }
+  let sources : Array[Source] = []
+  for i in 0..<rows.length() {
+    let r = rows[i]
+    sources.push(
+      Source::{
+        id: match text_of(row_field(r, "id")) {
+          Some(v) => v
+          None => ""
+        },
+        runtime: match text_of(row_field(r, "runtime")) {
+          Some(v) => v
+          None => ""
+        },
+      },
+    )
+  }
+  let current = match s.runtime_session_id {
+    Some(c) => c
+    None => return Ok(sources)
+  }
+  let mut entry = Source::{ id: current, runtime: s.runtime }
+  for i in 0..<sources.length() {
+    if sources[i].id == current {
+      entry = sources[i]
+      break
+    }
+  }
+  let out : Array[Source] = []
+  for i in 0..<sources.length() {
+    if sources[i].id != current {
+      out.push(sources[i])
+    }
+  }
+  out.push(entry)
+  Ok(out)
+}
+
+fn Counter::ways(self : Counter, data : String, homes : Array[String], runtime : String) -> Array[String] {
+  let out : Array[String] = [self.join([data, "transcripts", runtime])]
+  for i in 0..<homes.length() {
+    out.push(self.join([homes[i], locate::transcript_dir(runtime)]))
+  }
+  out
+}
+
+fn Counter::position(self : Counter, known : Map[String, Counted], name : String) -> Result[Option[Counted], String] {
+  match known.get(name) {
+    Some(c) => return Ok(Some(c))
+    None => ()
+  }
+  let file = match usage_file(self.db, name) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  let counter = match counter_file(self.db, name) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  match (file, counter) {
+    (None, None) => return Ok(None)
+    _ => ()
+  }
+  let f = match file {
+    Some(v) => v
+    None => File::{ session: None, offset: 0.0, model: None, speed: None }
+  }
+  let saved = Counted::{
+    session: f.session,
+    offset: f.offset,
+    model: f.model,
+    speed: f.speed,
+    cutoff: match counter {
+      Some(c) => Some(c.cutoff)
+      None => None
+    },
+    anchor: match counter {
+      Some(c) => c.anchor
+      None => None
+    },
+    path: name,
+  }
+  known.set(name, saved)
+  Ok(Some(saved))
+}
+
+fn Counter::read_before(
+  self : Counter,
+  known : Map[String, Counted],
+  data : String,
+  homes : Array[String],
+  path : String,
+  runtime : String,
+) -> Result[Option[Counted], String] {
+  match self.position(known, path) {
+    Ok(Some(had)) => return Ok(Some(had))
+    Ok(None) => ()
+    Err(e) => return Err(e)
+  }
+  let roots = self.ways(data, homes, runtime)
+  let mut matched_idx = -1
+  for i in 0..<roots.length() {
+    if str_has_prefix(path, roots[i] + self.sep) {
+      matched_idx = i
+      break
+    }
+  }
+  if matched_idx < 0 {
+    return Ok(None)
+  }
+  let rest = str_slice_bytes(path, roots[matched_idx].to_bytes().length(), path.to_bytes().length())
+  for i in 0..<roots.length() {
+    match self.position(known, roots[i] + rest) {
+      Ok(Some(was)) => return Ok(Some(was))
+      Ok(None) => ()
+      Err(e) => return Err(e)
+    }
+  }
+  Ok(None)
+}
+
+fn arr_contains_str(arr : Array[String], target : String) -> Bool {
+  for i in 0..<arr.length() {
+    if arr[i] == target {
+      return true
+    }
+  }
+  false
+}
+
+fn Counter::flush(self : Counter) -> Result[Int, String] {
+  let pending = self.pending
+  self.pending = []
+  self.pending_calls = 0
+  let writes : Array[Write] = []
+  for i in 0..<pending.length() {
+    let (w, _, _) = pending[i]
+    writes.push(w)
+  }
+  let recorded = match record_all(self.db, self.schema, writes) {
+    Ok(r) => r
+    Err(e) => {
+      self.files = None
+      return Err(e)
+    }
+  }
+  let mut added = 0
+  for i in 0..<pending.length() {
+    let (w, skey, cnt) = pending[i]
+    match self.files {
+      Some(files) => files.set(w.path, cnt)
+      None => ()
+    }
+    if w.changed.value != pos_inf() {
+      if !arr_contains_str(self.counted, skey) {
+        self.counted.push(skey)
+      }
+      if w.changed.value < self.from {
+        self.from = w.changed.value
+      }
+    }
+    added = added + recorded[i]
+  }
+  Ok(added)
+}
+
+fn Counter::turns(self : Counter, session : String, from : Double, until : Double) -> Result[Array[(Double, For)], String] {
+  // Pass `from` and `until` directly as in-memory `Json::Num(d, "")` (never via JSON text)
+  // so `until = NaN` is preserved for `usage_turns`.
+  let args = base_codec::json_obj([
+    ("session", base_codec::json_str(session)),
+    ("from", base_codec::json_num(from)),
+    ("until", base_codec::json_num(until)),
+  ])
+  let got = match usage_turns(self.db, args) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  let items = match got {
+    base_codec::Json::Arr(xs) => xs
+    _ => return Ok([])
+  }
+  let out : Array[(Double, For)] = []
+  for i in 0..<items.length() {
+    let t = items[i]
+    let started = match builders_core::json_get_last(t, "startedAt") {
+      Some(base_codec::Json::Num(s, _)) => s
+      _ => 0.0
+    }
+    let of_obj = builders_core::json_get_last(t, "of")
+    let of_val = fn(k : String) -> base_codec::Json {
+      match jget(of_obj, k) {
+        Some(v) => v
+        None => base_codec::json_null()
+      }
+    }
+    out.push(
+      (
+        started,
+        For::{
+          turn: of_val("turn"),
+          person: of_val("person"),
+          thread: of_val("thread"),
+          profile: of_val("profile"),
+        },
+      ),
+    )
+  }
+  Ok(out)
+}
+
+fn read_out(
+  archived : Bool,
+  was : Option[Counted],
+  sized : Double,
+  path : String,
+  time_from : Option[Double],
+  runtime : String,
+) -> Bool {
+  if !archived {
+    return false
+  }
+  let w = match was {
+    Some(v) => v
+    None => return false
+  }
+  let has_tf = match time_from {
+    Some(_) => true
+    None => false
+  }
+  let speed_none = match w.speed {
+    None => true
+    Some(_) => false
+  }
+  let to_time = has_tf &&
+  w.offset > 0.0 &&
+  ((speed_none && !is_timed_runtime(runtime)) || (is_timed_runtime(runtime) && needs_timing(runtime, w.speed)))
+  let has_cutoff = match w.cutoff {
+    Some(_) => true
+    None => false
+  }
+  let has_anchor = match w.anchor {
+    Some(_) => true
+    None => false
+  }
+  sized == w.offset && has_cutoff && has_anchor && w.path == path && !to_time
+}
+
+pub fn sections_of(part : Part, cutoff : Double) -> Array[(Bytes, Int64, Int64, Bool)] {
+  if part.offset.to_double() <= cutoff {
+    return [(part.bytes, part.from, part.offset, false)]
+  }
+  if part.from.to_double() >= cutoff {
+    return [(part.bytes, part.from, part.offset, true)]
+  }
+  let at = (cutoff.to_int64() - part.from).to_int()
+  let end = if (part.bytes[at - 1].to_int() & 0xFF) == 10 {
+    at
+  } else {
+    let mut i = at
+    while i < part.bytes.length() && (part.bytes[i].to_int() & 0xFF) != 10 {
+      i = i + 1
+    }
+    if i < part.bytes.length() { i + 1 } else { 0 }
+  }
+  let old = bytes_slice(part.bytes, 0, end)
+  let next = bytes_slice(part.bytes, end, part.bytes.length())
+  let out : Array[(Bytes, Int64, Int64, Bool)] = [(old, part.from, part.from + end.to_int64(), false)]
+  if end < part.bytes.length() {
+    out.push((next, part.from + end.to_int64(), part.offset, true))
+  }
+  out
+}
+
+fn concat_tail_anchor(anchor : Bytes, bytes : Bytes) -> Bytes {
+  if bytes.length() >= ANCHOR_BYTES {
+    return bytes_slice(bytes, bytes.length() - ANCHOR_BYTES, bytes.length())
+  }
+  let total = anchor.length() + bytes.length()
+  let start = if total > ANCHOR_BYTES { total - ANCHOR_BYTES } else { 0 }
+  let out = Bytes::new(total - start)
+  let mut oi = 0
+  for i in 0..<anchor.length() {
+    if i >= start {
+      out[oi] = anchor[i]
+      oi = oi + 1
+    }
+  }
+  for i in 0..<bytes.length() {
+    let pos = anchor.length() + i
+    if pos >= start {
+      out[oi] = bytes[i]
+      oi = oi + 1
+    }
+  }
+  out
+}
+
+fn Counter::timed_again(
+  self : Counter,
+  path : String,
+  was_path : String,
+  runtime : String,
+  subagent : Bool,
+  session : String,
+  upto : Double,
+  cut : Double,
+  time_from : Double,
+) -> Result[Speed, String] {
+  let state = CallState::{
+    model: None,
+    codex_id: if runtime == "codex" { codex_meta(self.client, path) } else { None },
+    window: None,
+    speed: no_speed(),
+  }
+  let timed : Array[(String, Double, Double)] = []
+  match read_from(self.client, path, 0.to_int64(), fn(part : Part) -> Result[Bool, String] {
+    let secs = sections_of(part, cut)
+    for si in 0..<secs.length() {
+      let (bytes, from, offset, _) = secs[si]
+      if from.to_double() >= upto {
+        return Ok(false)
+      }
+      let upto_here = if offset.to_double() > upto {
+        bytes_slice(bytes, 0, (upto - from.to_double()).to_int())
+      } else {
+        bytes
+      }
+      let cs = calls_of(runtime, upto_here, subagent, state)
+      for ci in 0..<cs.length() {
+        let c = cs[ci]
+        if c.gen_ms > 0.0 && c.at >= time_from {
+          timed.push((c.id, c.at, c.gen_ms))
+        }
+      }
+    }
+    Ok(true)
+  }) {
+    Ok(_) => ()
+    Err(e) => return Err(e)
+  }
+  let saved_speed = kept_speed_for(runtime, state.speed)
+  let mut earliest = pos_inf()
+  let total = if timed.length() > 1 { timed.length() } else { 1 }
+  let mut i = 0
+  while i < total {
+    let end = if i + WRITE_BATCH < timed.length() { i + WRITE_BATCH } else { timed.length() }
+    let is_last = i + WRITE_BATCH >= timed.length()
+    let batch_start = i
+    let batch_res = self.db.tx_err(
+      fn(tx_db : sql_db::Db) -> Result[Double, String] {
+        let mut batch_earliest = pos_inf()
+        for j in batch_start..<end {
+          let (id, at, gen_ms) = timed[j]
+          let changed = match tx_db.run(
+            "UPDATE usage SET gen_ms = ?2, gen_output = CASE WHEN ?2 > 0 THEN output ELSE 0 END WHERE id = ?1 AND gen_ms < ?2",
+            [base_codec::json_str(id), base_codec::json_num(gen_ms)],
+          ) {
+            Ok(n) => n
+            Err(e) => return Err(e.message)
+          }
+          if changed > 0 && at < batch_earliest {
+            batch_earliest = at
+          }
+        }
+        if is_last {
+          match tx_db.run(
+            "UPDATE usage_files SET speed = ?1 WHERE (path = ?2 OR path = ?3) AND offset = ?4",
+            [
+              base_codec::json_str(saved_speed),
+              base_codec::json_str(path),
+              base_codec::json_str(was_path),
+              base_codec::json_num(upto),
+            ],
+          ) {
+            Ok(_) => ()
+            Err(e) => return Err(e.message)
+          }
+        }
+        Ok(batch_earliest)
+      },
+      fn(e : sql_db::SqlError) -> String { e.message },
+    )
+    match batch_res {
+      Ok(be) => {
+        if be < earliest {
+          earliest = be
+        }
+      }
+      Err(e) => return Err(e)
+    }
+    i = i + WRITE_BATCH
+  }
+  if earliest != pos_inf() {
+    if !arr_contains_str(self.counted, session) {
+      self.counted.push(session)
+    }
+    if earliest < self.from {
+      self.from = earliest
+    }
+  }
+  Ok(state.speed)
+}
+
+fn Counter::read_file(
+  self : Counter,
+  path : String,
+  runtime : String,
+  subagent : Bool,
+  session : Session,
+  was : Option[Counted],
+  since : Double,
+) -> Result[Int, String] {
+  let client = self.client
+  let archived = put_away(client, path)
+  let size : Int64 = if archived {
+    match written_length(client, packed(path)) {
+      Ok(Some(n)) => n
+      _ => {
+        match unpacked_length(client, packed(path)) {
+          Some(n) => n
+          None => return Ok(0)
+        }
+      }
+    }
+  } else {
+    match size_of(client, path) {
+      Some(n) => n
+      None => return Ok(0)
+    }
+  }
+  let sized = size.to_double()
+  if read_out(archived, was, sized, path, self.time_from, runtime) {
+    return Ok(0)
+  }
+  let mut anchor = Bytes::new(0)
+  let shortened = match was {
+    Some(w) => sized < w.offset
+    None => false
+  }
+  if !shortened {
+    match was {
+      Some(w) => {
+        match anchor_at(client, path, w.offset.to_int64(), archived) {
+          Some(found) => anchor = found
+          None => return Ok(0)
+        }
+      }
+      None => ()
+    }
+  }
+  let replaced = match was {
+    Some(w) => {
+      shortened ||
+      match w.anchor {
+        Some(a) => hex_of(anchor) != a
+        None => false
+      }
+    }
+    None => false
+  }
+  let before = match was {
+    Some(w) => {
+      if replaced {
+        File::{ session: w.session, offset: 0.0, model: None, speed: None }
+      } else {
+        File::{ session: w.session, offset: w.offset, model: w.model, speed: w.speed }
+      }
+    }
+    None => File::{ session: None, offset: 0.0, model: None, speed: None }
+  }
+  if replaced {
+    anchor = Bytes::new(0)
+  }
+  let mut cutoff = match was {
+    Some(w) => w.cutoff
+    None => None
+  }
+  let anchor_missing = match was {
+    Some(w) => match w.anchor {
+      None => true
+      Some(_) => false
+    }
+    None => false
+  }
+  let other_path = match was {
+    Some(w) => w.path != path
+    None => true
+  }
+  let cutoff_missing = match cutoff {
+    None => true
+    Some(_) => false
+  }
+  if replaced || cutoff_missing || anchor_missing || other_path {
+    let at = if replaced { sized } else { match cutoff {
+      Some(c) => c
+      None => sized
+    } }
+    match begin_counter_file(self.db, path, before, at, hex_of(anchor), replaced) {
+      Ok(saved) => cutoff = Some(saved.cutoff)
+      Err(e) => return Err(e)
+    }
+  }
+  let cut = match cutoff {
+    Some(c) => c
+    None => sized
+  }
+  match self.files {
+    Some(files) =>
+    files.set(
+      path,
+      Counted::{
+        session: before.session,
+        offset: before.offset,
+        model: before.model,
+        speed: before.speed,
+        cutoff: Some(cut),
+        anchor: Some(hex_of(anchor)),
+        path: path,
+      },
+    )
+    None => ()
+  }
+  match (self.time_from, was) {
+    (Some(_), Some(w)) => {
+      let speed_none = match w.speed {
+        None => true
+        Some(_) => false
+      }
+      if speed_none && !replaced && before.offset > 0.0 && sized == before.offset && !is_timed_runtime(runtime) {
+        let upd = self.db.tx_err(
+          fn(tx_db : sql_db::Db) -> Result[Unit, String] {
+            match tx_db.run(
+              "UPDATE usage_files SET speed = ?1 WHERE (path = ?2 OR path = ?3) AND offset = ?4",
+              [
+                base_codec::json_str(",,,"),
+                base_codec::json_str(path),
+                base_codec::json_str(w.path),
+                base_codec::json_num(before.offset),
+              ],
+            ) {
+              Ok(_) => Ok(())
+              Err(e) => Err(e.message)
+            }
+          },
+          fn(e : sql_db::SqlError) -> String { e.message },
+        )
+        match upd {
+          Ok(_) => ()
+          Err(e) => return Err(e)
+        }
+        match self.files {
+          Some(files) => {
+            let names = [path, w.path]
+            for ni in 0..<names.length() {
+              let nm = names[ni]
+              match files.get(nm) {
+                Some(f) =>
+                files.set(
+                  nm,
+                  Counted::{
+                    session: f.session,
+                    offset: f.offset,
+                    model: f.model,
+                    speed: Some(",,,"),
+                    cutoff: f.cutoff,
+                    anchor: f.anchor,
+                    path: f.path,
+                  },
+                )
+                None => ()
+              }
+            }
+          }
+          None => ()
+        }
+      }
+    }
+    _ => ()
+  }
+  let state = CallState::{
+    model: before.model,
+    codex_id: None,
+    window: None,
+    speed: speed_of(before.speed),
+  }
+  match (self.time_from, was) {
+    (Some(tf), Some(w)) => {
+      if is_timed_runtime(runtime) && needs_timing(runtime, w.speed) && !replaced && before.offset > 0.0 {
+        match self.timed_again(path, w.path, runtime, subagent, session.key, before.offset, cut, tf) {
+          Ok(sp) => state.speed = sp
+          Err(e) => return Err(e)
+        }
+        let saved_speed = kept_speed_for(runtime, state.speed)
+        match self.files {
+          Some(files) => {
+            match files.get(path) {
+              Some(f) =>
+              files.set(
+                path,
+                Counted::{
+                  session: f.session,
+                  offset: f.offset,
+                  model: f.model,
+                  speed: Some(saved_speed),
+                  cutoff: f.cutoff,
+                  anchor: f.anchor,
+                  path: f.path,
+                },
+              )
+              None => ()
+            }
+            if w.path != path {
+              match files.get(w.path) {
+                Some(f) =>
+                files.set(
+                  w.path,
+                  Counted::{
+                    session: f.session,
+                    offset: f.offset,
+                    model: f.model,
+                    speed: Some(saved_speed),
+                    cutoff: f.cutoff,
+                    anchor: f.anchor,
+                    path: f.path,
+                  },
+                )
+                None => ()
+              }
+            }
+          }
+          None => ()
+        }
+      }
+    }
+    _ => ()
+  }
+  if archived && !replaced && sized == before.offset {
+    return Ok(0)
+  }
+  let first_new_at = if session.created_at >= since { min_d(since, session.created_at - SKEW_MS) } else { since }
+  let mut added = 0
+  let known_suffix_from = before.offset
+  if runtime == "codex" && (archived || sized != before.offset) {
+    state.codex_id = codex_meta(client, path)
+  }
+  let has_was = match was {
+    Some(_) => true
+    None => false
+  }
+  match read_from(client, path, before.offset.to_int64(), fn(part : Part) -> Result[Bool, String] {
+    let secs = sections_of(part, cut)
+    for si in 0..<secs.length() {
+      let (bytes, from, offset, followed) = secs[si]
+      let next_anchor = concat_tail_anchor(anchor, bytes)
+      let model_before = state.model
+      let speed_before = Some(kept_speed_for(runtime, state.speed))
+      let from_known_suffix = has_was && !replaced && from.to_double() >= known_suffix_from
+      let raw_calls = calls_of(runtime, bytes, subagent, state)
+      let calls : Array[Call] = []
+      for ci in 0..<raw_calls.length() {
+        let c = raw_calls[ci]
+        if c.at >= session.created_at - SKEW_MS && (followed || c.at >= first_new_at || from_known_suffix) {
+          calls.push(c)
+        }
+      }
+      let mut lo_at = pos_inf()
+      let mut hi_at = neg_inf()
+      for ci in 0..<calls.length() {
+        lo_at = min_d(lo_at, calls[ci].at)
+        hi_at = max_d(hi_at, calls[ci].at)
+      }
+      let of : Array[(Double, For)] = if calls.length() == 0 {
+        []
+      } else {
+        match self.turns(session.key, lo_at, hi_at) {
+          Ok(ts) => ts
+          Err(e) => return Err(e)
+        }
+      }
+      let with_for : Array[(Call, For)] = []
+      for ci in 0..<calls.length() {
+        let c = calls[ci]
+        let mut lo = 0
+        let mut hi = of.length()
+        while lo < hi {
+          let mid = (lo + hi) >> 1
+          let (started_at, _) = of[mid]
+          if started_at <= c.at {
+            lo = mid + 1
+          } else {
+            hi = mid
+          }
+        }
+        let pick = if lo - 1 > 0 { lo - 1 } else { 0 }
+        let (_, f) = of[pick]
+        with_for.push((c, f))
+      }
+      let saved_anchor_hex = hex_of(anchor)
+      let next_anchor_hex = hex_of(next_anchor)
+      let total = if with_for.length() > 1 { with_for.length() } else { 1 }
+      let mut bi = 0
+      while bi < total {
+        let complete = bi + WRITE_BATCH >= with_for.length()
+        let file = File::{
+          session: Some(session.key),
+          offset: if complete { offset.to_double() } else { from.to_double() },
+          model: if complete { state.model } else { model_before },
+          speed: if complete { Some(kept_speed_for(runtime, state.speed)) } else { speed_before },
+        }
+        let end = if bi + WRITE_BATCH < with_for.length() { bi + WRITE_BATCH } else { with_for.length() }
+        let batch : Array[(Call, For)] = []
+        if bi < end {
+          for k in bi..<end {
+            batch.push(with_for[k])
+          }
+        }
+        let saved_anchor = if complete { next_anchor_hex } else { saved_anchor_hex }
+        let write = Write::{
+          path: path,
+          file: file,
+          runtime: runtime,
+          calls: batch,
+          min_new_at: if followed { None } else { Some(first_new_at) },
+          changed: DoubleCell::{ value: pos_inf() },
+          cutoff: cut,
+          anchor: saved_anchor,
+        }
+        self.pending.push(
+          (
+            write,
+            session.key,
+            Counted::{
+              session: file.session,
+              offset: file.offset,
+              model: file.model,
+              speed: file.speed,
+              cutoff: Some(cut),
+              anchor: Some(saved_anchor),
+              path: path,
+            },
+          ),
+        )
+        self.pending_calls = self.pending_calls + batch.length()
+        if self.pending_calls >= WRITE_BATCH {
+          match self.flush() {
+            Ok(n) => added = added + n
+            Err(e) => return Err(e)
+          }
+        }
+        bi = bi + WRITE_BATCH
+      }
+      anchor = next_anchor
+    }
+    Ok(true)
+  }) {
+    Ok(_) => Ok(added)
+    Err(e) => Err(e)
+  }
+}
+
+fn recent_timing_candidates(db : sql_db::Db, time_from : Double) -> Result[Array[String], String] {
+  let out : Array[String] = []
+  let seen : Map[String, Bool] = Map::new()
+  let add = fn(rows : Array[Map[String, base_codec::Json]]) -> Unit {
+    for i in 0..<rows.length() {
+      match text_of(row_field(rows[i], "session_key")) {
+        Some(k) => {
+          match seen.get(k) {
+            Some(_) => ()
+            None => {
+              seen.set(k, true)
+              out.push(k)
+            }
+          }
+        }
+        None => ()
+      }
+    }
+  }
+  let mut run_rowid = 0.0
+  while true {
+    let rows = match db.all(RECENT_RUNNING_TURNS_SQL, [base_codec::json_num(run_rowid)]) {
+      Ok(rs) => rs
+      Err(e) => return Err(e.message)
+    }
+    add(rows)
+    if rows.length() < RECENT_TIMING_PAGE {
+      break
+    }
+    run_rowid = match num_of(row_field(rows[rows.length() - 1], "rowid")) {
+      Some(v) => v
+      None => run_rowid
+    }
+  }
+  let first = match db.all(RECENT_ENDED_FIRST_SQL, [base_codec::json_num(time_from)]) {
+    Ok(rs) => rs
+    Err(e) => return Err(e.message)
+  }
+  add(first)
+  if first.length() < RECENT_TIMING_PAGE {
+    return Ok(out)
+  }
+  let mut cursor_at = match num_of(row_field(first[first.length() - 1], "ended_at")) {
+    Some(v) => v
+    None => time_from
+  }
+  let mut cursor_rowid = match num_of(row_field(first[first.length() - 1], "rowid")) {
+    Some(v) => v
+    None => 0.0
+  }
+  while true {
+    let same = match db.all(RECENT_ENDED_SAME_SQL, [base_codec::json_num(cursor_at), base_codec::json_num(cursor_rowid)]) {
+      Ok(rs) => rs
+      Err(e) => return Err(e.message)
+    }
+    add(same)
+    if same.length() == RECENT_TIMING_PAGE {
+      cursor_rowid = match num_of(row_field(same[same.length() - 1], "rowid")) {
+        Some(v) => v
+        None => cursor_rowid
+      }
+      continue
+    }
+    let next = match db.all(RECENT_ENDED_AFTER_SQL, [base_codec::json_num(cursor_at)]) {
+      Ok(rs) => rs
+      Err(e) => return Err(e.message)
+    }
+    add(next)
+    if next.length() < RECENT_TIMING_PAGE {
+      break
+    }
+    cursor_at = match num_of(row_field(next[next.length() - 1], "ended_at")) {
+      Some(v) => v
+      None => cursor_at
+    }
+    cursor_rowid = match num_of(row_field(next[next.length() - 1], "rowid")) {
+      Some(v) => v
+      None => 0.0
+    }
+  }
+  Ok(out)
+}
+
+fn is_single_file_runtime(rt : String) -> Bool {
+  rt == "dsh" || rt == "grok" || rt == "cursor" || rt == "devin" || rt == "hermes" || rt == "agy" || rt == "pi"
+}
+
+fn load_sessions(db : sql_db::Db, keys : Array[String]) -> Result[Array[Session], String] {
+  if keys.length() == 0 {
+    return Ok([])
+  }
+  let arr : Array[base_codec::Json] = []
+  for i in 0..<keys.length() {
+    arr.push(base_codec::json_str(keys[i]))
+  }
+  let rows = match db.all(
+    "SELECT * FROM sessions WHERE key IN (SELECT value FROM json_each(?))",
+    [base_codec::json_str(sql_db::stringify_json(base_codec::json_arr(arr)))],
+  ) {
+    Ok(rs) => rs
+    Err(e) => return Err(e.message)
+  }
+  let out : Array[Session] = []
+  for i in 0..<rows.length() {
+    out.push(session_of(rows[i]))
+  }
+  Ok(out)
+}
+
+fn Counter::read_switched_sessions(
+  self : Counter,
+  sessions : Array[Session],
+  known : Map[String, Counted],
+  seen_files : Map[String, Bool],
+  data : String,
+  homes : Array[String],
+  since : Double,
+) -> Result[Int, String] {
+  let mut added = 0
+  let client = self.client
+  for si in 0..<sessions.length() {
+    let s = sessions[si]
+    let srcs = match self.sources(s) {
+      Ok(xs) => xs
+      Err(e) => return Err(e)
+    }
+    for j in 0..<srcs.length() {
+      let source = srcs[j]
+      let runtime = source.runtime
+      if !locate::runtime_kind(runtime) || runtime == s.runtime {
+        continue
+      }
+      let transcript = match self.finder.transcript_path(runtime, data, homes, source.id, [], true) {
+        Some(t) => t
+        None => continue
+      }
+      let files : Array[(String, Bool)] = if runtime == "claude" {
+        claude_files(client, self.sep, nodepath::dirname(self.sep, transcript), Some(source.id))
+      } else if runtime == "grok" {
+        [(self.join([nodepath::dirname(self.sep, transcript), "stillfail-usage.jsonl"]), false)]
+      } else {
+        [(transcript, false)]
+      }
+      for fi in 0..<files.length() {
+        let (path, subagent) = files[fi]
+        if runtime == "grok" && !exists(client, path) {
+          continue
+        }
+        let real = canonical(client, path)
+        match seen_files.get(real) {
+          Some(_) => continue
+          None => seen_files.set(real, true)
+        }
+        let was = match self.read_before(known, data, homes, path, runtime) {
+          Ok(v) => v
+          Err(e) => return Err(e)
+        }
+        match self.read_file(path, runtime, subagent, s, was, since) {
+          Ok(n) => added = added + n
+          Err(e) => return Err(e)
+        }
+      }
+    }
+  }
+  Ok(added)
+}
+
+fn Counter::read_claude_sessions(
+  self : Counter,
+  sessions : Array[Session],
+  claude_roots : Array[String],
+  known : Map[String, Counted],
+  seen_files : Map[String, Bool],
+  data : String,
+  homes : Array[String],
+  since : Double,
+) -> Result[Int, String] {
+  let mut added = 0
+  let client = self.client
+  for si in 0..<sessions.length() {
+    let s = sessions[si]
+    if s.runtime != "claude" {
+      continue
+    }
+    let project = claude_project(
+      match s.cwd {
+        Some(c) => c
+        None => s.workspace
+      },
+    )
+    let has_cwd = match s.cwd {
+      Some(_) => true
+      None => false
+    }
+    let only_id = if has_cwd { s.runtime_session_id } else { None }
+    if has_cwd {
+      match only_id {
+        None => continue
+        Some(_) => ()
+      }
+    }
+    for ri in 0..<claude_roots.length() {
+      let files = claude_files(client, self.sep, self.join([claude_roots[ri], project]), only_id)
+      for fi in 0..<files.length() {
+        let (path, subagent) = files[fi]
+        let real = canonical(client, path)
+        match seen_files.get(real) {
+          Some(_) => continue
+          None => seen_files.set(real, true)
+        }
+        let was = match self.read_before(known, data, homes, path, "claude") {
+          Ok(v) => v
+          Err(e) => return Err(e)
+        }
+        match self.read_file(path, "claude", subagent, s, was, since) {
+          Ok(n) => added = added + n
+          Err(e) => return Err(e)
+        }
+      }
+    }
+  }
+  Ok(added)
+}
+
+fn Counter::read_codex_sessions(
+  self : Counter,
+  sessions : Array[Session],
+  known : Map[String, Counted],
+  data : String,
+  homes : Array[String],
+  since : Double,
+) -> Result[Int, String] {
+  let mut added = 0
+  let client = self.client
+  let found_map : Map[String, Session] = Map::new()
+  let found_paths : Array[String] = []
+  for si in 0..<sessions.length() {
+    let s = sessions[si]
+    if s.runtime != "codex" {
+      continue
+    }
+    let srcs = match self.sources(s) {
+      Ok(xs) => xs
+      Err(e) => return Err(e)
+    }
+    for j in 0..<srcs.length() {
+      let source = srcs[j]
+      if source.runtime != "codex" {
+        continue
+      }
+      let id = source.id
+      let paths = match self.codex_paths.get(s.key) {
+        Some(p) => p
+        None => {
+          let p : Map[String, String] = Map::new()
+          self.codex_paths.set(s.key, p)
+          p
+        }
+      }
+      let mut had = paths.get(id)
+      match had {
+        Some(h) => {
+          if !is_file(client, h) && !is_file(client, packed(h)) {
+            paths.remove(id)
+            had = None
+          }
+        }
+        None => ()
+      }
+      let path = match had {
+        Some(h) => Some(h)
+        None => {
+          let anywhere = !(s.running && opt_str_eq(s.runtime_session_id, id))
+          self.finder.transcript_path("codex", data, homes, id, [], anywhere)
+        }
+      }
+      match path {
+        Some(p) => {
+          paths.set(id, p)
+          match found_map.get(p) {
+            Some(_) => ()
+            None => found_paths.push(p)
+          }
+          found_map.set(p, s)
+        }
+        None => ()
+      }
+    }
+  }
+  for fi in 0..<found_paths.length() {
+    let path = found_paths[fi]
+    let s = match found_map.get(path) {
+      Some(v) => v
+      None => continue
+    }
+    let file = match self.read_before(known, data, homes, path, "codex") {
+      Ok(v) => v
+      Err(e) => return Err(e)
+    }
+    match file {
+      Some(f) => {
+        match f.session {
+          Some(other) => {
+            if other != s.key {
+              continue
+            }
+          }
+          None => ()
+        }
+      }
+      None => ()
+    }
+    match self.read_file(path, "codex", false, s, file, since) {
+      Ok(n) => added = added + n
+      Err(e) => return Err(e)
+    }
+  }
+  Ok(added)
+}
+
+fn Counter::read_single_file_sessions(
+  self : Counter,
+  sessions : Array[Session],
+  known : Map[String, Counted],
+  seen_files : Map[String, Bool],
+  data : String,
+  homes : Array[String],
+  since : Double,
+) -> Result[Int, String] {
+  let mut added = 0
+  let client = self.client
+  for si in 0..<sessions.length() {
+    let s = sessions[si]
+    let runtime = s.runtime
+    if !is_single_file_runtime(runtime) {
+      continue
+    }
+    let srcs = match self.sources(s) {
+      Ok(xs) => xs
+      Err(e) => return Err(e)
+    }
+    for j in 0..<srcs.length() {
+      let source = srcs[j]
+      if source.runtime != runtime {
+        continue
+      }
+      let transcript = self.finder.transcript_path(runtime, data, homes, source.id, [], true)
+      let path_opt = match transcript {
+        Some(t) => {
+          if runtime == "grok" {
+            Some(self.join([nodepath::dirname(self.sep, t), "stillfail-usage.jsonl"]))
+          } else {
+            Some(t)
+          }
+        }
+        None => None
+      }
+      let path = match path_opt {
+        Some(p) => p
+        None => continue
+      }
+      if runtime == "grok" && !exists(client, path) {
+        continue
+      }
+      let real = canonical(client, path)
+      match seen_files.get(real) {
+        Some(_) => continue
+        None => seen_files.set(real, true)
+      }
+      let was = match self.read_before(known, data, homes, path, runtime) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      match self.read_file(path, runtime, false, s, was, since) {
+        Ok(n) => added = added + n
+        Err(e) => return Err(e)
+      }
+    }
+  }
+  Ok(added)
+}
+
+fn Counter::read_agy_backfill_sessions(
+  self : Counter,
+  agy_only_sessions : Array[Session],
+  known : Map[String, Counted],
+  seen_files : Map[String, Bool],
+  data : String,
+  homes : Array[String],
+  since : Double,
+) -> Result[Int, String] {
+  let mut added = 0
+  let client = self.client
+  for si in 0..<agy_only_sessions.length() {
+    let s = agy_only_sessions[si]
+    let srcs = match self.sources(s) {
+      Ok(xs) => xs
+      Err(e) => return Err(e)
+    }
+    for j in 0..<srcs.length() {
+      let source = srcs[j]
+      if source.runtime != "agy" {
+        continue
+      }
+      let path = match self.finder.transcript_path("agy", data, homes, source.id, [], true) {
+        Some(p) => p
+        None => continue
+      }
+      let was = match self.read_before(known, data, homes, path, "agy") {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      let needs = match was {
+        Some(w) => w.offset > 0.0 && needs_timing("agy", w.speed)
+        None => false
+      }
+      if !needs {
+        continue
+      }
+      let real = canonical(client, path)
+      match seen_files.get(real) {
+        Some(_) => continue
+        None => seen_files.set(real, true)
+      }
+      match self.read_file(path, "agy", false, s, was, since) {
+        Ok(n) => added = added + n
+        Err(e) => return Err(e)
+      }
+    }
+  }
+  Ok(added)
+}
+
+pub fn Counter::read(self : Counter, ask : base_codec::Json) -> Result[base_codec::Json, String] {
+  let started = match builders_core::json_get_last(ask, "started") {
+    Some(base_codec::Json::Num(s, _)) => s
+    _ => 0.0
+  }
+  let last = match builders_core::json_get_last(ask, "last") {
+    Some(base_codec::Json::Num(l, _)) => l
+    _ => 0.0
+  }
+  let data = match builders_core::json_get_last(ask, "dataDir") {
+    Some(base_codec::Json::Str(d)) => d
+    _ => return Err("no data directory")
+  }
+  let homes : Array[String] = match builders_core::json_get_last(ask, "homes") {
+    Some(base_codec::Json::Arr(hs)) => {
+      let out : Array[String] = []
+      for i in 0..<hs.length() {
+        match hs[i] {
+          base_codec::Json::Str(s) => out.push(s)
+          _ => ()
+        }
+      }
+      out
+    }
+    _ => []
+  }
+  let only : Option[Array[String]] = match builders_core::json_get_last(ask, "only") {
+    Some(base_codec::Json::Arr(ks)) => {
+      let out : Array[String] = []
+      for i in 0..<ks.length() {
+        match ks[i] {
+          base_codec::Json::Str(s) => out.push(s)
+          _ => ()
+        }
+      }
+      Some(out)
+    }
+    _ => None
+  }
+  let hints_in = match builders_core::json_get_last(ask, "hints") {
+    Some(h) => h
+    None => base_codec::json_null()
+  }
+  self.finder.use_hints(hints_in)
+  self.time_from = match builders_core::json_get_last(ask, "timeFrom") {
+    Some(base_codec::Json::Num(t, _)) => Some(t)
+    _ => None
+  }
+  let cursor = match db_one(self.db, "SELECT since, through FROM usage_counter WHERE id = 1", []) {
+    Ok(Some(r)) => r
+    Ok(None) => return Err("no usage counter")
+    Err(e) => return Err(e)
+  }
+  let since = match num_of(row_field(cursor, "since")) {
+    Some(v) => v
+    None => 0.0
+  }
+  let through = match num_of(row_field(cursor, "through")) {
+    Some(v) => v
+    None => 0.0
+  }
+
+  let keys : Array[String] = match only {
+    Some(ks) => ks
+    None => {
+      let base = if last != 0.0 { last } else { through }
+      let from = max_d(since, base - MARGIN_MS)
+      let rows = match self.db.all(
+        "SELECT session_key FROM turns WHERE ended_at IS NULL UNION ALL SELECT session_key FROM turns WHERE ended_at >= ?",
+        [base_codec::json_num(from)],
+      ) {
+        Ok(rs) => rs
+        Err(e) => return Err(e.message)
+      }
+      let out : Array[String] = []
+      for i in 0..<rows.length() {
+        match text_of(row_field(rows[i], "session_key")) {
+          Some(k) => out.push(k)
+          None => ()
+        }
+      }
+      out
+    }
+  }
+  let recent_any = keys.length() > 0
+  let wanted : Array[String] = []
+  let seen_keys : Map[String, Bool] = Map::new()
+  for i in 0..<keys.length() {
+    let k = keys[i]
+    match seen_keys.get(k) {
+      Some(_) => ()
+      None => {
+        seen_keys.set(k, true)
+        wanted.push(k)
+      }
+    }
+  }
+  let agy_only_wanted : Array[String] = []
+  match (only, self.time_from) {
+    (None, Some(tf)) => {
+      let untimed_rows = match self.db.all(UNTIMED_SESSIONS_SQL, [base_codec::json_num(tf)]) {
+        Ok(rs) => rs
+        Err(e) => return Err(e.message)
+      }
+      for i in 0..<untimed_rows.length() {
+        match text_of(row_field(untimed_rows[i], "session_key")) {
+          Some(k) => {
+            match seen_keys.get(k) {
+              Some(_) => ()
+              None => {
+                seen_keys.set(k, true)
+                wanted.push(k)
+              }
+            }
+          }
+          None => ()
+        }
+      }
+      let recent_cands = match recent_timing_candidates(self.db, tf) {
+        Ok(cs) => cs
+        Err(e) => return Err(e)
+      }
+      for i in 0..<recent_cands.length() {
+        let k = recent_cands[i]
+        match seen_keys.get(k) {
+          Some(_) => ()
+          None => {
+            seen_keys.set(k, true)
+            agy_only_wanted.push(k)
+          }
+        }
+      }
+    }
+    _ => ()
+  }
+  let sessions = match load_sessions(self.db, wanted) {
+    Ok(ss) => ss
+    Err(e) => return Err(e)
+  }
+  let agy_only_sessions = match load_sessions(self.db, agy_only_wanted) {
+    Ok(ss) => ss
+    Err(e) => return Err(e)
+  }
+  let known = match self.files {
+    Some(f) => f
+    None => {
+      let f : Map[String, Counted] = Map::new()
+      self.files = Some(f)
+      f
+    }
+  }
+  let mut added = 0
+  self.counted = []
+  self.from = pos_inf()
+  self.pending = []
+  self.pending_calls = 0
+
+  let claude_roots : Array[String] = []
+  let real_roots : Map[String, Bool] = Map::new()
+  let cways = self.ways(data, homes, "claude")
+  for i in 0..<cways.length() {
+    let r = cways[i]
+    if !is_dir(self.client, r) {
+      continue
+    }
+    let real = canonical(self.client, r)
+    match real_roots.get(real) {
+      Some(_) => continue
+      None => {
+        real_roots.set(real, true)
+        claude_roots.push(r)
+      }
+    }
+  }
+
+  let seen_files : Map[String, Bool] = Map::new()
+  match self.read_switched_sessions(sessions, known, seen_files, data, homes, since) {
+    Ok(n) => added = added + n
+    Err(e) => return Err(e)
+  }
+  match self.read_claude_sessions(sessions, claude_roots, known, seen_files, data, homes, since) {
+    Ok(n) => added = added + n
+    Err(e) => return Err(e)
+  }
+  match self.read_codex_sessions(sessions, known, data, homes, since) {
+    Ok(n) => added = added + n
+    Err(e) => return Err(e)
+  }
+  match self.read_single_file_sessions(sessions, known, seen_files, data, homes, since) {
+    Ok(n) => added = added + n
+    Err(e) => return Err(e)
+  }
+  match self.read_agy_backfill_sessions(agy_only_sessions, known, seen_files, data, homes, since) {
+    Ok(n) => added = added + n
+    Err(e) => return Err(e)
+  }
+  match self.flush() {
+    Ok(n) => added = added + n
+    Err(e) => return Err(e)
+  }
+
+  let only_none = match only {
+    None => true
+    Some(_) => false
+  }
+  if only_none && recent_any {
+    let upd = self.db.tx_err(
+      fn(tx_db : sql_db::Db) -> Result[Unit, String] {
+        match tx_db.run("UPDATE usage_counter SET through = MAX(through, ?) WHERE id = 1", [base_codec::json_num(started)]) {
+          Ok(_) => Ok(())
+          Err(e) => Err(e.message)
+        }
+      },
+      fn(e : sql_db::SqlError) -> String { e.message },
+    )
+    match upd {
+      Ok(_) => ()
+      Err(e) => return Err(e)
+    }
+  }
+
+  let counted_json : Array[base_codec::Json] = []
+  for i in 0..<self.counted.length() {
+    counted_json.push(base_codec::json_str(self.counted[i]))
+  }
+  let from_json = if self.from == pos_inf() { base_codec::json_null() } else { base_codec::json_num(self.from) }
+  Ok(
+    base_codec::json_obj([
+      ("added", base_codec::json_num(added.to_double())),
+      ("sessions", base_codec::json_arr(counted_json)),
+      ("from", from_json),
+      ("hints", self.finder.hints()),
+    ]),
+  )
+}
+
+/// Wire framing aligned 1:1 with `station/mb/src/reader/main.mbt:616-624`:
+/// - `Err(msg)` -> `{"id": id, "error": msg}`
+/// - `Ok(Obj(fields))` -> overwrite existing `"id"` or append `("id", id)`
+/// - `Ok(other)` -> `other` unchanged
+pub fn format_wire_answer(
+  id : base_codec::Json,
+  res : Result[base_codec::Json, String],
+) -> base_codec::Json {
+  match res {
+    Err(msg) =>
+    base_codec::json_obj([
+      ("id", id),
+      ("error", base_codec::json_str(msg)),
+    ])
+    Ok(base_codec::Json::Obj(fields)) => {
+      let out : Array[(String, base_codec::Json)] = []
+      let mut replaced_id = false
+      for i in 0..<fields.length() {
+        let (k, v) = fields[i]
+        if k == "id" {
+          if !replaced_id {
+            out.push(("id", id))
+            replaced_id = true
+          }
+        } else {
+          out.push((k, v))
+        }
+      }
+      if !replaced_id {
+        out.push(("id", id))
+      }
+      base_codec::json_obj(out)
+    }
+    Ok(other) => other
+  }
+}
+
+/// Production `--builder usage-counter --db <file> [--sep <sep>]` entrypoint.
+pub fn run_usage_counter(db_path : String, sep : String) -> Int {
+  let shell_dir = builders_core::beside(db_path, "shell")
+  if !host_shim::start(shell_dir, true) {
+    let _ = host_shim::write_stderr_line("the shell did not start")
+    return 1
+  }
+  let db = match sql_db::Db::attach(db_path, wait_ms=5000) {
+    Ok(d) => d
+    Err(e) => {
+      let _ = host_shim::write_stderr_line(e.message)
+      host_shim::stop()
+      return 1
+    }
+  }
+  match db.exec("PRAGMA synchronous = NORMAL") {
+    Ok(_) => ()
+    Err(e) => {
+      let _ = host_shim::write_stderr_line(e.message)
+      db.close()
+      host_shim::stop()
+      return 1
+    }
+  }
+  let client = builders_core::ShellClient::new()
+  let counter = Counter::new(client, db, sep)
+  while true {
+    match client.next_line() {
+      None => break
+      Some(line) => {
+        if line.length() == 0 {
+          continue
+        }
+        let ask = builders_core::parse_ask_line(line)
+        let id = match builders_core::json_get_last(ask, "id") {
+          Some(v) => v
+          None => base_codec::json_null()
+        }
+        let answer = format_wire_answer(id, counter.read(ask))
+        let _ = client.say_line(sql_db::stringify_json(answer))
+      }
+    }
+  }
+  db.close()
+  host_shim::stop()
+  0
+}

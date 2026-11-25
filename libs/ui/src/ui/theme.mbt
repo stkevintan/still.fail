@@ -332,10 +332,10 @@ pub fn Theme::dark() -> Theme {
     sidebar: 0x19191BFFL,
     list: 0x1C1D20FFL,
     link: 0x8EB8FEFFL,
-    // the ink at 12% over the track (the ink at 6%): 1.39 to 1 off it on the darkest ground and the lightest; the
-    // opaque 3A3B40 was 1.05 to 1 off a track on a raised ground, and the canvas the wide segmented had 1.02 off one
-    // on the page (2026-10-27: "dark mode 下单选滑块几乎分辨不清")
-    lifted: 0xE9E9EA1FL,
+    // Native iOS 27.0 dark resting segmented thumb (`(105..111)` over `#1C1C1E`/`#1F2023`/`#28292C`):
+    // opaque `0x68686EFF` gives `2.22:1` on canvas, `1.96:1` on card, `>= 1.70:1` on all dark grounds,
+    // and `4.56:1` WCAG AA text contrast with `#E9E9EA` without interior shadow darkening.
+    lifted: 0x68686EFFL,
     // white at 5%
     wash: 0xFFFFFF0DL,
   }

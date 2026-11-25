@@ -17,6 +17,7 @@
 #import "apple.h"
 #include <stdatomic.h>
 #include "post.h"
+#include "frame_late.h"
 #include "term.h"
 #include "done_watch.h"
 #include "update_delta.h"  // (the Updates' delta)
@@ -59,6 +60,7 @@ static void go_back(void) {
 @property(nonatomic) CFTimeInterval linkAskedAt;  // when the link was asked for a frame and has not ticked since
 @property(nonatomic) BOOL wantFrame;
 @property(nonatomic) CFTimeInterval drawnWithWindowAt;  // drawWithWindow's last frame (CACurrentMediaTime)
+@property(nonatomic) double lastTick;  // when this view's previous continuous frame began (-1: none)
 @property(nonatomic) int wid;  // its window of the run's (0 the first: win_open)
 // a window of the run beside the first, out of sight till its first frame is drawn (win_open: held_shown)
 @property(nonatomic) BOOL held;
@@ -368,9 +370,8 @@ static BOOL drag_has_words(id<NSDraggingInfo> info) {
 // What the menu bar's editing items can do (@hostapi.edit_can: text_menu_* bits), -1 till the app first says.
 static int32_t edit_can_now = -1;
 
-// how much later than its time the frame before reached the screen (mb_host_frame_late), and when the display link's
-// last frame began (-1: none since the link was paused, or a frame drawn with the window's change between)
-static double frame_late, last_tick = -1;
+// how much later than its time the frame before reached the screen (mb_host_frame_late)
+static double frame_late;
 // The frame the app waits for (@hostapi.wake_after: a resident cycle's next step), by its time (ms, mb_now_ms's
 // clock), or -1; the time of the frame being built (what wake_after counts from); the display's frame (ms).
 static double wake_for = -1, building_for = -1, link_period = 1000.0 / 60.0;
@@ -383,6 +384,7 @@ static double paced_hz, link_hz = -1;
 - (instancetype)initWithFrame:(NSRect)f {
   self = [super initWithFrame:f];
   self.wid = win_making;
+  self.lastTick = -1.0;
   self.wantsLayer = YES;
   self.mirror = @"";
   [self registerForDraggedTypes:@[ NSPasteboardTypeFileURL, NSPasteboardTypeString ]];
@@ -491,6 +493,7 @@ static double paced_hz, link_hz = -1;
   [self.link invalidate];
   self.link = nil;
   self.linkAskedAt = 0;
+  self.lastTick = -1.0;
   if (!self.window) return;
   if (!settle) {
     self.link = MB_MAKE_DISPLAY_LINK(self, self, @selector(tick:));
@@ -532,6 +535,8 @@ static double paced_hz, link_hz = -1;
   if (self.linkAskedAt > 0 && now - self.linkAskedAt > 0.25 && !in_app_frame && self.window.isVisible &&
       (self.wid > 0 || window_seen || looked_at_run())) {
     rebind_all_links();
+    frame_late = 0;
+    self.lastTick = -1.0;
     [self drawFrame];
     return;
   }
@@ -630,10 +635,12 @@ static double record_t0 = -1;
   }
   CAMetalLayer *l = (CAMetalLayer *)self.layer;
   l.presentsWithTransaction = YES;
+  frame_late = 0;
+  self.lastTick = -1.0;
   [self drawFrame];
   l.presentsWithTransaction = NO;
   self.drawnWithWindowAt = MB_HOST_MEDIA_TIME();
-  last_tick = -1;
+  self.lastTick = -1.0;
 }
 
 static int frames_drawn;
@@ -668,7 +675,11 @@ static void pump(void) {
   if (awaiting > 0) {
     // the clock stands still; what the app asks for meanwhile (a read it answers, a list measured) is drawn at the
     // same time, not a step. Half a minute of it is said, and the run goes on.
-    if (app_wants) [v drawFrame];
+    if (app_wants) {
+      frame_late = 0;
+      v.lastTick = -1.0;
+      [v drawFrame];
+    }
     if (awaiting_since < 0) awaiting_since = CACurrentMediaTime();
     if (CACurrentMediaTime() - awaiting_since < 30) {
       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ pump(); });
@@ -686,10 +697,17 @@ static void pump(void) {
     app_wants = YES;
   }
   script_wants = NO;
+  frame_late = 0;
+  v.lastTick = -1.0;
   [v drawFrame];
   // (each window of the run beside the first drawn at the same moment, on the same clock)
   for (NSNumber *k in win_slots)
-    if (k.intValue > 0) [win_slots[k].view drawFrame];
+    if (k.intValue > 0) {
+      MBView *ov = win_slots[k].view;
+      frame_late = 0;
+      ov.lastTick = -1.0;
+      [ov drawFrame];
+    }
   frames_drawn++;
   run_script_step(frames_drawn);
   if (app_wants || script_wants || settle_wake >= 0) pump_soon();
@@ -707,7 +725,7 @@ static void pump(void) {
   if (sleep_holds_links()) {
     l.paused = YES;
     self.linkAskedAt = 0;
-    last_tick = -1;
+    self.lastTick = -1.0;
     return;
   }
   CFTimeInterval now = MB_HOST_MEDIA_TIME();
@@ -725,7 +743,10 @@ static void pump(void) {
   // to fire and the link wakes after it, a step a frame or two late by as much as they fall, so a resident cycle's
   // steps unevenly apart); the ticks before it draw nothing (ios_app.m's the same)
   if (!self.wantFrame && wake_for >= 0) {
-    if (mb_now_ms() < wake_for - 0.5) return;
+    if (mb_now_ms() < wake_for - 0.5) {
+      self.lastTick = -1.0;
+      return;
+    }
     wake_for = -1;
     self.wantFrame = YES;
     // (a wake is the run's, not one window's: each window draws its frame for it)
@@ -735,24 +756,23 @@ static void pump(void) {
     }
   }
   if (!self.wantFrame) {
+    self.lastTick = -1.0;
     if (mb_render_adaptive_step(self.wid)) return;
     l.paused = YES;
     self.linkAskedAt = 0;
-    last_tick = -1;
     return;
   }
   // a frame's time is when it begins (drawFrame): one begun more than the display's frame after the one before, that
   // one was late by as much (it took longer than the display's frame to build); a settled or recorded run's never is
   double begins = mb_now_ms(), period = (l.targetTimestamp - l.timestamp) * 1000.0;
-  frame_late = last_tick >= 0 && !settle && !record_dir ? MAX(0, begins - last_tick - period) : 0;
-  last_tick = begins;
+  frame_late = mb_frame_late_from_begin(self.lastTick, begins, period, settle || record_dir != NULL);
   [self drawFrame];
+  self.lastTick = mb_frame_late_next(self.wantFrame, begins);
   frames_drawn++;
   if (script) run_script_step(frames_drawn);
   if (!self.wantFrame && !mb_render_adaptive_settling_of(self.wid)) {
     l.paused = YES;
     self.linkAskedAt = 0;
-    last_tick = -1;
   }
 }
 
@@ -1900,7 +1920,11 @@ static int win_open(NSString *what) {
   if (settle) [v requestFrame];
   else
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (seen.held && seen.window) [seen drawFrame];
+      if (seen.held && seen.window) {
+        frame_late = 0;
+        seen.lastTick = -1.0;
+        [seen drawFrame];
+      }
     });
   return wid;
 }
@@ -2003,15 +2027,15 @@ static void pause_all_links(void) {
   if (win_slots.count == 0) {
     the_view.link.paused = YES;
     the_view.linkAskedAt = 0;
-    last_tick = -1;
+    the_view.lastTick = -1.0;
     return;
   }
   for (NSNumber *k in win_slots) {
     MBView *v = win_slots[k].view;
     v.link.paused = YES;
     v.linkAskedAt = 0;
+    v.lastTick = -1.0;
   }
-  last_tick = -1;
 }
 
 // Replace every display link in the process: all old links are invalidated before any new one is made, so QuartzCore's
@@ -2024,16 +2048,17 @@ static void rebind_all_links(void) {
     [the_view.link invalidate];
     the_view.link = nil;
     the_view.linkAskedAt = 0;
+    the_view.lastTick = -1.0;
   } else {
     for (NSNumber *k in win_slots) {
       MBView *v = win_slots[k].view;
       [v.link invalidate];
       v.link = nil;
       v.linkAskedAt = 0;
+      v.lastTick = -1.0;
     }
   }
   link_hz = -1;
-  last_tick = -1;
   if (settle) return;
   CFTimeInterval now = MB_HOST_MEDIA_TIME();
   BOOL hold = sleep_holds_links();

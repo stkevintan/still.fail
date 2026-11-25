@@ -10,6 +10,8 @@ struct FakeHost {
   /// how long presenting a frame takes (its clock moved on by it as each is presented, as a device's GPU may hold a
   /// frame's present: 0 by default, presenting taking no time)
   mut present_ms : Double
+  /// how long rasterizing a glyph cache miss takes (its clock moved on by it in `FakeHost::glyph`: 0 by default)
+  mut glyph_ms : Double
   /// how late the frame drawn at `late_after` reached the screen, as said of it (Tester::frame_late, a run's LATE line):
   /// what the first frame drawn after then says (frame `late_frame`, once it is drawn); every other frame's was on time
   mut late : Double
@@ -196,6 +198,9 @@ struct FakeHost {
   /// the font families installed as its host would say them (Tester::set_local_fonts), JSON; the families given to
   /// faces, by face (@ui.face_add_family)
   mut local_fonts : String
+  mut local_fonts_info : String
+  face_ligatures : Map[Int, Bool]
+  mut host_autospace : Bool
   families_given : Map[Int, String]
   /// the font files (by where they are) its host could not read as a font (Tester::set_unreadable_font)
   unreadable_fonts : Array[String]
@@ -394,7 +399,7 @@ struct FakeHost {
 /// they are. A test never does. `turn`: the host given a moment for what it was asked (its main queue turned: a
 /// picture's decode told).
 pub(all) struct Live {
-  host : &@hostapi.Host
+  host : @hostapi.Host
   turn : () -> Unit
 }
 
@@ -407,11 +412,11 @@ let live_turns_most = 3000
 /// did not decode), the host's kept by it (Tester::live_image); the answer recorded as a host's is.
 fn live_image(f : FakeHost, l : Live, mine : Int, head : Json) -> Int {
   let info = FixedArray::make(4, 0.0)
-  let mut st = l.host.image_info(mine, info)
+  let mut st = (l.host.image_info)(mine, info)
   let mut turns = 0
   while st == 0 && turns < live_turns_most {
     (l.turn)()
-    st = l.host.image_info(mine, info)
+    st = (l.host.image_info)(mine, info)
     turns = turns + 1
   }
   let id = if st == 1 {
@@ -695,6 +700,21 @@ fn h_face_add_family(face : Int, family : String) -> Bool {
 ///|
 fn h_face_clear(face : Int) -> Unit {
   @hostapi.face_clear(face)
+}
+
+///|
+fn h_face_set_ligatures(face : Int, on : Bool) -> Unit {
+  @hostapi.face_set_ligatures(face, on)
+}
+
+///|
+fn h_set_host_autospace(on : Bool) -> Unit {
+  @hostapi.set_host_autospace(on)
+}
+
+///|
+fn h_local_font_info() -> String {
+  @hostapi.local_font_info()
 }
 
 ///|
@@ -1215,8 +1235,8 @@ fn outside_let_go(kind : Int, id : Int) -> Unit {
 ///|
 /// What @hostapi waits on (its op's runs, its autofill's ask) waited on here: taken as the host's word comes.
 fn init {
-  @hostapi.outside_waits.val = fn(kind, id, take) { outside_takes(kind, id, take) }
-  @hostapi.outside_lets_go.val = fn(kind, id) { outside_let_go(kind, id) }
+  @hostapi.set_outside_waits(fn(kind, id, take) { outside_takes(kind, id, take) })
+  @hostapi.set_outside_lets_go(fn(kind, id) { outside_let_go(kind, id) })
 }
 
 ///|

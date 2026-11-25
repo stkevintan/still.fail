@@ -109,7 +109,6 @@ jobs:
       - uses: ./.github/actions/mbui-moonbit
         with:
           tools: ''
-          farview: 'false'
 
       - name: Verify access to AFK-surf/pion, pion-packages, and invar (fail loudly)
         env:

@@ -77,6 +77,8 @@ void mb_render_set_size(int pw, int ph, double w, double h, double scale);
 int mb_render_present(const double *inst, int32_t count, double r, double g, double b);
 int mb_render_adaptive_settling(int wid);
 int mb_render_adaptive_step(int wid);
+void mb_render_mark_gap(int wid);
+int mb_render_last_presented(int wid);
 int mb_frame_beats(void);
 // renders the last presented frame again into a texture and writes a PNG
 int mb_render_snapshot(const wchar_t *path);
@@ -189,6 +191,8 @@ void mb_views_draw_under(uint8_t *out, int w, int h, double scale);
 int mb_stream_layers_here(void);
 void mb_stream_attach(int sid, void *content);
 void mb_stream_placed(int sid, double w, double h, double scale);
+void mb_stream_route_acks(int (*ack)(double route, double ts));
+void mb_stream_route_acks_wait(int (*ack)(double route, double ts, uint32_t wait_us));
 
 // text (win_text.cpp)
 // rasterize at this many pixels per point; a change starts a new atlas

@@ -20,6 +20,7 @@ static const mbc_engine hermes_engine = {mb_core_start, mb_core_send, mb_core_st
 // mbui's android_host.c: a remote screen's frames taken straight to the stream the app routed them to
 int mb_stream_route_take(uint64_t route, int kind, int key, uint64_t seq, uint64_t ts, const uint8_t *bytes, size_t len);
 void mb_stream_route_acks(int (*ack)(double route, double ts));
+void mb_stream_route_acks_wait(int (*ack)(double route, double ts, uint32_t wait_us));
 
 __attribute__((constructor)) static void use_hermes_engine(void) {
   mbc_use(&hermes_engine);
@@ -27,4 +28,5 @@ __attribute__((constructor)) static void use_hermes_engine(void) {
   // Streams.java: decoded onto the stream's own surface), acknowledged to the station through the shell
   mb_core_route_media(mb_stream_route_take);
   mb_stream_route_acks(mb_core_screen_ack);
+  mb_stream_route_acks_wait(mb_core_screen_ack_wait);
 }

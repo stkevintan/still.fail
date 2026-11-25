@@ -29,6 +29,7 @@ static const int FINE = 4;        // a gray glyph drawn at this many times its s
 
 struct ClusterBounds {
   double x0, y0, x1, y1, base;
+  double box_w, box_h;
   int color;
   // the least weight of the fonts without variations its runs are drawn in (0: none such): a Medium asked of a face
   // with none (Microsoft YaHei UI: 290, 400, 700), drawn in its Regular
@@ -41,6 +42,7 @@ typedef struct {
   double size;
   int weight;
   int style;  // 1 italic, 2 the code face
+  int fg;     // per-slot face generation (for preview slots >= MB_FACE_TRY)
   double w, h, ox, oy;
   int color;
   // its ink across, from where it starts (punct_ink); known: worked out
@@ -243,7 +245,7 @@ static void init(void) {
 
 // The faces given (mb_host_face_add, style.mbt): each its files, made into a collection of their own (DirectWrite's
 // font set from the files: a variable file's named weights in it), and the family the files make.
-#define MB_FACES 16
+#define MB_FACES 32
 static struct {
   WCHAR **paths;  // a file's path, or NULL: its bytes (data, sizes)
   void **data;
@@ -252,6 +254,7 @@ static struct {
   IDWriteFontCollection1 *fc;
   WCHAR family[128];
   bool system;  // a family installed here (mb_host_face_add_family): the system's collection, no files of its own
+  bool no_lig;  // programming/contextual ligatures disabled on this slot
 } faces[MB_FACES];
 // fonts given as bytes: DirectWrite's in-memory loader (it keeps a copy of each)
 static IDWriteInMemoryFontFileLoader *mem_loader;
@@ -261,11 +264,11 @@ static IDWriteInMemoryFontFileLoader *mem_loader;
 static bool face_has(int f) { return faces[f].fc || faces[f].system; }
 
 static int face_id(int style) {
-  int f = (style >> 8) & 15;
+  int f = (style >> 8) & 31;
   if (f > 0) return face_has(f) ? f : 0;
   if (style & 2) return face_has(3) ? 3 : 0;
-  if ((style & 16) && face_has(2)) return 2;
   if (style & 4) return 0;
+  if ((style & 16) && face_has(2)) return 2;
   return face_has(1) ? 1 : 0;
 }
 
@@ -308,7 +311,9 @@ static bool face_build(int f) {
   return ok;
 }
 
-static void faces_changed(void);
+#define MB_FACE_TRY 7
+static int face_gen[MB_FACES];
+static void face_changed(int32_t f);
 
 // A file of face `f`: its path, or its bytes (path NULL); made part of it if DirectWrite reads them as a font.
 static int32_t face_take(int32_t f, WCHAR *path, void *data, UINT32 size) {
@@ -332,7 +337,7 @@ static int32_t face_take(int32_t f, WCHAR *path, void *data, UINT32 size) {
     free(data);
     return 0;
   }
-  faces_changed();
+  face_changed(f);
   return 1;
 }
 
@@ -354,7 +359,9 @@ extern "C" int32_t mb_host_face_add_bytes(int32_t f, moonbit_bytes_t data, int32
 }
 
 extern "C" void mb_host_face_clear(int32_t f) {
-  if (f <= 0 || f >= MB_FACES || !face_has(f)) return;
+  if (f <= 0 || f >= MB_FACES) return;
+  faces[f].no_lig = false;
+  if (!face_has(f)) return;
   for (int i = 0; i < faces[f].n; i++) {
     free(faces[f].paths[i]);
     free(faces[f].data[i]);
@@ -363,8 +370,18 @@ extern "C" void mb_host_face_clear(int32_t f) {
   if (faces[f].fc) faces[f].fc->Release();
   faces[f].fc = NULL;
   faces[f].system = false;
-  faces_changed();
+  face_changed(f);
 }
+
+extern "C" void mb_host_face_set_ligatures(int32_t f, int32_t on) {
+  if (f <= 0 || f >= MB_FACES) return;
+  bool no_lig = !on;
+  if (faces[f].no_lig == no_lig) return;
+  faces[f].no_lig = no_lig;
+  face_changed(f);
+}
+
+extern "C" void mb_host_set_host_autospace(int32_t on) { (void)on; }
 
 // Face `f` set in the family installed here named `family`: the system's collection, by its name.
 extern "C" int32_t mb_host_face_add_family(int32_t f, moonbit_string_t family) {
@@ -390,7 +407,7 @@ extern "C" int32_t mb_host_face_add_family(int32_t f, moonbit_string_t family) {
   faces[f].fc = NULL;
   memcpy(faces[f].family, name, sizeof(name));
   faces[f].system = true;
-  faces_changed();
+  face_changed(f);
   return 1;
 }
 
@@ -404,59 +421,209 @@ static int name_order(const void *a, const void *b) {
                          *(const WCHAR *const *)b, -1, NULL, NULL, 0) - CSTR_EQUAL;
 }
 
+static WCHAR *local_families_cache;
+static size_t local_families_cache_len;
+
 extern "C" moonbit_string_t mb_host_local_font_families(void) {
   init();
-  IDWriteFontCollection *fc = NULL;
-  if (FAILED(dw->GetSystemFontCollection(&fc, FALSE))) return moonbit_make_string_raw(0);
-  if (!GetUserDefaultLocaleName(names_locale, LOCALE_NAME_MAX_LENGTH)) names_locale[0] = 0;
-  UINT32 count = fc->GetFontFamilyCount();
-  WCHAR **all = (WCHAR **)calloc(count ? count : 1, sizeof(WCHAR *));
-  UINT32 had = 0;
-  for (UINT32 i = 0; i < count; i++) {
-    IDWriteFontFamily *fam = NULL;
-    IDWriteLocalizedStrings *names = NULL;
-    WCHAR name[256];
-    name[0] = 0;
-    if (SUCCEEDED(fc->GetFontFamily(i, &fam)) && SUCCEEDED(fam->GetFamilyNames(&names))) {
-      UINT32 at = 0;
-      BOOL there = FALSE;
-      if (names_locale[0]) names->FindLocaleName(names_locale, &at, &there);
-      if (!there) at = 0;
-      UINT32 len = 0;
-      if (SUCCEEDED(names->GetStringLength(at, &len)) && len < 255) names->GetString(at, name, 256);
+  if (!local_families_cache) {
+    IDWriteFontCollection *fc = NULL;
+    if (FAILED(dw->GetSystemFontCollection(&fc, FALSE))) return moonbit_make_string_raw(0);
+    if (!GetUserDefaultLocaleName(names_locale, LOCALE_NAME_MAX_LENGTH)) names_locale[0] = 0;
+    UINT32 count = fc->GetFontFamilyCount();
+    WCHAR **all = (WCHAR **)calloc(count ? count : 1, sizeof(WCHAR *));
+    UINT32 had = 0;
+    for (UINT32 i = 0; i < count; i++) {
+      IDWriteFontFamily *fam = NULL;
+      IDWriteLocalizedStrings *names = NULL;
+      WCHAR name[256];
+      name[0] = 0;
+      if (SUCCEEDED(fc->GetFontFamily(i, &fam)) && SUCCEEDED(fam->GetFamilyNames(&names))) {
+        UINT32 at = 0;
+        BOOL there = FALSE;
+        if (names_locale[0]) names->FindLocaleName(names_locale, &at, &there);
+        if (!there) at = 0;
+        UINT32 len = 0;
+        if (SUCCEEDED(names->GetStringLength(at, &len)) && len < 255) names->GetString(at, name, 256);
+      }
+      if (names) names->Release();
+      if (fam) fam->Release();
+      if (name[0]) all[had++] = _wcsdup(name);
     }
-    if (names) names->Release();
-    if (fam) fam->Release();
-    if (name[0]) all[had++] = _wcsdup(name);
+    fc->Release();
+    // in the order of the user's language, as the web's localeCompare
+    qsort(all, had, sizeof(WCHAR *), name_order);
+    size_t cap = 4096, n = 0;
+    WCHAR *out = (WCHAR *)malloc(sizeof(WCHAR) * cap);
+    out[n++] = L'[';
+    for (UINT32 i = 0; i < had; i++) {
+      const WCHAR *name = all[i];
+      size_t len = wcslen(name);
+      // its name as a JSON string: a quote and a backslash escaped, the rest as it is
+      if (n + 2 * len + 4 >= cap) {
+        cap = (n + 2 * len + 4) * 2;
+        out = (WCHAR *)realloc(out, sizeof(WCHAR) * cap);
+      }
+      if (n > 1) out[n++] = L',';
+      out[n++] = L'"';
+      for (size_t k = 0; k < len; k++) {
+        if (name[k] == L'"' || name[k] == L'\\') out[n++] = L'\\';
+        out[n++] = name[k] < 0x20 ? L' ' : name[k];
+      }
+      out[n++] = L'"';
+      free(all[i]);
+    }
+    free(all);
+    out[n++] = L']';
+    local_families_cache = out;
+    local_families_cache_len = n;
   }
-  fc->Release();
-  // in the order of the user's language, as the web's localeCompare
-  qsort(all, had, sizeof(WCHAR *), name_order);
+  moonbit_string_t s = moonbit_make_string_raw((int32_t)local_families_cache_len);
+  memcpy(s, local_families_cache, sizeof(WCHAR) * local_families_cache_len);
+  return s;
+}
+
+static WCHAR *local_font_info_cache;
+static size_t local_font_info_cache_len;
+
+static void wbuf_append(WCHAR **buf, size_t *n, size_t *cap, const WCHAR *s, size_t len) {
+  if (*n + len + 4 >= *cap) {
+    *cap = (*n + len + 4) * 2;
+    *buf = (WCHAR *)realloc(*buf, sizeof(WCHAR) * (*cap));
+  }
+  memcpy(*buf + *n, s, sizeof(WCHAR) * len);
+  *n += len;
+}
+
+static void wbuf_append_json_str(WCHAR **buf, size_t *n, size_t *cap, const WCHAR *s) {
+  size_t len = wcslen(s);
+  if (*n + 2 * len + 4 >= *cap) {
+    *cap = (*n + 2 * len + 4) * 2;
+    *buf = (WCHAR *)realloc(*buf, sizeof(WCHAR) * (*cap));
+  }
+  (*buf)[(*n)++] = L'"';
+  for (size_t k = 0; k < len; k++) {
+    if (s[k] == L'"' || s[k] == L'\\') (*buf)[(*n)++] = L'\\';
+    (*buf)[(*n)++] = s[k] < 0x20 ? L' ' : s[k];
+  }
+  (*buf)[(*n)++] = L'"';
+}
+
+extern "C" void mb_host_request_frame(void);
+extern "C" void mb_app_call(void (*fn)(void *), void *arg);
+
+static volatile LONG local_font_info_started = 0;
+
+static void local_font_info_wake(void *) { mb_host_request_frame(); }
+
+static WCHAR local_font_info_empty[2] = {L'[', L']'};
+
+static void local_font_info_finish_empty(bool wake) {
+  local_font_info_cache_len = 2;
+  InterlockedExchangePointer((PVOID *)&local_font_info_cache, local_font_info_empty);
+  if (wake) mb_app_call(local_font_info_wake, NULL);
+}
+
+static DWORD WINAPI local_font_info_worker(LPVOID) {
+  IDWriteFactory *factory = NULL;
+  if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                 (IUnknown **)&factory)) || !factory) {
+    local_font_info_finish_empty(true);
+    return 0;
+  }
+  IDWriteFontCollection *fc = NULL;
+  if (FAILED(factory->GetSystemFontCollection(&fc, FALSE)) || !fc) {
+    factory->Release();
+    local_font_info_finish_empty(true);
+    return 0;
+  }
+  WCHAR locale[LOCALE_NAME_MAX_LENGTH] = {0};
+  if (!GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH)) locale[0] = 0;
+  UINT32 count = fc->GetFontFamilyCount();
   size_t cap = 4096, n = 0;
   WCHAR *out = (WCHAR *)malloc(sizeof(WCHAR) * cap);
   out[n++] = L'[';
-  for (UINT32 i = 0; i < had; i++) {
-    const WCHAR *name = all[i];
-    size_t len = wcslen(name);
-    // its name as a JSON string: a quote and a backslash escaped, the rest as it is
-    if (n + 2 * len + 4 >= cap) {
-      cap = (n + 2 * len + 4) * 2;
-      out = (WCHAR *)realloc(out, sizeof(WCHAR) * cap);
+  for (UINT32 i = 0; i < count; i++) {
+    IDWriteFontFamily *fam = NULL;
+    IDWriteLocalizedStrings *names = NULL;
+    WCHAR en_name[256] = {0}, loc_name[256] = {0};
+    bool mono = false, serif = false, cjk = false;
+    if (SUCCEEDED(fc->GetFontFamily(i, &fam)) && SUCCEEDED(fam->GetFamilyNames(&names))) {
+      UINT32 at = 0;
+      BOOL there = FALSE;
+      names->FindLocaleName(L"en-us", &at, &there);
+      if (!there) at = 0;
+      UINT32 len = 0;
+      if (SUCCEEDED(names->GetStringLength(at, &len)) && len < 255) names->GetString(at, en_name, 256);
+      at = 0;
+      there = FALSE;
+      if (locale[0]) names->FindLocaleName(locale, &at, &there);
+      if (!there) at = 0;
+      len = 0;
+      if (SUCCEEDED(names->GetStringLength(at, &len)) && len < 255) names->GetString(at, loc_name, 256);
+      IDWriteFont *font = NULL;
+      if (SUCCEEDED(fam->GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                              DWRITE_FONT_STYLE_NORMAL, &font)) && font) {
+        IDWriteFont1 *font1 = NULL;
+        if (SUCCEEDED(font->QueryInterface(__uuidof(IDWriteFont1), (void **)&font1)) && font1) {
+          mono = font1->IsMonospacedFont() != FALSE;
+          DWRITE_PANOSE panose;
+          font1->GetPanose(&panose);
+          if (panose.familyKind == DWRITE_PANOSE_FAMILY_TEXT_DISPLAY &&
+              panose.text.serifStyle >= DWRITE_PANOSE_SERIF_STYLE_COVE &&
+              panose.text.serifStyle <= DWRITE_PANOSE_SERIF_STYLE_TRIANGLE) {
+            serif = true;
+          }
+          font1->Release();
+        }
+        BOOL has_han = FALSE;
+        if (SUCCEEDED(font->HasCharacter(0x4E2D, &has_han)) && has_han) cjk = true;
+        font->Release();
+      }
     }
+    if (names) names->Release();
+    if (fam) fam->Release();
+    if (!en_name[0] && loc_name[0]) wcscpy_s(en_name, 256, loc_name);
+    if (!loc_name[0] && en_name[0]) wcscpy_s(loc_name, 256, en_name);
+    if (!en_name[0]) continue;
     if (n > 1) out[n++] = L',';
-    out[n++] = L'"';
-    for (size_t k = 0; k < len; k++) {
-      if (name[k] == L'"' || name[k] == L'\\') out[n++] = L'\\';
-      out[n++] = name[k] < 0x20 ? L' ' : name[k];
-    }
-    out[n++] = L'"';
-    free(all[i]);
+    wbuf_append(&out, &n, &cap, L"{\"name\":", 8);
+    wbuf_append_json_str(&out, &n, &cap, en_name);
+    wbuf_append(&out, &n, &cap, L",\"localized\":", 13);
+    wbuf_append_json_str(&out, &n, &cap, loc_name);
+    const WCHAR *tail_m = mono ? L",\"mono\":true" : L",\"mono\":false";
+    wbuf_append(&out, &n, &cap, tail_m, wcslen(tail_m));
+    const WCHAR *tail_s = serif ? L",\"serif\":true" : L",\"serif\":false";
+    wbuf_append(&out, &n, &cap, tail_s, wcslen(tail_s));
+    const WCHAR *tail_c = cjk ? L",\"cjk\":true}" : L",\"cjk\":false}";
+    wbuf_append(&out, &n, &cap, tail_c, wcslen(tail_c));
   }
-  free(all);
+  fc->Release();
+  factory->Release();
   out[n++] = L']';
-  moonbit_string_t s = moonbit_make_string_raw((int32_t)n);
-  memcpy(s, out, sizeof(WCHAR) * n);
-  free(out);
+  local_font_info_cache_len = n;
+  InterlockedExchangePointer((PVOID *)&local_font_info_cache, out);
+  mb_app_call(local_font_info_wake, NULL);
+  return 0;
+}
+
+extern "C" moonbit_string_t mb_host_local_font_info(void) {
+  WCHAR *cached = (WCHAR *)InterlockedCompareExchangePointer((PVOID *)&local_font_info_cache, NULL, NULL);
+  if (!cached) {
+    if (InterlockedCompareExchange(&local_font_info_started, 1, 0) == 0) {
+      HANDLE th = CreateThread(NULL, 0, local_font_info_worker, NULL, 0, NULL);
+      if (th) {
+        CloseHandle(th);
+      } else {
+        local_font_info_finish_empty(true);
+        cached = local_font_info_empty;
+      }
+    }
+    if (!cached) return moonbit_make_string_raw(0);
+  }
+  size_t len = local_font_info_cache_len;
+  moonbit_string_t s = moonbit_make_string_raw((int32_t)len);
+  memcpy(s, cached, sizeof(WCHAR) * len);
   return s;
 }
 
@@ -467,10 +634,11 @@ static const WCHAR *segoe_family_for_size(double size) {
 }
 
 static IDWriteTextFormat *format_for(double size, int weight, int style) {
-  for (int i = 0; i < n_formats; i++)
-    if (formats[i].size == size && formats[i].weight == weight && formats[i].style == style) return formats[i].f;
-  IDWriteTextFormat *f = NULL;
   int face = face_id(style);
+  int fkey = (face << 8) | (style & 7);
+  for (int i = 0; i < n_formats; i++)
+    if (formats[i].size == size && formats[i].weight == weight && formats[i].style == fkey) return formats[i].f;
+  IDWriteTextFormat *f = NULL;
   const WCHAR *fam = face ? (faces[face].system && wcscmp(faces[face].family, L"Segoe UI Variable Text") == 0
                                  ? segoe_family_for_size(size)
                                  : faces[face].family)
@@ -491,7 +659,7 @@ static IDWriteTextFormat *format_for(double size, int weight, int style) {
   }
   formats[n_formats].size = size;
   formats[n_formats].weight = weight;
-  formats[n_formats].style = style;
+  formats[n_formats].style = fkey;
   formats[n_formats++].f = f;
   return f;
 }
@@ -500,18 +668,24 @@ static IDWriteTextFormat *format_for(double size, int weight, int style) {
 // digits all one width (style.mbt style_tabular): tnum; style & 64: a CJK face's marks narrow among Latin letters
 // (style.mbt style_proportional): pwid; the app's words and what people wrote (faces 1 and 2) with the web's
 // alternates, as the Apple hosts set them (apple_text.m face_font: cv11 and ss01, Inter's single-storey a and its open
-// digits; a face without them is as it is). One typography for each of the ways they go together.
-static IDWriteTypography *typographies[16];
+// digits; a face without them is as it is); k & 16: per-face ligatures disabled (calt, liga, clig off).
+static IDWriteTypography *typographies[32];
 
 // the typography of a style's features (NULL: none, the font's own)
 static IDWriteTypography *typography_for(int style) {
   int face = face_id(style);
-  int k = ((style & 8) ? 1 : 0) | ((style & 32) ? 2 : 0) | ((style & 64) ? 4 : 0) | (face == 1 || face == 2 ? 8 : 0);
+  int k = ((style & 8) ? 1 : 0) | ((style & 32) ? 2 : 0) | ((style & 64) ? 4 : 0) |
+          (face == 1 || face == 2 ? 8 : 0) | ((face > 0 && faces[face].no_lig) ? 16 : 0);
   if (!k) return NULL;
   if (!typographies[k]) {
     IDWriteTypography *t = NULL;
     dw->CreateTypography(&t);
     if (k & 1) {
+      t->AddFontFeature({DWRITE_FONT_FEATURE_TAG_STANDARD_LIGATURES, 0});
+      t->AddFontFeature({DWRITE_FONT_FEATURE_TAG_CONTEXTUAL_LIGATURES, 0});
+    }
+    if (k & 16) {
+      t->AddFontFeature({DWRITE_FONT_FEATURE_TAG_CONTEXTUAL_ALTERNATES, 0});
       t->AddFontFeature({DWRITE_FONT_FEATURE_TAG_STANDARD_LIGATURES, 0});
       t->AddFontFeature({DWRITE_FONT_FEATURE_TAG_CONTEXTUAL_LIGATURES, 0});
     }
@@ -747,31 +921,33 @@ extern "C" void mb_host_font_metrics(double size, int32_t weight, int32_t style,
   out[5] = 0;  // lines as asked, not on whole pixels
 }
 
-static uint32_t hash(const WCHAR *s, int len, double size, int weight, int style) {
+static uint32_t hash(const WCHAR *s, int len, double size, int weight, int style, int fg) {
   uint32_t h = 2166136261u;
   for (int i = 0; i < len; i++) h = (h ^ s[i]) * 16777619u;
   h = (h ^ (uint32_t)(size * 64)) * 16777619u;
   h = (h ^ (uint32_t)style) * 16777619u;
+  h = (h ^ (uint32_t)fg) * 16777619u;
   return (h ^ (uint32_t)weight) * 16777619u;
 }
 
-static int same(const glyph_entry *e, const WCHAR *s, int len, double size, int weight, int style) {
-  return e->len == len && e->size == size && e->weight == weight && e->style == style &&
+static int same(const glyph_entry *e, const WCHAR *s, int len, double size, int weight, int style, int fg) {
+  return e->len == len && e->size == size && e->weight == weight && e->style == style && e->fg == fg &&
          memcmp(pool + e->off, s, (size_t)len * sizeof(WCHAR)) == 0;
 }
 
 static void table_put(int id) {
   glyph_entry *e = &entries[id];
-  size_t i = hash(pool + e->off, e->len, e->size, e->weight, e->style) & (table_cap - 1);
+  size_t i = hash(pool + e->off, e->len, e->size, e->weight, e->style, e->fg) & (table_cap - 1);
   while (table[i]) i = (i + 1) & (table_cap - 1);
   table[i] = id + 1;
 }
 
 static int intern(const WCHAR *s, int len, double size, int weight, int style) {
+  int fg = face_gen[face_id(style)];
   if (table_cap) {
-    size_t i = hash(s, len, size, weight, style) & (table_cap - 1);
+    size_t i = hash(s, len, size, weight, style, fg) & (table_cap - 1);
     for (; table[i]; i = (i + 1) & (table_cap - 1))
-      if (same(&entries[table[i] - 1], s, len, size, weight, style)) return table[i] - 1;
+      if (same(&entries[table[i] - 1], s, len, size, weight, style, fg)) return table[i] - 1;
   }
   if (n_entries == cap_entries) {
     cap_entries = cap_entries ? cap_entries * 2 : 1024;
@@ -789,6 +965,7 @@ static int intern(const WCHAR *s, int len, double size, int weight, int style) {
   ge.size = size;
   ge.weight = weight;
   ge.style = style;
+  ge.fg = fg;
   entries[id] = ge;
   pool_len += len;
   if ((size_t)n_entries * 2 > table_cap) {
@@ -950,16 +1127,20 @@ static void reset_atlas(void) {
 // What was measured and drawn before a face changed: its formats made again, its glyphs drawn again.
 static void ahead_forget(void);
 
-static void faces_changed(void) {
+static void face_changed(int32_t f) {
   layout_cache_clear();
   for (int i = 0; i < n_formats; i++) formats[i].f->Release();
   n_formats = 0;
+  ahead_forget();
+  if (f >= MB_FACE_TRY && f < MB_FACES) {
+    face_gen[f]++;
+    return;
+  }
   for (int i = 0; i < n_entries; i++) {
     entries[i].ink_known = false;
     entries[i].bounds = {};
     entries[i].subs_queued = 0;
   }
-  ahead_forget();
   reset_atlas();
   keys_stale = 1;
 }
@@ -974,6 +1155,7 @@ extern "C" void mb_text_set_scale(double scale) {
 // Draws nothing; tells whether any run of a layout comes from a color font
 // (emoji), the way the Core Text host checks kCTFontTraitColorGlyphs.
 struct ColorProbe : public IDWriteTextRenderer {
+  bool check_weight = false;
   int color = 0;
   int static_weight = 0;
   STDMETHOD(QueryInterface)(REFIID iid, void **o) override {
@@ -1001,19 +1183,39 @@ struct ColorProbe : public IDWriteTextRenderer {
   }
   STDMETHOD(DrawGlyphRun)(void *, FLOAT x, FLOAT y, DWRITE_MEASURING_MODE mode, DWRITE_GLYPH_RUN const *run,
                           DWRITE_GLYPH_RUN_DESCRIPTION const *desc, IUnknown *) override {
-    IDWriteColorGlyphRunEnumerator *runs = NULL;
-    if (SUCCEEDED(dw->TranslateColorGlyphRun(x, y, run, desc, mode, NULL, 0, &runs))) {
-      color = 1;
-      runs->Release();
-    }
-    // the weight of a font with no variations a run is drawn in (a variable one's is what was asked)
-    IDWriteFontFace5 *f5 = NULL;
-    if (run->fontFace && SUCCEEDED(run->fontFace->QueryInterface(__uuidof(IDWriteFontFace5), (void **)&f5))) {
-      if (!f5->HasVariations()) {
-        int w = (int)f5->GetWeight();
-        if (static_weight == 0 || w < static_weight) static_weight = w;
+    bool need_color = true;
+    if (run->fontFace) {
+      if (check_weight) {
+        // the weight of a font with no variations a run is drawn in (a variable one's is what was asked)
+        IDWriteFontFace5 *f5 = NULL;
+        if (SUCCEEDED(run->fontFace->QueryInterface(__uuidof(IDWriteFontFace5), (void **)&f5))) {
+          need_color = f5->IsColorFont() != FALSE;
+          if (!f5->HasVariations()) {
+            int w = (int)f5->GetWeight();
+            if (static_weight == 0 || w < static_weight) static_weight = w;
+          }
+          f5->Release();
+        } else {
+          IDWriteFontFace2 *f2 = NULL;
+          if (SUCCEEDED(run->fontFace->QueryInterface(__uuidof(IDWriteFontFace2), (void **)&f2))) {
+            need_color = f2->IsColorFont() != FALSE;
+            f2->Release();
+          }
+        }
+      } else {
+        IDWriteFontFace2 *f2 = NULL;
+        if (SUCCEEDED(run->fontFace->QueryInterface(__uuidof(IDWriteFontFace2), (void **)&f2))) {
+          need_color = f2->IsColorFont() != FALSE;
+          f2->Release();
+        }
       }
-      f5->Release();
+    }
+    if (!color && need_color) {
+      IDWriteColorGlyphRunEnumerator *runs = NULL;
+      if (SUCCEEDED(dw->TranslateColorGlyphRun(x, y, run, desc, mode, NULL, 0, &runs))) {
+        color = 1;
+        runs->Release();
+      }
     }
     return S_OK;
   }
@@ -1036,6 +1238,7 @@ static void target_ensure(Target *t, double scale) {
   t->white = NULL;
   t->black = NULL;
   t->rt = NULL;
+  if (!t->wic || !t->d2d) return;
   if (!t->bitmap && FAILED(t->wic->CreateBitmap(RT_SIZE, RT_SIZE, GUID_WICPixelFormat32bppPBGRA,
                                                   WICBitmapCacheOnDemand, &t->bitmap)))
     return;
@@ -1052,17 +1255,24 @@ static void target_ensure(Target *t, double scale) {
 }
 
 // A cluster drawn: its picture (pw × ph pixels, RGBA, NULL none), its box in points as its entry has it, whether it is
-// in its own colours (an emoji)
+// in its own colours (an emoji), and the measured ClusterBounds used to draw it
 struct Drawn {
   int pw, ph;
   uint8_t *px;
   double w, h, ox, oy;
   int color;
+  ClusterBounds bounds;
 };
 
-static void measure_bounds(IDWriteTextLayout *l, ClusterBounds *cb) {
-  if (cb->valid) return;
+static void measure_bounds(IDWriteTextLayout *l, int weight, ClusterBounds *cb) {
+  if (cb->valid) {
+    if (l->GetMaxWidth() != (FLOAT)cb->box_w) l->SetMaxWidth((FLOAT)cb->box_w);
+    if (l->GetMaxHeight() != (FLOAT)cb->box_h) l->SetMaxHeight((FLOAT)cb->box_h);
+    return;
+  }
+  bool check_weight = (weight > 400 && weight < 700);
   ColorProbe probe;
+  probe.check_weight = check_weight;
   l->Draw(NULL, &probe, 0, 0);
   DWRITE_TEXT_METRICS tm;
   DWRITE_LINE_METRICS lm;
@@ -1088,6 +1298,8 @@ static void measure_bounds(IDWriteTextLayout *l, ClusterBounds *cb) {
   cb->x1 = x1;
   cb->y1 = y1;
   cb->base = nl ? lm.baseline : 0;
+  cb->box_w = tm.widthIncludingTrailingWhitespace;
+  cb->box_h = tm.height;
   cb->color = probe.color;
   cb->static_weight = probe.static_weight;
   cb->valid = true;
@@ -1123,6 +1335,7 @@ static bool fine_ensure(Target *t, double scale, int fw, int fh) {
     t->fine_w = ((fw > t->fine_w ? fw : t->fine_w) + 63) & ~63;
     t->fine_h = ((fh > t->fine_h ? fh : t->fine_h) + 63) & ~63;
   }
+  if (!t->wic || !t->d2d) return false;
   if (!t->fine_bitmap && FAILED(t->wic->CreateBitmap((UINT)t->fine_w, (UINT)t->fine_h, GUID_WICPixelFormat32bppPBGRA,
                                                        WICBitmapCacheOnDemand, &t->fine_bitmap))) {
     t->fine_w = t->fine_h = 0;
@@ -1265,8 +1478,6 @@ static void draw_cluster(IDWriteTextLayout *l, const ClusterBounds *cb, double s
   double y0 = base + py0 / sc;
   int pw = px1 - px0, ph = py1 - py0;
   if (pw <= 0 || ph <= 0 || pw > RT_SIZE || ph > RT_SIZE) return;
-  target_ensure(t, sc);
-  if (!t->rt) return;
   bool mono = !color && (params_ct || params_gray);
   bool ct = mono && use_cleartype(sc);
   d->w = pw / sc;
@@ -1280,9 +1491,15 @@ static void draw_cluster(IDWriteTextLayout *l, const ClusterBounds *cb, double s
       d->pw = pw;
       d->ph = ph;
       d->px = px;
+      d->bounds = *cb;
       return;
     }
     free(px);
+  }
+  target_ensure(t, sc);
+  if (!t->rt) {
+    *d = {};
+    return;
   }
   // One colour: drawn black on opaque white at linear gamma with no contrast, each stripe's cover (255 - s) in its
   // channel (ClearType under 125% on RGB/BGR LCDs; else gray, the small hinted), the shader blending a mask stripe by
@@ -1330,6 +1547,7 @@ static void draw_cluster(IDWriteTextLayout *l, const ClusterBounds *cb, double s
     d->pw = pw;
     d->ph = ph;
     d->px = px;
+    d->bounds = *cb;
   }
   // a color font's glyph drawn in the text's colour (Segoe UI Emoji's flags are letters): a mask after all
   d->color = color == 2;
@@ -1370,6 +1588,7 @@ struct Ahead {
   double scale;
   double size;
   int weight;
+  ClusterBounds bounds;
   uint8_t want_mask;
   uint8_t first_mask;
   uint8_t drawing_mask;
@@ -1449,6 +1668,18 @@ static IDWriteTextLayout *layout_with(const WCHAR *s, int len, IDWriteTextFormat
   return l;
 }
 
+static bool ahead_begin_phase(Ahead *a, int s) {
+  uint8_t bit = (uint8_t)(1 << s);
+  EnterCriticalSection(&ahead_lock);
+  bool drop_now = a->dropped || (a->skip_mask & bit) != 0;
+  if (drop_now) {
+    a->drawing_mask &= (uint8_t)~bit;
+    a->skip_mask &= (uint8_t)~bit;
+  }
+  LeaveCriticalSection(&ahead_lock);
+  return !drop_now;
+}
+
 static void ahead_finish_phase(Ahead *a, int s, bool built, Drawn d) {
   uint8_t bit = (uint8_t)(1 << s);
   EnterCriticalSection(&ahead_lock);
@@ -1471,19 +1702,23 @@ static DWORD WINAPI ahead_thread(void *) {
   Target t = {};
   D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), NULL, (void **)&t.d2d);
   CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, __uuidof(IWICImagingFactory), (void **)&t.wic);
+  int cur_prio = THREAD_PRIORITY_BELOW_NORMAL;
   for (;;) {
     EnterCriticalSection(&ahead_lock);
     Ahead *a = NULL;
     uint8_t claim = 0;
+    int want_prio = THREAD_PRIORITY_BELOW_NORMAL;
     for (;;) {
       while (ahead_first.n == 0 && ahead_rest.n == 0) SleepConditionVariableCS(&ahead_more, &ahead_lock, INFINITE);
       if (ahead_first.n) {
         a = queue_pop(&ahead_first);
         uint8_t f = (uint8_t)(a->want_mask & a->first_mask);
         claim = (uint8_t)(f & -f);
+        want_prio = THREAD_PRIORITY_NORMAL;
       } else {
         a = queue_pop(&ahead_rest);
         claim = (uint8_t)(a->want_mask & ~a->first_mask);
+        want_prio = THREAD_PRIORITY_BELOW_NORMAL;
       }
       if (a->dropped) claim = 0;
       if (claim) break;
@@ -1499,17 +1734,18 @@ static DWORD WINAPI ahead_thread(void *) {
     a->first_mask &= (uint8_t)~claim;
     a->drawing_mask |= claim;
     LeaveCriticalSection(&ahead_lock);
+    if (want_prio != cur_prio) {
+      if (SetThreadPriority(GetCurrentThread(), want_prio) != 0) cur_prio = want_prio;
+    }
     IDWriteTextLayout *l = t.d2d && t.wic ? layout_with(a->text, a->len, a->format, a->typography) : NULL;
-    ClusterBounds cb = {};
-    if (l) measure_bounds(l, &cb);
+    ClusterBounds cb = a->bounds;
+    if (l) measure_bounds(l, a->weight, &cb);
     for (int s = 0; s < SUB_COUNT; s++) {
       uint8_t bit = (uint8_t)(1 << s);
       if (!(claim & bit)) continue;
-      EnterCriticalSection(&ahead_lock);
-      bool drop_now = a->dropped || (a->skip_mask & bit) != 0;
-      LeaveCriticalSection(&ahead_lock);
+      if (!ahead_begin_phase(a, s)) continue;
       Drawn d = {};
-      bool built = l && !drop_now;
+      bool built = l != NULL;
       if (built) draw_cluster(l, &cb, a->scale, sub_dx(s) / a->scale, a->size, a->weight, &t, &d);
       ahead_finish_phase(a, s, built, d);
     }
@@ -1579,8 +1815,9 @@ static bool drop_oldest_drawn(void) {
 }
 
 // What was drawn ahead of `key` at subpixel phase `sub` and the scale of now, taken (true, its picture in *d); false
-// when it was not ready (asked and not begun: no longer asked; being drawn on a lower-priority worker thread: marked
-// skipped so the worker discards it and the frames' thread draws it immediately without blocking).
+// when it was not ready (asked and not begun: no longer asked; being drawn on a worker thread — NORMAL for ahead_first,
+// BELOW_NORMAL for ahead_rest — marked skipped via skip_mask so the worker discards it and the frames' thread draws it
+// immediately without ever blocking).
 static bool drawn_ahead(int key, int sub, Drawn *d) {
   if (sub < 0 || sub >= SUB_COUNT) return false;
   Ahead *a = key < ahead_of_cap ? ahead_of[key] : NULL;
@@ -1593,8 +1830,8 @@ static bool drawn_ahead(int key, int sub, Drawn *d) {
     a->want_mask &= (uint8_t)~bit;
     a->first_mask &= (uint8_t)~bit;
   } else if (a->drawing_mask & bit) {
-    // (a below-normal worker thread is drawing this phase: never stall the frames' thread on it; mark skipped so the
-    // worker frees its bitmap when done and draw here immediately)
+    // (a worker thread — NORMAL for ahead_first, BELOW_NORMAL for ahead_rest — is drawing this phase: never stall the
+    // frames' thread on it; mark skip_mask so the worker frees its bitmap when done and draw here immediately)
     a->skip_mask |= bit;
   } else if ((a->have_mask & bit) && a->scale == text_scale) {
     *d = a->drawn[sub];
@@ -1661,6 +1898,7 @@ static bool ahead_enqueue_one(int k, uint8_t mask, uint8_t first) {
   a->scale = text_scale;
   a->size = e->size;
   a->weight = e->weight;
+  a->bounds = e->bounds;
   a->want_mask = mask;
   a->first_mask = (uint8_t)(first & mask);
   // (the frames' thread's hold, till it lets go of it)
@@ -1702,6 +1940,10 @@ static bool ahead_enqueue_phases(int k, uint8_t mask, uint8_t first) {
     bool queued = false;
     EnterCriticalSection(&ahead_lock);
     if (!a->dropped && a->scale == text_scale) {
+      uint8_t unskip = (uint8_t)(mask & a->drawing_mask & a->skip_mask);
+      if (unskip) {
+        a->skip_mask &= (uint8_t)~unskip;
+      }
       uint8_t add = (uint8_t)(mask & ~(a->want_mask | a->drawing_mask | a->have_mask));
       if (add) {
         a->want_mask |= add;
@@ -1745,21 +1987,8 @@ extern "C" void mb_host_glyphs_ahead(int32_t *keys, int32_t n) {
     uint8_t bit = (uint8_t)(1 << sub);
     uint8_t prev = entries[k].subs_queued;
     bool moved = prev != 0 && (prev & bit) == 0;
-    uint8_t want = moved ? (uint8_t)(SUB_ALL & ~prev) : (uint8_t)(bit & ~prev);
-    if (want) {
-      if (ahead_enqueue_phases(k, want, (uint8_t)(want & bit))) asked++;
-    } else {
-      Ahead *a = ahead_started && k < ahead_of_cap ? ahead_of[k] : NULL;
-      if (a) {
-        EnterCriticalSection(&ahead_lock);
-        if ((a->want_mask & bit) && !(a->first_mask & bit) && !a->dropped) {
-          a->first_mask |= bit;
-          queue_push(&ahead_first, a);
-          asked++;
-        }
-        LeaveCriticalSection(&ahead_lock);
-      }
-    }
+    uint8_t want = moved ? (uint8_t)(SUB_ALL & ~prev) : bit;
+    if (ahead_enqueue_phases(k, want, bit)) asked++;
   }
   if (asked) WakeAllConditionVariable(&ahead_more);
 }
@@ -1782,8 +2011,10 @@ static void rasterize(int full_key) {
   bool moved = e->subs_queued != 0 && (e->subs_queued & bit) == 0;
   if (!drawn_ahead(key, sub, &d)) {
     IDWriteTextLayout *l = main_layout_for(key);
-    measure_bounds(l, &e->bounds);
+    measure_bounds(l, e->weight, &e->bounds);
     draw_cluster(l, &e->bounds, text_scale, sub_dx(sub) / text_scale, e->size, e->weight, &main_target, &d);
+  } else if (!e->bounds.valid && d.bounds.valid) {
+    e->bounds = d.bounds;
   }
   e->subs_queued |= bit;
   if (moved) {

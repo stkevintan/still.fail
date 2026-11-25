@@ -12,8 +12,6 @@ MBUI_DIR=$(sh "$A/scripts/mbui.sh") || { echo "apps/mbui: no mbui (scripts/mbui.
 . "$MBUI_DIR/scripts/env.sh"
 export MBUI_DIR
 export MBUI_APP_MOD=$A
-# (Farview's client, which moon.work names: fetched at its pinned commit where this checkout has not it yet)
-sh "$A/scripts/farview.sh" || echo "apps/mbui: Farview's client not fetched (scripts/farview.sh): the app does not build" >&2
 export SF_SRC=${SF_SRC:-$(cd "$A/../.." && pwd)}
 export MBUI_WEB_HOOK=${MBUI_WEB_HOOK:-$A/scripts/web-hook.sh}
 # (scripts/core.sh's Rust shell, for the macOS apps with the core: a target of this module's own)

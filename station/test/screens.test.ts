@@ -32,7 +32,7 @@ import { KEYS, WinInput } from "../src/screens/win-input.ts";
 import { type AudioFrame, CLIP_PNG_MAX, CLIP_TEXT_MAX, CURSOR_PNG_MAX, CURSOR_SHAPE, type Clip, type ClipType, type Frame, type ScreenAccess, type ScreenInput, type ScreenSource, type ScreenView, type ViewOptions, codecFor, cursorImageShape } from "../src/screens/source.ts";
 import { WINDOWS } from "../src/platform/index.ts";
 import { settle, testClock } from "./hub-fakes.ts";
-import { LOSS_EVERY_MS, LOSS_WINDOW_MS, LinkLoss, type LinkPath, MAX_UNACKED, MOVING_SHARPEN_MS, QUEUE_MS, START_RATE, START_UNACKED, STILL_MS, UP_EVERY_MS, rateCeiling } from "../src/mesh/screen-pace.ts";
+import { LOSS_EVERY_MS, LOSS_WINDOW_MS, LinkLoss, type LinkPath, MAX_UNACKED, MOVING_SHARPEN_MS, QUEUE_MS, SEVERE_QUEUE_MS, SHARPEN_COOLDOWN_MS, START_RATE, START_UNACKED, STILL_MS, UP_AFTER_MS, UP_EVERY_MS, rateCeiling } from "../src/mesh/screen-pace.ts";
 import type { Clock } from "effect";
 import { memoryMesh, vanish } from "./memory-mesh.ts";
 import { Superseded } from "../src/mesh/superseded.ts";
@@ -301,8 +301,8 @@ test("frames go unacknowledged while the link keeps up: two before its round tri
   await v.stream.write(frame(KIND.ack, ts8(1000)));
   await settle();
   assert.equal(view.asked, 1 + MAX_UNACKED);
-  // Later than the round trip and QUEUE_MS: a queue builds, nothing more goes, not even as one is acknowledged.
-  await time.adjust(QUEUE_MS + 1);
+  // Later than the round trip and severe backlog threshold: nothing more goes, not even as one is acknowledged.
+  await time.adjust(SEVERE_QUEUE_MS + 1);
   await v.stream.write(frame(KIND.ack, ts8(2000)));
   await settle();
   assert.equal(view.asked, 1 + MAX_UNACKED);
@@ -707,10 +707,10 @@ test("a link's loss over the window: a handful of packets says 0, a path gone or
   assert.equal(loss.step(at(350, 0)), null, "the same said once");
 });
 
-/// A still screen's picture sharpened a step at a time: each a key frame, the next no sooner than the pace steps up.
-const STEP_MS = Math.max(STILL_MS, UP_EVERY_MS);
+/// A still screen's picture is gently refreshed only when healthy, cooled down (SHARPEN_COOLDOWN_MS), and recovered from < 60% rate.
+const STEP_MS = Math.max(STILL_MS, SHARPEN_COOLDOWN_MS);
 
-test("a still screen's picture goes again sharper as the rate goes up, a key frame each step, until it is at the most it is asked at", async () => {
+test("a still screen's picture does not blast keyframes every 250ms, and refreshes gently only after significant rate recovery", async () => {
   const hub = new ScreenHub();
   const source = new FakeSource();
   source.make = () => new StillView();
@@ -720,47 +720,62 @@ test("a still screen's picture goes again sharper as the rate goes up, a key fra
   const first = await until(v.frames, KIND.video);
   assert.equal(first[0], 1);
   const view = source.views[0] as StillView;
-  // Each acknowledged at once: the rate goes up a step; still for STILL_MS, the picture again as a key frame at it.
-  let ts = 1000;
-  const steps: number[] = [];
-  for (;;) {
-    await v.stream.write(frame(KIND.ack, ts8(ts)));
-    await settle();
-    await time.adjust(STEP_MS);
-    await settle();
-    if (view.keyframes === steps.length) break;
-    steps.push(view.rates.at(-1)!);
-    const again = await until(v.frames, KIND.video);
-    assert.equal(again[0], 1, "the picture again is a key frame");
-    ts = Number(again.readBigUInt64BE(1));
-  }
-  // Up from START_RATE by the pace's steps to the most 自动 asks (1920×1080's), and then no more.
-  assert.deepEqual(steps, [2_250_000, 3_375_000, 5_062_500, 7_593_750, 11_390_625, 17_085_938, 25_628_906, rateCeiling(1920, 1080)]);
-  await time.adjust(5 * STEP_MS);
+  // First ack raises rate by START_UP (1.25x): not compressed below 60%, so no aggressive keyframe blast after 250ms or 1s.
+  await v.stream.write(frame(KIND.ack, ts8(1000)));
   await settle();
-  assert.equal(view.keyframes, steps.length);
+  await time.adjust(250);
+  await settle();
+  assert.equal(view.keyframes, 0, "must not blast keyframe after 250ms");
+  await time.adjust(STEP_MS);
+  await settle();
+  assert.equal(view.keyframes, 0, "must not sharpen when last frame was >= 60% of current rate");
   await v.stream.finish();
   await v.served;
 });
 
 test("the rate goes up to its pixels × 16 (自动, 高清), × 20 (2K, 原画), × 6 (流畅), more over 60 frames a second", async () => {
+  class RateView extends FakeView {
+    rates: number[] = [];
+    #queued = 0;
+    #wait: (() => void) | null = null;
+    push() {
+      this.#queued++;
+      const w = this.#wait;
+      this.#wait = null;
+      w?.();
+    }
+    override async next(): Promise<Frame | null> {
+      while (this.#queued === 0 && !this.closed) await new Promise<void>((r) => (this.#wait = r));
+      if (this.closed) return null;
+      this.#queued--;
+      const f = await super.next();
+      return f?.config ? { ...f, config: { ...f.config, width: 1920, height: 1080 } } : f;
+    }
+    override close() {
+      super.close();
+      const w = this.#wait;
+      this.#wait = null;
+      w?.();
+    }
+    rate(bits: number) {
+      this.rates.push(bits);
+    }
+  }
   for (const [quality, top, fps] of [["original", 1920 * 1080 * 20], ["qhd", 1920 * 1080 * 20], ["hd", 1920 * 1080 * 16], ["smooth", 1920 * 1080 * 6], [undefined, 1920 * 1080 * 16], ["hd", 1920 * 1080 * 16 * 1.5, 120], ["qhd", 1920 * 1080 * 20 * 1.25, 90]] as const) {
     const hub = new ScreenHub();
     const source = new FakeSource();
-    source.make = () => new StillView();
+    source.make = () => new RateView();
     hub.add(source);
     const time = testClock();
     const v = await open(hub, member, { maxWidth: 1920, maxHeight: 1080, codecs: ["h264"], control: true, ...(quality ? { quality } : {}), ...(fps ? { fps } : {}) }, undefined, time.clock);
-    await until(v.frames, KIND.video);
-    const view = source.views[0] as StillView;
-    let ts = 1000;
-    for (let i = 0; i < 20; i++) {
-      await v.stream.write(frame(KIND.ack, ts8(ts)));
+    const view = source.views[0] as RateView;
+    for (let i = 0; i < 25 && (view.rates.at(-1) ?? 0) < top; i++) {
+      view.push();
+      const got = await until(v.frames, KIND.video);
+      await v.stream.write(frame(KIND.ack, ts8(Number(got.readBigUInt64BE(1)))));
       await settle();
-      await time.adjust(STEP_MS);
+      await time.adjust(UP_EVERY_MS);
       await settle();
-      if (view.keyframes === i) break;
-      ts = Number((await until(v.frames, KIND.video)).readBigUInt64BE(1));
     }
     assert.equal(Math.max(...view.rates), top, `${quality} ${fps ?? ""}`);
     await v.stream.finish();
@@ -1053,16 +1068,15 @@ test("a screen that keeps changing: a key frame asked once the rate doubled its 
     }
   })();
   let asked: number | null = null;
-  // (to before the rate could double the asked key frame's again: 1.5 s on, START_UP twice more)
-  for (let elapsed = 0; elapsed < 2900; ) {
-    await time.adjust(5);
-    elapsed += 5;
+  for (let elapsed = 0; elapsed < MOVING_SHARPEN_MS + 1000; ) {
+    await time.adjust(25);
+    elapsed += 25;
     await settle();
     if (asked === null && view.keyframes > 0) asked = elapsed;
   }
   assert.ok(asked !== null && asked >= MOVING_SHARPEN_MS, `a key frame asked, not before MOVING_SHARPEN_MS: ${asked}; frames ${view.asked}, rates ${view.rates}`);
-  assert.ok(Math.max(...view.rates) >= 2 * START_RATE, `the rate doubled: ${view.rates}`);
-  assert.equal(view.keyframes, 1, "once: the rate no higher since than double its again");
+  assert.ok(Math.max(...view.rates) >= 2 * START_RATE, `the rate climbed: ${view.rates}`);
+  assert.equal(view.keyframes, 1, "once: cooldown prevents repeated keyframe spikes");
   await v.stream.finish();
   await v.served;
   await read;
@@ -3254,12 +3268,12 @@ test("answerScreen forwards quality to source.open and drives Pacer rate on JPEG
   const f2 = await until(v.frames, KIND.video);
   await time.adjust(600);
   await settle();
-  // Frame 3 triggers pacer.may() -> false (f2 waited 600ms > 10 + 30ms), setting #since/#held.
+  // Frame 3 triggers pacer.may() -> false (f2 waited 600ms > severe queue), setting #since/#held.
   view.push();
   await settle();
-  await time.adjust(250);
+  await time.adjust(600);
   await settle();
-  // Late ack for f2 -> #queuing lowers rate below START_RATE.
+  // Late ack for f2 -> #queuing lowers rate below initial climb.
   await v.stream.write(frame(KIND.ack, ts8(Number(f2.readBigUInt64BE(1)))));
   await settle();
   const f3 = await until(v.frames, KIND.video);
@@ -3269,8 +3283,8 @@ test("answerScreen forwards quality to source.open and drives Pacer rate on JPEG
   assert.ok(view.rates.length >= 2 && view.rates.at(-1)! < view.rates[0]!, `expected congestion drop from ${view.rates[0]}, got ${view.rates}`);
   const lowest = Math.min(...view.rates);
 
-  // Calm period > UP_AFTER_MS (1000ms) with no frames in flight, then prompt acks to climb back toward JPEG_RATE_CEILING.
-  await time.adjust(1_100);
+  // Calm period > UP_AFTER_MS with no frames in flight, then prompt acks to climb back toward JPEG_RATE_CEILING.
+  await time.adjust(UP_AFTER_MS + 100);
   await settle();
   for (let i = 0; i < 8; i++) {
     view.push();

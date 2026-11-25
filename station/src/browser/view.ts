@@ -11,8 +11,11 @@
 // is acknowledged only when the one after it is asked for (`next`), so a slow viewer slows the casting rather than
 // having frames pile up. Of two waiting, the newer is given and the older let go.
 import { type Clip, type Frame, type FrameConfig, type LoginField, type LoginFill, type PasskeyAnswer, type PasskeyAsk, type ScreenInput, type ScreenMic, type ScreenVideo, type ScreenView, type ViewOptions, CLIP_TEXT_MAX, gamepadReleased } from "../screens/source.ts";
+import type { HelperApp } from "../helper/app.ts";
+import { wall } from "../ops/fibers.ts";
 import type { Cdp, CdpEvent } from "./cdp.ts";
 import { type BrowserMicController, attachBrowserMic } from "./mic.ts";
+import { type BrowserVideoEncoder, type BrowserVideoEncoderFactory, createBrowserVideoEncoder } from "./video-encode.ts";
 import { randomUUID } from "node:crypto";
 import { sizeOf } from "../sessions/image-size.ts";
 
@@ -24,34 +27,57 @@ export function viewportOf(m: any): { width: number; height: number } | null {
   return width > 0 && height > 0 ? { width, height } : null;
 }
 
-/// Default (auto quality) screencast bounds cap: 1:1 with Chrome's 1280×900 CSS viewport instead of 2x Retina.
+/// Default (auto quality) JPEG screencast bounds cap: 1:1 with Chrome's 1280×900 CSS viewport instead of 2x Retina.
 export const DEFAULT_MAX_WIDTH = 1280;
 export const DEFAULT_MAX_HEIGHT = 900;
-/// Smooth quality & severe weak-network degradation screencast bounds cap.
+/// Smooth quality JPEG screencast bounds cap.
 export const SMOOTH_MAX_WIDTH = 960;
 export const SMOOTH_MAX_HEIGHT = 675;
+/// H.264 mode source capture settings: crisp input quality and higher auto resolution cap.
+export const H264_SOURCE_QUALITY = 88;
+export const H264_AUTO_MAX_WIDTH = 2560;
+export const H264_AUTO_MAX_HEIGHT = 1600;
+export const H264_SMOOTH_MAX_WIDTH = 1280;
+export const H264_SMOOTH_MAX_HEIGHT = 900;
 /// JPEG quality of the cast frames: 82, as at 70 small text's edges rang (their colours bled round the strokes).
 export const QUALITY = 82;
 export const SMOOTH_QUALITY = 70;
-export const CONSTRAINED_QUALITY = 60;
-export const SEVERE_QUALITY = 45;
-/// Hysteresis thresholds (bits/s) and cooldown for Pacer-driven JPEG quality/bounds degradation.
-export const TIER1_DOWN_BPS = 1_000_000;
-export const TIER1_UP_BPS = 1_250_000;
-export const TIER2_DOWN_BPS = 500_000;
-export const TIER2_UP_BPS = 650_000;
-export const RECAST_COOLDOWN_MS = 2_000;
+/// Gentle JPEG fallback congestion guard: only step down quality to >= 72 after sustained severe congestion >= 5s,
+/// with >= 8s cooldown and never shrinking resolution to 960×675.
+export const JPEG_MIN_QUALITY = 72;
+export const JPEG_CONGESTION_BPS = 600_000;
+export const JPEG_RECOVER_BPS = 1_100_000;
+export const JPEG_SUSTAINED_CONGESTION_MS = 5_000;
+export const JPEG_RECAST_COOLDOWN_MS = 8_000;
 /// The most pixels a CSS pixel is drawn with for a phone it is laid out for (`fit`): sharp on any phone, and frames a
 /// third the size of a 3× phone's own.
 const FIT_SCALE_MOST = 2;
 
 /// Initial screencast bounds and JPEG quality for a browser view.
-export function screencastBase(options: Pick<ViewOptions, "maxWidth" | "maxHeight" | "peek" | "fit" | "quality">): { bounds: { maxWidth: number; maxHeight: number }; quality: number } {
+export function screencastBase(options: Pick<ViewOptions, "maxWidth" | "maxHeight" | "peek" | "fit" | "quality">, h264 = false): { bounds: { maxWidth: number; maxHeight: number }; quality: number } {
   if (!options.peek && options.fit) {
     const scale = Math.min(options.fit.scale, FIT_SCALE_MOST);
     return {
       bounds: { maxWidth: options.fit.width * scale, maxHeight: options.fit.height * scale },
-      quality: options.quality === "smooth" ? SMOOTH_QUALITY : QUALITY,
+      quality: h264 ? H264_SOURCE_QUALITY : options.quality === "smooth" ? SMOOTH_QUALITY : QUALITY,
+    };
+  }
+  if (h264) {
+    if (options.quality === "smooth") {
+      return {
+        bounds: { maxWidth: Math.min(options.maxWidth, H264_SMOOTH_MAX_WIDTH), maxHeight: Math.min(options.maxHeight, H264_SMOOTH_MAX_HEIGHT) },
+        quality: H264_SOURCE_QUALITY,
+      };
+    }
+    if (options.quality === undefined) {
+      return {
+        bounds: { maxWidth: Math.min(options.maxWidth, H264_AUTO_MAX_WIDTH), maxHeight: Math.min(options.maxHeight, H264_AUTO_MAX_HEIGHT) },
+        quality: H264_SOURCE_QUALITY,
+      };
+    }
+    return {
+      bounds: { maxWidth: options.maxWidth, maxHeight: options.maxHeight },
+      quality: H264_SOURCE_QUALITY,
     };
   }
   if (options.quality === "smooth") {
@@ -72,13 +98,12 @@ export function screencastBase(options: Pick<ViewOptions, "maxWidth" | "maxHeigh
   };
 }
 
-/// Target degradation tier (0 normal, 1 constrained, 2 severe) with hysteresis.
-export function screencastTier(current: 0 | 1 | 2, bps: number): 0 | 1 | 2 {
-  if (bps < TIER2_DOWN_BPS) return 2;
-  if (bps < TIER2_UP_BPS) return current === 2 ? 2 : 1;
-  if (bps < TIER1_DOWN_BPS) return 1;
-  if (bps < TIER1_UP_BPS) return current === 0 ? 0 : 1;
-  return 0;
+/// Smooth frame-rate pacing interval (ms) for JPEG fallback when network bandwidth drops.
+export function jpegThrottleIntervalMs(bps: number): number {
+  if (!Number.isFinite(bps) || bps >= 1_200_000) return 0;
+  if (bps >= 800_000) return 50;
+  if (bps >= 500_000) return 85;
+  return 125;
 }
 /// At most this many frames are held unacknowledged (as Chrome sends at most).
 const HELD = 2;
@@ -526,13 +551,18 @@ export type ViewParts = {
   /// Whether the tab's context has a passkey of relying party `rpId` its own authenticator signs (passkeys.ts): a
   /// page's sign-in for it is the browser's, not the person's device's.
   ownPasskey?: (rpId: string) => boolean;
+  /// macOS still.fail Helper for hardware VideoToolbox H.264 encoding (frames.encode).
+  helper?: HelperApp | null;
+  /// Optional H.264 encoder factory override for tests.
+  createEncoder?: BrowserVideoEncoderFactory;
+  /// Optional one-shot timer override for deterministic JPEG throttle tests (defaults to `wall.after`).
+  later?: (ms: number, f: () => void) => () => void;
 };
 
 export class TabView implements ScreenView {
   watchChild?: (heard: (screenId: string) => void) => () => void;
   readonly #p: ViewParts;
   #received: Cast[] = [];
-  #delivered: number[] = [];
   #waiter: ((frame: Frame | null) => void) | null = null;
   #ended = false;
   /// The passkey sign-in a page asked last and not yet answered: its id, the origin it was asked on, the client data
@@ -559,19 +589,30 @@ export class TabView implements ScreenView {
   #fitted = false;
   /// Whether the driving viewer's host signs arbitrary-site passkeys (`ViewOptions.passkeys !== false`).
   #devicePasskeys = true;
-  /// Dynamic screencast degradation state, driven by Pacer via `rate(bps)`.
+  /// Active H.264 encoder when `!peek && codecs.includes("h264")` and an encoder backend is available; null -> JPEG.
+  #encoder: BrowserVideoEncoder | null = null;
+  /// Whether the client accepts JPEG fallback if the H.264 encoder closes unexpectedly mid-stream.
+  #allowJpeg = true;
+  /// Gentle JPEG fallback rate adaptation state (only used when `#encoder === null`).
   #started = false;
   #quality: ViewOptions["quality"];
   #baseBounds = { maxWidth: DEFAULT_MAX_WIDTH, maxHeight: DEFAULT_MAX_HEIGHT };
   #baseQuality = QUALITY;
-  #tier: 0 | 1 | 2 = 0;
+  #tier: 0 | 1 = 0;
+  #congestedSince: number | null = null;
   #lastRecast = -Infinity;
-  #pendingBps: number | null = null;
+  #jpegMinIntervalMs = 0;
+  #lastJpegDeliveredAt = -Infinity;
+  #jpegThrottleTimer: (() => void) | null = null;
   /// The tab's virtual microphone (mic.ts) while its driver watches it.
   #mic: BrowserMicController | null = null;
 
-  /// Chrome's own screencast, a JPEG a picture.
+  /// Chrome's screencast, either encoded as H.264 or falling back to JPEG.
   video(): ScreenVideo {
+    if (this.#encoder !== null) {
+      const info = this.#encoder.info();
+      return { capture: "Chrome screencast", encoder: info.encoder, hardware: info.hardware };
+    }
     return { capture: "Chrome screencast", encoder: "JPEG" };
   }
 
@@ -592,10 +633,6 @@ export class TabView implements ScreenView {
     const { cdp, session } = this.#p;
     await cdp.send("Page.enable", {}, session);
     const fit = options.fit && !this.#peek ? options.fit : undefined;
-    const base = screencastBase(options);
-    this.#baseBounds = base.bounds;
-    this.#baseQuality = base.quality;
-    this.#tier = 0;
     if (fit) {
       const scale = Math.min(fit.scale, FIT_SCALE_MOST);
       await cdp.send("Emulation.setDeviceMetricsOverride", { width: fit.width, height: fit.height, deviceScaleFactor: scale, mobile: true }, session);
@@ -609,6 +646,29 @@ export class TabView implements ScreenView {
         this.#p.sized?.(v);
       }
     }
+    if (!this.#peek && options.codecs.includes("h264")) {
+      const h264Bounds = screencastBase(options, true).bounds;
+      this.#encoder = await createBrowserVideoEncoder({
+        helper: this.#p.helper,
+        width: this.#viewport.width > 0 ? Math.min(this.#viewport.width, h264Bounds.maxWidth) : h264Bounds.maxWidth,
+        height: this.#viewport.height > 0 ? Math.min(this.#viewport.height, h264Bounds.maxHeight) : h264Bounds.maxHeight,
+        bitrate: options.bitrate,
+        fps: options.fps,
+        now: this.#p.now,
+        factory: this.#p.createEncoder,
+      });
+    }
+    this.#allowJpeg = options.codecs.includes("jpeg");
+    if (this.#encoder === null && !this.#allowJpeg) {
+      throw new Error("A tab of the station's browser needs H.264 or JPEG, and no H.264 encoder is available.");
+    }
+    const base = screencastBase(options, this.#encoder !== null);
+    this.#baseBounds = base.bounds;
+    this.#baseQuality = base.quality;
+    this.#tier = 0;
+    this.#congestedSince = null;
+    this.#jpegMinIntervalMs = 0;
+    this.#lastJpegDeliveredAt = -Infinity;
     await cdp.send(
       "Page.startScreencast",
       { format: "jpeg", quality: base.quality, maxWidth: Math.max(1, Math.round(base.bounds.maxWidth)), maxHeight: Math.max(1, Math.round(base.bounds.maxHeight)), everyNthFrame: 1 },
@@ -616,52 +676,94 @@ export class TabView implements ScreenView {
     );
     this.#started = true;
     this.#lastRecast = -Infinity;
-    this.#pendingBps = null;
   }
 
   rate(bps: number) {
-    if (this.#ended || !this.#started || this.#peek || this.#quality === "original" || !Number.isFinite(bps)) return;
-    const target = screencastTier(this.#tier, bps);
-    if (target === this.#tier) {
-      this.#pendingBps = null;
+    if (this.#ended || !this.#started || !Number.isFinite(bps)) return;
+    if (this.#encoder !== null) {
+      this.#encoder.setBitrate(bps);
       return;
     }
+    if (this.#peek || this.#quality === "original") return;
+    this.#jpegMinIntervalMs = jpegThrottleIntervalMs(bps);
     const now = this.#p.now();
-    if (now - this.#lastRecast < RECAST_COOLDOWN_MS) {
-      this.#pendingBps = bps;
-      return;
+    if (this.#tier === 0) {
+      if (bps < JPEG_CONGESTION_BPS) {
+        this.#congestedSince ??= now;
+        if (now - this.#congestedSince >= JPEG_SUSTAINED_CONGESTION_MS && now - this.#lastRecast >= JPEG_RECAST_COOLDOWN_MS) {
+          this.#tier = 1;
+          this.#lastRecast = now;
+          this.#congestedSince = null;
+          const quality = Math.max(JPEG_MIN_QUALITY, Math.min(this.#baseQuality, JPEG_MIN_QUALITY));
+          void this.#p.cdp
+            .send(
+              "Page.startScreencast",
+              { format: "jpeg", quality, maxWidth: Math.max(1, Math.round(this.#baseBounds.maxWidth)), maxHeight: Math.max(1, Math.round(this.#baseBounds.maxHeight)), everyNthFrame: 1 },
+              this.#p.session,
+            )
+            .catch(() => {});
+        }
+      } else if (bps >= JPEG_RECOVER_BPS) {
+        this.#congestedSince = null;
+      }
+    } else {
+      if (bps >= JPEG_RECOVER_BPS && now - this.#lastRecast >= JPEG_RECAST_COOLDOWN_MS) {
+        this.#tier = 0;
+        this.#lastRecast = now;
+        this.#congestedSince = null;
+        void this.#p.cdp
+          .send(
+            "Page.startScreencast",
+            { format: "jpeg", quality: this.#baseQuality, maxWidth: Math.max(1, Math.round(this.#baseBounds.maxWidth)), maxHeight: Math.max(1, Math.round(this.#baseBounds.maxHeight)), everyNthFrame: 1 },
+            this.#p.session,
+          )
+          .catch(() => {});
+      }
     }
-    this.#tier = target;
-    this.#lastRecast = now;
-    this.#pendingBps = null;
-    const quality = target === 0 ? this.#baseQuality : target === 1 ? Math.min(this.#baseQuality, CONSTRAINED_QUALITY) : SEVERE_QUALITY;
-    const bounds =
-      target === 2 && !this.#fitted && this.#quality !== "qhd"
-        ? { maxWidth: Math.min(this.#baseBounds.maxWidth, SMOOTH_MAX_WIDTH), maxHeight: Math.min(this.#baseBounds.maxHeight, SMOOTH_MAX_HEIGHT) }
-        : this.#baseBounds;
-    void this.#p.cdp
-      .send(
-        "Page.startScreencast",
-        { format: "jpeg", quality, maxWidth: Math.max(1, Math.round(bounds.maxWidth)), maxHeight: Math.max(1, Math.round(bounds.maxHeight)), everyNthFrame: 1 },
-        this.#p.session,
-      )
-      .catch(() => {});
   }
 
-  next(): Promise<Frame | null> {
-    if (this.#ended) return Promise.resolve(null);
-    if (this.#pendingBps !== null) this.rate(this.#pendingBps);
-    // The frames given before were taken: Chrome may cast the next ones.
-    for (const ack of this.#delivered.splice(0)) this.#ack(ack);
-    if (this.#keyframe && this.#last) return Promise.resolve(this.#again());
-    const frame = this.#take();
-    if (frame) return Promise.resolve(frame);
+  async next(): Promise<Frame | null> {
+    if (this.#ended) return null;
+    if (this.#encoder !== null) {
+      const frame = await this.#encoder.next();
+      if (frame !== null || this.#ended || !this.#allowJpeg) return frame;
+      // Encoder died unexpectedly mid-stream while CDP screencast is still alive: fall back to JPEG seamlessly.
+      this.#encoder = null;
+      this.#config = null;
+      if (this.#last) {
+        this.#keyframe = true;
+        return this.#again();
+      }
+    }
+    if (this.#keyframe && this.#last) {
+      this.#clearThrottleTimer();
+      return this.#again();
+    }
+    if (this.#received.length > 0) {
+      const elapsed = this.#p.now() - this.#lastJpegDeliveredAt;
+      if (this.#jpegMinIntervalMs <= 0 || elapsed >= this.#jpegMinIntervalMs) {
+        this.#clearThrottleTimer();
+        const frame = this.#take();
+        if (frame) return frame;
+      } else {
+        return new Promise((resolve) => {
+          this.#waiter = resolve;
+          this.#scheduleThrottleFlush(this.#jpegMinIntervalMs - elapsed);
+        });
+      }
+    }
     return new Promise((resolve) => (this.#waiter = resolve));
   }
 
   keyframe() {
+    if (this.#ended) return;
+    if (this.#encoder !== null) {
+      this.#encoder.requestKeyframe();
+      return;
+    }
     this.#keyframe = true;
     if (this.#waiter && this.#last) {
+      this.#clearThrottleTimer();
       const w = this.#waiter;
       this.#waiter = null;
       w(this.#again());
@@ -1009,31 +1111,67 @@ export class TabView implements ScreenView {
     const { session } = this.#p;
     if (e.method === "Page.screencastFrame" && e.sessionId === session) {
       if (this.#ended) return;
-      if (this.#pendingBps !== null) this.rate(this.#pendingBps);
+      const ack = e.params.sessionId;
+      // Pipeline CDP ack immediately on receipt so Chrome can capture the next frame without waiting 1 RTT.
+      this.#ack(ack);
       const data = Buffer.from(String(e.params.data ?? ""), "base64");
-      this.#received.push({ ack: e.params.sessionId, data, meta: e.params.metadata ?? {} });
-      while (this.#received.length > HELD) this.#ack(this.#received.shift()!.ack);
+      const meta = e.params.metadata ?? {};
+      if (meta.deviceWidth > 0 && meta.deviceHeight > 0 && (meta.deviceWidth !== this.#viewport.width || meta.deviceHeight !== this.#viewport.height)) {
+        this.#viewport = { width: meta.deviceWidth, height: meta.deviceHeight };
+        this.#p.sized?.(this.#viewport);
+      }
+      if (this.#encoder !== null) {
+        const stamp = typeof meta.timestamp === "number" ? Math.round(meta.timestamp * 1e6) : this.#p.now() * 1000;
+        this.#ts = Math.max(this.#ts + 1, stamp);
+        const size = jpegSize(data) ?? this.#viewport;
+        this.#last = { data, config: { codec: "jpeg", width: Math.max(1, size.width), height: Math.max(1, size.height) } };
+        this.#encoder.pushJpeg(data, this.#ts);
+        return;
+      }
+      this.#received.push({ ack, data, meta });
+      while (this.#received.length > HELD) this.#received.shift();
       if (this.#waiter) {
-        const w = this.#waiter;
-        this.#waiter = null;
-        w(this.#take());
+        const now = this.#p.now();
+        const elapsed = now - this.#lastJpegDeliveredAt;
+        if (this.#jpegMinIntervalMs <= 0 || elapsed >= this.#jpegMinIntervalMs) {
+          this.#clearThrottleTimer();
+          const w = this.#waiter;
+          this.#waiter = null;
+          w(this.#take());
+        } else {
+          this.#scheduleThrottleFlush(this.#jpegMinIntervalMs - elapsed);
+        }
       }
     } else if ((e.method === "Target.detachedFromTarget" && e.params.sessionId === session) || (e.method === "Inspector.detached" && e.sessionId === session)) {
       this.#end();
     }
   }
 
+  #clearThrottleTimer() {
+    this.#jpegThrottleTimer?.();
+    this.#jpegThrottleTimer = null;
+  }
+
+  #scheduleThrottleFlush(remainingMs: number) {
+    if (this.#jpegThrottleTimer !== null) return;
+    const delay = Math.max(1, Math.ceil(remainingMs));
+    // timer: burst debouncing to deliver the final throttled JPEG frame once the pacing interval elapses
+    this.#jpegThrottleTimer = (this.#p.later ?? wall.after)(delay, () => {
+      this.#jpegThrottleTimer = null;
+      if (this.#ended || this.#waiter === null || this.#received.length === 0) return;
+      const w = this.#waiter;
+      this.#waiter = null;
+      w(this.#take());
+    });
+  }
+
   /// The newest frame received, the older let go; null when none came.
   #take(): Frame | null {
     const newest = this.#received.pop();
     if (newest === undefined) return null;
-    for (const older of this.#received.splice(0)) this.#ack(older.ack);
-    this.#delivered.push(newest.ack);
+    this.#received.length = 0;
+    this.#lastJpegDeliveredAt = this.#p.now();
     const meta = newest.meta;
-    if (meta.deviceWidth > 0 && meta.deviceHeight > 0 && (meta.deviceWidth !== this.#viewport.width || meta.deviceHeight !== this.#viewport.height)) {
-      this.#viewport = { width: meta.deviceWidth, height: meta.deviceHeight };
-      this.#p.sized?.(this.#viewport);
-    }
     const size = jpegSize(newest.data) ?? (this.#config ? { width: this.#config.width, height: this.#config.height } : { width: this.#viewport.width, height: this.#viewport.height });
     const config: FrameConfig = { codec: "jpeg", width: size.width, height: size.height };
     const changed = this.#config === null || this.#config.width !== config.width || this.#config.height !== config.height || this.#keyframe;
@@ -1061,8 +1199,11 @@ export class TabView implements ScreenView {
   #end() {
     if (this.#ended) return;
     this.#ended = true;
+    this.#clearThrottleTimer();
     this.#micOff();
     this.#unlisten();
+    this.#encoder?.close();
+    this.#encoder = null;
     const w = this.#waiter;
     this.#waiter = null;
     w?.(null);

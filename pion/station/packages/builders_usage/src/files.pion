@@ -1,0 +1,731 @@
+// 1:1 port of `station/mb/src/usagecount/files.mbt`:
+// Raw & zstd-packed transcript reading via `builders_core::ShellClient` and `transcript_io`,
+// raw-byte line framing with incomplete trailing line buffering, and Claude/Codex path helpers.
+
+import "base_codec"
+import "builders_core"
+import "js_json"
+import "nodepath"
+import "sql_db"
+import "transcript_io"
+
+pub let CHUNK : Int = 1048576
+
+pub let ANCHOR_BYTES : Int = 256
+
+pub struct Part {
+  pub bytes : Bytes
+  pub from : Int64
+  pub offset : Int64
+}
+
+pub fn stat(client : builders_core::ShellClient, path : String) -> Option[String] {
+  match client.shell_sync_json("fs.stat", base_codec::json_obj([("path", base_codec::json_str(path))])) {
+    Ok(base_codec::Json::Str(kind)) => Some(kind)
+    _ => None
+  }
+}
+
+pub fn is_file(client : builders_core::ShellClient, path : String) -> Bool {
+  opt_str_eq(stat(client, path), "file")
+}
+
+pub fn is_dir(client : builders_core::ShellClient, path : String) -> Bool {
+  opt_str_eq(stat(client, path), "dir")
+}
+
+pub fn exists(client : builders_core::ShellClient, path : String) -> Bool {
+  match stat(client, path) {
+    Some(_) => true
+    None => false
+  }
+}
+
+pub fn canonical(client : builders_core::ShellClient, path : String) -> String {
+  match client.shell_sync_json("fs.realpath", base_codec::json_obj([("path", base_codec::json_str(path))])) {
+    Ok(base_codec::Json::Str(p)) => p
+    _ => path
+  }
+}
+
+pub fn size_of(client : builders_core::ShellClient, path : String) -> Option[Int64] {
+  match client.shell_sync_json("fs.meta", base_codec::json_obj([("path", base_codec::json_str(path))])) {
+    Ok(v) => {
+      match builders_core::json_get_last(v, "size") {
+        Some(base_codec::Json::Num(sz, _)) => Some(sz.to_int64())
+        _ => None
+      }
+    }
+    Err(_) => None
+  }
+}
+
+fn decode_hex_bytes_local(hex : String) -> Option[Bytes] {
+  let n = hex.length()
+  if (n % 2) != 0 {
+    return None
+  }
+  let out = Bytes::new(n / 2)
+  let mut i = 0
+  while i < n {
+    let hi = match base_codec::hex_digit(hex.code_unit_at(i)) {
+      Some(v) => v
+      None => return None
+    }
+    let lo = match base_codec::hex_digit(hex.code_unit_at(i + 1)) {
+      Some(v) => v
+      None => return None
+    }
+    out[i / 2] = ((hi << 4) | lo) as Byte
+    i = i + 2
+  }
+  Some(out)
+}
+
+pub fn bytes_of(
+  client : builders_core::ShellClient,
+  path : String,
+  from : Int64,
+  length : Int64,
+  exact : Bool = false,
+  zstd : Bool = false,
+) -> Result[Bytes, String] {
+  let fields : Array[(String, base_codec::Json)] = [
+    ("path", base_codec::json_str(path)),
+    ("from", base_codec::json_num(from.to_double())),
+    ("length", base_codec::json_num(length.to_double())),
+  ]
+  if exact {
+    fields.push(("exact", base_codec::json_bool(true)))
+  }
+  if zstd {
+    fields.push(("zstd", base_codec::json_bool(true)))
+  }
+  match client.shell_sync_json("fs.bytes", base_codec::json_obj(fields)) {
+    Ok(base_codec::Json::Str(hex)) => {
+      match decode_hex_bytes_local(hex) {
+        Some(b) => Ok(b)
+        None => Err("invalid hex")
+      }
+    }
+    Ok(_) => Err("not there")
+    Err(e) => Err(e.message)
+  }
+}
+
+pub fn packed(path : String) -> String {
+  path + ".zst"
+}
+
+pub fn put_away(client : builders_core::ShellClient, path : String) -> Bool {
+  !exists(client, path) && exists(client, packed(path))
+}
+
+pub fn written_length(client : builders_core::ShellClient, path : String) -> Result[Option[Int64], String] {
+  transcript_io::packed_written_size(client, path)
+}
+
+pub fn segments_from(
+  client : builders_core::ShellClient,
+  path : String,
+  from : Int64,
+  take : (Bytes) -> Result[Bool, String],
+) -> Result[Bool, String] {
+  transcript_io::packed_read_segments(client, path, from, None, true, take)
+}
+
+/// Stream-decompress a single-frame/unindexed `.zst` transcript via async `zstd.open`/`zstd.push`
+/// and synchronous `zstd.close` (guaranteed closed on every exit path).
+pub fn unpacked(
+  client : builders_core::ShellClient,
+  path : String,
+  take : (Bytes) -> Result[Bool, String],
+) -> Result[Unit, String] {
+  let size = match size_of(client, path) {
+    Some(s) => s
+    None => return Err("a put-away transcript is not there")
+  }
+  let opened = match client.shell_call_wait("zstd.open", base_codec::json_obj([]), None) {
+    Ok((Some(j), _)) => j
+    Ok((None, _)) => return Err("no zstd stream")
+    Err(e) => return Err(e.message)
+  }
+  let id = match builders_core::json_get_last(opened, "id") {
+    Some(v) => v
+    None => return Err("no zstd stream")
+  }
+  let close_stream = fn() -> Unit {
+    let _ = client.shell_sync_json("zstd.close", base_codec::json_obj([("id", id)]))
+  }
+  let mut pos = 0.to_int64()
+  let chunk64 = CHUNK.to_int64()
+  while pos < size {
+    let rem = size - pos
+    let n = if rem < chunk64 { rem } else { chunk64 }
+    let piece = match bytes_of(client, path, pos, n) {
+      Ok(b) => b
+      Err(e) => {
+        close_stream()
+        return Err(e)
+      }
+    }
+    if piece.length() == 0 {
+      break
+    }
+    pos = pos + piece.length().to_int64()
+    let push_res = client.shell_call_wait("zstd.push", base_codec::json_obj([("id", id)]), Some(piece))
+    match push_res {
+      Err(e) => {
+        close_stream()
+        return Err(e.message)
+      }
+      Ok((_, Some(b))) => {
+        if b.length() > 0 {
+          match take(b) {
+            Ok(true) => ()
+            Ok(false) => {
+              close_stream()
+              return Ok(())
+            }
+            Err(e) => {
+              close_stream()
+              return Err(e)
+            }
+          }
+        }
+      }
+      Ok((_, None)) => ()
+    }
+  }
+  close_stream()
+  Ok(())
+}
+
+/// Split `bytes` (whole lines starting at `from`) into `Part`s of at most `CHUNK` bytes where lines allow.
+/// `take` returns `Ok(true)` to continue, `Ok(false)` to stop early cleanly, or `Err(msg)` to propagate.
+pub fn parts_of(
+  bytes : Bytes,
+  from : Int64,
+  take : (Part) -> Result[Bool, String],
+) -> Result[Bool, String] {
+  let mut at = 0
+  let total = bytes.length()
+  while at < total {
+    let window = if total < at + CHUNK { total } else { at + CHUNK }
+    let mut cut = window - 1
+    while cut >= at && (bytes[cut].to_int() & 0xFF) != 10 {
+      cut = cut - 1
+    }
+    if cut < at {
+      cut = window
+      while cut < total && (bytes[cut].to_int() & 0xFF) != 10 {
+        cut = cut + 1
+      }
+      if cut >= total {
+        return Ok(true)
+      }
+    }
+    let part = Part::{
+      bytes: bytes_slice(bytes, at, cut + 1),
+      from: from + at.to_int64(),
+      offset: from + (cut + 1).to_int64(),
+    }
+    match take(part) {
+      Ok(true) => ()
+      Ok(false) => return Ok(false)
+      Err(e) => return Err(e)
+    }
+    at = cut + 1
+  }
+  Ok(true)
+}
+
+/// Buffers raw bytes of incomplete trailing lines across chunks until `\n`.
+pub struct Lines {
+  mut held : Array[Byte]
+  mut start : Int64
+}
+
+pub fn Lines::new(start : Int64) -> Lines {
+  Lines::{ held: [], start: start }
+}
+
+fn append_bytes_range(dst : Array[Byte], src : Bytes, from : Int, end : Int) -> Unit {
+  for i in from..<end {
+    dst.push(src[i])
+  }
+}
+
+fn array_to_bytes(arr : Array[Byte]) -> Bytes {
+  let out = Bytes::new(arr.length())
+  for i in 0..<arr.length() {
+    out[i] = arr[i]
+  }
+  out
+}
+
+pub fn Lines::add(
+  self : Lines,
+  piece : Bytes,
+  take : (Part) -> Result[Bool, String],
+) -> Result[Bool, String] {
+  let mut cut = piece.length() - 1
+  while cut >= 0 && (piece[cut].to_int() & 0xFF) != 10 {
+    cut = cut - 1
+  }
+  if cut < 0 {
+    append_bytes_range(self.held, piece, 0, piece.length())
+    return Ok(true)
+  }
+  let whole = if self.held.length() == 0 {
+    bytes_slice(piece, 0, cut + 1)
+  } else {
+    append_bytes_range(self.held, piece, 0, cut + 1)
+    let b = array_to_bytes(self.held)
+    self.held = []
+    b
+  }
+  let res = parts_of(whole, self.start, take)
+  self.start = self.start + whole.length().to_int64()
+  append_bytes_range(self.held, piece, cut + 1, piece.length())
+  res
+}
+
+pub fn packed_from(
+  client : builders_core::ShellClient,
+  path : String,
+  offset : Int64,
+  take : (Part) -> Result[Bool, String],
+) -> Result[Unit, String] {
+  match written_length(client, packed(path)) {
+    Ok(Some(length)) => {
+      if offset > length {
+        return packed_from(client, path, 0.to_int64(), take)
+      }
+      let lines = Lines::new(offset)
+      let mut failed : Option[String] = None
+      let _ = segments_from(client, packed(path), offset, fn(piece : Bytes) -> Result[Bool, String] {
+        match lines.add(piece, fn(part : Part) -> Result[Bool, String] {
+          match take(part) {
+            Ok(cont) => Ok(cont)
+            Err(e) => {
+              failed = Some(e)
+              Err("stopped")
+            }
+          }
+        }) {
+          Ok(cont) => Ok(cont)
+          Err(e) => Err(e)
+        }
+      })
+      match failed {
+        Some(e) => Err(e)
+        None => Ok(())
+      }
+    }
+    _ => {
+      let lines = Lines::new(offset)
+      let mut total = 0.to_int64()
+      let mut failed : Option[String] = None
+      let mut stopped_early = false
+      let _ = unpacked(client, packed(path), fn(piece : Bytes) -> Result[Bool, String] {
+        let skip = if offset > total { offset - total } else { 0.to_int64() }
+        total = total + piece.length().to_int64()
+        if skip >= piece.length().to_int64() {
+          return Ok(true)
+        }
+        let slice = if skip > 0.to_int64() { bytes_slice(piece, skip.to_int(), piece.length()) } else { piece }
+        match lines.add(slice, fn(part : Part) -> Result[Bool, String] {
+          match take(part) {
+            Ok(true) => Ok(true)
+            Ok(false) => {
+              stopped_early = true
+              Ok(false)
+            }
+            Err(e) => {
+              failed = Some(e)
+              Err("stopped")
+            }
+          }
+        }) {
+          Ok(cont) => Ok(cont)
+          Err(e) => Err(e)
+        }
+      })
+      match failed {
+        Some(e) => return Err(e)
+        None => ()
+      }
+      if !stopped_early && total < offset {
+        return packed_from(client, path, 0.to_int64(), take)
+      }
+      Ok(())
+    }
+  }
+}
+
+pub fn read_from(
+  client : builders_core::ShellClient,
+  path : String,
+  offset : Int64,
+  take : (Part) -> Result[Bool, String],
+) -> Result[Unit, String] {
+  if put_away(client, path) {
+    return packed_from(client, path, offset, take)
+  }
+  let size = match size_of(client, path) {
+    Some(s) => s
+    None => return Ok(())
+  }
+  let mut pos = if size < offset { 0.to_int64() } else { offset }
+  if pos == size {
+    return Ok(())
+  }
+  let lines = Lines::new(pos)
+  let chunk64 = CHUNK.to_int64()
+  while pos < size {
+    let rem = size - pos
+    let n = if rem < chunk64 { rem } else { chunk64 }
+    let piece = match bytes_of(client, path, pos, n) {
+      Ok(b) => b
+      Err(_) => Bytes::new(0)
+    }
+    if piece.length() == 0 {
+      break
+    }
+    pos = pos + piece.length().to_int64()
+    match lines.add(piece, take) {
+      Ok(true) => ()
+      Ok(false) => return Ok(())
+      Err(e) => return Err(e)
+    }
+  }
+  Ok(())
+}
+
+pub fn unpacked_length(client : builders_core::ShellClient, path : String) -> Option[Int64] {
+  let mut size = 0.to_int64()
+  match unpacked(client, path, fn(piece : Bytes) -> Result[Bool, String] {
+    size = size + piece.length().to_int64()
+    Ok(true)
+  }) {
+    Ok(_) => Some(size)
+    Err(_) => None
+  }
+}
+
+pub fn anchor_at(
+  client : builders_core::ShellClient,
+  path : String,
+  offset : Int64,
+  archived : Bool,
+) -> Option[Bytes] {
+  let anchor64 = ANCHOR_BYTES.to_int64()
+  let length = if offset < anchor64 { offset } else { anchor64 }
+  if length == 0.to_int64() {
+    return Some(Bytes::new(0))
+  }
+  let start = offset - length
+  if !archived {
+    return match bytes_of(client, path, start, length) {
+      Ok(b) => if b.length().to_int64() == length { Some(b) } else { None }
+      Err(_) => None
+    }
+  }
+  let got : Array[Byte] = []
+  let gather = fn(skip : Int64, piece : Bytes) -> Result[Bool, String] {
+    let want = length.to_int() - got.length()
+    if skip >= piece.length().to_int64() {
+      return Ok(true)
+    }
+    let from = skip.to_int()
+    let end = if piece.length() - from < want { piece.length() } else { from + want }
+    append_bytes_range(got, piece, from, end)
+    Ok(got.length().to_int64() < length)
+  }
+  match segments_from(client, packed(path), start, fn(piece : Bytes) -> Result[Bool, String] {
+    gather(0.to_int64(), piece)
+  }) {
+    Ok(true) => ()
+    Ok(false) => {
+      let mut skip = start
+      match unpacked(client, packed(path), fn(piece : Bytes) -> Result[Bool, String] {
+        let s = skip
+        skip = if skip > piece.length().to_int64() { skip - piece.length().to_int64() } else { 0.to_int64() }
+        gather(s, piece)
+      }) {
+        Ok(_) => ()
+        Err(_) => return None
+      }
+    }
+    Err(_) => return None
+  }
+  if got.length().to_int64() == length {
+    Some(array_to_bytes(got))
+  } else {
+    None
+  }
+}
+
+pub fn first_line(client : builders_core::ShellClient, path : String) -> Option[String] {
+  let source = if exists(client, path) { path } else { packed(path) }
+  if !exists(client, source) {
+    return None
+  }
+  let got : Array[Byte] = []
+  let mut ended = false
+  let take = fn(piece : Bytes) -> Result[Bool, String] {
+    let mut i = 0
+    while i < piece.length() && (piece[i].to_int() & 0xFF) != 10 {
+      i = i + 1
+    }
+    if i < piece.length() {
+      append_bytes_range(got, piece, 0, i + 1)
+      ended = true
+      Ok(false)
+    } else {
+      append_bytes_range(got, piece, 0, piece.length())
+      Ok(true)
+    }
+  }
+  if source == path {
+    let size = match size_of(client, path) {
+      Some(s) => s
+      None => return None
+    }
+    let mut pos = 0.to_int64()
+    while pos < size && !ended {
+      let rem = size - pos
+      let n = if rem < 65536.to_int64() { rem } else { 65536.to_int64() }
+      let piece = match bytes_of(client, path, pos, n) {
+        Ok(b) => b
+        Err(_) => return None
+      }
+      if piece.length() == 0 {
+        break
+      }
+      pos = pos + piece.length().to_int64()
+      let _ = take(piece)
+    }
+  } else {
+    match unpacked(client, source, take) {
+      Ok(_) => ()
+      Err(_) => {
+        if !ended {
+          return None
+        }
+      }
+    }
+  }
+  Some(sql_db::decode_utf8_lossy_bytes(array_to_bytes(got)))
+}
+
+pub fn codex_meta(client : builders_core::ShellClient, path : String) -> Option[String] {
+  let line = match first_line(client, path) {
+    Some(l) => l
+    None => return None
+  }
+  let r = match parse_line(line) {
+    Some(v) => v
+    None => return None
+  }
+  let p = jget(Some(r), "payload")
+  match (jstr(jget(p, "id")), jstr(jget(p, "cwd"))) {
+    (Some(id), Some(_)) => Some(id)
+    _ => None
+  }
+}
+
+pub fn extension(sep : String, path : String) -> Option[String] {
+  let name = nodepath::basename(sep, path)
+  let raw = name.to_bytes()
+  let mut i = raw.length() - 1
+  while i >= 0 {
+    if (raw[i].to_int() & 0xFF) == 46 {
+      if i > 0 {
+        return Some(str_slice_bytes(name, i + 1, raw.length()))
+      }
+      return None
+    }
+    i = i - 1
+  }
+  None
+}
+
+fn bytes_cmp(x : Bytes, y : Bytes) -> Int {
+  let m = if x.length() < y.length() { x.length() } else { y.length() }
+  for i in 0..<m {
+    let bx = x[i].to_int() & 0xFF
+    let by = y[i].to_int() & 0xFF
+    if bx != by {
+      return bx - by
+    }
+  }
+  x.length() - y.length()
+}
+
+pub fn byte_order(a : String, b : String) -> Int {
+  bytes_cmp(js_json::utf8_bytes(a), js_json::utf8_bytes(b))
+}
+
+fn sort_strings_by_bytes(items : Array[String]) -> Unit {
+  let n = items.length()
+  if n <= 1 {
+    return
+  }
+  // Precompute UTF-8 byte keys once and run O(n log n) bottom-up merge sort.
+  let mut src : Array[(String, Bytes)] = []
+  let mut dst : Array[(String, Bytes)] = []
+  for i in 0..<n {
+    let pair = (items[i], js_json::utf8_bytes(items[i]))
+    src.push(pair)
+    dst.push(pair)
+  }
+  let mut width = 1
+  while width < n {
+    let mut left = 0
+    while left < n {
+      let mid = if left + width < n { left + width } else { n }
+      let right = if left + width + width < n { left + width + width } else { n }
+      let mut i = left
+      let mut j = mid
+      let mut k = left
+      while i < mid && j < right {
+        let (_, ki) = src[i]
+        let (_, kj) = src[j]
+        if bytes_cmp(ki, kj) <= 0 {
+          dst[k] = src[i]
+          i = i + 1
+        } else {
+          dst[k] = src[j]
+          j = j + 1
+        }
+        k = k + 1
+      }
+      while i < mid {
+        dst[k] = src[i]
+        i = i + 1
+        k = k + 1
+      }
+      while j < right {
+        dst[k] = src[j]
+        j = j + 1
+        k = k + 1
+      }
+      left = right
+    }
+    let tmp = src
+    src = dst
+    dst = tmp
+    width = width * 2
+  }
+  for i in 0..<n {
+    let (s, _) = src[i]
+    items[i] = s
+  }
+}
+
+pub fn jsonl_in(client : builders_core::ShellClient, sep : String, dir : String) -> Array[String] {
+  let names : Array[String] = match client.shell_sync_json("fs.readdir", base_codec::json_obj([("path", base_codec::json_str(dir))])) {
+    Ok(base_codec::Json::Arr(items)) => {
+      let out : Array[String] = []
+      for i in 0..<items.length() {
+        match items[i] {
+          base_codec::Json::Str(s) => out.push(s)
+          _ => ()
+        }
+      }
+      out
+    }
+    _ => return []
+  }
+  let seen : Map[String, Bool] = Map::new()
+  let paths : Array[String] = []
+  for i in 0..<names.length() {
+    let p = nodepath::join(sep, [dir, names[i]])
+    if !is_file(client, p) {
+      continue
+    }
+    let q = if opt_str_eq(extension(sep, p), "zst") {
+      str_slice_bytes(p, 0, p.to_bytes().length() - 4)
+    } else {
+      p
+    }
+    if opt_str_eq(extension(sep, q), "jsonl") {
+      match seen.get(q) {
+        Some(_) => ()
+        None => {
+          seen.set(q, true)
+          paths.push(q)
+        }
+      }
+    }
+  }
+  sort_strings_by_bytes(paths)
+  paths
+}
+
+pub fn claude_files(
+  client : builders_core::ShellClient,
+  sep : String,
+  dir : String,
+  only : Option[String],
+) -> Array[(String, Bool)] {
+  let own : Array[String] = match only {
+    Some(id) => {
+      let p = nodepath::join(sep, [dir, id + ".jsonl"])
+      if is_file(client, p) || (!exists(client, p) && is_file(client, packed(p))) {
+        [p]
+      } else {
+        []
+      }
+    }
+    None => jsonl_in(client, sep, dir)
+  }
+  let out : Array[(String, Bool)] = []
+  for i in 0..<own.length() {
+    out.push((own[i], false))
+  }
+  for i in 0..<own.length() {
+    let name = nodepath::basename(sep, own[i])
+    let id = str_slice_bytes(name, 0, name.to_bytes().length() - 6)
+    let subs = jsonl_in(client, sep, nodepath::join(sep, [dir, id, "subagents"]))
+    for j in 0..<subs.length() {
+      out.push((subs[j], true))
+    }
+  }
+  out
+}
+
+/// Claude Code project directory name: each Unicode code point except ASCII letter/digit becomes `-`.
+pub fn claude_project(path : String) -> String {
+  let cps = js_json::points(path)
+  let out = StringBuilder::new()
+  for i in 0..<cps.length() {
+    let cp = cps[i]
+    let raw = cp.to_bytes()
+    if raw.length() == 1 {
+      let c = raw[0].to_int() & 0xFF
+      if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) {
+        out.write_byte(c as Byte)
+      } else {
+        out.write_byte(45 as Byte)
+      }
+    } else {
+      out.write_byte(45 as Byte)
+    }
+  }
+  out.to_string()
+}
+
+pub fn hex_of(b : Bytes) -> String {
+  let sb = StringBuilder::new()
+  for i in 0..<b.length() {
+    let v = b[i].to_int() & 0xFF
+    let hi = (v >> 4) & 0xF
+    let lo = v & 0xF
+    sb.write_byte((if hi < 10 { 48 + hi } else { 87 + hi }) as Byte)
+    sb.write_byte((if lo < 10 { 48 + lo } else { 87 + lo }) as Byte)
+  }
+  sb.to_string()
+}

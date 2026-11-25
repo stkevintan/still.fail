@@ -231,3 +231,99 @@ test "UTF-16 helpers: utf16_len, utf16_slice, utf16_find_from, utf8_bytes, is_sa
   expect(!is_safe_integer(0.0 / 0.0), "NaN not safe")
   expect(!is_safe_integer(1.0 / 0.0), "Inf not safe")
 }
+
+test "civil dates, js_parse_iso, js_iso_checked: leap years, extended years, and ±8.64e15 ms bounds" {
+  // Epoch and leap year checks
+  expect(days_from_civil(1970, 1, 1) == 0.to_int64(), "1970-01-01 == 0")
+  expect(days_from_civil(2000, 2, 29) == 11016.to_int64(), "2000-02-29")
+  let (y, m, d) = civil_from_days(11016.to_int64())
+  expect(y == 2000 && m == 2 && d == 29, "civil_from_days 2000-02-29")
+  // Non-leap 1900-02-29 rolls over to 1900-03-01 when strict_day=false, rejected when strict_day=true
+  match js_parse_iso("1900-02-29", strict_day=true) {
+    None => ()
+    Some(_) => panic("1900-02-29 strict_day must be None")
+  }
+  match js_parse_iso("1900-02-29", strict_day=false) {
+    Some(t) => expect(js_iso(t) == "1900-03-01T00:00:00.000Z", "1900-02-29 rollover")
+    None => panic("1900-02-29 rollover expected Some")
+  }
+  match js_parse_iso("2024-02-29T12:34:56.78Z", strict_day=true) {
+    Some(t) => expect(js_iso(t) == "2024-02-29T12:34:56.780Z", "2024-02-29 leap")
+    None => panic("2024-02-29 leap expected Some")
+  }
+  // Extended years (+010000, -000001) and forbidden -000000
+  match js_parse_iso("+010000-01-01T00:00:00.000Z") {
+    Some(t) => expect(js_iso(t) == "+010000-01-01T00:00:00.000Z", "+010000")
+    None => panic("+010000 expected Some")
+  }
+  match js_parse_iso("-000001-12-31T23:59:59.000Z") {
+    Some(t) => expect(js_iso(t) == "-000001-12-31T23:59:59.000Z", "-000001")
+    None => panic("-000001 expected Some")
+  }
+  match js_parse_iso("-000000-01-01") {
+    None => ()
+    Some(_) => panic("-000000 must be rejected")
+  }
+  // ±8.64e15 ms boundary (max JS date: +275760-09-13T00:00:00.000Z, min: -271821-04-20T00:00:00.000Z)
+  match js_iso_checked(8.64e15) {
+    Some(s) => expect(s == "+275760-09-13T00:00:00.000Z", "max JS date: " + s)
+    None => panic("8.64e15 should be valid")
+  }
+  match js_iso_checked(-8.64e15) {
+    Some(s) => expect(s == "-271821-04-20T00:00:00.000Z", "min JS date: " + s)
+    None => panic("-8.64e15 should be valid")
+  }
+  match js_iso_checked(8.64e15 + 1.0) {
+    None => ()
+    Some(_) => panic("8.64e15 + 1 must be None")
+  }
+  match js_iso_checked(-8.64e15 - 1.0) {
+    None => ()
+    Some(_) => panic("-8.64e15 - 1 must be None")
+  }
+  match js_iso_checked(0.0 / 0.0) {
+    None => ()
+    Some(_) => panic("NaN must be None")
+  }
+  match js_parse_iso("+275760-09-13T00:00:00.001Z") {
+    None => ()
+    Some(_) => panic("past +8.64e15 must be None")
+  }
+  match js_parse_iso("-271821-04-19T23:59:59.999Z") {
+    None => ()
+    Some(_) => panic("past -8.64e15 must be None")
+  }
+}
+
+test "js_compare, js_less, trim_js, js_utf8_len, points, without_mentions, pretty, and jval accessors" {
+  // Non-BMP 😀 (U+1F600 -> UTF-16 0xD83D 0xDE00) sorts BEFORE BMP U+E000 in UTF-16 order!
+  expect(js_less("😀", "\u{E000}"), "😀 < U+E000 in UTF-16 order")
+  expect(js_compare("😀", "\u{E000}") < 0, "js_compare 😀 < U+E000")
+  expect(!js_less("\u{E000}", "😀"), "!(U+E000 < 😀)")
+  expect(trim_js("\u{FEFF}\u{2028} hello \u{2029}\u{3000}") == "hello", "trim_js")
+  expect(js_utf8_len("a😀中") == 8, "js_utf8_len: 1+4+3=8")
+  expect(units_utf8_len([0xD800, 0x0000, 0xDC00]) == 7, "lone surrogates 3+1+3=7")
+
+  let pts = points("a😀中")
+  expect(pts.length() == 3 && pts[0] == "a" && pts[1] == "😀" && pts[2] == "中", "points")
+
+  expect(without_mentions("hi <@U123AB> and <@bad> and <@> ok") == "hi  and <@bad> and <@> ok", "without_mentions")
+
+  let parsed = jval_try_parse("{\"a\":[1,2],\"b\":42}")
+  expect(jval_arr(jval_at(parsed, "a")).length() == 2, "jval_arr/jval_at")
+  match jval_num_of(jval_at(parsed, "b")) {
+    Some(n) => expect(n == 42.0, "jval_num_of")
+    None => panic("expected 42")
+  }
+  match parsed {
+    Some(v) => {
+      let pretty = stringify_indent_with_num(v, 2, fmt_simple)
+      expect(pretty == "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": 42\n}", "stringify_indent: " + pretty)
+    }
+    None => panic("expected Some")
+  }
+  expect(num_text_with(0.0 / 0.0, fmt_simple) == "NaN", "num_text NaN")
+  expect(num_text_with(1.0 / 0.0, fmt_simple) == "Infinity", "num_text +Inf")
+  expect(num_text_with(-1.0 / 0.0, fmt_simple) == "-Infinity", "num_text -Inf")
+  expect(num_text_with(0.0, fmt_simple) == "0", "num_text 0")
+}

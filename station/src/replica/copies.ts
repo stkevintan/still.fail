@@ -12,9 +12,11 @@ import type { Fibers } from "../ops/fibers.ts";
 import type { StoreChange } from "../store/rows.ts";
 import { type Places, type Told, nothingTold } from "./export.ts";
 import { GEN, type Head, STATION, WORKSPACE, genMade } from "./format.ts";
-import { FolderPlace, type Held, type Known, type Levelled, type Place, handOver, holdsAll, level } from "./places.ts";
-import { type Ask, COPIES, PeerPlace, keepers, ranked, serve } from "./peers.ts";
+import { loadLocalTranscriptFiles, loadTranscriptManifest, readStreamBounded } from "./manifest.ts";
+import { FolderPlace, type Held, type Known, type Levelled, type Place, handOver, holdsAllLogical, level } from "./places.ts";
+import { type Ask, COPIES, MOST, PeerPlace, keepers, ranked, serve } from "./peers.ts";
 import { Refused } from "../mesh/bus.ts";
+import { readBytes } from "../mesh/files.ts";
 import type { Traces } from "../mesh/traces.ts";
 import { NotEmpty, type Outcome, type Ready, copyDir, outcomeFile, readyFile } from "./restore.ts";
 import type { Runner, WorkPassed } from "./runner.ts";
@@ -256,6 +258,8 @@ export class Copies {
   #told: Told = nothingTold();
   #gathering: (() => void) | null = null;
   #transcriptGathering: (() => void) | null = null;
+  #configSeq = 0;
+  readonly #manifestMemo = new Map<string, Promise<Record<string, number>>>();
   #retrying: (() => void) | null = null;
   #wantTranscripts = false;
   #passing: Promise<void> | null = null;
@@ -490,9 +494,13 @@ export class Copies {
     await this.#d.runner.places(places);
     const ins = new Set(places.workspaces.map((w) => w.workspace));
     // (a workspace this station is not in any more: nothing of it kept here)
-    for (const root of [keptDir(this.#d.data), join(this.#d.data, "replica", "own")]) {
+    const keptRoot = keptDir(this.#d.data);
+    for (const root of [keptRoot, join(this.#d.data, "replica", "own")]) {
       for (const ws of await readdir(root).catch(() => [] as string[])) {
-        if (WORKSPACE.test(ws) && !ins.has(ws)) await rm(join(root, ws), { recursive: true, force: true });
+        if (WORKSPACE.test(ws) && !ins.has(ws)) {
+          await rm(join(root, ws), { recursive: true, force: true });
+          if (root === keptRoot) this.kept.forget(ws);
+        }
       }
     }
     for (const k of [...this.#keeping.keys()]) if (!ins.has(k.split("\n")[0]!)) this.#keeping.delete(k);
@@ -535,6 +543,7 @@ export class Copies {
   /// targets, re-announces `acceptCopies` to peers, hands over kept copies if `acceptOthers` turned false, and scans
   /// S3 for restorable backups if this station is empty.
   configChanged(): void {
+    this.#configSeq++;
     const cfg = this.#backup();
     const s3ById = new Map(cfg.s3.map((t) => [t.id, t]));
     for (const [id, entry] of [...this.#s3Places.entries()]) {
@@ -753,6 +762,7 @@ export class Copies {
     const keeping = k;
     const wasError = k.error;
     const prevReason = k.reason;
+    const startConfigSeq = this.#configSeq;
     // (the chats there before the transcripts: said as they are, while those go on)
     const onPartial = (to: number, lacking: number) => {
       keeping.to = to;
@@ -792,8 +802,14 @@ export class Copies {
           done = await level(place, ws, this.#own(next), null, { onPartial });
           if (done.behind) throw new Error("that station keeps more of this station's than it has");
         }
-        keeping.known = done.known;
-        keeping.head = headSaid(syncedHead);
+        if (this.#configSeq === startConfigSeq) {
+          keeping.known = done.known;
+          keeping.head = headSaid(syncedHead);
+        } else {
+          keeping.known = null;
+          keeping.head = null;
+          keeping.asked = true;
+        }
         keeping.reason = null;
         keeping.to = done.to;
         keeping.missing = done.missing;
@@ -917,12 +933,18 @@ export class Copies {
     const keeping = k;
     const wasError = k.error;
     const prevReason = k.reason;
+    const startConfigSeq = this.#configSeq;
     const run = (async () => {
       const traces = this.#d.traces?.() ?? null;
       const span = traces?.startRoot() ?? null;
       try {
         const place = this.#s3Place(target);
-        const opts = { includeTranscripts: target.includeTranscripts };
+        const opts = {
+          includeTranscripts: target.includeTranscripts,
+          onPruneError: (err: unknown) => {
+            log.warn("copies", "S3 orphan cleanup failed", { ws, target: target.id, error: err instanceof Error ? err.message : String(err) });
+          },
+        };
         let { head: syncedHead, done } = await levelNewest(
           head,
           (cur) => this.#newestHead(ws, cur),
@@ -950,8 +972,14 @@ export class Copies {
           done = await level(place, ws, this.#own(next), null, opts);
           if (done.behind) throw new Error("that S3 target keeps more of this station's than it has");
         }
-        keeping.known = done.known;
-        keeping.head = headSaid(syncedHead);
+        if (this.#configSeq === startConfigSeq) {
+          keeping.known = done.known;
+          keeping.head = headSaid(syncedHead);
+        } else {
+          keeping.known = null;
+          keeping.head = null;
+          keeping.asked = true;
+        }
         keeping.reason = null;
         keeping.to = done.to;
         keeping.missing = done.missing;
@@ -1033,12 +1061,38 @@ export class Copies {
     } while (this.#again);
   }
 
+  #loadLocalTranscriptFilesMemo(replicaDir: string, head: Head): Promise<Record<string, number>> {
+    if (head.transcriptManifest === undefined) {
+      return Promise.resolve(head.transcriptFiles ?? {});
+    }
+    const key = `${replicaDir}\n${head.gen}\n${head.transcriptManifest}`;
+    const existing = this.#manifestMemo.get(key);
+    if (existing !== undefined) {
+      this.#manifestMemo.delete(key);
+      this.#manifestMemo.set(key, existing);
+      return existing;
+    }
+    const p = loadLocalTranscriptFiles(replicaDir, head).catch((err) => {
+      if (this.#manifestMemo.get(key) === p) this.#manifestMemo.delete(key);
+      throw err;
+    });
+    while (this.#manifestMemo.size >= 2) {
+      const oldest = this.#manifestMemo.keys().next().value;
+      if (oldest === undefined) break;
+      this.#manifestMemo.delete(oldest);
+    }
+    this.#manifestMemo.set(key, p);
+    return p;
+  }
+
   #own(head: Head) {
-    const dir = join(this.#d.data, "replica", "own", head.workspace, head.gen);
+    const replicaDir = join(this.#d.data, "replica");
+    const dir = join(replicaDir, "own", head.workspace, head.gen);
     return {
       head,
       batch: (name: string) => readFile(join(dir, "log", name)),
       sources: async (hashes: string[]) => new Map(Object.entries(await this.#d.runner.sources(hashes))),
+      loadTranscriptFiles: () => this.#loadLocalTranscriptFilesMemo(replicaDir, head),
     };
   }
 
@@ -1100,7 +1154,17 @@ export class Copies {
           continue;
         }
         const seqBefore = this.#writeSeq.get(key) ?? 0;
-        const mine = await this.kept.held(ws, origin);
+        let mine: Held;
+        try {
+          mine = await this.kept.heldStrict(ws, origin);
+        } catch {
+          left = true;
+          continue;
+        }
+        if (mine.hasUnverifiedHead === true) {
+          left = true;
+          continue;
+        }
         let all = should.length > 0;
         for (const peer of should) {
           try {
@@ -1111,7 +1175,25 @@ export class Copies {
         }
         if (all) {
           // (each of them holds as much as this one did: asked again just before it goes)
-          const still = await Promise.all(should.map((p) => new PeerPlace(p, this.#d.ask).held(ws, origin).then((h) => holdsAll(mine, h), () => false)));
+          const readMine = (hash: string, maxBytes: number) => this.kept.readBounded(ws, origin, null, hash, maxBytes);
+          const still = await Promise.all(
+            should.map(async (p) => {
+              const peerPlace = new PeerPlace(p, this.#d.ask);
+              try {
+                const h = await peerPlace.held(ws, origin);
+                const readTheirs = async (hash: string, maxBytes: number) => {
+                  try {
+                    return await readBytes(await peerPlace.read(ws, origin, null, hash), Math.min(MOST, maxBytes));
+                  } catch {
+                    return null;
+                  }
+                };
+                return await holdsAllLogical(mine, h, { readMine, readTheirs });
+              } catch {
+                return false;
+              }
+            }),
+          );
           if (still.every((x) => x)) {
             if ((this.#activeWrites.get(key) ?? 0) > 0 || (this.#writeSeq.get(key) ?? 0) !== seqBefore) {
               left = true;
@@ -1124,6 +1206,7 @@ export class Copies {
             try {
               await rename(join(wsDir, origin), dropping);
               renamed = true;
+              this.kept.forget(ws, origin);
               this.#lastWriteAt.delete(key);
             } catch (e) {
               if (!isEnoent(e)) throw e;
@@ -1458,23 +1541,77 @@ export class Copies {
     if (holding?.head == null) throw new Gone("that copy is not kept there");
     const head = holding.head;
     const heldFiles = new Set(held.files);
-    const wanted = new Set(Object.keys(head.files));
-    for (const h of Object.keys(head.transcriptFiles ?? {})) if (heldFiles.has(h)) wanted.add(h);
-    const names = [...wanted];
-    r.name = head.name;
-    r.total = head.batches.length + names.length;
-    this.#changed(0);
     const dir = copyDir(this.#d.data);
     await rm(dir, { recursive: true, force: true });
     await mkdir(join(dir, gen, "log"), { recursive: true });
     await mkdir(join(dir, "files"), { recursive: true });
+    // If head carries `transcriptManifest`, download and strictly verify root + all bucket leaves first
+    // (corrupt/missing manifest aborts restore; prefer manifest over inline `transcriptFiles` for download).
+    let transcriptMap: Record<string, number> | undefined;
+    if (head.transcriptManifest !== undefined) {
+      const manifestBlobs = new Map<string, Buffer>();
+      const readManifestBlob = async (hash: string, maxBytes: number): Promise<Buffer | null> => {
+        let s: AsyncIterable<Buffer>;
+        try {
+          s = await stream(null, hash);
+        } catch (e) {
+          const missing =
+            isEnoent(e) ||
+            (e instanceof S3HttpError && e.status === 404) ||
+            (e instanceof Refused && /not kept here/i.test(e.message));
+          if (missing) return null;
+          throw e;
+        }
+        const buf = await readStreamBounded(s, maxBytes);
+        manifestBlobs.set(hash, buf);
+        return buf;
+      };
+      const resolved = await loadTranscriptManifest(head.transcriptManifest, readManifestBlob);
+      transcriptMap = resolved.files;
+      for (const [hash, buf] of manifestBlobs) {
+        const target = join(dir, "files", hash);
+        const f = await open(`${target}.part`, "w");
+        try {
+          await f.write(buf);
+          await f.sync();
+        } finally {
+          await f.close();
+        }
+        await rename(`${target}.part`, target);
+      }
+    } else {
+      transcriptMap = head.transcriptFiles;
+    }
+    const chatWanted = new Set(Object.keys(head.files));
+    const transcriptWanted: string[] = [];
+    for (const h of Object.keys(transcriptMap ?? {})) {
+      if (!chatWanted.has(h) && heldFiles.has(h)) transcriptWanted.push(h);
+    }
+    r.name = head.name;
+    r.total = head.batches.length + chatWanted.size + transcriptWanted.length;
+    this.#changed(0);
     for (const b of head.batches) {
       await save(join(dir, gen, "log", b), gen, b);
       r.done++;
       this.#changed(TELL_RESTORE_MS);
     }
-    for (const hash of names) {
+    for (const hash of chatWanted) {
       await save(join(dir, "files", hash), null, hash);
+      r.done++;
+      this.#changed(TELL_RESTORE_MS);
+    }
+    // Chat-first fault tolerance: a missing individual transcript chunk does not block chat DB/attachments restore;
+    // takeBack records it in `missing`.
+    for (const hash of transcriptWanted) {
+      try {
+        await save(join(dir, "files", hash), null, hash);
+      } catch (e) {
+        const missingChunk =
+          isEnoent(e) ||
+          (e instanceof S3HttpError && e.status === 404) ||
+          (e instanceof Refused && /not kept here/i.test(e.message));
+        if (!missingChunk) throw e;
+      }
       r.done++;
       this.#changed(TELL_RESTORE_MS);
     }

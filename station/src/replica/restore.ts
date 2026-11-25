@@ -4,6 +4,7 @@
 // keys, the paths in its rows moved from the lost station's data directory to this one's, its files put where the rows
 // say. Only into a station that has no chats of its own yet; the station then says it was that one (`formerly`).
 import { claudeProject } from "../read/transcript.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import { existsSync } from "node:fs";
 import { join, sep } from "node:path";
 
@@ -64,10 +65,16 @@ export const outcomeFile = (data: string) => join(data, "replica", "restored.jso
 /// The restore put in off the main thread, where one waits (null: none did), by the MoonBit program (station/mb's
 /// src/replica, `--builder replica-restore`; `given`: a test's own), which does what `takeBack` did
 /// (test/reference/replica-restore.ts, which the tests hold it to).
-export async function takeBackSoon(data: string, db: string, now: number, given?: string): Promise<Ready | null> {
+export async function takeBackSoon(
+  data: string,
+  db: string,
+  now: number,
+  given?: string,
+  options?: { readers?: ReaderSelectConfig | (() => ReaderSelectConfig) },
+): Promise<Ready | null> {
   if (!existsSync(readyFile(data))) return null; // sync: before the station serves (its store not open yet)
-  const { MbProcess, readerBinary } = await import("../read/mb-reader.ts");
-  const binary = given ?? readerBinary();
+  const { MbProcess, resolveReaderSelectionAsync } = await import("../read/mb-reader.ts");
+  const binary = (await resolveReaderSelectionAsync("replica-restore", { binary: given, config: options?.readers, logAt: "replica" })).primaryBinary;
   return new Promise((resolve, reject) => {
     const p = new MbProcess(binary, ["--builder", "replica-restore", "--db", db, "--data", data, "--now", String(now), "--sep", sep]);
     let said = false;

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { baseFile } from "../scripts/release-deltas.ts";
 import { aheadOf, apiWithRetry, deleteDoomed, doomedOf, encodeObjectKey, type Fetch } from "../scripts/release-prune.ts";
 
@@ -133,6 +135,38 @@ test("staged files after two days; the web archives as before", () => {
 test("native CI chunks expire with their seven-day receipts", () => {
   const keys = [6, 8].map((days) => `staged/ci-natives/${NOW - days * 86400}-abc/chunk`);
   assert.deepEqual(doomedOf(keys, {}, null, NOW), [keys[1]]);
+});
+
+test("CI archive cleanup only deletes expired keys within the CI prefix", () => {
+  const mock = `
+    import assert from "node:assert/strict";
+    Date.now = () => ${NOW} * 1_000;
+    const expired = "staged/ci-natives/1700000000-commit/chunk";
+    const objects = "/client/v4/accounts/company-test/r2/buckets/stillfail-releases/objects";
+    const calls = [];
+    globalThis.fetch = async (at, init) => {
+      const url = new URL(at);
+      assert.equal(url.origin, "https://api.cloudflare.com");
+      calls.push(init.method ?? "GET");
+      if (init.method === "DELETE") {
+        assert.equal(url.pathname, objects + "/" + expired);
+        return new Response(null, { status: 204 });
+      }
+      assert.equal(url.pathname, objects);
+      assert.equal(url.searchParams.get("prefix"), "staged/ci-natives/");
+      return Response.json({ result: [
+        { key: expired }, { key: "android/latest.json" },
+        { key: "staged/1700000000-commit/file" }, { key: "staged/ci-natives/${NOW}-commit/chunk" },
+      ] });
+    };
+    process.once("beforeExit", () => assert.deepEqual(calls, ["GET", "DELETE"]));
+  `;
+  const script = fileURLToPath(new URL("../scripts/release-prune.ts", import.meta.url));
+  const run = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(mock), script, "--ci-natives-only"], {
+    encoding: "utf8", env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "company-test", CLOUDFLARE_API_TOKEN: "test" }, timeout: 10_000,
+  });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(run.stdout, /deleted 1/);
 });
 
 test("an Android release's symbols: older than 30 days by when the bucket says they were put go, nothing else by it", () => {

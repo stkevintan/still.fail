@@ -4,6 +4,7 @@
 // DevToolsActivePort and takes it up, its tabs and logins as they were.
 import type { Clock } from "effect";
 import { open, readFile, rename, unlink } from "node:fs/promises";
+import type { HelperApp } from "../helper/app.ts";
 import { Fibers } from "../ops/fibers.ts";
 import { log } from "../ops/log.ts";
 import type { ScreenBrowser, Screens } from "../screens/source.ts";
@@ -57,6 +58,8 @@ export type BrowserOptions = {
   /// The session whose chat's context a browser context is (browsers.ts): a tab in it is that session's.
   contextOwner?: (browserContextId: string | undefined) => string | undefined;
   usedTab?: (session: string, targetId: string) => void;
+  /// macOS still.fail Helper for hardware H.264 browser encoding (`frames.encode`).
+  helper?: HelperApp | null;
 };
 
 export type OpenTabOptions = {
@@ -147,9 +150,11 @@ export class StationBrowser implements ScreenBrowser {
   readonly #loaded: Promise<void>;
   /// Whether a Chrome was found on the machine, and when it was looked for.
   #installed: { at: number; is: boolean } | null = null;
+  #helper: HelperApp | null;
 
   constructor(o: BrowserOptions) {
     this.#o = o;
+    this.#helper = o.helper ?? null;
     this.#owners = new Owners(o.dir);
     this.#fibers = new Fibers("browser", o.clock);
     this.#idleMs = o.idleMs ?? IDLE_MS;
@@ -205,6 +210,12 @@ export class StationBrowser implements ScreenBrowser {
   /// Opens a persistent user page (`browser:u_<id>`) in Chrome's default profile, recycled to sleep when idle.
   openUserTab(url: string, id?: string): Promise<string> {
     return this.#userTabs.openNew(url, id);
+  }
+
+  /// macOS still.fail Helper for hardware H.264 browser encoding (`frames.encode`).
+  useHelper(helper: HelperApp | null) {
+    this.#helper = helper;
+    this.#up?.tabs.useHelper(helper);
   }
 
   async #createDefaultTarget(
@@ -466,6 +477,7 @@ export class StationBrowser implements ScreenBrowser {
       },
       usedTab: (session, targetId) => this.#o.usedTab?.(session, targetId),
       userTabs: this.#userTabs,
+      helper: this.#helper,
     });
     this.#userTabs.attaching(tabs);
     const unlisten = cdp.on((e) => this.#heardLogin(current, e));

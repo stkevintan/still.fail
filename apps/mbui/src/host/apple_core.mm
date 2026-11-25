@@ -61,6 +61,7 @@ void sf_shell_stop(void *shell);
 void sf_shell_set_say(const void *shell, void (*say)(void *, const uint8_t *, size_t, const uint8_t *, size_t), void *ctx);
 void sf_shell_set_media(const void *shell, uint8_t (*media)(void *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, const uint8_t *, size_t), void *ctx);
 uint8_t sf_shell_screen_ack(const void *shell, uint64_t call, double ts);
+uint8_t sf_shell_screen_ack_wait(const void *shell, uint64_t call, double ts, uint32_t wait_us);
 uint8_t sf_shell_screen_input(const void *shell, uint64_t call, const uint8_t *json, size_t len);
 uint8_t *sf_shell_stats(size_t *out_len);
 int32_t sf_utc_offset_min(double at_ms);
@@ -1544,6 +1545,12 @@ int mb_core_screen_ack(double call, double ts) {
   void *shell = C.shell;
   if (!shell || !C.running || call < 1) return 0;
   return sf_shell_screen_ack(shell, (uint64_t)call, ts);
+}
+
+int mb_core_screen_ack_wait(double call, double ts, uint32_t wait_us) {
+  void *shell = C.shell;
+  if (!shell || !C.running || call < 1) return 0;
+  return sf_shell_screen_ack_wait(shell, (uint64_t)call, ts, wait_us);
 }
 
 int mb_core_screen_input(double call, const uint8_t *json, size_t len) {

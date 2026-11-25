@@ -86,7 +86,6 @@ fn ListState::unstretch(self : ListState) -> Unit {
   self.over = 0.0
   self.over_edge = 0
   self.over_state = 0
-  self.over_v = 0.0
 }
 
 ///|
@@ -181,7 +180,7 @@ pub fn Ctx::list_rest(self : Ctx, key : String) -> Double {
     Some(st) => {
       // (where its own motions have it at the frame's time, what that leaves to come: read so)
       self.list_step(st)
-      Moving::rest_at(st, self.clock, self.frame_no)
+      st.rest_at(self.clock, self.frame_no)
     }
     None => -1.0
   }
@@ -207,7 +206,7 @@ fn Ctx::list_step(self : Ctx, st : ListState) -> Unit {
 fn Ctx::scrolled(self : Ctx, st : ListState) -> Unit {
   st.bar.wake(self.clock, st.shown_until())
   st.last_scroll = self.clock
-  self.moving(st.ease_mover, st as &Moving, what="a list's wheel ease and scroll bar")
+  self.moving(st.ease_mover, st.as_moving(), what="a list's wheel ease and scroll bar")
 }
 
 ///|
@@ -235,7 +234,7 @@ fn Ctx::app_scrolled(self : Ctx, id : Int, st : ListState, put? : Bool = true) -
 ///|
 /// What moves of a list by itself: a wheel's ease (at rest at its end), its fling and its overscroll going back (at
 /// their ends: @view's list_motion.mbt) and its scroll bar (gone once faded).
-impl Moving for ListState with rest_at(self, now, frame) {
+fn ListState::rest_at(self : ListState, now : Double, frame : Int) -> Double {
   // not built this frame: nothing shows it, at rest (shown again, it says so again: Ctx::list)
   if self.built != frame {
     return -1.0
@@ -258,6 +257,12 @@ impl Moving for ListState with rest_at(self, now, frame) {
     t = dmax(t, self.glide_rest)
   }
   t
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn ListState::as_moving(self : ListState) -> Moving {
+  Moving::new(fn(now, frame) { self.rest_at(now, frame) })
 }
 
 ///|
@@ -480,7 +485,6 @@ pub fn Ctx::list(
         over: 0.0,
         over_edge: 0,
         over_state: 0,
-        over_v: 0.0,
         back: BackPath::new(),
         ease: 0.0,
         ease_v: 0.0,
@@ -550,8 +554,8 @@ pub fn Ctx::list(
   // is its layout's to work out: Ctx::place_list)
   let back = st.built >= 0 && st.built < self.frame_no - 1
   st.built = self.frame_no
-  if back && Moving::rest_at(st, self.clock, self.frame_no) > self.clock {
-    self.moving(st.ease_mover, st as &Moving, what="a list's wheel ease, glide and scroll bar")
+  if back && st.rest_at(self.clock, self.frame_no) > self.clock {
+    self.moving(st.ease_mover, st.as_moving(), what="a list's wheel ease, glide and scroll bar")
   }
   // with `glide_on_growth`, rows come at the end while it is at its end: it glides after them from where it was
   // (still.fail's Follow), rather than being put at its end at once; put there, it scrolled all the same: held at its
@@ -1005,7 +1009,7 @@ fn Ctx::place_list(
   st.sizes_kept(self.clock)
   // (a row's height under way, said by a row built as it was laid out: frames till it is over, each laid out again)
   if st.sizes_rest() > self.clock {
-    self.moving(st.sizes_mover, (Sizes::{ st, }) as &Moving, what="a list's rows' heights")
+    self.moving(st.sizes_mover, (Sizes::{ st, }).as_moving(), what="a list's rows' heights")
     self.shows_motion(st.sizes_mover, true)
   }
   st.left = (st.anchor, st.anchor_off, st.pending, st.at_end, st.glide)
@@ -1359,7 +1363,7 @@ fn Ctx::glide_to_end(self : Ctx, id : Int, st : ListState) -> Unit {
   st.glide_t0 = @double.infinity
   st.glide_rest = -1.0
   st.glide_meant = -1.0
-  self.moving(st.ease_mover, st as &Moving, what="a list gliding to its end")
+  self.moving(st.ease_mover, st.as_moving(), what="a list gliding to its end")
 }
 
 ///|

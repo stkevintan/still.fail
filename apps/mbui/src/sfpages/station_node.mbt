@@ -619,7 +619,9 @@ fn station_head_node(
             let now = @signals.untracked(s)
             let workspace = @signals.untracked(here)
             guard flag(now, "online") else { @settings.mark_offline(core, text(now, "name")) }
-            open_mark_pick(core, text(now, "name"), text(now, "emoji"), text(now, "icon"), @sf.t("android-settings.station.emojiWhat"), fn(
+            // (its system's icon, shown where it has none, is none to the picker)
+            let icon = if flag(now, "osIcon") { "" } else { text(now, "icon") }
+            open_mark_pick(core, text(now, "name"), text(now, "emoji"), icon, @sf.t("android-settings.station.emojiWhat"), fn(
               emoji,
               icon,
               done,

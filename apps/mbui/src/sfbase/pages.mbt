@@ -170,11 +170,6 @@ pub fn chat_page_kind() -> String {
 }
 
 ///|
-/// Whether Farview browser tabs (`browser:fv_…`) are drawn natively on this device (实验性功能 › Farview 原生标签页渲染).
-// kept across runs: false as a run begins (reset)
-pub let farview_native : @signals.Signal[Bool] = @signals.signal(false, same=fn(a, b) { a == b })
-
-///|
 /// Whether Home offers and shows the board view on this device (实验性功能 › 对话列表看板视图).
 // kept across runs: false as a run begins (reset)
 pub let board_feature : @signals.Signal[Bool] = @signals.signal(false, same=fn(a, b) { a == b })
@@ -1695,8 +1690,7 @@ pub fn reset() -> Unit {
   fresh_reset()
   // how times are said (message_words.mbt)
   absolute_times.set(false)
-  // whether Farview tabs are native, the board, selection intent or Cmd-click quote enabled
-  farview_native.set(false)
+  // whether the board, selection intent or Cmd-click quote is enabled
   board_feature.set(false)
   selection_intent_feature.set(false)
   selection_intent_reset()

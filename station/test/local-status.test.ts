@@ -83,6 +83,54 @@ test("the waiting sessions' read goes by the turns that ended lately asking for 
     const plan = store.db.prepare(`EXPLAIN QUERY PLAN ${WAITING_FOR_PEOPLE}`).all(0, 10).map((r: any) => String(r.detail));
     assert.ok(plan.some((d) => /SEARCH t USING INDEX turns_waiting/.test(d)), plan.join("\n"));
     assert.ok(!plan.some((d) => /^SCAN (t|u|d|s)\b/.test(d)), plan.join("\n"));
+    assert.ok(!plan.some((d) => /deliveries_session/.test(d)), `every row a session was delivered is read:\n${plan.join("\n")}`);
+    // In the order they are asked: the session's archived_at before either subquery, which are the session's own.
+    const steps = [/SEARCH t USING INDEX turns_waiting\b/, /SEARCH s USING INDEX sqlite_autoindex_sessions_1\b/,
+      /SEARCH d USING (COVERING )?INDEX deliveries_pending\b/, /SEARCH u USING (COVERING )?INDEX turns_by_session\b/]
+      .map((step) => plan.findIndex((d) => step.test(d)));
+    assert.ok(steps.every((at, n) => at >= 0 && (n === 0 || at > steps[n - 1])), `${steps}\n${plan.join("\n")}`);
+    assert.equal(plan.filter((d) => /^CORRELATED SCALAR SUBQUERY/.test(d)).length, 2, plan.join("\n"));
+    const subquery = plan.findIndex((d) => /SUBQUERY/.test(d));
+    assert.ok(steps[1] < subquery && subquery < steps[2], plan.join("\n"));
+  } finally {
+    store.close();
+  }
+});
+
+test("a long delivered past and archived sessions change nothing of who waits: one undelivered row does", () => {
+  const time = testClock(), store = Store.open(":memory:", null, time.clock);
+  try {
+    const PAST = 400, now = store.now();
+    const thread = store.openThread("chat", "C", "long", null, null);
+    const deliver = store.db.prepare("INSERT INTO deliveries(thread,n,session,delivered_at) VALUES(?,?,?,?)");
+    const asked = (key: string) => {
+      store.insertSession({ key, connect: "chat", runtime: "claude", profile: "cc", workspace: `/w/${key}`, token: key, createdAt: now, lastActiveAt: now });
+      for (let n = 1; n <= PAST; n++) deliver.run(thread.id, n, key, now);
+      // An earlier turn that asked too: only a session's latest is told, once.
+      for (const id of [`${key}-1`, `${key}-2`]) {
+        store.startTurn(id, key, "message");
+        store.endTurn(id, "completed", null, "need_human", null);
+        store.db.prepare("UPDATE turns SET need = ? WHERE id = ?").run(`need of ${id}`, id);
+      }
+    };
+    const waiting = () => store.waitingForPeople(now - DAY, 10).map((w) => [w.key, w.need]).sort();
+    store.db.exec("BEGIN IMMEDIATE");
+    for (const key of ["open", "other"]) asked(key);
+    for (let n = 0; n < 20; n++) asked(`archived${n}`);
+    store.db.exec("COMMIT");
+    for (let n = 0; n < 20; n++) store.setArchived(`archived${n}`, true, "p");
+
+    assert.deepEqual(waiting(), [["open", "need of open-2"], ["other", "need of other-2"]]);
+
+    deliver.run(thread.id, PAST + 1, "open", null);
+    assert.deepEqual(waiting(), [["other", "need of other-2"]], "one row undelivered after the long past: answered");
+    store.db.prepare("UPDATE deliveries SET delivered_at = ? WHERE session = 'open' AND delivered_at IS NULL").run(now);
+    assert.deepEqual(waiting(), [["open", "need of open-2"], ["other", "need of other-2"]], "delivered, and its latest turn still asks");
+
+    deliver.run(thread.id, PAST + 1, "archived0", null);
+    assert.deepEqual(waiting(), [["open", "need of open-2"], ["other", "need of other-2"]], "an archived session's undelivered row is its own");
+    store.setArchived("archived1", false, "p");
+    assert.deepEqual(waiting(), [["archived1", "need of archived1-2"], ["open", "need of open-2"], ["other", "need of other-2"]], "back from the archive, it waits again");
   } finally {
     store.close();
   }

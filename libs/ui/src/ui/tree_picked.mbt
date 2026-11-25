@@ -27,6 +27,9 @@ pub struct WordsPicked {
   /// code units of what that paragraph's node shows (a code viewer's exact lines)
   first_at : Int
   last_at : Int
+  /// what its first paragraph's node shows before what is picked begins there (`first_at`'s words): which of the
+  /// times its words are in that paragraph, and which paragraph, is the one picked
+  first_before : String
   /// picked by a finger (held on its words: its handles and the system's text menu over it)
   finger : Bool
   /// which selection it is (Ctx::selection_made): another number for each a press begins
@@ -231,6 +234,7 @@ fn picked_now_worked() -> WordsPicked? {
     ends_in,
     ends_at_start: spot_cmp(from, to) > 0,
     first_at: spans[0].1.a,
+    first_before: spans[0].1.text.clamped_view(end=spans[0].1.a).to_owned(),
     last_at: spans[spans.length() - 1].1.b,
     finger: picked.finger,
     made: picked.made,

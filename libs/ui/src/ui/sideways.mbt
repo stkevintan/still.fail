@@ -337,7 +337,7 @@ fn Sideways::bar_until(self : Sideways) -> Double {
 
 ///|
 /// A fling, at rest at its end, and its bar, at rest once faded.
-impl Moving for Sideways with rest_at(self, now, frame) {
+fn Sideways::rest_at(self : Sideways, now : Double, frame : Int) -> Double {
   if self.built_frame != frame {
     return -1.0
   }
@@ -355,8 +355,14 @@ impl Moving for Sideways with rest_at(self, now, frame) {
 ///|
 /// Brought on toward words picked past its edge, it keeps the time: what picks them is built again each frame it goes,
 /// the words under the pointer coming as it does (desktop.mbt's select_edge_across).
-impl Moving for Sideways with keeps_time(self) {
+fn Sideways::keeps_time(self : Sideways) -> Bool {
   self.edge_v != 0.0
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn Sideways::as_moving(self : Sideways) -> Moving {
+  Moving::new(fn(now, frame) { self.rest_at(now, frame) }, keeps_time=fn() { self.keeps_time() })
 }
 
 ///|
@@ -366,7 +372,7 @@ fn Ctx::sideways_scrolled(self : Ctx, st : Sideways) -> Unit {
   st.told()
   st.bar.wake(self.clock, st.bar_until())
   st.last_scroll = self.clock
-  self.moving(st.mover, st as &Moving, what="a box scrolled inside a list and its scroll bar")
+  self.moving(st.mover, st.as_moving(), what="a box scrolled inside a list and its scroll bar")
 }
 
 ///|
@@ -733,7 +739,7 @@ fn sideways_up(c : Ctx, id : Int, vx : Double, vy : Double) -> Unit {
         st.rest = 0.0
         st.t0 = @double.infinity
         st.told()
-        c.moving(st.mover, st as &Moving, what="a fling of a box scrolled inside a list")
+        c.moving(st.mover, st.as_moving(), what="a fling of a box scrolled inside a list")
       }
       // in the motion log (MBUI_MOTION_LOG=1) as let go: where it is, how far it can go
       if sideways_logging() {

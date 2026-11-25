@@ -27,9 +27,6 @@ concurrency:
 permissions:
   contents: read
 env:
-  # Farview's client, which the app draws a chat's Farview tab with (apps/mbui/scripts/farview.sh: a private repository,
-  # read by its deploy key)
-  FARVIEW_DEPLOY_KEY: ${{ secrets.FARVIEW_DEPLOY_KEY }}
   # The native parts a branch's checks and builds use, split between ci-1 (`BRANCH_NATIVES`: Linux, Windows cross-builds,
   # Wasm and Android) and macos-ci (`BRANCH_MAC_NATIVES`: Apple's darwin-arm64 parts).
   BRANCH_NATIVES: archive-rs:linux-x64 reader:linux-x64 iroh-wasm:wasm32 shell:android-arm64 engine:android-arm64 mesh:linux-x64 runner:linux-x64 launcher:linux-x64 mesh:win32-x64 launcher:win32-x64 runner:win32-x64 screen:win32-x64 agent-desktop:win32-x64
@@ -290,7 +287,7 @@ jobs:
         uses: ./.github/actions/setup-mac
       # (the station's reader is MoonBit: scripts/native.ts `reader`, which needs only mbc of mbui's tools)
       - uses: ./.github/actions/mbui-moonbit
-        with: { tools: 'mbc', farview: 'false' }
+        with: { tools: 'mbc' }
       # (GitHub's: the pinned Node, and the zig scripts/native.ts builds Linux and Windows with, kept in the Actions
       # cache by its version, with what it compiled of its own (glibc's and MinGW's stubs, compiler-rt) in ~/.cache/zig)
       - if: runner.environment != 'self-hosted'
@@ -408,7 +405,7 @@ jobs:
       - if: runner.environment == 'self-hosted'
         uses: ./.github/actions/setup-linux
       - uses: ./.github/actions/mbui-moonbit
-        with: { tools: 'mbc', farview: 'false' }
+        with: { tools: 'mbc' }
       # (GitHub's: the pinned Node, and the zig scripts/native.ts builds Linux and Windows with, kept in the Actions
       # cache by its version, with what it compiled of its own (glibc's and MinGW's stubs, compiler-rt) in ~/.cache/zig)
       - if: runner.environment != 'self-hosted'
@@ -510,7 +507,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-linux
       - uses: ./.github/actions/mbui-moonbit
-        with: { tools: 'mbc', farview: 'false' }
+        with: { tools: 'mbc' }
       - name: Get or build Windows' reader
         env:
           GH_TOKEN: ${{ github.token }}
@@ -543,7 +540,7 @@ jobs:
       - if: runner.environment == 'self-hosted'
         uses: ./.github/actions/setup-linux
       - uses: ./.github/actions/mbui-moonbit
-        with: { tools: 'mbc', farview: 'false' }
+        with: { tools: 'mbc' }
       # (GitHub's: the pinned Node, and the zig scripts/native.ts builds Linux and Windows with, kept in the Actions
       # cache by its version, with what it compiled of its own (glibc's and MinGW's stubs, compiler-rt) in ~/.cache/zig)
       - if: runner.environment != 'self-hosted'
@@ -648,7 +645,7 @@ jobs:
       - if: runner.os == 'macOS'
         uses: ./.github/actions/setup-mac
       - uses: ./.github/actions/mbui-moonbit
-        with: { tools: 'mbc', farview: 'false' }
+        with: { tools: 'mbc' }
       - name: Build what main builds besides the branch's (into ci-1's cache)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -682,7 +679,7 @@ jobs:
       - if: runner.environment == 'self-hosted'
         uses: ./.github/actions/setup-mac
       - uses: ./.github/actions/mbui-moonbit
-        with: { tools: 'mbc', farview: 'false' }
+        with: { tools: 'mbc' }
       # (GitHub's: the pinned Node, and rustup's Rust the image has, in a target of the job's own; no sccache there)
       - if: runner.environment != 'self-hosted'
         uses: ./.github/actions/node
@@ -730,6 +727,8 @@ jobs:
           fi
       - name: Stage native archives in R2
         if: github.ref != 'refs/heads/main'
+        env:
+          STILLFAIL_NATIVE_DIRECT_R2: ${{ runner.environment == 'self-hosted' && '1' || '0' }}
         run: node scripts/native-handoff.mjs put "$RUNNER_TEMP/natives" "$RUNNER_TEMP/natives-mac.r2.json"
       - if: github.ref != 'refs/heads/main'
         uses: actions/upload-artifact@v4
@@ -763,7 +762,7 @@ jobs:
       - if: runner.environment == 'self-hosted'
         uses: ./.github/actions/setup-mac
       - uses: ./.github/actions/mbui-moonbit
-        with: { tools: 'mbc', farview: 'false' }
+        with: { tools: 'mbc' }
       # (GitHub's: the pinned Node, and rustup's Rust the image has, in a target of the job's own; no sccache there)
       - if: runner.environment != 'self-hosted'
         uses: ./.github/actions/node
@@ -811,6 +810,8 @@ jobs:
           fi
       - name: Stage native archives in R2
         if: github.ref != 'refs/heads/main'
+        env:
+          STILLFAIL_NATIVE_DIRECT_R2: ${{ runner.environment == 'self-hosted' && '1' || '0' }}
         run: node scripts/native-handoff.mjs put "$RUNNER_TEMP/natives" "$RUNNER_TEMP/natives-mac-reader.r2.json"
       - if: github.ref != 'refs/heads/main'
         uses: actions/upload-artifact@v4
@@ -840,7 +841,7 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: ./.github/actions/setup-mac
       - uses: ./.github/actions/mbui-moonbit
-        with: { tools: 'mbc', farview: 'false' }
+        with: { tools: 'mbc' }
       - name: Build the rest of main's Apple parts (into macos-ci's cache)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1252,7 +1253,6 @@ jobs:
     uses: ./.github/workflows/mbui-check.yml
     # (at the default rate alone: the rates run on main after the merge, mbui-check.yml's head)
     permissions: { contents: read, actions: read }
-    # (its FARVIEW_DEPLOY_KEY: the app's Farview client)
     secrets: inherit
     with: { rates: "no" }
 
@@ -1569,6 +1569,9 @@ jobs:
     if: ${{ !cancelled() && vars.MONOID_CI == 'on' && github.ref == 'refs/heads/main' && needs.plan.outputs.api == 'true' && needs.api.result == 'success' }}
     runs-on: ubuntu-24.04
     environment: production
+    concurrency:
+      group: monoid-api-production
+      queue: max
     timeout-minutes: 5
     steps:
       - run: sudo -n sysctl -qw net.ipv4.tcp_syn_retries=3 || true
@@ -1578,6 +1581,7 @@ jobs:
         env:
           STILLFAIL_CLOUD: monoid
           CLOUDFLARE_API_TOKEN: ${{ secrets.MONOID_CLOUDFLARE_API_TOKEN }}
+          STILLFAIL_CI_NATIVE_R2: 'on'
           STILLFAIL_ADMIN_EMAIL: ${{ secrets.STILLFAIL_ADMIN_EMAIL }}
           # Once still.fail's accounts moved in (CLOUD_MOVED on: workflows/move-cloud.yml): still.fail's keys, and answered
           # as still.fail too (cloud/src/guests.ts).
@@ -1743,7 +1747,7 @@ jobs:
     runs-on: [self-hosted, macos-ci]
     outputs:
       hand: ${{ steps.hand.outputs.key }}
-      monoid: ${{ steps.hand.outputs.packed == '1' && steps.monoid-upload.outcome == 'success' && '1' || '' }}
+      monoid: ${{ steps.hand.outputs.packed == '1' && steps.monoid-hand.outcome == 'success' && steps.monoid-hand.outputs.key || '' }}
     environment: production
     timeout-minutes: 5
     env:
@@ -1761,21 +1765,17 @@ jobs:
           POSTHOG_JSON: ${{ secrets.POSTHOG_JSON }}
           RELEASE_DIR: ${{ runner.temp }}/release
         run: sh .github/release.sh android
-      # (what it weighs and takes once idle: mbui-size.yml, after this run, recorded, never a gate: its upload's failure
-      # is not the release's. Studio's connection to GitHub's artifact service reset stopped a release that had built and
-      # signed its APK, main a3e59ea9 43157398296 and three times before on 2026-11-11 and 12)
-      - uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with: { name: "mbui-apk-${{ github.sha }}", path: "${{ runner.temp }}/release/android/*.apk", retention-days: 1, compression-level: 0 }
-      # Its files put (named by its version, nothing points at them until put writes the feed), then what is left handed
-      # to put through the bucket, not a run artifact (scripts/release-put.sh --hand), beside monoid's beta Android app
-      # (build.monoid.android.beta, the same key) built from the same build: the put is the network's ~30 s and monoid's
-      # the CPU's, one after the other until 2026-11-20. Neither writes where the other reads: the put reads and empties
-      # $RUNNER_TEMP/release alone; monoid's is made in $RUNNER_TEMP/monoid and its own mktemp, in the warm mbui cache
-      # under scripts/release.sh's lockf. Monoid's, in the same warm cache (its native code is this one's; only the
-      # package is made again: its id, name and links are in its manifest and resources), is put by monoid-android once
-      # the check passed; left for the next release where this job has not the time for it, as desktop-win's (main
-      # 43e63e625's was cut at 351 s building monoid's, the job cancelled). Either failing fails the step, as before.
+      # Its files put (named by its version, nothing points at them until put writes the feed; mbui-size.yml reads the
+      # published APK from app.still.fail/releases instead of an actions/upload-artifact from Mini1, whose proxy stalled
+      # 60 s on every run and cancelled android at 304 s in 45517890562), then what is left handed to put through the
+      # bucket (scripts/release-put.sh --hand), beside monoid's beta Android app (build.monoid.android.beta, the same
+      # key) built from the same build: the put is the network's ~15-30 s and monoid's the CPU's, one after the other
+      # until 2026-11-20. Neither writes where the other reads: the put reads and empties $RUNNER_TEMP/release alone;
+      # monoid's is made in $RUNNER_TEMP/monoid and its own mktemp, in the warm mbui cache under scripts/release.sh's
+      # lockf. Monoid's, in the same warm cache (its native code is this one's; only the package is made again: its id,
+      # name and links are in its manifest and resources), is handed to monoid-android through monoid's bucket below;
+      # left for the next release where this job has not the time for it, as desktop-win's (main 43e63e625's was cut at
+      # 351 s building monoid's, the job cancelled). Either failing fails the step, as before.
       - name: Put its files, and build and sign monoid's beta Android app from the same build
         id: hand
         env:
@@ -1788,11 +1788,11 @@ jobs:
           monoid=""
           if [ "$MONOID_CI" = on ]; then
             used=$(( $(date +%s) - JOB_BEGAN ))
-            if [ "$used" -gt 200 ]; then
+            if [ "$used" -ge 220 ]; then
               echo "::warning::monoid's beta Android app left for the next release: this job has used ${used} s of its 300"
             else
               (unset CLOUDFLARE_API_TOKEN; RELEASE_DIR="$RUNNER_TEMP/monoid" \
-                bash scripts/with-timeout.sh "@$(( JOB_BEGAN + 275 ))" sh .github/release.sh --product monoid android) \
+                bash scripts/with-timeout.sh "@$(( JOB_BEGAN + 220 ))" sh .github/release.sh --product monoid android) \
                 > "$RUNNER_TEMP/monoid.log" 2>&1 &
               monoid=$!
             fi
@@ -1805,36 +1805,56 @@ jobs:
           else
             echo "::error::still.fail's beta Android app was not put"; failed=1
           fi
-          # (monoid's ended before the job is, 25 s left for the rest: run beside stable's android on the same Mac it ran
-          # on to the job's 5 minutes, and the job cut after still.fail's beta was put, 44770976468; out of time it is
-          # left for the next release, not this one's failure)
+          # (monoid's ended with >=80 s left so monoid-hand below can put its APK directly to R2 within the 5-minute
+          # cap: run beside stable's android on the same Mac it ran on to 5 minutes, 44770976468; out of time it is left
+          # for the next release, not this one's failure)
           if [ -n "$monoid" ]; then
             ms=0; wait "$monoid" || ms=$?
             if [ "$ms" = 0 ]; then
               echo "::group::monoid's beta Android app"; cat "$RUNNER_TEMP/monoid.log"; echo "::endgroup::"
-              echo "packed=1" >> "$GITHUB_OUTPUT"
+              if [ "$(( $(date +%s) - JOB_BEGAN ))" -le 220 ]; then
+                echo "packed=1" >> "$GITHUB_OUTPUT"
+              else
+                echo "::warning::monoid's beta Android app handoff skipped: less than 80 s left in this job"
+              fi
             elif [ "$ms" = 124 ]; then
               cat "$RUNNER_TEMP/monoid.log"
-              echo "::warning::monoid's beta Android app did not finish before the job's end and is left for the next release"
+              echo "::warning::monoid's beta Android app did not finish with room to hand off and is left for the next release"
             else
               cat "$RUNNER_TEMP/monoid.log"; echo "::error::monoid's beta Android app was not built"; failed=1
             fi
           fi
           [ -z "$failed" ]
-      # (not uploaded, monoid's beta is left for the next release, monoid-android skipped, as where it was not packed: a
-      # reset of the artifact service failed this job after still.fail's own was put, and held its put back, main
-      # 04d026f01's 45386684272, 2026-11-24)
+      # Put monoid's APK and hand its feed to monoid-android through monoid's R2 bucket (direct Cloudflare API via
+      # STILLFAIL_DIRECT_DNS, ~15 s) instead of actions/upload-artifact@v4 over Mini1's proxy (which timed out at 60 s
+      # on 20 consecutive runs after build 11345 and triggered 85 s orphan-process teardown in 45478439684). Separate
+      # step so MONOID_CLOUDFLARE_API_TOKEN never enters still.fail's steps; bounded by min(JOB_BEGAN+255, now+50) so
+      # with-timeout always reaps its process group before timeout-minutes: 1 and leaves >=45 s for teardown.
       - if: vars.MONOID_CI == 'on' && steps.hand.outputs.packed == '1'
-        id: monoid-upload
-        uses: actions/upload-artifact@v4
+        id: monoid-hand
+        name: Put monoid's beta Android files and hand its feed to monoid-android
         continue-on-error: true
-        with: { name: "monoid-android-${{ github.sha }}", path: "${{ runner.temp }}/monoid", retention-days: 1, compression-level: 0 }
+        timeout-minutes: 1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.MONOID_CLOUDFLARE_API_TOKEN }}
+        run: |
+          end=$(( JOB_BEGAN + 255 ))
+          cap=$(( $(date +%s) + 50 ))
+          [ "$cap" -lt "$end" ] && end=$cap
+          bash scripts/with-timeout.sh "@$end" sh -ec '
+            sh scripts/release-put.sh --files "$RUNNER_TEMP/monoid"
+            sh scripts/release-put.sh --hand "$RUNNER_TEMP/monoid" > "$RUNNER_TEMP/monoid-hand.out"
+          '
+          cat "$RUNNER_TEMP/monoid-hand.out"
+          key=$(tail -1 "$RUNNER_TEMP/monoid-hand.out")
+          [ -n "$key" ]
+          echo "key=$key" >> "$GITHUB_OUTPUT"
 
   # monoid's beta Android app (build.monoid.android.beta), built by android from its own build, put whole in monoid's
   # bucket once the check passed.
   monoid-android:
     needs: [plan, check, check-mac, check-linux, check-station, check-core, android]
-    if: ${{ !cancelled() && vars.MONOID_CI == 'on' && github.ref == 'refs/heads/main' && needs.plan.outputs.android_beta == 'true' && needs.check.result == 'success' && (needs.plan.outputs.check_mac != 'true' || vars.CI_1 == 'off' || needs.check-mac.result == 'success') && needs.check-linux.result == 'success' && (needs.plan.outputs.station_tests != 'true' || needs.check-station.result == 'success') && (needs.plan.outputs.core_tests != 'true' || needs.check-core.result == 'success') && needs.android.result == 'success' && needs.android.outputs.monoid == '1' }}
+    if: ${{ !cancelled() && vars.MONOID_CI == 'on' && github.ref == 'refs/heads/main' && needs.plan.outputs.android_beta == 'true' && needs.check.result == 'success' && (needs.plan.outputs.check_mac != 'true' || vars.CI_1 == 'off' || needs.check-mac.result == 'success') && needs.check-linux.result == 'success' && (needs.plan.outputs.station_tests != 'true' || needs.check-station.result == 'success') && (needs.plan.outputs.core_tests != 'true' || needs.check-core.result == 'success') && needs.android.result == 'success' && needs.android.outputs.monoid != '' }}
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 5
@@ -1842,15 +1862,16 @@ jobs:
       - run: sudo -n sysctl -qw net.ipv4.tcp_syn_retries=3 || true
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
-      - uses: actions/download-artifact@v4
-        with: { name: "monoid-android-${{ github.sha }}", path: "${{ runner.temp }}/monoid" }
-      - name: Put it in monoid's bucket (its files and deltas, then its feed)
+      - name: Put it in monoid's bucket (its deltas, then its feed)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.MONOID_CLOUDFLARE_API_TOKEN }}
+          HANDED: ${{ needs.android.outputs.monoid }}
         run: |
           (cd cloud && pnpm install --frozen-lockfile --prefer-offline > /dev/null)
+          sh scripts/release-put.sh --unhand "$RUNNER_TEMP/monoid" "$HANDED"
           node scripts/release-deltas.ts "$RUNNER_TEMP/monoid" --releases https://app.monoid.build/releases --deadline 150
           sh scripts/release-put.sh "$RUNNER_TEMP/monoid"
+          sh scripts/release-put.sh --drop "$HANDED"
 
   # The Mac app (fail.still.desktop.beta: mbui's, apps/mbui, in the Electron app's place), on mac/beta/latest.json and
   # desktop/stillfail-beta-mac.yml (which moves an installed Electron beta over): built, signed and notarized on the
@@ -2012,9 +2033,8 @@ jobs:
           key: mbui-mac-moon-${{ github.sha }}
           restore-keys: mbui-mac-moon-
       # The app's build (its core's native parts, then its Moon build) runs beside pnpm and the icon restore. Started once
-      # MoonBit and the old Moon build are restored, not before: its env.sh fetches Farview's client as the MoonBit action
-      # does, both into apps/mbui/deps/farview.tmp, each taking the other's away (scripts/farview.sh); its native parts
-      # are downloads of a few seconds. The same scripts, target and compiler are used by mac-app.sh below.
+      # MoonBit and the old Moon build are restored, not before; its native parts are downloads of a few seconds. The same
+      # scripts, target and compiler are used by mac-app.sh below.
       - name: Start the Mac app build
         id: start
         env:
@@ -2448,7 +2468,7 @@ jobs:
       # release builds it (MBUI_VARIANT, MBUI_BUILD: release.sh takes it as built, MBUI_WIN_BUILT); "Build, pack and sign"
       # waits for it. Its units' store is restored beside moonc (MBC_STORE_WAIT: mbc waits until it is handed over whole,
       # below), not before the build, one after the other.
-      # (each file of the app, mbui, the library and Farview's client given its content's mtime, so moon builds over the
+      # (each file of the app, mbui and the library given its content's mtime, so moon builds over the
       # build restored only what changed, as desktop-build's: apps/mbui/scripts/moon-mtimes.sh)
       - run: bash apps/mbui/scripts/moon-mtimes.sh
       - name: Build (the beta Windows app), started
@@ -2614,6 +2634,7 @@ jobs:
         id: monoid-upload
         uses: actions/upload-artifact@v4
         continue-on-error: true
+        timeout-minutes: 1
         with: { name: "monoid-desktop-win-${{ github.sha }}", path: "${{ runner.temp }}/monoid", retention-days: 1 }
       # (main's caches, however the build ended, last: after the release is put, never holding it back. One cut short
       # keeps what it compiled, what it left running (moon, mbc, clang-cl) stopped first and their locks taken out, so
@@ -2748,6 +2769,11 @@ jobs:
             rm -f .git/info/sparse-checkout .git/index
             git reset --hard HEAD
           fi
+          # (ci-1 does not run setup-linux here; set STILLFAIL_DIRECT_DNS so release-put.sh and node-here.sh reach
+          # Cloudflare's API directly instead of stalling over the proxy — deltas-station linux-x64 hung 286 s and
+          # deltas-desktop-win took 198 s in Put them on main 45444450664)
+          export STILLFAIL_DIRECT_DNS=223.5.5.5
+          echo "STILLFAIL_DIRECT_DNS=$STILLFAIL_DIRECT_DNS" >> "$GITHUB_ENV"
           echo "$(sh scripts/node-here.sh)" >> "$GITHUB_PATH"
       - if: env.PART == 'desktop-win'
         uses: actions/download-artifact@v4

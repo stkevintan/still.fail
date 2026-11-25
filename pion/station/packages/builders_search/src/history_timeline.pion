@@ -1,0 +1,471 @@
+// 1:1 port of `station/mb/src/history/timeline.mbt` and `station/mb/src/history/dates.mbt`:
+// TimelineEntry, ReadState, ISO date parsing/formatting, and per-runtime transcript helpers.
+
+import "js_json"
+import "jscase"
+
+pub struct Entry {
+  pub at : Option[String]
+  pub kind : String
+  pub text : String
+  /// Raw UTF-16 code units preserving lone surrogates from transcript JSON until serialization.
+  pub text_units : Option[Array[Int]]
+  pub tool : Option[String]
+  pub ok : Option[Bool]
+  pub call_id : Option[String]
+  pub subagent : Bool
+  pub said : Option[String]
+  pub in_script : Bool
+}
+
+pub struct ReadState {
+  inner : Map[String, Int]
+  keys : Array[String]
+}
+
+pub fn ReadState::new() -> ReadState {
+  ReadState::{ inner: Map::new(), keys: [] }
+}
+
+fn ReadState::of(pairs : Array[(String, Int)]) -> ReadState {
+  let st = ReadState::new()
+  for i in 0..<pairs.length() {
+    let (k, v) = pairs[i]
+    st.set_count(k, v)
+  }
+  st
+}
+
+fn ReadState::set_count(self : ReadState, k : String, v : Int) -> Unit {
+  match self.inner.get(k) {
+    Some(_) => ()
+    None => self.keys.push(k)
+  }
+  self.inner.set(k, v)
+}
+
+fn ReadState::remove_key(self : ReadState, k : String) -> Unit {
+  self.inner.remove(k)
+  let next : Array[String] = []
+  for i in 0..<self.keys.length() {
+    if self.keys[i] != k {
+      next.push(self.keys[i])
+    }
+  }
+  // Mutate in-place by truncating/pushing
+  while self.keys.length() > 0 {
+    let _ = self.keys.pop()
+  }
+  for i in 0..<next.length() {
+    self.keys.push(next[i])
+  }
+}
+
+fn ReadState::pairs(self : ReadState) -> Array[(String, Int)] {
+  let out : Array[(String, Int)] = []
+  for i in 0..<self.keys.length() {
+    let k = self.keys[i]
+    match self.inner.get(k) {
+      Some(v) => out.push((k, v))
+      None => ()
+    }
+  }
+  out
+}
+
+let MAX_TEXT : Int = 4000
+
+/// Date.parse of a transcript ISO timestamp (strict_day = true).
+pub fn date_parse(s : String) -> Option[Double] {
+  js_json::js_parse_iso(s, strict_day=true)
+}
+
+/// `new Date(time).toISOString()` of a finite number; returns `Err("Invalid time value")` out of range.
+pub fn date_iso(time : Double) -> Result[String, String] {
+  match js_json::js_iso_checked(time) {
+    Some(s) => Ok(s)
+    None => Err("Invalid time value")
+  }
+}
+
+fn jv_get(v : Option[js_json::JValue], key : String) -> Option[js_json::JValue] {
+  match v {
+    Some(o) => o.get(key)
+    None => None
+  }
+}
+
+fn jv_string_of(v : Option[js_json::JValue]) -> Option[String] {
+  match v {
+    Some(js_json::JValue::Str(u)) => Some(js_json::sanitize_str(u))
+    _ => None
+  }
+}
+
+fn jv_units_of(v : Option[js_json::JValue]) -> Option[Array[Int]] {
+  match v {
+    Some(js_json::JValue::Str(u)) => Some(u)
+    _ => None
+  }
+}
+
+/// Clip raw UTF-16 code units by Unicode code points (MAX_TEXT = 4000), preserving lone surrogates.
+fn clip_units(u : Array[Int]) -> Array[Int] {
+  let n = u.length()
+  let mut pts = 0
+  let mut cut = -1
+  let mut i = 0
+  while i < n {
+    if pts == MAX_TEXT && cut < 0 {
+      cut = i
+    }
+    let c = u[i]
+    if c >= 0xD800 && c <= 0xDBFF && i + 1 < n && u[i + 1] >= 0xDC00 && u[i + 1] <= 0xDFFF {
+      i = i + 2
+    } else {
+      i = i + 1
+    }
+    pts = pts + 1
+  }
+  if pts <= MAX_TEXT {
+    return u
+  }
+  let out : Array[Int] = []
+  let lim = if cut >= 0 { cut } else { n }
+  for k in 0..<lim {
+    out.push(u[k])
+  }
+  let suffix = "\n… (" + (pts - MAX_TEXT).to_string() + " more characters)"
+  let su = js_json::utf16_units(suffix)
+  for k in 0..<su.length() {
+    out.push(su[k])
+  }
+  out
+}
+
+fn jv_is_str(v : Option[js_json::JValue]) -> Bool {
+  match v {
+    Some(js_json::JValue::Str(_)) => true
+    _ => false
+  }
+}
+
+fn jv_str(s : String) -> js_json::JValue {
+  js_json::JValue::Str(js_json::utf16_units(s))
+}
+
+fn hist_trim(s : String) -> String {
+  jscase::trim_white(s)
+}
+
+fn hist_trim_start(s : String) -> String {
+  jscase::trim_start_white(s)
+}
+
+/// transcript.ts `clip`: by Unicode code points (MAX_TEXT = 4000).
+fn clip(text : String) -> String {
+  let cs = js_json::points(text)
+  if cs.length() > MAX_TEXT {
+    let sb = StringBuilder::new()
+    for i in 0..<MAX_TEXT {
+      sb.write_string(cs[i])
+    }
+    sb.write_string("\n… (")
+    sb.write_string((cs.length() - MAX_TEXT).to_string())
+    sb.write_string(" more characters)")
+    sb.to_string()
+  } else {
+    text
+  }
+}
+
+fn pretty_jv(v : Option[js_json::JValue]) -> String {
+  match v {
+    Some(j) => js_json::stringify_pretty(j)
+    None => "null"
+  }
+}
+
+/// transcript.ts `toText`.
+fn to_text(v : js_json::JValue) -> String {
+  match v {
+    js_json::JValue::Str(u) => js_json::sanitize_str(u)
+    js_json::JValue::Arr(items) => {
+      let parts : Array[String] = []
+      for i in 0..<items.length() {
+        let item = items[i]
+        let is_img = match jv_string_of(jv_get(Some(item), "type")) {
+          Some("image") => true
+          _ => false
+        }
+        if is_img {
+          parts.push("[image]")
+        } else {
+          match jv_get(Some(item), "text") {
+            Some(js_json::JValue::Str(u)) => parts.push(js_json::sanitize_str(u))
+            Some(t) => parts.push(js_json::stringify(t))
+            None => parts.push(to_text(item))
+          }
+        }
+      }
+      str_join(parts, "\n")
+    }
+    other => js_json::stringify_pretty(other)
+  }
+}
+
+fn is_posting(tool : String) -> Bool {
+  tool == "mcp__stillfail__chat_post" || tool == "mcp__ember__chat_post"
+}
+
+fn kept_whole(tool : String) -> Bool {
+  is_posting(tool) || tool == "TodoWrite" || tool == "update_plan" || tool == "TaskCreate" || tool == "TaskUpdate"
+}
+
+/// transcript.ts `timelineOf`: a record's entries, read on from `state`.
+pub fn timeline_of(
+  runtime : String,
+  record : js_json::JValue,
+  state : ReadState,
+  out : Array[Entry],
+) -> Result[Unit, String] {
+  if runtime == "claude" {
+    claude_entry(record, out)
+    Ok(())
+  } else if runtime == "dsh" {
+    dsh_entry(record, out)
+  } else if runtime == "grok" {
+    grok_entry(record, out)
+    Ok(())
+  } else if runtime == "cursor" || runtime == "devin" || runtime == "hermes" || runtime == "agy" {
+    cursor_entry(record, out)
+  } else if runtime == "pi" {
+    pi_entry(record, out)
+    Ok(())
+  } else {
+    codex_entry(record, state, out)
+    Ok(())
+  }
+}
+
+fn dsh_text(content : Option[js_json::JValue]) -> String {
+  match content {
+    Some(js_json::JValue::Arr(parts)) => {
+      let out : Array[String] = []
+      for i in 0..<parts.length() {
+        let c = parts[i]
+        let is_img = match jv_string_of(jv_get(Some(c), "type")) {
+          Some("image") => true
+          _ => false
+        }
+        let t = if is_img {
+          "[image]"
+        } else {
+          match jv_string_of(jv_get(Some(c), "text")) {
+            Some(s) => s
+            None => ""
+          }
+        }
+        if t != "" {
+          out.push(t)
+        }
+      }
+      str_join(out, "\n")
+    }
+    _ => ""
+  }
+}
+
+fn parsed_args(raw : String) -> (Option[js_json::JValue], String) {
+  match js_json::parse(raw) {
+    Ok(v) => (Some(v), js_json::stringify_pretty(v))
+    Err(_) => (None, raw)
+  }
+}
+
+/// transcript.ts `grokQuery`: strip surrounding `<user_query>...</user_query>`.
+fn grok_query(text : String) -> String {
+  let inner = jscase::trim(text)
+  let open = "<user_query>"
+  let close = "</user_query>"
+  let ib = inner.to_bytes()
+  let ob = open.to_bytes()
+  let cb = close.to_bytes()
+  if !str_has_prefix(inner, open) || !str_has_suffix(inner, close) || ib.length() < ob.length() + cb.length() {
+    return text
+  }
+  let mut body = str_slice_bytes(inner, ob.length(), ib.length() - cb.length())
+  if str_has_prefix(body, "\n") {
+    body = str_slice_bytes(body, 1, body.to_bytes().length())
+  }
+  if str_has_suffix(body, "\n") {
+    let bb = body.to_bytes()
+    body = str_slice_bytes(body, 0, bb.length() - 1)
+  }
+  body
+}
+
+/// transcript.ts `cursorResult`.
+fn cursor_result(result : Option[js_json::JValue]) -> String {
+  let mut r = result
+  match result {
+    Some(js_json::JValue::Str(u)) => {
+      let text = js_json::sanitize_str(u)
+      match js_json::parse(text) {
+        Ok(v) => r = Some(v)
+        Err(_) => return text
+      }
+    }
+    _ => ()
+  }
+  let v = match jv_get(r, "value") {
+    Some(v_got) => Some(v_got)
+    None => r
+  }
+  if jv_is_str(jv_get(v, "stdout")) || jv_is_str(jv_get(v, "stderr")) {
+    let parts : Array[String] = []
+    match jv_string_of(jv_get(v, "stdout")) {
+      Some(s) => if s != "" { parts.push(s) }
+      None => ()
+    }
+    match jv_string_of(jv_get(v, "stderr")) {
+      Some(s) => if s != "" { parts.push(s) }
+      None => ()
+    }
+    return str_join(parts, "\n")
+  }
+  match jv_get(v, "content") {
+    Some(js_json::JValue::Arr(content)) => {
+      let parts : Array[String] = []
+      for i in 0..<content.length() {
+        let c = Some(content[i])
+        let t = match jv_string_of(jv_get(jv_get(c, "text"), "text")) {
+          Some(s) => s
+          None => {
+            match jv_string_of(jv_get(c, "text")) {
+              Some(s) => s
+              None => ""
+            }
+          }
+        }
+        if t != "" {
+          parts.push(t)
+        }
+      }
+      return str_join(parts, "\n")
+    }
+    _ => ()
+  }
+  match r {
+    None | Some(js_json::JValue::Null) => ""
+    Some(js_json::JValue::Str(u)) => js_json::sanitize_str(u)
+    Some(x) => js_json::stringify_pretty(x)
+  }
+}
+
+fn claude_command(content : String) -> Bool {
+  let rest = jscase::trim_start(content)
+  str_has_prefix(rest, "<command-name>") ||
+  str_has_prefix(rest, "<local-command-stdout>") ||
+  str_has_prefix(rest, "<local-command-caveat>")
+}
+
+fn injected(text : String) -> Bool {
+  let t = hist_trim_start(text)
+  let tags = [
+    "environment_context",
+    "user_instructions",
+    "permissions",
+    "skills_instructions",
+    "collaboration_mode",
+  ]
+  for i in 0..<tags.length() {
+    let prefix = "<" + tags[i]
+    if !str_has_prefix(t, prefix) {
+      continue
+    }
+    let rest = str_slice_bytes(t, prefix.to_bytes().length(), t.to_bytes().length())
+    let pts = js_json::points(rest)
+    if pts.length() == 0 {
+      return true
+    }
+    let c = pts[0]
+    if !is_alphanumeric(script_code_of(c)) && c != "_" {
+      return true
+    }
+  }
+  false
+}
+
+fn typed(text : String) -> Option[String] {
+  let t = hist_trim_start(text)
+  if str_has_prefix(t, "# AGENTS.md instructions") {
+    return None
+  }
+  if !str_has_prefix(t, "#") {
+    return Some(text)
+  }
+  let marks = ["## My request for Codex:", "## My request:"]
+  for i in 0..<marks.length() {
+    let mark = marks[i]
+    match str_rev_find_bytes(t, mark) {
+      Some(at) => {
+        let start = at + mark.to_bytes().length()
+        return Some(hist_trim(str_slice_bytes(t, start, t.to_bytes().length())))
+      }
+      None => ()
+    }
+  }
+  Some(text)
+}
+
+fn wrapped(text : String) -> Bool {
+  let t = hist_trim(text)
+  if !str_has_prefix(t, "<") {
+    return false
+  }
+  let tb = t.to_bytes()
+  let close = match str_find_bytes_from(t, ">", 1) {
+    Some(c) => c
+    None => return false
+  }
+  let name = str_slice_bytes(t, 1, close)
+  let nb = name.to_bytes()
+  if nb.length() == 0 {
+    return false
+  }
+  for i in 0..<nb.length() {
+    let ch = nb[i].to_int() & 0xFF
+    let ok = (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || (ch >= 48 && ch <= 57) || ch == 95 || ch == 45
+    if !ok {
+      return false
+    }
+  }
+  str_has_suffix(t, "</" + name + ">")
+}
+
+fn typed_parts(content : Option[js_json::JValue]) -> String {
+  match content {
+    Some(js_json::JValue::Str(u)) => js_json::sanitize_str(u)
+    Some(js_json::JValue::Arr(blocks)) => {
+      let out : Array[String] = []
+      for i in 0..<blocks.length() {
+        match jv_string_of(jv_get(Some(blocks[i]), "text")) {
+          Some(raw) => {
+            match typed(raw) {
+              Some(t) => {
+                if hist_trim(t) != "" && !injected(t) && !wrapped(t) {
+                  out.push(t)
+                }
+              }
+              None => ()
+            }
+          }
+          None => ()
+        }
+      }
+      str_join(out, "\n")
+    }
+    _ => ""
+  }
+}

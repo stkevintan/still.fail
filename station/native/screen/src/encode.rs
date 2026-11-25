@@ -57,20 +57,45 @@ pub struct H264 {
     /// or was `restart`ed at).
     bitrate: u32,
     started: u32,
+    /// Whether `ICodecAPI::SetValue(CODECAPI_AVEncCommonMeanBitRate)` failed on the last hot update.
+    hot_rate_failed: bool,
     /// The hardware encoder's name (to make another of it), empty for the software one.
     mft: String,
     /// The pictures a second it is set for (pace.rs `encoder_fps`: the view's 帧率, at most 120; 60 where none is asked):
-    /// its rate control's bits a picture, its GOP (view.rs also asks a key frame every 10 s by the clock), each
-    /// picture's duration.
+    /// its rate control's bits a picture, each picture's duration.
     fps: u32,
     _manager: Option<IMFDXGIDeviceManager>,
 }
 
-/// A still picture's key frame: its QP at most this (of 51), at STILL_BOOST times the bit rate, where the bit rate asked
-/// is STILL_FROM or more (a narrow link's would take seconds to go).
+/// A still picture's key frame: its QP at most this (of 51), with at most a gentle 1.15× bitrate bump (same as
+/// `max_bitrate`), where the bit rate asked is STILL_FROM or more (a narrow link's would take seconds to go).
 const STILL_QP: u32 = 28;
-const STILL_BOOST: u32 = 2;
 const STILL_FROM: u32 = 4_000_000;
+/// Ultra-long GOP (on-demand IDR only) to eliminate periodic 10 s IDR bitrate spikes.
+const GOP_FRAMES: u32 = 6000;
+/// Short VBV buffer floor (64 KiB) for smooth 250 ms burst control.
+const MIN_VBV_BYTES: u32 = 65_536;
+
+fn max_bitrate(bitrate: u32) -> u32 {
+    ((bitrate as u64).saturating_mul(115) / 100).min(u32::MAX as u64) as u32
+}
+
+/// Adaptive QP ceiling by target bitrate: prevents mosaic at normal/high rates while still letting narrow links
+/// (< 1.5 Mbps) stay within their bitrate budget.
+fn max_qp(bitrate: u32) -> u32 {
+    if bitrate >= 3_000_000 {
+        38
+    } else if bitrate >= 1_500_000 {
+        42
+    } else {
+        48
+    }
+}
+
+/// 250 ms VBV buffer size in bytes (`bitrate / 8 * 0.25`), floored at 64 KiB.
+fn vbv_buffer_size(bitrate: u32) -> u32 {
+    (bitrate / 32).max(MIN_VBV_BYTES)
+}
 
 fn set(codec: &ICodecAPI, api: &GUID, value: VARIANT) -> bool {
     unsafe { codec.SetValue(api, &value).is_ok() }
@@ -152,10 +177,10 @@ impl H264 {
     }
 
     /// Another encoder of this one's kind, codec, size and profile, for a still picture's key frame: its QP at most
-    /// STILL_QP and STILL_BOOST times the bit rate asked now, set before it starts.
+    /// STILL_QP and 1.15× the bit rate asked now, set before it starts.
     pub fn still(&self, gpu: &Gpu) -> Result<H264> {
         let hardware = (!self.mft.is_empty()).then_some(self.mft.as_str());
-        H264::make(gpu, self.hevc, hardware.is_none(), hardware, self.width, self.height, self.bitrate.saturating_mul(STILL_BOOST), self.fps, true)
+        H264::make(gpu, self.hevc, hardware.is_none(), hardware, self.width, self.height, max_bitrate(self.bitrate), self.fps, true)
     }
 
     /// The first hardware encoder (the one named `only`, where given) that opens, else (H.264, unless `only`) the
@@ -219,16 +244,16 @@ impl H264 {
                 let _ = set(c, &CODECAPI_AVEncCommonRateControlMode, VARIANT::from(eAVEncCommonRateControlMode_LowDelayVBR.0 as u32))
                     || set(c, &CODECAPI_AVEncCommonRateControlMode, VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32));
                 set(c, &CODECAPI_AVEncCommonMeanBitRate, VARIANT::from(bitrate));
+                set(c, &CODECAPI_AVEncCommonMaxBitRate, VARIANT::from(max_bitrate(bitrate)));
+                set(c, &CODECAPI_AVEncCommonBufferSize, VARIANT::from(vbv_buffer_size(bitrate)));
                 set(c, &CODECAPI_AVEncMPVDefaultBPictureCount, VARIANT::from(0u32));
                 // CABAC (High and Main have it): an encoder that has no such setting goes by its profile.
                 if !hevc {
                     set(c, &CODECAPI_AVEncH264CABACEnable, VARIANT::from(true));
                 }
-                set(c, &CODECAPI_AVEncMPVGOPSize, VARIANT::from(fps * 10));
-                // A still picture's (bitrate already raised): an encoder that takes no QP bound keeps its own.
-                if still {
-                    set(c, &CODECAPI_AVEncVideoMaxQP, VARIANT::from(STILL_QP));
-                }
+                set(c, &CODECAPI_AVEncMPVGOPSize, VARIANT::from(GOP_FRAMES));
+                // Cap max QP adaptively by bitrate on moving frames (an encoder that takes no QP bound keeps its own).
+                set(c, &CODECAPI_AVEncVideoMaxQP, VARIANT::from(if still { STILL_QP } else { max_qp(bitrate) }));
             }
             let size = ((width as u64) << 32) | height as u64;
             let rate = ((fps as u64) << 32) | 1;
@@ -286,6 +311,7 @@ impl H264 {
                 header,
                 bitrate,
                 started: bitrate,
+                hot_rate_failed: false,
                 fps,
                 mft: if hardware { name } else { String::new() },
                 _manager: manager,
@@ -293,18 +319,31 @@ impl H264 {
         }
     }
 
-    /// From the next frame on, about this many bits a second (an encoder that `keeps_rate` once `restart`ed).
+    /// From the next frame on, about this many bits a second. Attempts live `ICodecAPI` hot-update of mean bitrate,
+    /// max bitrate, and VBV buffer size first; only falls back to `restart()` when `SetValue` fails or the driver is
+    /// known to ignore hot updates (`NVIDIA` MFT).
     pub fn rate(&mut self, bitrate: u32) {
         self.bitrate = bitrate;
         if let Some(c) = self.codec.as_ref() {
-            set(c, &CODECAPI_AVEncCommonMeanBitRate, VARIANT::from(bitrate));
+            let ok = set(c, &CODECAPI_AVEncCommonMeanBitRate, VARIANT::from(bitrate));
+            let _ = set(c, &CODECAPI_AVEncCommonMaxBitRate, VARIANT::from(max_bitrate(bitrate)));
+            let _ = set(c, &CODECAPI_AVEncCommonBufferSize, VARIANT::from(vbv_buffer_size(bitrate)));
+            let _ = set(c, &CODECAPI_AVEncVideoMaxQP, VARIANT::from(max_qp(bitrate)));
+            if ok && !self.mft.starts_with("NVIDIA") {
+                self.started = bitrate;
+                self.hot_rate_failed = false;
+            } else if !ok {
+                self.hot_rate_failed = true;
+            }
+        } else {
+            self.hot_rate_failed = true;
         }
     }
 
-    /// Whether it keeps the bit rate it started at whatever `rate` asks (NVIDIA's, both codecs). Microsoft's software
-    /// encoder heeds it from the next frame; Intel's and AMD's are said to.
+    /// Whether the encoder requires a `restart()` to apply the new bit rate (either `ICodecAPI::SetValue` failed, or
+    /// the driver is NVIDIA MFT which ignores live `CODECAPI_AVEncCommonMeanBitRate` changes).
     pub fn keeps_rate(&self) -> bool {
-        self.mft.starts_with("NVIDIA")
+        self.hot_rate_failed || self.mft.starts_with("NVIDIA")
     }
 
     /// The bit rate its rate control runs at, and the one asked.
@@ -319,11 +358,18 @@ impl H264 {
             let output = self.transform.GetOutputCurrentType(0)?;
             output.SetUINT32(&MF_MT_AVG_BITRATE, self.bitrate)?;
             self.transform.SetOutputType(0, &output, 0)?;
+            if let Some(c) = self.codec.as_ref() {
+                let _ = set(c, &CODECAPI_AVEncCommonMeanBitRate, VARIANT::from(self.bitrate));
+                let _ = set(c, &CODECAPI_AVEncCommonMaxBitRate, VARIANT::from(max_bitrate(self.bitrate)));
+                let _ = set(c, &CODECAPI_AVEncCommonBufferSize, VARIANT::from(vbv_buffer_size(self.bitrate)));
+                let _ = set(c, &CODECAPI_AVEncVideoMaxQP, VARIANT::from(max_qp(self.bitrate)));
+            }
             if let Some(header) = sequence_header(&self.transform) {
                 self.header = header;
             }
         }
         self.started = self.bitrate;
+        self.hot_rate_failed = false;
         Ok(())
     }
 

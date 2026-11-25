@@ -135,14 +135,17 @@ void mb_render_present(const double *inst, int32_t count, double r, double g, do
   presents_by_wid[active_render_wid]++;
 }
 void mb_render_trim(void) { trims_by_wid[active_render_wid]++; }
+void mb_render_set_clear(int wid, int on) { (void)wid, (void)on; }
 void mb_render_set_bands(double top, double bottom, uint32_t ground) { (void)top, (void)bottom, (void)ground; }
+static int test_adaptive_settling[MB_WINS];
+static int test_adaptive_steps[MB_WINS];
 int mb_render_adaptive_settling_of(int wid) {
-  (void)wid;
-  return 0;
+  return (wid >= 0 && wid < MB_WINS) ? test_adaptive_settling[wid] : 0;
 }
 int mb_render_adaptive_step(int wid) {
-  (void)wid;
-  return 0;
+  if (wid < 0 || wid >= MB_WINS || !test_adaptive_settling[wid]) return 0;
+  test_adaptive_steps[wid]++;
+  return 1;
 }
 int mb_render_snapshot(const char *path) {
   (void)path;
@@ -216,11 +219,19 @@ static void on_test_app_state(int32_t s) {
 }
 
 static int frame_calls_by_wid[MB_WINS];
+static double last_frame_late_by_wid[MB_WINS];
+static int test_want_next_by_wid[MB_WINS];
 static void on_test_frame(double w, double h, double scale, double t) {
   (void)w, (void)h, (void)scale, (void)t;
   frame_calls_by_wid[win_active]++;
+  last_frame_late_by_wid[win_active] = mb_host_frame_late();
   double inst[24] = {0};
   mb_host_present(inst, 1, 0.1, 0.2, 0.3);
+  if (test_want_next_by_wid[win_active] > 0) {
+    test_want_next_by_wid[win_active]--;
+    MBView *v = win_slots[@(win_active)].view;
+    if (v) v.wantFrame = YES;
+  }
 }
 static void on_noop_pointer(int32_t k, double x, double y, int32_t b) { (void)k, (void)x, (void)y, (void)b; }
 static void on_noop_wheel(double x, double y, double dx, double dy, int32_t ph) {
@@ -679,6 +690,125 @@ int main(void) {
     [s0.view keyDown:make_key_event(w0.windowNumber, @"3", @"3", NSEventModifierFlagControl, 20)];
     CHECK(key_calls == callsBefore + 3 && last_key_code == 1000 + '3' && last_key_mods == 2);
     s0.view.imeActive = NO;
+
+    // 11. frame_late continuity across adaptive glass settle, wake_for waits, dual windows, sync resize, and real lag.
+    // 11a. 100 ms adaptive_settling gap followed by a new app frame reports frame_late == 0.
+    fake_media_time = 300.0;
+    test_adaptive_settling[0] = 1;
+    [s0.view requestFrame];
+    [(FakeDisplayLink *)s0.view.link fire];
+    CHECK(last_frame_late_by_wid[0] == 0.0);
+    // Link stays unpaused for adaptive settle; tick 6 times (~100 ms) without app frames.
+    CHECK(!((FakeDisplayLink *)s0.view.link).paused);
+    for (int i = 0; i < 6; i++) {
+      fake_media_time += 1.0 / 60.0;
+      [(FakeDisplayLink *)s0.view.link fire];
+    }
+    CHECK(test_adaptive_steps[0] >= 6);
+    test_adaptive_settling[0] = 0;
+    fake_media_time += 1.0 / 60.0;
+    [s0.view requestFrame];
+    [(FakeDisplayLink *)s0.view.link fire];
+    CHECK(last_frame_late_by_wid[0] == 0.0);
+
+    // 11b. wake_for timer wait followed by first frame reports frame_late == 0 and increments frame_calls_by_wid[0] by 1.
+    fake_media_time = 310.0;
+    [s0.view requestFrame];
+    [(FakeDisplayLink *)s0.view.link fire];
+    int callsBeforeWake = frame_calls_by_wid[0];
+    wake_for = (fake_media_time + 0.100) * 1000.0;
+    ((FakeDisplayLink *)s0.view.link).paused = NO;
+    fake_media_time += 0.050;
+    [(FakeDisplayLink *)s0.view.link fire];  // before wake_for: returns early
+    CHECK(frame_calls_by_wid[0] == callsBeforeWake);
+    fake_media_time += 0.060;
+    [(FakeDisplayLink *)s0.view.link fire];  // at/past wake_for: draws frame
+    CHECK(frame_calls_by_wid[0] == callsBeforeWake + 1 && last_frame_late_by_wid[0] == 0.0);
+
+    // 11c. Dual-window interleaving: window B idle/settling does not clear window A's real late frame, and window A's
+    //      timestamp does not leak into window B.
+    fake_media_time = 320.0;
+    test_want_next_by_wid[0] = 1;
+    [s0.view requestFrame];
+    [(FakeDisplayLink *)s0.view.link fire];
+    CHECK(last_frame_late_by_wid[0] == 0.0);
+    // Window B draws an idle frame and runs an adaptive settle step while window A is mid-animation.
+    fake_media_time += 0.010;
+    test_adaptive_settling[1] = 1;
+    [s1.view requestFrame];
+    [(FakeDisplayLink *)s1.view.link fire];
+    CHECK(last_frame_late_by_wid[1] == 0.0);
+    fake_media_time += 0.010;
+    [(FakeDisplayLink *)s1.view.link fire];  // settle step on window B
+    test_adaptive_settling[1] = 0;
+    // Window A now fires 33.33 ms after its previous frame (1 beat late over 16.67 ms period).
+    fake_media_time = 320.0 + (2.0 / 60.0);
+    [(FakeDisplayLink *)s0.view.link fire];
+    CHECK(last_frame_late_by_wid[0] > 15.0 && last_frame_late_by_wid[0] < 18.0);
+    // Window B draws a fresh frame right after: must NOT inherit window A's lastTick.
+    fake_media_time += 0.050;
+    [s1.view requestFrame];
+    [(FakeDisplayLink *)s1.view.link fire];
+    CHECK(last_frame_late_by_wid[1] == 0.0);
+
+    // 11d. Synchronous resize (drawWithWindow) clears prior non-zero frame_late and starts next tick clean.
+    fake_media_time = 330.0;
+    test_want_next_by_wid[0] = 2;
+    [s0.view requestFrame];
+    [(FakeDisplayLink *)s0.view.link fire];
+    fake_media_time += (2.0 / 60.0);
+    [(FakeDisplayLink *)s0.view.link fire];
+    CHECK(last_frame_late_by_wid[0] > 15.0 && last_frame_late_by_wid[0] < 18.0);
+    fake_media_time += 0.080;
+    [s0.view drawWithWindow];
+    CHECK(last_frame_late_by_wid[0] == 0.0);
+    // Following tick after drawWithWindow also starts clean.
+    fake_media_time += 0.050;
+    [s0.view requestFrame];
+    [(FakeDisplayLink *)s0.view.link fire];
+    CHECK(last_frame_late_by_wid[0] == 0.0);
+
+    // 11e. Two consecutive continuous frames exceeding budget by 1 beat report frame_late > 0.
+    fake_media_time = 340.0;
+    test_want_next_by_wid[0] = 1;
+    [s0.view requestFrame];
+    [(FakeDisplayLink *)s0.view.link fire];
+    CHECK(last_frame_late_by_wid[0] == 0.0);
+    fake_media_time += (2.0 / 60.0);
+    [(FakeDisplayLink *)s0.view.link fire];
+    CHECK(last_frame_late_by_wid[0] > 15.0 && last_frame_late_by_wid[0] < 18.0);
+
+    // 11f. viewDidMoveToWindow detach + 100ms + reattach resets s0.view.lastTick without affecting s1.view.lastTick.
+    fake_media_time = 350.0;
+    test_want_next_by_wid[0] = 1;
+    test_want_next_by_wid[1] = 1;
+    [s0.view requestFrame];
+    [s1.view requestFrame];
+    [(FakeDisplayLink *)s0.view.link fire];
+    [(FakeDisplayLink *)s1.view.link fire];
+    double s1TickBefore = s1.view.lastTick;
+    CHECK(s0.view.lastTick > 0.0 && s1TickBefore > 0.0);
+    [s0.view removeFromSuperview];
+    CHECK(s0.view.lastTick == -1.0 && s1.view.lastTick == s1TickBefore);
+    fake_media_time += 0.100;
+    [s0.box addSubview:s0.view];
+    [(FakeDisplayLink *)s0.view.link fire];
+    CHECK(last_frame_late_by_wid[0] == 0.0);
+    test_want_next_by_wid[0] = 0;
+    test_want_next_by_wid[1] = 0;
+
+    // 11g. Frame ends with wantFrame=NO while adaptive_settling=1; external input re-arms wantFrame before next tick:
+    //      next tick must report frame_late == 0 (chain was broken immediately at frame end).
+    fake_media_time = 360.0;
+    test_adaptive_settling[0] = 1;
+    [s0.view requestFrame];
+    [(FakeDisplayLink *)s0.view.link fire];
+    CHECK(s0.view.lastTick == -1.0 && !((FakeDisplayLink *)s0.view.link).paused);
+    fake_media_time += 0.100;
+    [s0.view requestFrame];
+    [(FakeDisplayLink *)s0.view.link fire];
+    CHECK(last_frame_late_by_wid[0] == 0.0);
+    test_adaptive_settling[0] = 0;
   }
   // 10. The menu bar given again with only its items' enabled changed (a chat opened or closed) keeps every menu and
   //     item and sets only the app's items; anything else changed (keys, words, items, the tray) makes it anew.

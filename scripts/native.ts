@@ -145,7 +145,7 @@ const HERMES_LINUX_CMAKE = ["-G", "Ninja", "-DCMAKE_C_COMPILER=clang", "-DCMAKE_
 const ICU_LINUX = ["libicuuc.so.74", "libicui18n.so.74", "libicudata.so.74"];
 /// How Hermes and the engine are built on Windows: clang-cl (MSVC's own fails on HadesGC.cpp at this tag), CMake and
 /// Ninja, as a release with no debugger and the CRT linked in (a clean Windows install need not have VC++ redist).
-const HERMES_CMAKE = ["-G", "Ninja", "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", "-DHERMES_ENABLE_DEBUGGER=OFF", "-DHERMES_ENABLE_TEST_SUITE=OFF"];
+const HERMES_CMAKE = ["-G", "Ninja", "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /W3 /GR /EHsc /D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH", "-DHERMES_ENABLE_DEBUGGER=OFF", "-DHERMES_ENABLE_TEST_SUITE=OFF"];
 /// The bsdtar Windows has (Git Bash's GNU tar takes C:\… for a remote host).
 const TAR = osPlatform() === "win32" ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
 
@@ -404,7 +404,7 @@ function mbuiRenderer(app: string, launcher: string): Part {
     rust: false,
     // Generated interface summaries are not compiler inputs; `moon check` can rewrite them without changing a scene.
     inputs: ["apps/mbui/src", "libs/ui/src", "libs/ui/tools", "libs/ui/scripts",
-      "apps/mbui/moon.mod", "apps/mbui/moon.work", "apps/mbui/farview.pin", "apps/mbui/scripts/farview.sh", "libs/ui/moon.mod",
+      "apps/mbui/moon.mod", "apps/mbui/moon.work", "libs/ui/moon.mod",
       "apps/mbui/scripts/env.sh", "apps/mbui/scripts/mbui.sh", "apps/mbui/scripts/mac.sh", `apps/mbui/scripts/${launcher}`,
       ":(exclude,glob)apps/mbui/**/*_test.mbt", ":(exclude,glob)apps/mbui/**/*_wbtest.mbt",
       ":(exclude,glob)apps/mbui/**/pkg.generated.mbti", ":(exclude,glob)libs/ui/**/*_test.mbt",
@@ -803,6 +803,7 @@ const LLVM = "/opt/homebrew/opt/llvm/bin";
 function xwinEnv(): { XWIN_CACHE_DIR: string; PATH: string } {
   const tools = join(BUILD(), "tools");
   const env = { XWIN_CACHE_DIR: join(BUILD(), "xwin"), PATH: [join(tools, "bin"), join(homedir(), ".cargo/bin"), LLVM, "/opt/homebrew/bin", process.env.PATH].join(delimiter) };
+  rustTarget();
   if (!existsSync(join(tools, "bin", "cargo-xwin"))) {
     if (!existsSync(join(LLVM, "clang-cl"))) throw new Error("cross-building for Windows needs Homebrew's llvm and lld (brew install llvm lld)");
     run("cargo", ["install", "--locked", "--root", tools, "cargo-xwin", "--version", XWIN], { env: rustEnv(env) });
@@ -1590,12 +1591,26 @@ function rustEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     ...extra,
   };
 }
-/// The toolchain and the target, installed when missing (rustup does it once per machine).
-function rustTarget(triple: string) {
+/// The toolchain and (when given) the target, installed when missing (serialized behind a lock so parallel builds do
+/// not race in rustup).
+export function rustTarget(triple?: string) {
   const env = rustEnv();
-  const installed = spawnSync("rustup", ["target", "list", "--installed", "--toolchain", TOOLCHAIN], { env, encoding: "utf8" });
-  if (installed.status !== 0) run("rustup", ["toolchain", "install", TOOLCHAIN, "--profile", "minimal"], { env });
-  if (!(installed.stdout ?? "").split("\n").includes(triple)) run("rustup", ["target", "add", "--toolchain", TOOLCHAIN, triple], { env });
+  // `ensure` runs up to 3 builds in parallel; rustup mutates shared ~/.rustup downloads and toolchain dirs in place,
+  // so concurrent installs corrupt the toolchain on fresh runners (45460250774, 45461499107). The lock lives in CACHE
+  // (one per user/runner by default; separate STILLFAIL_NATIVE_CACHE dirs on one host do not share it).
+  const release = acquire(join(CACHE, ".rustup"));
+  try {
+    let installed = spawnSync("rustup", ["target", "list", "--installed", "--toolchain", TOOLCHAIN], { env, encoding: "utf8" });
+    if (installed.status !== 0) {
+      run("rustup", ["toolchain", "install", TOOLCHAIN, "--profile", "minimal"], { env });
+      if (triple) installed = spawnSync("rustup", ["target", "list", "--installed", "--toolchain", TOOLCHAIN], { env, encoding: "utf8" });
+    }
+    if (triple && !(installed.stdout ?? "").split(/\r?\n/).includes(triple)) {
+      run("rustup", ["target", "add", "--toolchain", TOOLCHAIN, triple], { env });
+    }
+  } finally {
+    release();
+  }
 }
 function cargo(args: string[], cwd: string, extra: Record<string, string>) {
   const env = rustEnv(extra);

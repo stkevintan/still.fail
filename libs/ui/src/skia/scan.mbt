@@ -4,14 +4,65 @@
 
 ///|
 /// What scan conversion draws with (Blitter): spans, runs of alpha, columns, pairs, rects and masks. A blitter
-/// implements what its callers use.
-priv trait Blitter {
-  blit_h(Self, x : Int, y : Int, width : Int) -> Unit
-  blit_anti_h(Self, x : Int, y : Int, alpha : FixedArray[Int], runs : FixedArray[Int]) -> Unit
-  blit_v(Self, x : Int, y : Int, height : Int, alpha : Int) -> Unit
-  blit_anti_h2(Self, x : Int, y : Int, alpha0 : Int, alpha1 : Int) -> Unit
-  blit_anti_v2(Self, x : Int, y : Int, alpha0 : Int, alpha1 : Int) -> Unit
-  blit_rect(Self, rect : ScreenIntRect) -> Unit
+/// implements what its callers use; asking one for what it does not draw halts.
+priv enum Blitter {
+  Super(SuperBlitter)
+  Raster(RasterPipelineBlitter)
+  RectClip(RectClipBlitter)
+}
+
+///|
+fn Blitter::blit_h(self : Blitter, x : Int, y : Int, width : Int) -> Unit {
+  match self {
+    Super(b) => b.blit_h(x, y, width)
+    Raster(b) => b.blit_h(x, y, width)
+    RectClip(_) => @halt.saying("RectClipBlitter: blit_h")
+  }
+}
+
+///|
+fn Blitter::blit_anti_h(self : Blitter, x : Int, y : Int, alpha : FixedArray[Int], runs : FixedArray[Int]) -> Unit {
+  match self {
+    Super(_) => @halt.saying("SuperBlitter: blit_anti_h")
+    Raster(b) => b.blit_anti_h(x, y, alpha, runs)
+    RectClip(b) => b.blit_anti_h(x, y, alpha, runs)
+  }
+}
+
+///|
+fn Blitter::blit_v(self : Blitter, x : Int, y : Int, height : Int, alpha : Int) -> Unit {
+  match self {
+    Super(_) => @halt.saying("SuperBlitter: blit_v")
+    Raster(b) => b.blit_v(x, y, height, alpha)
+    RectClip(b) => b.blit_v(x, y, height, alpha)
+  }
+}
+
+///|
+fn Blitter::blit_anti_h2(self : Blitter, x : Int, y : Int, alpha0 : Int, alpha1 : Int) -> Unit {
+  match self {
+    Super(_) => @halt.saying("SuperBlitter: blit_anti_h2")
+    Raster(b) => b.blit_anti_h2(x, y, alpha0, alpha1)
+    RectClip(b) => b.blit_anti_h2(x, y, alpha0, alpha1)
+  }
+}
+
+///|
+fn Blitter::blit_anti_v2(self : Blitter, x : Int, y : Int, alpha0 : Int, alpha1 : Int) -> Unit {
+  match self {
+    Super(_) => @halt.saying("SuperBlitter: blit_anti_v2")
+    Raster(b) => b.blit_anti_v2(x, y, alpha0, alpha1)
+    RectClip(b) => b.blit_anti_v2(x, y, alpha0, alpha1)
+  }
+}
+
+///|
+fn Blitter::blit_rect(self : Blitter, rect : ScreenIntRect) -> Unit {
+  match self {
+    Super(_) => @halt.saying("SuperBlitter: blit_rect")
+    Raster(b) => b.blit_rect(rect)
+    RectClip(_) => @halt.saying("RectClipBlitter: blit_rect")
+  }
 }
 
 ///|
@@ -22,7 +73,7 @@ pub(all) enum FillRule {
 }
 
 ///|
-fn fill_rect_nonaa(rect : Rect, clip : ScreenIntRect, blitter : &Blitter) -> Unit {
+fn fill_rect_nonaa(rect : Rect, clip : ScreenIntRect, blitter : Blitter) -> Unit {
   match rect.round() {
     Some(r) =>
       match r.intersect(clip.to_int_rect()) {
@@ -187,7 +238,7 @@ fn break_at(alpha : FixedArray[Int], ao : Int, runs : FixedArray[Int], ro : Int,
 // ── filling a path ────────────────────────────────────────────────────
 
 ///|
-fn fill_path_nonaa(path : Path, fill_rule : FillRule, clip : ScreenIntRect, blitter : &Blitter) -> Unit {
+fn fill_path_nonaa(path : Path, fill_rule : FillRule, clip : ScreenIntRect, blitter : Blitter) -> Unit {
   let ir = match conservative_round_to_int(path.bounds) {
     Some(v) => v
     None => return
@@ -319,7 +370,7 @@ fn fill_path_impl(
   stop_y : Int,
   shift_edges_up : Int,
   path_contained_in_clip : Bool,
-  blitter : &Blitter,
+  blitter : Blitter,
 ) -> Unit {
   let shifted_clip = match ShiftedIntRect::new(clip_rect, shift_edges_up) {
     Some(v) => v
@@ -361,7 +412,7 @@ fn walk_edges(
   stop_y : Int,
   right_clip : Int,
   edges : Array[Edge],
-  blitter : &Blitter,
+  blitter : Blitter,
 ) -> Unit {
   let mut curr_y = start_y
   let winding_mask = if fill_rule == EvenOdd { 1 } else { -1 }
@@ -531,7 +582,7 @@ let ss_scale : Int = 1 << 2
 let ss_mask : Int = (1 << 2) - 1
 
 ///|
-fn fill_path_aa(path : Path, fill_rule : FillRule, clip : ScreenIntRect, blitter : &Blitter) -> Unit {
+fn fill_path_aa(path : Path, fill_rule : FillRule, clip : ScreenIntRect, blitter : Blitter) -> Unit {
   let b = path.bounds
   let ir = match Rect::from_ltrb(b.left.floor(), b.top.floor(), b.right.ceil(), b.bottom.ceil()) {
     Some(r) => r.round_out()
@@ -560,7 +611,7 @@ fn fill_path_aa(path : Path, fill_rule : FillRule, clip : ScreenIntRect, blitter
     Some(bounds) => clip.contains(bounds)
     None => false
   }
-  fill_path_impl(path, fill_rule, clip, ir.y, ir.bottom(), supersample_shift, contained, sb)
+  fill_path_impl(path, fill_rule, clip, ir.y, ir.bottom(), supersample_shift, contained, Super(sb))
   // (Drop)
   sb.flush()
 }
@@ -582,7 +633,7 @@ fn overflows_short_shift(value : Int, shift : Int) -> Int {
 ///|
 /// The supersampling blitter: 4 subscanlines summed into a row of alpha runs, handed on to the real blitter.
 priv struct SuperBlitter {
-  real_blitter : &Blitter
+  real_blitter : Blitter
   mut curr_iy : Int
   width : Int
   left : Int
@@ -594,7 +645,7 @@ priv struct SuperBlitter {
 }
 
 ///|
-fn SuperBlitter::new(bounds : IntRect, clip_rect : ScreenIntRect, blitter : &Blitter) -> SuperBlitter? {
+fn SuperBlitter::new(bounds : IntRect, clip_rect : ScreenIntRect, blitter : Blitter) -> SuperBlitter? {
   let sect = match bounds.intersect(clip_rect.to_int_rect()) {
     Some(r) =>
       match r.to_screen_int_rect() {
@@ -629,7 +680,7 @@ fn SuperBlitter::flush(self : SuperBlitter) -> Unit {
 }
 
 ///|
-impl Blitter for SuperBlitter with blit_h(self, x, y, width) {
+fn SuperBlitter::blit_h(self : SuperBlitter, x : Int, y : Int, width : Int) -> Unit {
   let iy = y >> supersample_shift
   let mut x = x
   let mut width = width
@@ -670,31 +721,6 @@ impl Blitter for SuperBlitter with blit_h(self, x, y, width) {
     max_value,
     self.offset_x,
   )
-}
-
-///|
-impl Blitter for SuperBlitter with blit_anti_h(_self, _x, _y, _alpha, _runs) {
-  @halt.saying("SuperBlitter: blit_anti_h")
-}
-
-///|
-impl Blitter for SuperBlitter with blit_v(_self, _x, _y, _height, _alpha) {
-  @halt.saying("SuperBlitter: blit_v")
-}
-
-///|
-impl Blitter for SuperBlitter with blit_anti_h2(_self, _x, _y, _a0, _a1) {
-  @halt.saying("SuperBlitter: blit_anti_h2")
-}
-
-///|
-impl Blitter for SuperBlitter with blit_anti_v2(_self, _x, _y, _a0, _a1) {
-  @halt.saying("SuperBlitter: blit_anti_v2")
-}
-
-///|
-impl Blitter for SuperBlitter with blit_rect(_self, _rect) {
-  @halt.saying("SuperBlitter: blit_rect")
 }
 
 ///|

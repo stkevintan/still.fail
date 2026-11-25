@@ -3,7 +3,8 @@
 // to line by line in the test's thread in tests (test/reference/replica-work.ts `InlineRunner`).
 import { sep } from "node:path";
 import { wall } from "../ops/fibers.ts";
-import { MbProcess, readerBinary } from "../read/mb-reader.ts";
+import { MbProcess, resolveReaderSelection, resolveReaderSelectionAsync, resolveReaderSelectionOrPending } from "../read/mb-reader.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import type { Passed, Places, Told } from "./export.ts";
 
 /// A pass, and whether the station has no chat of its own (a copy is taken back only into such a one).
@@ -32,7 +33,9 @@ export type RunnerOptions = {
   chunkBytes?: number;
   transcriptPassFiles?: number;
   transcriptPassBytes?: number;
+  transcriptPassDeletes?: number;
   chunkGcGraceMs?: number;
+  readers?: ReaderSelectConfig | (() => ReaderSelectConfig);
 };
 
 /// What the work runs in: the MoonBit program's process, or a test's own, asked and answering a message each,
@@ -46,14 +49,16 @@ type Thread = {
   terminate?(): Promise<number>;
 };
 
-/// The work in the MoonBit program (`--builder replica-export`).
-export function exportThread(o: RunnerOptions): Thread {
-  const args = ["--builder", "replica-export", "--db", o.db, "--replica", o.replica, "--data-dir", o.dataDir, "--origin", o.origin, "--sep", sep];
+/// The work in the MoonBit/Pion program (`--builder replica-export`).
+export function exportThread(o: RunnerOptions, binary?: string): Thread {
+  const args = ["--builder", "replica-export", "--db", o.db, "--replica", o.replica, "--data-dir", o.dataDir, "--origin", o.origin, "--sep", sep, "--compact-heads"];
   if (o.chunkBytes !== undefined) args.push("--chunk-bytes", String(o.chunkBytes));
   if (o.transcriptPassFiles !== undefined) args.push("--transcript-pass-files", String(o.transcriptPassFiles));
   if (o.transcriptPassBytes !== undefined) args.push("--transcript-pass-bytes", String(o.transcriptPassBytes));
+  if (o.transcriptPassDeletes !== undefined) args.push("--transcript-pass-deletes", String(o.transcriptPassDeletes));
   if (o.chunkGcGraceMs !== undefined) args.push("--chunk-gc-grace-ms", String(o.chunkGcGraceMs));
-  return new MbProcess(readerBinary(), args);
+  const bin = binary ?? resolveReaderSelection("replica-export", { config: o.readers, logAt: "replica" }).primaryBinary;
+  return new MbProcess(bin, args);
 }
 
 /// The work in a process of its own, started again (told the workspaces again) at the next thing asked once
@@ -61,9 +66,11 @@ export function exportThread(o: RunnerOptions): Thread {
 /// the time (`now`): the program's clock is the station's.
 export class ProgramRunner implements Runner {
   readonly #o: RunnerOptions;
-  readonly #start: (o: RunnerOptions) => Thread;
+  readonly #start: (o: RunnerOptions, binary?: string) => Thread;
+  readonly #isDefaultStart: boolean;
   readonly #closeGraceMs: number;
   #worker: Thread | null = null;
+  #starting: Promise<Thread> | null = null;
   #closing: Thread | null = null;
   readonly #waiting = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   #next = 0;
@@ -73,11 +80,13 @@ export class ProgramRunner implements Runner {
   constructor(o: RunnerOptions, start: (o: RunnerOptions) => Thread = exportThread, closeGraceMs = 2_000) {
     this.#o = o;
     this.#start = start;
+    this.#isDefaultStart = start === exportThread;
     this.#closeGraceMs = closeGraceMs;
   }
 
-  #begin(): Thread {
-    const worker = this.#start(this.#o);
+  #begin(binary?: string): Thread {
+    if (this.#worker !== null) return this.#worker;
+    const worker = this.#isDefaultStart ? exportThread(this.#o, binary) : this.#start(this.#o);
     worker.on("message", (m: { id: number; answer?: unknown; error?: string }) => {
       const w = this.#waiting.get(m.id);
       this.#waiting.delete(m.id);
@@ -98,14 +107,40 @@ export class ProgramRunner implements Runner {
     return worker;
   }
 
-  #ask<T>(m: Asked): Promise<T> {
+  #sendAsk<T>(worker: Thread, m: Asked): Promise<T> {
     if (this.#closed) return Promise.reject(new Error("the copies' thread is closed"));
-    const worker = this.#worker ?? this.#begin();
     const id = ++this.#next;
     return new Promise<T>((resolve, reject) => {
       this.#waiting.set(id, { resolve, reject });
       worker.postMessage({ ...m, id, now: wall.now() });
     });
+  }
+
+  #ask<T>(m: Asked): Promise<T> {
+    if (this.#closed) return Promise.reject(new Error("the copies' thread is closed"));
+    if (this.#worker !== null) return this.#sendAsk(this.#worker, m);
+    if (!this.#isDefaultStart) return this.#sendAsk(this.#begin(), m);
+    if (this.#starting === null) {
+      let sync;
+      try {
+        sync = resolveReaderSelectionOrPending("replica-export", { config: this.#o.readers, logAt: "replica" });
+      } catch (e) {
+        return Promise.reject(e);
+      }
+      if (!sync.pending) {
+        return this.#sendAsk(this.#begin(sync.primaryBinary), m);
+      }
+      const pending = resolveReaderSelectionAsync("replica-export", { config: this.#o.readers, logAt: "replica" }).then(
+        (resolved) => {
+          if (this.#closed) throw new Error("the copies' thread is closed");
+          return this.#begin(resolved.primaryBinary);
+        },
+      ).finally(() => {
+        if (this.#starting === pending) this.#starting = null;
+      });
+      this.#starting = pending;
+    }
+    return this.#starting.then((worker) => this.#sendAsk(worker, m));
   }
 
   places(places: Places) {

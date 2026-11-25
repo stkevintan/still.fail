@@ -506,6 +506,7 @@ fn journal_reset() -> Unit {
   summary_extras.clear()
   summary_extras.shrink_to_fit()
   gpu_frames_reset()
+  paint_glyph_reset()
   journal_listens()
 }
 

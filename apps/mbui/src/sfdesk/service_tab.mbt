@@ -61,7 +61,7 @@ fn tab_let_go(src : Source, r : ChatRef, tab : String) -> Unit {
   panel_screen_pages.remove(tabs_key(r) + "/" + tab)
   panel_terminal_pages.remove(tabs_key(r) + "/" + tab)
   match station_tab(tab) {
-    Some(("screen", station, screen)) if !@sfpages.farview_screen(screen) => @sfpages.screen_left(src, station, screen)
+    Some(("screen", station, screen)) => @sfpages.screen_left(src, station, screen)
     Some(("terminal", station, terminal)) => @sfpages.terminal_left(station, terminal)
     _ => ()
   }

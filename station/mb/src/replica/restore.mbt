@@ -49,6 +49,11 @@ fn as_head(v : JValue) -> JValue? {
       }
     Some(_) => return None
   }
+  match get(v, "transcriptManifest") {
+    None => ()
+    Some(Str(m)) => if !hash_ok(@jsjson.sanitize_str(m)) { return None }
+    Some(_) => return None
+  }
   guard get(v, "runs") is Some(Arr(_)) else { return None }
   Some(v)
 }
@@ -140,6 +145,9 @@ fn read_json(files : Files, path : String) -> JValue raise {
 async fn build(host : @host.Host, files : Files, db_path : String, dir : String, from_files : String, data_dir : String, now : Double, merge : Bool, connects : JValue, ws : JValue?) -> (JValue, Int, Int) {
   guard as_head(read_json(files, files.join([dir, "head.json"]))) is Some(head) else {
     fail("no copy here, or one of a newer station's")
+  }
+  if text_of(get(head, "transcriptManifest")) is Some(root_hash) {
+    ignore(verify_manifest_dir(host, files, from_files, root_hash))
   }
   let origin = text_of(get(head, "origin")).unwrap_or("")
   let gen = text_of(get(head, "gen")).unwrap_or("")

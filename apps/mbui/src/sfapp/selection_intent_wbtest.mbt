@@ -195,7 +195,7 @@ test "大屏, 戳一下 kept on the words picked: they stay lit, its answer a no
 }
 
 ///|
-test "大屏, two 戳一下 on words of one message: each a note of its own, one under the other beside it" {
+test "大屏, two 戳一下 on words of one message: each lit, each a note of its own, in the order the words stand; the pointer on one lights its words deeper" {
   new_run()
   @sf.presenters_reset()
   let src = fixture("chat")
@@ -211,17 +211,58 @@ test "大屏, two 戳一下 on words of one message: each a note of its own, one
     t.click(Button, label="戳一下")
     t.run_for(@ui.move_most_ms)
   }
-  poke("高度先按 90 估")
+  // (the later words first)
   poke("深色模式我一起看")
+  poke("高度先按 90 估")
   let notes = @sfbase.intent_notes_for("ws1/st1:s-c1")
-  assert_eq(notes.map(fn(n) { n.selection }), ["高度先按 90 估", "深色模式我一起看"])
+  assert_eq(notes.length(), 2)
   assert_eq(notes[0].row, notes[1].row, msg="both of one message")
+  assert_eq(@sfbase.intent_notes_on("ws1/st1:s-c1", notes[0].row).map(fn(n) { n.selection }), ["高度先按 90 估", "深色模式我一起看"])
   // (each passage on its ground, as a quote's flash lights one: two grounds drawn)
   let ground = @sf.alpha(@sf.theme().p.accent, @sfbase.picked_alpha)
+  let deeper = @sf.alpha(@sf.theme().p.accent, 2.0 * @sfbase.picked_alpha)
   assert_eq(t.drawn_rects().filter(fn(r) { r.4 == ground }).length(), 2, msg="both lit")
-  let answers = t.words().filter(fn(w) { w.0.contains("轻量模型结合当前对话上下文") })
-  assert_eq(answers.length(), 2, msg="two cards")
-  assert_true(answers[0].2 != answers[1].2, msg="one under the other")
+  let card_of = fn(words : String) {
+    t.words().filter(fn(w) { w.0.contains("关于「" + words + "」") }).last()
+  }
+  guard (card_of("高度先按 90 估"), card_of("深色模式我一起看")) is (Some(first), Some(second)) else { fail("two cards") }
+  assert_true(first.2 < second.2, msg="the first words' note above: \{first.2} over \{second.2}")
+  // (the pointer on the second's card: its words deeper, the first's as they were)
+  t.move_to(second.1 + 20.0, second.2 + second.4 / 2.0)
+  t.run_for(@ui.move_most_ms)
+  assert_eq(t.drawn_rects().filter(fn(r) { r.4 == deeper }).length(), 1, msg="the pointed one deeper")
+  assert_eq(t.drawn_rects().filter(fn(r) { r.4 == ground }).length(), 1, msg="the other as it was")
+  t.move_to(700.0, 700.0)
+  t.run_for(@ui.move_most_ms)
+  assert_eq(t.drawn_rects().filter(fn(r) { r.4 == ground }).length(), 2, msg="both as they were once it is off")
+}
+
+///|
+test "大屏, 戳一下 on words its message has more than once: the time picked lit alone, its note placed by it" {
+  new_run()
+  @sf.presenters_reset()
+  let src = fixture("chat")
+  open_chat({ station: "ws1/st1", session: "s-c1", title: "整理发布清单", station_name: "Willow" })
+  let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w=1280.0, h=800.0, platform=0, corners_held=false)
+  t.check_looks(false)
+  t.run_for(@ui.move_most_ms)
+  exp_set(t, src, ["selectionIntent"], true)
+  // (「一起」 is in 「深色模式我一起看」 and 「也一起换掉」: the second picked, its two letters in the middle of four)
+  let (px, py, pw, ph) = quote_nodes_words(t, "也一起换")
+  t.drag(px + pw / 4.0 + 1.0, py + ph / 2.0, px + pw * 3.0 / 4.0 - 1.0, py + ph / 2.0)
+  t.run_for(@ui.move_most_ms)
+  t.click(Button, label="戳一下")
+  t.run_for(@ui.move_most_ms)
+  let notes = @sfbase.intent_notes_for("ws1/st1:s-c1")
+  assert_eq(notes.length(), 1)
+  assert_eq(notes[0].selection, "一起")
+  let text = "高度先按 90 估，量过一次就记住。深色模式我一起看。要不要把旧的截图也一起换掉？"
+  assert_eq(Some(notes[0].at), text.find("一起换"), msg="placed where the time picked stands")
+  let ground = @sf.alpha(@sf.theme().p.accent, @sfbase.picked_alpha)
+  let lit = t.drawn_rects().filter(fn(r) { r.4 == ground })
+  assert_eq(lit.length(), 1, msg="lit once")
+  guard t.run_rects("也一起换") is [(qx, _, qw, _), ..] else { fail("the words not drawn") }
+  assert_true(lit[0].0 >= qx && lit[0].0 + lit[0].2 <= qx + qw + 1.0, msg="lit on the time picked: \{lit[0].0} in \{qx}+\{qw}")
 }
 
 ///|

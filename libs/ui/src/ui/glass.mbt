@@ -258,7 +258,12 @@ fn effective_glass(gl : Glass, frost : Double, contrast : Bool) -> Glass {
   } else {
     gl.rim_edge
   }
-  { ..gl, tint, blur, refraction, rim, rim_edge }
+  let chroma = if contrast && gl.liquid && gl.droplet_role == 0 {
+    0.0
+  } else {
+    gl.chroma
+  }
+  { ..gl, tint, blur, refraction, rim, rim_edge, chroma }
 }
 
 ///|

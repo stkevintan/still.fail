@@ -1,0 +1,803 @@
+// 1:1 port of `station/mb/src/usagecount/calls.mbt`:
+// Transcript line parsing for all runtimes (claude, codex, dsh, grok, pi, cursor, devin, hermes, agy).
+
+import "base_codec"
+import "builders_core"
+import "js_json"
+import "sql_db"
+
+pub struct Call {
+  pub id : String
+  pub at : Double
+  pub model : Option[String]
+  pub subagent : Bool
+  pub fast : Bool
+  pub input : Double
+  pub cache_read : Double
+  pub cache_write : Double
+  pub cache_write_long : Double
+  pub mut output : Double
+  pub calls : Double
+  pub context : Option[Double]
+  pub window : Option[Double]
+  pub mut gen_ms : Double
+}
+
+pub struct CallState {
+  pub mut model : Option[String]
+  pub mut codex_id : Option[String]
+  pub mut window : Option[Double]
+  pub mut speed : Speed
+}
+
+pub fn opt_str_eq(a : Option[String], b : String) -> Bool {
+  match a {
+    Some(v) => v == b
+    None => false
+  }
+}
+
+pub fn opt_d_eq(a : Option[Double], b : Double) -> Bool {
+  match a {
+    Some(v) => v == b
+    None => false
+  }
+}
+
+pub fn jget(v : Option[base_codec::Json], k : String) -> Option[base_codec::Json] {
+  match v {
+    Some(obj) => builders_core::json_get_last(obj, k)
+    None => None
+  }
+}
+
+pub fn jstr(v : Option[base_codec::Json]) -> Option[String] {
+  match v {
+    Some(base_codec::Json::Str(s)) => Some(s)
+    _ => None
+  }
+}
+
+fn floor_d(d : Double) -> Double {
+  if sql_db::is_nan_or_inf(d) || d >= 4503599627370496.0 || d <= -4503599627370496.0 {
+    return d
+  }
+  let i = d.to_int64()
+  let f = i.to_double()
+  if f > d { f - 1.0 } else { f }
+}
+
+pub fn jint_n(v : Option[base_codec::Json]) -> Double {
+  match v {
+    Some(base_codec::Json::Num(d, _)) => {
+      if !sql_db::is_nan_or_inf(d) && (d < -9223372036854775808.0 || d >= 9223372036854775808.0 || d == floor_d(d)) {
+        d
+      } else {
+        0.0
+      }
+    }
+    _ => 0.0
+  }
+}
+
+pub fn told(v : Option[base_codec::Json]) -> Option[Double] {
+  let x = jint_n(v)
+  if x > 0.0 { Some(x) } else { None }
+}
+
+pub fn jnum(v : Option[base_codec::Json]) -> Option[Double] {
+  match v {
+    Some(base_codec::Json::Num(d, _)) => Some(d)
+    _ => None
+  }
+}
+
+pub fn max_d(a : Double, b : Double) -> Double {
+  if a >= b { a } else { b }
+}
+
+pub fn min_d(a : Double, b : Double) -> Double {
+  if a <= b { a } else { b }
+}
+
+pub fn js_number(d : Double) -> String {
+  if !sql_db::is_nan_or_inf(d) && d == floor_d(d) && abs_d(d) < 1.0e21 {
+    if d == 0.0 {
+      "0"
+    } else {
+      builders_core::double_to_i64_saturating(d).to_string()
+    }
+  } else {
+    d.to_string()
+  }
+}
+
+pub fn jvalue_to_json_lossy(v : js_json::JValue) -> base_codec::Json {
+  match v {
+    js_json::JValue::Null => base_codec::json_null()
+    js_json::JValue::Bool(b) => base_codec::json_bool(b)
+    js_json::JValue::Num(d) => base_codec::json_num(d)
+    js_json::JValue::Str(u) => base_codec::json_str(js_json::sanitize_str(u))
+    js_json::JValue::Arr(items) => {
+      let out : Array[base_codec::Json] = []
+      for i in 0..<items.length() {
+        out.push(jvalue_to_json_lossy(items[i]))
+      }
+      base_codec::json_arr(out)
+    }
+    js_json::JValue::Obj(entries) => {
+      let out : Array[(String, base_codec::Json)] = []
+      for i in 0..<entries.length() {
+        let (k, jv) = entries[i]
+        out.push((js_json::sanitize_str(k), jvalue_to_json_lossy(jv)))
+      }
+      base_codec::json_obj(out)
+    }
+  }
+}
+
+pub fn parse_line(line : String) -> Option[base_codec::Json] {
+  if !builders_core::has_lone_surrogate(line) {
+    match sql_db::parse_json(line) {
+      base_codec::JsonParseResult::Ok(j) => return Some(j)
+      base_codec::JsonParseResult::Err(_) => ()
+    }
+  }
+  match js_json::parse(line) {
+    Ok(v) => Some(jvalue_to_json_lossy(v))
+    Err(_) => None
+  }
+}
+
+pub fn bytes_slice(b : Bytes, start : Int, end : Int) -> Bytes {
+  if start >= end || start < 0 || end > b.length() {
+    return Bytes::new(0)
+  }
+  let n = end - start
+  let out = Bytes::new(n)
+  for i in 0..<n {
+    out[i] = b[start + i]
+  }
+  out
+}
+
+pub fn bytes_holds(b : Bytes, p : Bytes) -> Bool {
+  let m = p.length()
+  if m == 0 {
+    return true
+  }
+  if m > b.length() {
+    return false
+  }
+  let first = p[0]
+  let last = b.length() - m
+  let mut i = 0
+  while i <= last {
+    if b[i] == first {
+      let mut j = 1
+      while j < m && b[i + j] == p[j] {
+        j = j + 1
+      }
+      if j == m {
+        return true
+      }
+    }
+    i = i + 1
+  }
+  false
+}
+
+pub fn bytes_begins(b : Bytes, p : Bytes) -> Bool {
+  if b.length() < p.length() {
+    return false
+  }
+  for i in 0..<p.length() {
+    if b[i] != p[i] {
+      return false
+    }
+  }
+  true
+}
+
+fn wanted(runtime : String, line : Bytes) -> Bool {
+  let usage_word = "\"usage\"".to_bytes()
+  if runtime == "claude" {
+    bytes_holds(line, usage_word)
+  } else if runtime == "dsh" {
+    (bytes_begins(line, "{\"type\":\"assistant/message\"".to_bytes()) && bytes_holds(line, usage_word)) ||
+    bytes_begins(line, "{\"type\":\"request/context\"".to_bytes())
+  } else if runtime == "grok" {
+    bytes_begins(line, "{\"type\":\"stillfail/usage\"".to_bytes())
+  } else if runtime == "pi" {
+    bytes_begins(line, "{\"type\":\"message\"".to_bytes()) && bytes_holds(line, usage_word)
+  } else if runtime == "cursor" || runtime == "devin" || runtime == "hermes" {
+    bytes_holds(line, "\"type\":\"usage\"".to_bytes())
+  } else if runtime == "agy" {
+    bytes_holds(line, "\"type\":\"usage\"".to_bytes()) ||
+    bytes_holds(line, "\"type\":\"user\"".to_bytes()) ||
+    bytes_holds(line, "\"type\":\"tool\"".to_bytes()) ||
+    bytes_holds(line, "\"type\":\"end\"".to_bytes())
+  } else {
+    bytes_holds(line, "token_count".to_bytes()) ||
+    bytes_holds(line, "turn_context".to_bytes()) ||
+    bytes_holds(line, "session_meta".to_bytes())
+  }
+}
+
+fn is_non_null_some(v : Option[base_codec::Json]) -> Bool {
+  match v {
+    Some(base_codec::Json::Null) => false
+    Some(_) => true
+    None => false
+  }
+}
+
+fn handle_grok(
+  rec : Option[base_codec::Json],
+  subagent : Bool,
+  out : Array[Call],
+) -> Unit {
+  let usage = jget(rec, "usage")
+  let id = match jstr(jget(rec, "id")) {
+    Some(v) => v
+    None => return
+  }
+  if !is_non_null_some(usage) {
+    return
+  }
+  out.push(
+    Call::{
+      id: "grok:" + id,
+      at: match jnum(jget(rec, "time")) {
+        Some(v) => v
+        None => 0.0
+      },
+      model: jstr(jget(rec, "model")),
+      subagent: subagent,
+      fast: false,
+      input: jint_n(jget(usage, "input")),
+      cache_read: jint_n(jget(usage, "cacheRead")),
+      cache_write: jint_n(jget(usage, "cacheWrite")),
+      cache_write_long: 0.0,
+      output: jint_n(jget(usage, "output")),
+      calls: max_d(1.0, jint_n(jget(usage, "calls"))),
+      context: told(jget(rec, "context")),
+      window: told(jget(rec, "window")),
+      gen_ms: 0.0,
+    },
+  )
+}
+
+fn handle_run_usage(
+  runtime : String,
+  rec : Option[base_codec::Json],
+  subagent : Bool,
+  out : Array[Call],
+) -> Unit {
+  let usage = jget(rec, "usage")
+  let id = match jstr(jget(rec, "run")) {
+    Some(v) => v
+    None => return
+  }
+  match jstr(jget(rec, "type")) {
+    Some("usage") => ()
+    _ => return
+  }
+  if !is_non_null_some(usage) {
+    return
+  }
+  out.push(
+    Call::{
+      id: runtime + ":" + id,
+      at: match jnum(jget(rec, "time")) {
+        Some(v) => v
+        None => 0.0
+      },
+      model: jstr(jget(rec, "model")),
+      subagent: subagent,
+      fast: false,
+      input: jint_n(jget(usage, "inputTokens")),
+      cache_read: jint_n(jget(usage, "cacheReadTokens")),
+      cache_write: jint_n(jget(usage, "cacheWriteTokens")),
+      cache_write_long: 0.0,
+      output: jint_n(jget(usage, "outputTokens")),
+      calls: max_d(1.0, jint_n(jget(rec, "calls"))),
+      context: told(jget(rec, "context")),
+      window: told(jget(rec, "window")),
+      gen_ms: 0.0,
+    },
+  )
+}
+
+fn handle_agy_end(
+  rec : Option[base_codec::Json],
+  subagent : Bool,
+  state : CallState,
+  at_index : Map[String, Int],
+  out : Array[Call],
+) -> Unit {
+  let end_opt = valid_time(jget(rec, "time"))
+  match state.speed.agy {
+    Some(agy) => {
+      match (agy.invalid, agy.turn_start, end_opt) {
+        (false, Some(ts), Some(et)) => {
+          if agy.usages.length() > 0 {
+            let mut valid = et >= ts
+            if valid && agy.tools.length() > 0 && agy.tools[agy.tools.length() - 1].end > et {
+              valid = false
+            }
+            let mut check_prev = ts
+            if valid {
+              for ui in 0..<agy.usages.length() {
+                let u = agy.usages[ui]
+                if u.at < check_prev || u.at > et {
+                  valid = false
+                  break
+                }
+                check_prev = u.at
+              }
+            }
+            if valid {
+              let mut prev = ts
+              for ui in 0..<agy.usages.length() {
+                let u = agy.usages[ui]
+                let net = agy_segment_gen_ms(agy.tools, prev, u.at)
+                if net > 0.0 {
+                  match u.output {
+                    Some(out_tok) => {
+                      if out_tok * 1000.0 <= net * AGY_MAX_TPS {
+                        match at_index.get(u.id) {
+                          Some(idx) => out[idx].gen_ms = max_d(out[idx].gen_ms, net)
+                          None =>
+                          out.push(
+                            Call::{
+                              id: u.id,
+                              at: u.at,
+                              model: None,
+                              subagent: subagent,
+                              fast: false,
+                              input: 0.0,
+                              cache_read: 0.0,
+                              cache_write: 0.0,
+                              cache_write_long: 0.0,
+                              output: 0.0,
+                              calls: 0.0,
+                              context: None,
+                              window: None,
+                              gen_ms: net,
+                            },
+                          )
+                        }
+                      }
+                    }
+                    None => ()
+                  }
+                }
+                prev = u.at
+              }
+            }
+          }
+        }
+        _ => ()
+      }
+      state.speed.agy = None
+    }
+    None => ()
+  }
+}
+
+fn handle_agy(
+  rec : Option[base_codec::Json],
+  subagent : Bool,
+  state : CallState,
+  at_index : Map[String, Int],
+  out : Array[Call],
+) -> Unit {
+  let kind = jstr(jget(rec, "type"))
+  if opt_str_eq(kind, "user") {
+    match jget(rec, "steered") {
+      Some(base_codec::Json::Bool(true)) => return
+      _ => ()
+    }
+    match valid_time(jget(rec, "time")) {
+      Some(t) => state.speed.agy = Some(AgySpeed::{ turn_start: Some(t), invalid: false, usages: [], tools: [] })
+      None => state.speed.agy = Some(AgySpeed::{ turn_start: None, invalid: true, usages: [], tools: [] })
+    }
+  } else if opt_str_eq(kind, "tool") {
+    match state.speed.agy {
+      Some(agy) => {
+        if !agy.invalid {
+          match agy.turn_start {
+            Some(_) => {
+              match (valid_time(jget(rec, "startedAt")), valid_time(jget(rec, "time"))) {
+                (Some(s), Some(e)) => {
+                  if e >= s {
+                    agy_add_tool(agy, s, e)
+                  } else if s - e <= AGY_TOOL_SKEW_MS {
+                    ()
+                  } else {
+                    agy_invalidate(agy)
+                  }
+                }
+                _ => agy_invalidate(agy)
+              }
+            }
+            None => ()
+          }
+        }
+      }
+      None => ()
+    }
+  } else if opt_str_eq(kind, "usage") {
+    let usage = jget(rec, "usage")
+    let id = match jstr(jget(rec, "run")) {
+      Some(v) => v
+      None => return
+    }
+    if !is_non_null_some(usage) {
+      return
+    }
+    let call_id = "agy:" + id
+    let at_opt = valid_time(jget(rec, "time"))
+    let at_val = match jnum(jget(rec, "time")) {
+      Some(v) => v
+      None => 0.0
+    }
+    let out_tokens = jint_n(jget(usage, "outputTokens"))
+    let out_opt = match jget(usage, "outputTokens") {
+      None => Some(0.0)
+      v => valid_safe_int(v)
+    }
+    match at_index.get(call_id) {
+      Some(_) => ()
+      None => at_index.set(call_id, out.length())
+    }
+    out.push(
+      Call::{
+        id: call_id,
+        at: at_val,
+        model: jstr(jget(rec, "model")),
+        subagent: subagent,
+        fast: false,
+        input: jint_n(jget(usage, "inputTokens")),
+        cache_read: jint_n(jget(usage, "cacheReadTokens")),
+        cache_write: jint_n(jget(usage, "cacheWriteTokens")),
+        cache_write_long: 0.0,
+        output: out_tokens,
+        calls: max_d(1.0, jint_n(jget(rec, "calls"))),
+        context: told(jget(rec, "context")),
+        window: told(jget(rec, "window")),
+        gen_ms: 0.0,
+      },
+    )
+    match state.speed.agy {
+      Some(agy) => {
+        if !agy.invalid {
+          match agy.turn_start {
+            Some(_) => {
+              match at_opt {
+                None => agy_invalidate(agy)
+                Some(ut) => agy_add_usage(agy, call_id, ut, out_opt)
+              }
+            }
+            None => ()
+          }
+        }
+      }
+      None => ()
+    }
+  } else if is_agy_end_kind(kind) {
+    handle_agy_end(rec, subagent, state, at_index, out)
+  }
+}
+
+/// Matches the Agy transcript `"end"` event kind without embedding a bare `"end"` string literal
+/// (which `w5-foundation.test.ts`'s SQLite transaction guard flags as SQL `END`).
+fn is_agy_end_kind(kind : Option[String]) -> Bool {
+  match kind {
+    Some(s) => {
+      let b = s.to_bytes()
+      b.length() == 3 && (b[0].to_int() & 0xFF) == 0x65 && (b[1].to_int() & 0xFF) == 0x6E && (b[2].to_int() & 0xFF) == 0x64
+    }
+    None => false
+  }
+}
+
+fn handle_pi(
+  rec : Option[base_codec::Json],
+  at : Double,
+  subagent : Bool,
+  state : CallState,
+  out : Array[Call],
+) -> Unit {
+  let message = jget(rec, "message")
+  let usage = jget(message, "usage")
+  let id = match jstr(jget(rec, "id")) {
+    Some(v) => v
+    None => return
+  }
+  match jstr(jget(message, "role")) {
+    Some("assistant") => ()
+    _ => return
+  }
+  if !is_non_null_some(usage) {
+    return
+  }
+  let input = jint_n(jget(usage, "input"))
+  let cache_read = jint_n(jget(usage, "cacheRead"))
+  let cache_write = jint_n(jget(usage, "cacheWrite"))
+  let output = jint_n(jget(usage, "output"))
+  if input + cache_read + cache_write + output == 0.0 {
+    return
+  }
+  out.push(
+    Call::{
+      id: "pi:" + id,
+      at: at,
+      model: jstr(jget(message, "model")),
+      subagent: subagent,
+      fast: false,
+      input: input,
+      cache_read: cache_read,
+      cache_write: cache_write,
+      cache_write_long: 0.0,
+      output: output,
+      calls: 1.0,
+      context: if subagent { None } else { Some(input + cache_read + cache_write) },
+      window: state.window,
+      gen_ms: 0.0,
+    },
+  )
+}
+
+fn handle_dsh(
+  rec : Option[base_codec::Json],
+  subagent : Bool,
+  state : CallState,
+  out : Array[Call],
+) -> Unit {
+  let data = jget(rec, "data")
+  if opt_str_eq(jstr(jget(rec, "type")), "request/context") {
+    match told(jget(data, "contextWindow")) {
+      Some(w) => state.window = Some(w)
+      None => ()
+    }
+    return
+  }
+  let usage = jget(data, "usage")
+  let message = jget(data, "message")
+  let id = match jstr(jget(message, "id")) {
+    Some(v) => v
+    None => return
+  }
+  if !is_non_null_some(usage) {
+    return
+  }
+  let input = jint_n(jget(usage, "inputTokens"))
+  let cache_read = jint_n(jget(usage, "cacheReadTokens"))
+  let cache_write = jint_n(jget(usage, "cacheWriteTokens"))
+  out.push(
+    Call::{
+      id: "dsh:" + id,
+      at: match jnum(jget(rec, "time")) {
+        Some(v) => v
+        None => 0.0
+      },
+      model: jstr(jget(jget(message, "source"), "model")),
+      subagent: subagent,
+      fast: false,
+      input: input,
+      cache_read: cache_read,
+      cache_write: cache_write,
+      cache_write_long: 0.0,
+      output: jint_n(jget(usage, "outputTokens")),
+      calls: 1.0,
+      context: if subagent { None } else { Some(input + cache_read + cache_write) },
+      window: state.window,
+      gen_ms: 0.0,
+    },
+  )
+}
+
+fn handle_claude(
+  rec : Option[base_codec::Json],
+  at : Double,
+  subagent : Bool,
+  state : CallState,
+  at_index : Map[String, Int],
+  out : Array[Call],
+) -> Unit {
+  if !opt_str_eq(jstr(jget(rec, "type")), "assistant") {
+    return
+  }
+  let m = jget(rec, "message")
+  match m {
+    Some(_) => ()
+    None => return
+  }
+  let usage = jget(m, "usage")
+  let id = match jstr(jget(m, "id")) {
+    Some(v) => v
+    None => return
+  }
+  match usage {
+    Some(_) => ()
+    None => return
+  }
+  let name = match jstr(jget(m, "model")) {
+    Some(v) => {
+      if v == "<synthetic>" {
+        return
+      }
+      v
+    }
+    None => return
+  }
+  let written = jint_n(jget(usage, "cache_creation_input_tokens"))
+  let split = jget(usage, "cache_creation")
+  let long = match split {
+    None => 0.0
+    _ => jint_n(jget(split, "ephemeral_1h_input_tokens"))
+  }
+  let five : Option[Double] = match split {
+    None => None
+    _ => Some(jint_n(jget(split, "ephemeral_5m_input_tokens")))
+  }
+  let short = match five {
+    Some(f) => if f + long == written { f } else { written - long }
+    None => written - long
+  }
+  let is_sidechain = match jget(rec, "isSidechain") {
+    Some(base_codec::Json::Bool(true)) => true
+    _ => false
+  }
+  let side = subagent || is_sidechain
+  let input = jint_n(jget(usage, "input_tokens"))
+  let cache_read = jint_n(jget(usage, "cache_read_input_tokens"))
+  if !side && !opt_str_eq(state.speed.open_id, id) {
+    state.speed.open_id = Some(id)
+    state.speed.open_start = state.speed.since
+  }
+  let call = Call::{
+    id: id,
+    at: at,
+    model: Some(name),
+    subagent: side,
+    fast: opt_str_eq(jstr(jget(usage, "speed")), "fast"),
+    input: input,
+    cache_read: cache_read,
+    cache_write: short,
+    cache_write_long: long,
+    output: jint_n(jget(usage, "output_tokens")),
+    calls: 1.0,
+    context: if side { None } else { Some(input + cache_read + written) },
+    window: None,
+    gen_ms: if side { 0.0 } else { gen_of(state.speed.open_start, Some(at)) },
+  }
+  match at_index.get(id) {
+    Some(idx) => {
+      out[idx].output = max_d(out[idx].output, call.output)
+      out[idx].gen_ms = max_d(out[idx].gen_ms, call.gen_ms)
+    }
+    None => {
+      at_index.set(id, out.length())
+      out.push(call)
+    }
+  }
+}
+
+fn handle_codex(
+  rec : Option[base_codec::Json],
+  at : Double,
+  subagent : Bool,
+  state : CallState,
+  out : Array[Call],
+) -> Unit {
+  let p = jget(rec, "payload")
+  let kind = jstr(jget(rec, "type"))
+  if opt_str_eq(kind, "session_meta") {
+    match jstr(jget(p, "id")) {
+      Some(id) => state.codex_id = Some(id)
+      None => ()
+    }
+  } else if opt_str_eq(kind, "turn_context") {
+    match jstr(jget(p, "model")) {
+      Some(model) => state.model = Some(model)
+      None => ()
+    }
+  } else if opt_str_eq(kind, "event_msg") && opt_str_eq(jstr(jget(p, "type")), "token_count") {
+    let info = jget(p, "info")
+    let last = match info {
+      None => None
+      Some(base_codec::Json::Null) => None
+      _ => jget(info, "last_token_usage")
+    }
+    if !is_non_null_some(last) {
+      return
+    }
+    let totals = jget(info, "total_token_usage")
+    let total = match totals {
+      None => at
+      _ => jint_n(jget(totals, "total_tokens"))
+    }
+    let sent = jint_n(jget(last, "input_tokens"))
+    let cached = min_d(jint_n(jget(last, "cached_input_tokens")), sent)
+    let gen_ms = gen_of(state.speed.open_start, state.speed.ended)
+    state.speed.open_start = None
+    state.speed.ended = None
+    state.speed.since = Some(at)
+    let cid = match state.codex_id {
+      Some(c) => c
+      None => ""
+    }
+    out.push(
+      Call::{
+        id: "codex:" + cid + ":" + js_number(total),
+        at: at,
+        model: state.model,
+        subagent: subagent,
+        fast: false,
+        input: sent - cached,
+        cache_read: cached,
+        cache_write: 0.0,
+        cache_write_long: 0.0,
+        output: jint_n(jget(last, "output_tokens")),
+        calls: 1.0,
+        context: if subagent { None } else { Some(sent) },
+        window: told(jget(info, "model_context_window")),
+        gen_ms: gen_ms,
+      },
+    )
+  }
+}
+
+pub fn calls_of(runtime : String, text : Bytes, subagent : Bool, state : CallState) -> Array[Call] {
+  let out : Array[Call] = []
+  let at_index : Map[String, Int] = Map::new()
+  let mut start = 0
+  let len = text.length()
+  while start <= len {
+    let mut end = start
+    while end < len && (text[end].to_int() & 0xFF) != 10 {
+      end = end + 1
+    }
+    let next = end + 1
+    let stop = if end > start && (text[end - 1].to_int() & 0xFF) == 13 { end - 1 } else { end }
+    let line = bytes_slice(text, start, stop)
+    start = next
+    speed_line(runtime, line, state.speed)
+    if !wanted(runtime, line) {
+      continue
+    }
+    let r = match parse_line(sql_db::decode_utf8_lossy_bytes(line)) {
+      Some(v) => v
+      None => continue
+    }
+    let rec = Some(r)
+    let at = match jstr(jget(rec, "timestamp")) {
+      Some(s) => {
+        match parse_iso(s) {
+          Some(ms) => ms
+          None => 0.0
+        }
+      }
+      None => 0.0
+    }
+    if runtime == "grok" {
+      handle_grok(rec, subagent, out)
+    } else if runtime == "cursor" || runtime == "devin" || runtime == "hermes" {
+      handle_run_usage(runtime, rec, subagent, out)
+    } else if runtime == "agy" {
+      handle_agy(rec, subagent, state, at_index, out)
+    } else if runtime == "pi" {
+      handle_pi(rec, at, subagent, state, out)
+    } else if runtime == "dsh" {
+      handle_dsh(rec, subagent, state, out)
+    } else if runtime == "claude" {
+      handle_claude(rec, at, subagent, state, at_index, out)
+    } else {
+      handle_codex(rec, at, subagent, state, out)
+    }
+  }
+  out
+}

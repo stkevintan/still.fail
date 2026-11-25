@@ -176,3 +176,113 @@ int sfc_denied(moonbit_bytes_t path, int dir) {
   return errno == EACCES || errno == EPERM ? 1 : 0;
 #endif
 }
+
+/// Whether `path` is confirmed absent (ENOENT / ENOTDIR on POSIX; FILE_NOT_FOUND / PATH_NOT_FOUND / INVALID_NAME on
+/// Windows) rather than unreadable (EACCES / EIO / other). `follow`: stat vs lstat.
+int sfc_missing(moonbit_bytes_t path, int follow) {
+#ifdef _WIN32
+  wchar_t *w = wide((const char *)path);
+  if (w == NULL) return 0;
+  DWORD attr = GetFileAttributesW(w);
+  if (attr == INVALID_FILE_ATTRIBUTES) {
+    DWORD e = GetLastError();
+    free(w);
+    return (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND || e == ERROR_INVALID_NAME) ? 1 : 0;
+  }
+  if (follow && (attr & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    DWORD e = h == INVALID_HANDLE_VALUE ? GetLastError() : 0;
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    free(w);
+    if (h != INVALID_HANDLE_VALUE) return 0;
+    return (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND || e == ERROR_INVALID_NAME) ? 1 : 0;
+  }
+  free(w);
+  return 0;
+#else
+  struct stat st;
+  int rc = follow ? stat((const char *)path, &st) : lstat((const char *)path, &st);
+  if (rc == 0) return 0;
+  return (errno == ENOENT || errno == ENOTDIR) ? 1 : 0;
+#endif
+}
+
+/// Whether directory `path` is confirmed absent or not a directory (ENOENT / ENOTDIR) when opened for listing, rather
+/// than unreadable (EACCES / EIO / other).
+int sfc_dir_missing(moonbit_bytes_t path) {
+#ifdef _WIN32
+  wchar_t *w = wide((const char *)path);
+  if (w == NULL) return 0;
+  DWORD attr = GetFileAttributesW(w);
+  free(w);
+  if (attr != INVALID_FILE_ATTRIBUTES) return (attr & FILE_ATTRIBUTE_DIRECTORY) ? 0 : 1;
+  DWORD e = GetLastError();
+  return (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND || e == ERROR_INVALID_NAME) ? 1 : 0;
+#else
+  DIR *d = opendir((const char *)path);
+  if (d != NULL) {
+    closedir(d);
+    return 0;
+  }
+  return (errno == ENOENT || errno == ENOTDIR) ? 1 : 0;
+#endif
+}
+
+/// Lightweight check whether directory `path` can be opened for listing (without reading/sorting entries):
+/// returns 1 if readable OR confirmed missing/not-a-dir (ENOENT / ENOTDIR), 0 if unreadable (EACCES / EIO / other).
+int sfc_dir_readable(moonbit_bytes_t path) {
+#ifdef _WIN32
+  wchar_t *w = wide((const char *)path);
+  if (w == NULL) return 0;
+  HANDLE h = CreateFileW(w, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  DWORD e = h == INVALID_HANDLE_VALUE ? GetLastError() : 0;
+  if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+  free(w);
+  if (h != INVALID_HANDLE_VALUE) return 1;
+  return (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND || e == ERROR_INVALID_NAME || e == ERROR_DIRECTORY) ? 1 : 0;
+#else
+  DIR *d = opendir((const char *)path);
+  if (d != NULL) {
+    closedir(d);
+    return 1;
+  }
+  return (errno == ENOENT || errno == ENOTDIR) ? 1 : 0;
+#endif
+}
+
+/// Whether `path` is a regular file, links followed: what the shell's `fs.stat` says as "file" (Rust's
+/// `fs::metadata(path).is_file()`, Node's `statSync(path).isFile()`), asked without a message to the shell, for a
+/// replica's `sources` that asks it of every file a place lacks. 1 a file, 0 not one, -1 not known here: on Windows a
+/// path of MAX_PATH or more, which the shell asks in its verbatim form (`\\?\`) and this does not.
+int sfc_is_file(moonbit_bytes_t path) {
+#ifdef _WIN32
+  int n = MultiByteToWideChar(CP_UTF8, 0, (const char *)path, -1, NULL, 0);
+  if (n <= 0 || n >= MAX_PATH) return -1;
+  wchar_t *w = wide((const char *)path);
+  if (w == NULL) return -1;
+  DWORD attr = GetFileAttributesW(w);
+  if (attr == INVALID_FILE_ATTRIBUTES) {
+    DWORD e = GetLastError();
+    free(w);
+    return e == ERROR_FILENAME_EXCED_RANGE ? -1 : 0;
+  }
+  if ((attr & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+    free(w);
+    return (attr & FILE_ATTRIBUTE_DIRECTORY) == 0 ? 1 : 0;
+  }
+  HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                         FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  free(w);
+  if (h == INVALID_HANDLE_VALUE) return 0;
+  BY_HANDLE_FILE_INFORMATION info;
+  int ok = GetFileType(h) == FILE_TYPE_DISK && GetFileInformationByHandle(h, &info) &&
+           (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+  CloseHandle(h);
+  return ok ? 1 : 0;
+#else
+  struct stat st;
+  return (stat((const char *)path, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 0;
+#endif
+}

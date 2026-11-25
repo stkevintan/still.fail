@@ -1,0 +1,73 @@
+import "base_codec"
+import "builders_core"
+
+fn expect_loc(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+test "claude_project, runtime_kind, transcript_dir, Finder::use_hints/hints roundtrip" {
+  match claude_project("/Users/a/b_c") {
+    Some(p) => expect_loc(p == "-Users-a-b-c", "claude_project: " + p)
+    None => panic("expected Some")
+  }
+  // Non-BMP emoji counts as 2 UTF-16 code units -> "--"
+  match claude_project("a😀b") {
+    Some(p) => expect_loc(p == "a--b", "claude_project emoji: " + p)
+    None => panic("expected Some")
+  }
+  // 201 UTF-16 units -> None
+  let sb = StringBuilder::new()
+  for _ in 0..<201 {
+    sb.write_byte(97 as Byte)
+  }
+  match claude_project(sb.to_string()) {
+    None => ()
+    Some(_) => panic("201 units must return None")
+  }
+
+  expect_loc(runtime_kind("claude") && runtime_kind("codex") && runtime_kind("agy") && runtime_kind("pi"), "known runtimes")
+  expect_loc(!runtime_kind("unknown"), "unknown runtime")
+  expect_loc(transcript_dir("claude") == "projects" && transcript_dir("codex") == "sessions" && transcript_dir("dsh") == "dsh-sessions", "transcript_dir")
+
+  let client = builders_core::ShellClient::new()
+  let finder = Finder::new(client, "/")
+  expect_loc(finder.join(["/a/b", "c"]) == "/a/b/c", "Finder::join")
+
+  let hints = base_codec::json_obj([
+    (
+      "elsewhere",
+      base_codec::json_arr([
+        base_codec::json_arr([base_codec::json_str("k1"), base_codec::json_str("/p1")]),
+        base_codec::json_arr([base_codec::json_str("k2"), base_codec::json_null()]),
+      ]),
+    ),
+    (
+      "rollouts",
+      base_codec::json_arr([
+        base_codec::json_arr([base_codec::json_str("r1"), base_codec::json_str("/r1.jsonl")]),
+      ]),
+    ),
+    (
+      "said",
+      base_codec::json_arr([
+        base_codec::json_arr([
+          base_codec::json_str("id1"),
+          base_codec::json_arr([
+            base_codec::json_arr([
+              base_codec::json_str("/dir"),
+              base_codec::json_obj([
+                ("suffix", base_codec::json_str("rollout-id1.jsonl")),
+                ("seen", base_codec::json_bool(true)),
+              ]),
+            ]),
+          ]),
+        ]),
+      ]),
+    ),
+  ])
+  finder.use_hints(hints)
+  let out = finder.hints()
+  expect_loc(base_codec::json_eq(out, hints), "Finder hints roundtrip")
+}

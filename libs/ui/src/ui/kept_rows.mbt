@@ -86,7 +86,7 @@ fn clip_into(k : Int, c : FixedArray[Double]) -> Unit {
   let beyond = clip_has_outer(k)
   let apart = beyond && clip_is_apart(k)
   let own = if c[16] > 0.0 || c[17] > 0.0 || c[18] > 0.0 || c[19] > 0.0 {
-    clip_cut_depth(c, 12, x0, y0, x1, y1, r, sm)
+    clip_cut_depth_fixed(c, 12, x0, y0, x1, y1, r, sm)
   } else {
     -1.0e9
   }

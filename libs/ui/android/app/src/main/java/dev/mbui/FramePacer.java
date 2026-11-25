@@ -1,6 +1,7 @@
 package dev.mbui;
 
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Which vsync the app's next frame is drawn for, and what rate the surface says of the display (MBView's, kept apart
@@ -36,6 +37,16 @@ final class FramePacer {
 
         /** Whether the app's field is being typed into (the focus, or the soft keyboard up over it). */
         boolean typing();
+
+        /** Whether GL adaptive glass is currently settling and needs high refresh. */
+        default boolean glSettling() {
+            return false;
+        }
+
+        /** Whether a native view's picture recently redrew and needs high refresh. */
+        default boolean pictureActive() {
+            return false;
+        }
     }
 
     private final Platform p;
@@ -68,6 +79,188 @@ final class FramePacer {
     private final AtomicBoolean ahead = new AtomicBoolean();
     /** A frame asked of the app (wantFrame), or only for a view's picture (pictureFrame), since the last was drawn. */
     final AtomicBoolean appWanted = new AtomicBoolean(), picturesOnly = new AtomicBoolean();
+    /** Non-paced external demand (wantFrame/frameNow), distinguished from paced timer wakeups (wantPacedFrame). */
+    final AtomicBoolean externalWanted = new AtomicBoolean();
+    /** External demand arriving for an already-dispatched vsync, consumed at that frame's ended(). */
+    private final AtomicLong externalForVsync = new AtomicLong(0L);
+
+    /** Timed wake request: merges same-deadline requests in place under wakeLock while preserving external demand. */
+    static final class WakeReq {
+        final long gen;
+        final double at;
+        volatile boolean pacedOnly;
+
+        WakeReq(long gen, double at, boolean pacedOnly) {
+            this.gen = gen;
+            this.at = at;
+            this.pacedOnly = pacedOnly;
+        }
+
+        boolean isPacedOnly() {
+            return pacedOnly;
+        }
+    }
+
+    private final Object wakeLock = new Object();
+    private long wakeGen;
+    private WakeReq wakeReq;
+
+    /** Schedules or upgrades a timed wake; returns the new request to post, or null if an earlier/same-deadline one stands. */
+    WakeReq scheduleWake(double at, boolean pacedOnly) {
+        synchronized (wakeLock) {
+            if (wakeReq != null) {
+                if (wakeReq.at < at) return null;
+                if (wakeReq.at == at) {
+                    if (!pacedOnly) wakeReq.pacedOnly = false;
+                    return null;
+                }
+            }
+            WakeReq next = new WakeReq(++wakeGen, at, pacedOnly);
+            wakeReq = next;
+            return next;
+        }
+    }
+
+    /** Clears any pending timed wake (called as a new app frame begins). */
+    void clearWake() {
+        synchronized (wakeLock) {
+            wakeReq = null;
+        }
+    }
+
+    /** Whether {@code req} is still the active scheduled wake. */
+    boolean isWakeCurrent(WakeReq req) {
+        synchronized (wakeLock) {
+            return req != null && wakeReq == req;
+        }
+    }
+
+    /** Atomic snapshot of frame demand and vsync timeline taken by the drawing thread. */
+    static final class Taken {
+        final boolean app, pictured, external, picturedPaced;
+        final long[] vsyncAt;
+
+        Taken(boolean app, boolean pictured, boolean external, boolean picturedPaced, long[] vsyncAt) {
+            this.app = app;
+            this.pictured = pictured;
+            this.external = external;
+            this.picturedPaced = picturedPaced;
+            this.vsyncAt = vsyncAt;
+        }
+    }
+
+    private final Object dispatchLock = new Object();
+    /** Whether the current vsyncAt has been dispatched for an app frame (prevents stealing T+1's appWanted early). */
+    private boolean appDispatched;
+    /** Whether a pending picture-only redraw originated while a low-rate paced vote was active (guarded by dispatchLock). */
+    private boolean picturedFromPaced;
+
+    /** Atomically consumes pending frame flags, reads vsyncAt, and claims vsyncAt[0] when building an app frame. */
+    Taken takeRender() {
+        synchronized (dispatchLock) {
+            boolean app = appDispatched && appWanted.getAndSet(false);
+            if (app) {
+                appDispatched = false;
+                ahead.set(false);
+            }
+            boolean pictured = picturesOnly.getAndSet(false);
+            boolean picturedPaced = pictured && picturedFromPaced;
+            if (pictured) picturedFromPaced = false;
+            boolean external = app && externalWanted.getAndSet(false);
+            long[] at = vsyncAt;
+            if (app && at[0] != 0) lastAppDispatchedVsyncNs.set(at[0]);
+            return new Taken(app, pictured, external, picturedPaced, at);
+        }
+    }
+
+    /** Marks an immediate app frame without waiting for the next vsync (e.g. mid-frame imeBottom change). */
+    void wantImmediateFrame() {
+        synchronized (dispatchLock) {
+            appWanted.set(true);
+            appDispatched = true;
+        }
+    }
+
+    /** Delivers a due timed wake directly on the current Choreographer vsync (main thread). */
+    void wakeFrameNow(long vsyncNs, long shows, boolean pacedOnly) {
+        boolean needFlushPost = false;
+        boolean shouldRender = false;
+        synchronized (dispatchLock) {
+            if (vsyncNs != 0 && lastAppDispatchedVsyncNs.get() == vsyncNs) {
+                if (!pacedOnly) externalForVsync.set(vsyncNs);
+            } else if (imeMoving) {
+                deferredWakeApp = true;
+                if (!pacedOnly) deferredWakeExternal = true;
+                ahead.set(false);
+                if (!deferredVsync) {
+                    deferredVsyncT = vsyncNs;
+                    deferredVsyncShows = shows;
+                    deferredVsync = true;
+                    deferredFromVsync = false;
+                    needFlushPost = true;
+                } else if (deferredVsyncShows == 0 && shows != 0) {
+                    deferredVsyncShows = shows;
+                }
+            } else {
+                if (!pacedOnly) externalWanted.set(true);
+                appWanted.set(true);
+                appDispatched = true;
+                ahead.set(false);
+                if (vsyncNs != 0) lastAppDispatchedVsyncNs.set(vsyncNs);
+                lastFrameNowAt = vsyncNs;
+                if (deferredVsync) {
+                    boolean fromVsync = deferredFromVsync;
+                    deferredVsync = false;
+                    deferredFromVsync = false;
+                    deferredWakeApp = false;
+                    deferredWakeExternal = false;
+                    vsyncAt = new long[] {deferredVsyncT, deferredVsyncShows};
+                    if (fromVsync) clearWantedForLocked(deferredVsyncT);
+                } else {
+                    long s = shows != 0 ? shows : (vsyncAt[0] == vsyncNs ? vsyncAt[1] : 0);
+                    vsyncAt = new long[] {vsyncNs, s};
+                }
+                shouldRender = true;
+            }
+        }
+        if (needFlushPost) p.postMain(this::flushDeferredVsync);
+        else if (shouldRender) p.requestRender();
+    }
+
+    /** Convenience overload with shows = 0 (API < 33). */
+    int fireWake(WakeReq req, long vsyncNs) {
+        return fireWake(req, vsyncNs, 0);
+    }
+
+    /**
+     * Evaluates a scheduled wake at Choreographer {@code doFrame(vsyncNs)} / {@code onVsync(vsyncNs, shows)} (main thread):
+     * 0 = stale/replaced, 1 = not yet due (re-post next vsync), 2 = delivered on this vsync, 3 = requested for next vsync.
+     */
+    int fireWake(WakeReq req, long vsyncNs, long shows) {
+        int action;
+        boolean pacedOnly;
+        synchronized (wakeLock) {
+            if (req == null || wakeReq != req) return 0;
+            if (vsyncNs / 1e6 >= req.at - 0.5) {
+                wakeReq = null;
+                pacedOnly = req.pacedOnly;
+                action = 2;
+            } else if ((vsyncNs + framePeriod) / 1e6 >= req.at - 0.5) {
+                wakeReq = null;
+                pacedOnly = req.pacedOnly;
+                action = 3;
+            } else {
+                return 1;
+            }
+        }
+        if (action == 2) {
+            wakeFrameNow(vsyncNs, shows, pacedOnly);
+        } else {
+            if (pacedOnly) wantPacedFrame();
+            else wantFrame();
+        }
+        return action;
+    }
 
     private double lastFrame;
     // the frame before's vsync (0: none, or it had none), and whether it asked for this one (askAhead: the vsync after
@@ -77,14 +270,50 @@ final class FramePacer {
     // main-thread state for coalescing CALLBACK_ANIMATION (vsyncCame) with CALLBACK_INSETS_ANIMATION (frameNow)
     private boolean imeMoving;
     private boolean deferredVsync;
+    private boolean deferredFromVsync;
+    private boolean deferredWakeApp;
+    private boolean deferredWakeExternal;
     private long deferredVsyncT, deferredVsyncShows;
     private long lastFrameNowAt;
+    private long wantedAfterVsyncNs;
+    private final AtomicLong lastAppDispatchedVsyncNs = new AtomicLong(0L);
+
+    private boolean nonPacedActive() {
+        return p.glSettling() || p.pictureActive();
+    }
+
+    private boolean claimPostVsyncLocked() {
+        if (!wanted.compareAndSet(false, true)) return false;
+        wantedAfterVsyncNs = lastAppDispatchedVsyncNs.get();
+        return true;
+    }
+
+    private void postVsyncOutOfLock() {
+        if (p.onMain()) p.postVsync();
+        else p.postMain(p::postVsync);
+    }
+
+    private void clearWantedForLocked(long t) {
+        if (!(wanted.get() && t != 0 && wantedAfterVsyncNs >= t)) {
+            wanted.set(false);
+        }
+    }
+
+    /** Handles a duplicate vsync callback for an already-dispatched vsync t (inside dispatchLock). Returns 2 to postVsync. */
+    private int handleDuplicateVsyncLocked(long t) {
+        clearWantedForLocked(t);
+        if (appWanted.get() && !appDispatched) {
+            return claimPostVsyncLocked() ? 2 : 0;
+        }
+        return 0;
+    }
 
     private void armImeVsync() {
-        if (imeMoving && wanted.compareAndSet(false, true)) {
-            if (p.onMain()) p.postVsync();
-            else p.postMain(p::postVsync);
+        boolean postNext = false;
+        synchronized (dispatchLock) {
+            if (imeMoving) postNext = claimPostVsyncLocked();
         }
+        if (postNext) postVsyncOutOfLock();
     }
 
     /** Whether the soft keyboard's inset animation is under way (main thread). */
@@ -99,23 +328,71 @@ final class FramePacer {
         return vsyncAt;
     }
 
-    private void dispatchVsync(long t, long shows) {
+    /** Returns 0 = no-op, 1 = requestRender, 2 = postVsync for T+1. */
+    private int dispatchVsyncLocked(long t, long shows, boolean fromVsync) {
         vsyncAt = new long[] {t, shows};
-        if (appWanted.get() || picturesOnly.get()) {
-            wanted.set(false);
-            p.requestRender();
-            return;
+        boolean app = appWanted.get();
+        if (t != 0 && lastAppDispatchedVsyncNs.get() == t) {
+            if (fromVsync) {
+                int dup = handleDuplicateVsyncLocked(t);
+                if (dup != 0) return dup;
+            }
+            return (!app && picturesOnly.get()) ? 1 : 0;
+        }
+        if (app || picturesOnly.get()) {
+            ahead.set(false);
+            if (fromVsync) clearWantedForLocked(t);
+            if (app) {
+                if (t != 0) lastAppDispatchedVsyncNs.set(t);
+                appDispatched = true;
+            }
+            return 1;
         }
         ahead.set(true);
-        wanted.set(false);
+        if (fromVsync) clearWantedForLocked(t);
         // (a frame wanted as this was kept: the one asking saw it not yet kept, and asked for another vsync, or none)
-        if ((appWanted.get() || picturesOnly.get()) && ahead.getAndSet(false)) p.requestRender();
+        boolean app2 = appWanted.get();
+        if ((app2 || picturesOnly.get()) && ahead.getAndSet(false)) {
+            if (app2) {
+                if (t != 0) lastAppDispatchedVsyncNs.set(t);
+                appDispatched = true;
+            }
+            return 1;
+        }
+        return 0;
+    }
+
+    private void finishDispatch(int act) {
+        if (act == 1) p.requestRender();
+        else if (act == 2) postVsyncOutOfLock();
+    }
+
+    private void dispatchVsync(long t, long shows) {
+        int act;
+        synchronized (dispatchLock) {
+            act = dispatchVsyncLocked(t, shows, true);
+        }
+        finishDispatch(act);
     }
 
     private void flushDeferredVsync() {
-        if (!deferredVsync) return;
-        deferredVsync = false;
-        dispatchVsync(deferredVsyncT, deferredVsyncShows);
+        int act;
+        synchronized (dispatchLock) {
+            if (!deferredVsync) return;
+            boolean fromVsync = deferredFromVsync;
+            deferredVsync = false;
+            deferredFromVsync = false;
+            long t = deferredVsyncT, shows = deferredVsyncShows;
+            vsyncAt = new long[] {t, shows};
+            if (deferredWakeApp) {
+                if (deferredWakeExternal) externalWanted.set(true);
+                appWanted.set(true);
+                deferredWakeApp = false;
+                deferredWakeExternal = false;
+            }
+            act = dispatchVsyncLocked(t, shows, fromVsync);
+        }
+        finishDispatch(act);
     }
 
     /**
@@ -124,18 +401,26 @@ final class FramePacer {
      * ends (ask), should it want one.
      */
     void vsyncCame(long t, long shows) {
-        if (lastFrameNowAt != 0 && t <= lastFrameNowAt && lastFrameNowAt - t < framePeriod / 2) {
-            wanted.set(false);
-            return;
+        boolean needFlushPost = false;
+        int act = 0;
+        synchronized (dispatchLock) {
+            if (shows != 0 && vsyncAt[0] == t && vsyncAt[1] == 0) {
+                vsyncAt = new long[] {t, shows};
+            }
+            if (lastFrameNowAt != 0 && t <= lastFrameNowAt && lastFrameNowAt - t < framePeriod / 2) {
+                act = handleDuplicateVsyncLocked(t);
+            } else if (imeMoving) {
+                deferredVsyncT = t;
+                deferredVsyncShows = shows;
+                deferredVsync = true;
+                deferredFromVsync = true;
+                needFlushPost = true;
+            } else {
+                act = dispatchVsyncLocked(t, shows, true);
+            }
         }
-        if (imeMoving) {
-            deferredVsyncT = t;
-            deferredVsyncShows = shows;
-            deferredVsync = true;
-            p.postMain(this::flushDeferredVsync);
-            return;
-        }
-        dispatchVsync(t, shows);
+        if (needFlushPost) p.postMain(this::flushDeferredVsync);
+        else finishDispatch(act);
     }
 
     /**
@@ -148,31 +433,62 @@ final class FramePacer {
      * costs nothing where the next is lighter.
      */
     private void askAhead() {
-        ahead.set(false);
-        if (wanted.compareAndSet(false, true)) p.postMain(p::postVsync);
+        boolean postNext;
+        synchronized (dispatchLock) {
+            ahead.set(false);
+            postNext = claimPostVsyncLocked();
+        }
+        if (postNext) p.postMain(p::postVsync);
     }
 
-    /** A frame wanted (appWanted or picturesOnly just set, from any thread): drawn for the vsync kept, or the next. */
-    private void ask() {
-        if (ahead.getAndSet(false) && p.nanoTime() - vsyncAt[0] < framePeriod) {
-            p.requestRender();
-            return;
+    /** A frame wanted (atomically sets flags under dispatchLock, from any thread): drawn for the vsync kept, or the next. */
+    private void ask(boolean forApp, boolean isExternal, boolean fromPaced) {
+        boolean renderNow = false;
+        boolean postNext = false;
+        synchronized (dispatchLock) {
+            if (forApp) {
+                if (isExternal) externalWanted.set(true);
+                appWanted.set(true);
+            } else {
+                picturesOnly.set(true);
+                if (fromPaced) picturedFromPaced = true;
+            }
+            boolean alreadyPendingForT = false;
+            if (ahead.getAndSet(false) && p.nanoTime() - vsyncAt[0] < framePeriod) {
+                long t = vsyncAt[0];
+                if (forApp && t != 0 && lastAppDispatchedVsyncNs.getAndSet(t) == t) {
+                    if (appDispatched) alreadyPendingForT = true;
+                } else {
+                    if (forApp) appDispatched = true;
+                    renderNow = true;
+                }
+            }
+            if (!alreadyPendingForT && !renderNow) {
+                postNext = claimPostVsyncLocked();
+            }
         }
-        if (!wanted.compareAndSet(false, true)) return;
-        if (p.onMain()) p.postVsync();
-        else p.postMain(p::postVsync);
+        if (renderNow) p.requestRender();
+        else if (postNext) postVsyncOutOfLock();
     }
 
     /** A frame at the next vsync (from any thread). */
     void wantFrame() {
-        appWanted.set(true);
-        ask();
+        ask(true, true, false);
+    }
+
+    /** A paced timer wakeup frame at the next vsync (from any thread): does not mark externalDemand. */
+    void wantPacedFrame() {
+        ask(true, false, false);
     }
 
     /** Only a native view's picture to show again (from any thread): the last frame drawn again at the next vsync. */
     void pictureFrame() {
-        picturesOnly.set(true);
-        ask();
+        pictureFrame(pacedActive);
+    }
+
+    /** Picture-only redraw with caller-captured paced state (sampled before lifting a low-rate vote). */
+    void pictureFrame(boolean fromPaced) {
+        ask(false, false, fromPaced);
     }
 
     /**
@@ -181,16 +497,26 @@ final class FramePacer {
      * as it is drawn.)
      */
     void frameNow() {
-        appWanted.set(true);
-        ahead.set(false);
-        long now = p.nanoTime();
-        lastFrameNowAt = now;
-        if (deferredVsync) {
-            deferredVsync = false;
-            vsyncAt = new long[] {deferredVsyncT, deferredVsyncShows};
-            wanted.set(false);
-        } else {
-            vsyncAt = new long[] {now, 0};
+        synchronized (dispatchLock) {
+            externalWanted.set(true);
+            appWanted.set(true);
+            appDispatched = true;
+            ahead.set(false);
+            long now = p.nanoTime();
+            lastFrameNowAt = now;
+            long dt = deferredVsync ? deferredVsyncT : now;
+            if (dt != 0) lastAppDispatchedVsyncNs.set(dt);
+            if (deferredVsync) {
+                boolean fromVsync = deferredFromVsync;
+                deferredVsync = false;
+                deferredFromVsync = false;
+                deferredWakeApp = false;
+                deferredWakeExternal = false;
+                vsyncAt = new long[] {deferredVsyncT, deferredVsyncShows};
+                if (fromVsync) clearWantedForLocked(deferredVsyncT);
+            } else {
+                vsyncAt = new long[] {now, 0};
+            }
         }
         p.requestRender();
         armImeVsync();
@@ -198,7 +524,7 @@ final class FramePacer {
 
     /** The last frame drawn again for a view's picture alone (drawing thread): it asked for none after it. */
     void redrawn() {
-        askedAtEnd = false;
+        if (!appWanted.get()) askedAtEnd = false;
     }
 
     /** A frame of the app's begun (drawing thread): the time it is built for, how late it is, whether it follows. */
@@ -209,18 +535,26 @@ final class FramePacer {
         final double now, late;
         /** drawn at the vsync after the frame before's: the hand moving what it holds, a frame each vsync */
         final boolean following;
+        /** whether an external (non-paced) frame request triggered this frame */
+        final boolean externalDemand;
 
-        Begun(long vsync, long shows, double now, double late, boolean following) {
+        Begun(long vsync, long shows, double now, double late, boolean following, boolean externalDemand) {
             this.vsync = vsync;
             this.shows = shows;
             this.now = now;
             this.late = late;
             this.following = following;
+            this.externalDemand = externalDemand;
         }
     }
 
     /** The app's frame beginning now (drawing thread), at {@code began} (the system's clock), for {@code at} (vsyncAt). */
     Begun begin(long[] at, long began) {
+        return begin(at, began, externalWanted.getAndSet(false));
+    }
+
+    /** The app's frame beginning now (drawing thread) with {@code externalDemand} atomically taken by {@link #takeRender()}. */
+    Begun begin(long[] at, long began, boolean externalDemand) {
         // (the frame before asked for this one: the one after it asked for now, before this one's work: askAhead)
         if (askedAtEnd) askAhead();
         // the vsync's time; a frame the system asked for (a resize) has none, and time never goes back
@@ -243,7 +577,7 @@ final class FramePacer {
         // drawn at the vsync after the frame before's: the hand moving what it holds, a frame each vsync
         boolean following = v > lastVsync && lastVsync != 0 && v - lastVsync < framePeriod * 3 / 2;
         lastVsync = v;
-        return new Begun(v, at[1], now, late, following);
+        return new Begun(v, at[1], now, late, following, externalDemand);
     }
 
     /**
@@ -254,21 +588,204 @@ final class FramePacer {
      * refresh as slowly; anything else moving, at the display's highest.
      */
     void ended(boolean more, boolean later, boolean following, float paced) {
+        ended(more, later, following, paced, false);
+    }
+
+    void ended(boolean more, boolean later, boolean following, float paced, boolean externalDemand) {
+        applyRate(more, later, following, paced, externalDemand);
+        scheduleNext(more || later);
+    }
+
+    /** Applies the frame's display-rate vote and returns whether a low-rate paced vote is active. */
+    boolean applyRate(boolean more, boolean later, boolean following, float paced, boolean externalDemand) {
+        boolean ext = externalDemand || (lastVsync != 0 && externalForVsync.compareAndSet(lastVsync, 0L));
         askedAtEnd = more || later;
         drawn++;
-        if (paced > 0 && !more && !later && !touching && !p.typing()) {
+        if (paced > 0 && !more && !later && !touching && !p.typing() && !ext
+                && !appWanted.get() && !nonPacedActive()) {
             moved = drawn;
-            sayRate(paced);
-        } else if (more || later || following) {
-            moved = drawn;
-            sayRate(true);
-        } else if (p.typing()) {
-            // (typing: what it draws comes as keys are struck, its fingers on the keyboard's window, not on this surface
-            // and nothing of the app's own moving; each key's frame at the display's highest, 2026-11-05)
-            sayRate(true);
-        } else if (rateSaid != 0) stillAfter(moved);
-        if (more || later) wantFrame();
+            if (sayRate(paced)) {
+                pacedSaid = true;
+                pacedActive = true;
+                // Dekker barrier recheck: if GL thread set nonPacedActive just as pacedActive became true, lift now.
+                if (nonPacedActive()) recheckRate();
+            }
+        } else {
+            boolean wasPaced = pacedSaid;
+            if (wasPaced && paced == 0 && !more && !later && !touching && !p.typing()
+                    && !ext && !nonPacedActive() && !appWanted.get()) {
+                // Pure paced animation ended naturally (even with following==true on 50ms LTPO): drop directly to 0.
+                if (!sayRate(false)) retryRelease(drawn, surfaceGen, 0);
+            } else if (more || later || following || p.typing() || touching) {
+                if (topRate > 0) {
+                    if (sayRate(true)) {
+                        moved = drawn;
+                        if (!more && !later && !p.typing() && !touching && rateSaid != 0) stillAfter(moved);
+                    }
+                } else if (wasPaced) {
+                    if (!sayRate(false)) retryRelease(drawn, surfaceGen, 0);
+                }
+            } else if (wasPaced || paced > 0) {
+                if (topRate > 0) {
+                    if (sayRate(true)) {
+                        moved = drawn;
+                        if (rateSaid != 0) stillAfter(moved);
+                    }
+                } else {
+                    if (!sayRate(false)) retryRelease(drawn, surfaceGen, 0);
+                }
+            } else if (rateSaid != 0) {
+                stillAfter(moved);
+            }
+        }
+        return pacedActive;
+    }
+
+    /** Schedules the next frame (or clears ahead) after handing over the current frame. */
+    void scheduleNext(boolean wantMore) {
+        if (wantMore) wantFrame();
         else ahead.set(false);
+    }
+
+    /** Valid thread CPU delta in ns, or -1 if either sample is unavailable or moved backwards. */
+    static long cpuDeltaNanos(long cpuStartNs, long cpuEndNs) {
+        return (cpuStartNs >= 0L && cpuEndNs >= cpuStartNs) ? (cpuEndNs - cpuStartNs) : -1L;
+    }
+
+    /**
+     * GL thread work duration (ns): non-paced swaps keep full wall time (including real GPU backpressure);
+     * paced swaps exclude intentional pacing sleep in eglSwapBuffers / lazy dequeueBuffer via thread CPU time,
+     * falling back to pre-swap wall time if CPU time is unavailable.
+     */
+    static long glWorkNanos(long drawStartNs, long drawEndNs, long swapDoneNs, long cpuDeltaNs, boolean pacedSwap) {
+        long wallNs = Math.max(0L, swapDoneNs - drawStartNs);
+        if (!pacedSwap) return wallNs;
+        if (cpuDeltaNs >= 0L) return Math.min(wallNs, cpuDeltaNs);
+        return Math.min(wallNs, Math.max(0L, drawEndNs - drawStartNs));
+    }
+
+    /** ADPF target work duration (70% of period), optionally clamped to the display's top refresh rate. */
+    static long adpfTargetNanos(long framePeriodNs, float topRate, boolean clampToTop) {
+        long period = framePeriodNs;
+        if (clampToTop && topRate > 0f) {
+            long topPeriod = (long) (1e9 / topRate);
+            if (topPeriod > 0L && (period <= 0L || topPeriod < period)) period = topPeriod;
+        }
+        return period > 0L ? period * 7L / 10L : 0L;
+    }
+
+    /**
+     * Whether {@code framePeriodNs} is still a stale low-rate paced timeline (20-30 Hz: 33-50 ms) rather than
+     * a normal or system-capped interactive rate (e.g. 60 Hz = 16.67 ms on a 120 Hz panel).
+     */
+    static boolean isStalePacedPeriod(long framePeriodNs, float topRate) {
+        if (topRate <= 0f || framePeriodNs <= 0L) return false;
+        long threshold = Math.max(20_000_000L, (long) (1.75e9 / topRate));
+        return framePeriodNs > threshold;
+    }
+
+    /** Minimal ADPF hint session interface (plain Java, no Android dependency). */
+    interface AdpfSession {
+        void updateTargetWorkDuration(long nanos);
+
+        void reportActualWorkDuration(long nanos);
+    }
+
+    /**
+     * Unified ADPF target/boost policy state (drawing thread), shared across touch boost, IME warmup,
+     * resume, session creation, and per-frame work reporting.
+     */
+    static final class AdpfState {
+        boolean boostActive;
+        long hintTarget;
+        long lastFrameWorkedNs;
+
+        void reset() {
+            boostActive = false;
+            hintTarget = 0L;
+        }
+
+        private void refreshBoost(long framePeriodNs, float topRate, boolean pacedActive, boolean touching, float rateSaid) {
+            if (!boostActive) return;
+            if (!isStalePacedPeriod(framePeriodNs, topRate)
+                    || (!touching && (pacedActive || rateSaid == 0f))) {
+                boostActive = false;
+            }
+        }
+
+        long targetNanos(long framePeriodNs, float topRate, boolean pacedActive, boolean touching, float rateSaid) {
+            refreshBoost(framePeriodNs, topRate, pacedActive, touching, rateSaid);
+            return adpfTargetNanos(framePeriodNs, topRate, boostActive);
+        }
+
+        boolean onSessionCreated(long target, AdpfSession session) {
+            hintTarget = target;
+            if (session != null && target > 0L) {
+                session.reportActualWorkDuration(target);
+                return true;
+            }
+            return false;
+        }
+
+        boolean beginTouchBoost(boolean fromPaced, long nowNs, long framePeriodNs, float topRate) {
+            if (fromPaced) {
+                if (isStalePacedPeriod(framePeriodNs, topRate)) {
+                    boostActive = true;
+                }
+                return true;
+            }
+            if (boostActive) return true;
+            return lastFrameWorkedNs == 0L || nowNs - lastFrameWorkedNs >= 250_000_000L;
+        }
+
+        void wake(long framePeriodNs, float topRate, boolean pacedActive, boolean touching, float rateSaid,
+                  boolean created, AdpfSession session) {
+            long target = targetNanos(framePeriodNs, topRate, pacedActive, touching, rateSaid);
+            if (session == null) return;
+            if (target > 0L && target != hintTarget) {
+                hintTarget = target;
+                session.updateTargetWorkDuration(target);
+            }
+            if (!created && hintTarget > 0L) {
+                session.reportActualWorkDuration(hintTarget);
+            }
+        }
+
+        void frameWorked(long nanos, long gl, long nowNs, long framePeriodNs, float topRate,
+                         boolean pacedActive, boolean touching, float rateSaid, AdpfSession session) {
+            lastFrameWorkedNs = nowNs;
+            long target = targetNanos(framePeriodNs, topRate, pacedActive, touching, rateSaid);
+            if (session == null) return;
+            if (target > 0L && target != hintTarget) {
+                hintTarget = target;
+                session.updateTargetWorkDuration(target);
+            }
+            long actual = Math.max(nanos, gl);
+            if (actual > 0L) session.reportActualWorkDuration(actual);
+        }
+    }
+
+    /** Dual GL timing reading: ADPF/work duration alongside raw wall time and measurement flags. */
+    static final class GlTiming {
+        final long workNs;
+        final long rawWallNs;
+        final boolean paced;
+        final boolean swapMeasured;
+
+        GlTiming(long workNs, long rawWallNs, boolean paced, boolean swapMeasured) {
+            this.workNs = workNs;
+            this.rawWallNs = rawWallNs;
+            this.paced = paced;
+            this.swapMeasured = swapMeasured;
+        }
+    }
+
+    /** Computes both GL work duration and raw wall duration from a single GL frame sample. */
+    static GlTiming measureGl(long d0, long drawEnd, long swapEnd, long cpuDeltaNs, boolean paced, boolean swapMeasured) {
+        long effectiveEnd = swapMeasured ? swapEnd : drawEnd;
+        long rawWallNs = Math.max(0L, effectiveEnd - d0);
+        long workNs = glWorkNanos(d0, drawEnd, effectiveEnd, cpuDeltaNs, paced);
+        return new GlTiming(workNs, rawWallNs, paced, swapMeasured);
     }
 
     // ---- the display's rate ----
@@ -289,6 +806,12 @@ final class FramePacer {
      */
     /** The rate this surface says of the display now (drawing thread; 0 none: a new surface says nothing). */
     private float rateSaid;
+    /** Whether the current rate vote is a low-rate paced vote (drawing thread). */
+    private boolean pacedSaid;
+    /** Read-only mirror of {@link #pacedSaid} for the GL thread to check without a data race. */
+    private volatile boolean pacedActive;
+    /** Surface generation counter: invalidates stale stillFor countdowns across surface recreation (drawing thread). */
+    private int surfaceGen;
     /** The app's frames drawn (drawing thread): one drawn since a frame that asked for none is told by it. */
     private int drawn;
     /** The last frame drawn that moved something (drawing thread): a motion, the hand moving what it holds. */
@@ -301,16 +824,61 @@ final class FramePacer {
         return rateSaid;
     }
 
+    /** Whether the surface is currently holding a low-rate paced vote (readable from any thread). */
+    boolean isPacedActive() {
+        return pacedActive;
+    }
+
     /** The surface says the display's highest rate, or nothing (drawing thread). */
-    void sayRate(boolean on) {
-        if (on && topRate <= 0) return;
-        sayRate(on ? topRate : 0);
+    boolean sayRate(boolean on) {
+        if (on && topRate <= 0) return false;
+        if (sayRate(on ? topRate : 0)) {
+            pacedSaid = false;
+            pacedActive = false;
+            return true;
+        }
+        return false;
     }
 
     /** The surface says the display's rate {@code rate} (drawing thread; 0 nothing). */
-    private void sayRate(float rate) {
-        if (rate == rateSaid) return;
-        if (p.setRate(rate)) rateSaid = rate;
+    private boolean sayRate(float rate) {
+        if (rate == rateSaid) return true;
+        if (p.setRate(rate)) {
+            rateSaid = rate;
+            return true;
+        }
+        return false;
+    }
+
+    /** Exits a low-rate paced vote immediately if non-paced work became active (drawing thread). */
+    void recheckRate() {
+        if (!pacedSaid || !nonPacedActive()) return;
+        if (topRate > 0) {
+            if (sayRate(true)) {
+                moved = ++drawn;
+                if (rateSaid != 0) stillAfter(moved);
+            }
+        } else {
+            if (!sayRate(false)) retryRelease(drawn, surfaceGen, 0);
+        }
+    }
+
+    /** Bounded retry when releasing a paced vote via setRate(0) fails transiently (drawing thread). */
+    private void retryRelease(int at, int gen, int attempts) {
+        if (attempts >= 3) return;
+        p.atNextVsyncOnDrawing(() -> {
+            if (gen != surfaceGen || drawn != at || appWanted.get() || touching || p.typing() || rateSaid == 0) return;
+            if (!sayRate(false)) retryRelease(at, gen, attempts + 1);
+        });
+    }
+
+    /** Resets surface-bound rate state when the Surface is destroyed (drawing thread). */
+    void surfaceReset() {
+        surfaceGen++;
+        rateSaid = 0;
+        pacedSaid = false;
+        pacedActive = false;
+        stillFrom = -1;
     }
 
     /**
@@ -324,21 +892,32 @@ final class FramePacer {
     private void stillAfter(int at) {
         if (stillFrom == at) return;
         stillFrom = at;
-        stillFor(at, Math.max(1, Math.round(topRate)));
+        stillFor(at, surfaceGen, Math.max(1, Math.round(topRate)), 0);
     }
 
-    private void stillFor(int at, int left) {
+    private void stillFor(int at, int gen, int left, int failRetries) {
         p.atNextVsyncOnDrawing(() -> {
+            if (gen != surfaceGen) return;
             if (moved != at || appWanted.get() || touching || p.typing() || rateSaid == 0) {
                 if (stillFrom == at) stillFrom = -1;
                 return;
             }
-            if (left > 1) {
-                stillFor(at, left - 1);
+            if (p.glSettling()) {
+                stillFor(at, gen, Math.max(1, Math.round(topRate)), 0);
                 return;
             }
-            stillFrom = -1;
-            sayRate(false);
+            if (left > 1) {
+                stillFor(at, gen, left - 1, 0);
+                return;
+            }
+            if (sayRate(false)) {
+                stillFrom = -1;
+            } else if (failRetries < 3) {
+                stillFrom = at;
+                stillFor(at, gen, 1, failRetries + 1);
+            } else if (stillFrom == at) {
+                stillFrom = -1;
+            }
         });
     }
 

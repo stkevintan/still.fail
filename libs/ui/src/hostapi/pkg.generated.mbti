@@ -3,7 +3,6 @@ package "ui/hostapi"
 
 import {
   "moonbitlang/core/debug",
-  "moonbitlang/core/ref",
 }
 
 // Values
@@ -53,6 +52,8 @@ pub fn bench_mode() -> Int32
 
 pub fn browser_login(path? : String, done? : String) -> BrowserLogin?
 
+pub fn call_polled() -> Unit
+
 pub let clip_file_max : Int32
 
 pub let clip_none : Int32
@@ -78,6 +79,8 @@ pub let clip_unreadable : Int32
 pub fn clipboard_secret_off() -> Unit
 
 pub fn clipboard_set(String) -> Unit
+
+pub fn clipboard_set_html(String, String) -> Unit
 
 pub fn clipboard_set_image(Bytes) -> Unit
 
@@ -129,11 +132,23 @@ pub fn face_clear(Int32) -> Unit
 
 pub let face_code : Int32
 
+pub let face_code_cjk : Int32
+
 pub fn face_of_style(Int32) -> Int32
+
+pub fn face_set_ligatures(Int32, Bool) -> Unit
+
+pub let face_sys_default : Int32
 
 pub let face_text : Int32
 
+pub let face_text_cjk : Int32
+
+pub let face_try : Int32
+
 pub let face_ui : Int32
+
+pub let face_ui_cjk : Int32
 
 pub let faces_most : Int32
 
@@ -209,11 +224,15 @@ pub let haptic_reject : Int32
 
 pub let haptic_text_handle_move : Int32
 
+pub fn has_async_local_font_info() -> Bool
+
+pub fn has_local_fonts() -> Bool
+
 pub fn hex_of_b64url(String) -> String
 
 pub fn hold_words(channel~ : String, title~ : String, body~ : String) -> Unit
 
-pub fn host() -> &Host
+pub fn host() -> Host
 
 pub fn hotkey_clear(String) -> Unit
 
@@ -273,6 +292,8 @@ pub fn lines_on_pixels() -> Bool
 
 pub fn local_font_families() -> String
 
+pub fn local_font_info() -> String
+
 pub fn log(String) -> Unit
 
 pub fn login_fields(String) -> (String, String)
@@ -331,10 +352,6 @@ pub fn open_tab(String) -> Bool
 
 pub fn open_url(String) -> Bool
 
-pub let outside_lets_go : @ref.Ref[(Int32, Int32) -> Unit]
-
-pub let outside_waits : @ref.Ref[(Int32, Int32, () -> Bool) -> Unit]
-
 pub fn over_done(open_app~ : Bool) -> Unit
 
 pub fn own_clock() -> Bool
@@ -382,8 +399,6 @@ pub fn pointer_delta_take() -> (Double, Double)
 pub fn pointer_locked() -> Bool
 
 pub fn pointing() -> Int32
-
-pub let polled : @ref.Ref[() -> Unit]
 
 pub fn post_next() -> (String, String, Bytes)?
 
@@ -441,15 +456,23 @@ pub fn set_full_screen(Bool) -> Unit
 
 pub fn set_glass_light_angle(Double) -> Unit
 
-pub fn set_host(&Host) -> Unit
+pub fn set_host(Host) -> Unit
+
+pub fn set_host_autospace(Bool) -> Unit
 
 pub fn set_ime(Bool, Double, Double, Double, Double, String, Int32, Int32) -> Unit
 
 pub fn set_outside(FuncRef[(Int32, Int32, Int32) -> Unit]) -> Bool
 
+pub fn set_outside_lets_go((Int32, Int32) -> Unit) -> Unit
+
+pub fn set_outside_waits((Int32, Int32, () -> Bool) -> Unit) -> Unit
+
 pub fn set_perf(Bool) -> Unit
 
 pub fn set_pointer_lock(Bool) -> Unit
+
+pub fn set_polled(() -> Unit) -> Unit
 
 pub fn set_sideways(Bool) -> Unit
 
@@ -522,6 +545,8 @@ pub fn stream_show(Int32, Double) -> Unit
 pub let stream_tex_base : Int32
 
 pub fn style_face(Int32) -> Int32
+
+pub let style_face_bits : Int32
 
 pub let style_italic : Int32
 
@@ -689,6 +714,8 @@ pub let words_spaced_here : Int32
 
 pub let words_spaced_none : Int32
 
+pub fn words_spaced_of(Host) -> Int32
+
 pub fn work_began() -> Double
 
 pub fn work_noted_by((() -> Double, (String, Double) -> Unit)?) -> Unit
@@ -776,6 +803,311 @@ pub(all) enum Hinge {
   Open
 }
 pub impl Show for Hinge
+
+pub(all) struct Host {
+  mut set_window_zoom : (Double) -> Unit
+  mut set_window_key : (FuncRef[(Int32, Int32) -> Int32]) -> Unit
+  mut wheel_kept : (Bool) -> Unit
+  mut window_setup : (Double, Double, Double, Double, Bool) -> Unit
+  mut window_inset : () -> Bool
+  mut window_buttons_down : (Double, Double) -> Unit
+  mut window_hold : () -> Unit
+  mut window_show : () -> Unit
+  mut full_screen : () -> Bool
+  mut set_full_screen : (Bool) -> Unit
+  mut window_corner : () -> Double
+  mut window_corner_at : ((Int32) -> Double)?
+  mut window_drag : () -> Unit
+  mut window_act : (Int32) -> Unit
+  mut window_zoomed : () -> Bool
+  mut window_snap : (Double, Double, Double, Double) -> Unit
+  mut window_snap_state : () -> Int32
+  mut window_opens : () -> Bool
+  mut window_open : (String) -> Bool
+  mut window_front : (String) -> Bool
+  mut windows_in_process : () -> Bool
+  mut window_open_id : (String) -> Int32
+  mut window_front_id : (Int32) -> Bool
+  mut window_close_id : (Int32) -> Unit
+  mut window_current : () -> Int32
+  mut set_cursor : (Int32) -> Unit
+  mut set_badge : (Int32) -> Unit
+  mut menu_setup : (String) -> Unit
+  mut app_said : (String) -> String
+  mut app_tell : (String, String) -> Unit
+  mut set_site_name : (String) -> Unit
+  mut mods_held : () -> Int32
+  mut run : (String, FuncRef[(Double, Double, Double, Double) -> Unit], FuncRef[(Int32, Double, Double, Int32) -> Unit], FuncRef[(Double, Double, Double, Double, Int32) -> Unit], FuncRef[(Int32, Int32) -> Unit], FuncRef[(Int32, String, Int32, Int32) -> Unit]) -> Unit
+  mut now : () -> Double
+  mut wall_ms : () -> Double
+  mut clock_at_wall : ((Double) -> Double)?
+  mut utc_offset_min : (Double) -> Int32
+  mut event_time : () -> Double
+  mut event_finger : () -> Int32
+  mut frame_late : () -> Double
+  mut platform : () -> Int32
+  mut request_frame : () -> Unit
+  mut request_frame_on : (() -> Unit)?
+  mut frames_paced : ((Double) -> Unit)?
+  mut wake_after : (Double) -> Unit
+  mut font_metrics : (Double, Int32, Int32, FixedArray[Double]) -> Unit
+  mut shape : (String, Double, Int32, Int32, FixedArray[Double]) -> Int32
+  mut text_key : (String, Double, Int32, Int32) -> Int32
+  mut glyph : (Int32, FixedArray[Double]) -> Unit
+  mut glyph_put : (Int32, Int32, Int32) -> Unit
+  mut atlas_size : (Bool) -> Int32
+  mut glyphs_ahead : (FixedArray[Int32], Int32) -> Unit
+  mut glyph_picture : (Int32, FixedArray[Byte]) -> Bool
+  mut atlas_put : (Int32, Int32, Int32, Int32, FixedArray[Byte]) -> Bool
+  mut face_add : (Int32, String, Int32) -> Bool
+  mut face_add_bytes : (Int32, Bytes, Int32) -> Bool
+  mut face_clear : (Int32) -> Unit
+  mut face_add_family : (Int32, String) -> Bool
+  mut local_font_families : () -> String
+  mut atlas_generation : () -> Int32
+  mut present : (FixedArray[Double], Int32, Double, Double, Double) -> Unit
+  mut groups_here : () -> Bool
+  mut group_set : (Int32, FixedArray[Double], FixedArray[Double], Int32) -> Unit
+  mut group_drop : (Int32) -> Unit
+  mut set_ime : (Bool, Double, Double, Double, Double, String, Int32, Int32) -> Unit
+  mut text_menu : (Bool, Double, Double, Double, Double, Int32) -> Unit
+  mut text_menu_own : (String) -> Unit
+  mut edit_can : (Int32) -> Unit
+  mut clipboard_set : (String) -> Unit
+  mut clipboard_set_html : ((String, String) -> Unit)?
+  mut clipboard_set_secret : (String, Double) -> Unit
+  mut clipboard_secret_off : () -> Unit
+  mut clipboard_set_image : (Bytes) -> Unit
+  mut log : (String) -> Unit
+  mut bench_mode : () -> Int32
+  mut set_outside : (FuncRef[(Int32, Int32, Int32) -> Unit]) -> Bool
+  mut answers_by_frame : (Int32) -> Bool
+  mut script_step : (String, String) -> String
+  mut rows_on_pixels : () -> Bool
+  mut keeps_sources : () -> Bool
+  mut lines_on_pixels : (() -> Bool)?
+  mut frame_awaiting : (Int32, String) -> Unit
+  mut own_clock : () -> Bool
+  mut reduce_motion : () -> Bool
+  mut keys_platform : () -> Int32
+  mut exit : (Int32) -> Unit
+  mut mem_bytes : () -> Double
+  mut set_back : (FuncRef[(Int32, Double, Double, Int32) -> Unit]) -> Unit
+  mut back_enabled : (Bool) -> Unit
+  mut reduce_transparency : () -> Bool
+  mut increase_contrast : () -> Bool
+  mut thermal_throttled : () -> Bool
+  mut gpu_ms : () -> Double
+  mut frames_dropped : () -> Int32
+  mut cpu_ms : () -> Double
+  mut thread_cpu_ms : () -> Double
+  mut display_hz : () -> Double
+  mut env : (String) -> String
+  mut set_app_state : (FuncRef[(Int32) -> Unit]) -> Unit
+  mut system_dark : () -> Bool
+  mut font_scale : () -> Double
+  mut native_pointing : () -> Int32
+  mut pointing : () -> Int32
+  mut keyboard : () -> Int32
+  mut a11y_on : () -> Bool
+  mut a11y_tree : (String) -> Unit
+  mut set_dark : (Bool) -> Unit
+  mut set_sideways : (Bool) -> Unit
+  mut set_turnable : (Bool) -> Bool
+  mut share : (String, String, String, Bytes) -> Bool
+  mut perf_state : () -> Int32
+  mut set_perf : (Bool) -> Unit
+  mut perf_line : (String) -> Unit
+  mut perf_where : () -> String
+  mut perf_size : () -> Double
+  mut perf_read : () -> Bytes
+  mut perf_open : (Bool) -> Bool
+  mut reveal_file : (String, Bool) -> Bool
+  mut shared_in : () -> String
+  mut shared_in_file : (Int32) -> Bytes
+  mut app_version : () -> Int32
+  mut update_fetch : (String, String, Double, String, Bool, String) -> Unit
+  mut update_apply : (String) -> Unit
+  mut update_state : () -> String
+  mut install_package : (String, Bytes) -> Unit
+  mut drive : (Int32, String) -> Bool
+  mut image_load : (String, Int32) -> Int32
+  mut image_load_bytes : (Bytes, Int32) -> Int32
+  mut image_info : (Int32, FixedArray[Double]) -> Int32
+  mut image_free : (Int32) -> Unit
+  mut image_pixels : (Int32, FixedArray[Byte]) -> Bool
+  mut drawn_pixels : (Int32, Int32, Int32, Int32, FixedArray[Byte]) -> Bool
+  mut drawn_pixels_of : (FixedArray[Double], Int32, Double, Double, Double, Double, Int32, Int32, FixedArray[Byte]) -> Bool
+  mut view_site_next : (Int32) -> String
+  mut view_site_body : (Int32, Int32) -> Bytes
+  mut view_site_head : (Int32, Int32, Int32, String) -> Unit
+  mut view_site_chunk : (Int32, Int32, Bytes) -> Unit
+  mut view_site_end : (Int32, Int32, String) -> Unit
+  mut view_site_state : (Int32) -> String
+  mut view_site_load : (Int32, String) -> Unit
+  mut view_tell : (Int32, Int32, String) -> Unit
+  mut view_open : (Int32, String) -> Int32
+  mut view_place : (Int32, Double, Double, Double, Double, Double, Double, Double, Double, Double, Double, Double, Double, Bool) -> Unit
+  mut view_close : (Int32) -> Unit
+  mut view_control : (Int32, Int32, Double) -> Unit
+  mut view_info : (Int32, FixedArray[Double]) -> Int32
+  mut view_read_next : (Int32, FixedArray[Double]) -> Int32
+  mut view_read_answer : (Int32, Int32, Bytes, Double, Bool) -> Unit
+  mut pdf_open : (Bytes) -> Int32
+  mut pdf_pages : (Int32) -> Int32
+  mut pdf_page_size : (Int32, Int32, FixedArray[Double]) -> Unit
+  mut pdf_page_load : (Int32, Int32, Int32) -> Int32
+  mut pdf_close : (Int32) -> Unit
+  mut view_text : (Int32, Int32) -> String?
+  mut view_still : (Int32) -> Bytes
+  mut save_file : (String, Bytes) -> Bool
+  mut word_at : (String, Int32) -> (Int32, Int32)
+  mut open_url : (String) -> Bool
+  mut over_done : (Bool) -> Unit
+  mut open_tab : (String) -> Bool
+  mut hold_words : (String, String, String) -> Unit
+  mut post_take : () -> Int32
+  mut post_next : () -> (String, String, Bytes)?
+  mut ref_begin : (Double, Double, Double, Int32) -> Unit
+  mut ref_text : (String, Double, Int32, Int32, Double, Double, Int32, FixedArray[Double]) -> Unit
+  mut ref_end : (String) -> Bool
+  mut ref_frame : (String) -> Bool
+  mut bl_start : (String, String) -> Int32
+  mut bl_port : (Int32) -> Int32
+  mut bl_open : (Int32, String) -> Int32
+  mut bl_back : (Int32) -> String
+  mut bl_end : (Int32) -> Unit
+  mut pw_able : () -> Bool
+  mut pw_run : (String) -> Int32
+  mut pw_out : (Int32) -> String
+  mut pw_end : (Int32) -> Unit
+  mut af_able : () -> Bool
+  mut af_ask : (String) -> Int32
+  mut af_take : () -> String
+  mut af_end : () -> Unit
+  mut wa_able : () -> Bool
+  mut wa_get : (String) -> Int32
+  mut wa_out : (Int32) -> String
+  mut wa_end : (Int32) -> Unit
+  mut pk_start : (Int32) -> Int32
+  mut pk_state : (Int32) -> Int32
+  mut pk_count : (Int32) -> Int32
+  mut pk_name : (Int32, Int32) -> String
+  mut pk_bytes : (Int32, Int32) -> Bytes
+  mut pk_info : (Int32, Int32) -> String
+  mut pk_end : (Int32) -> Unit
+  mut kp_begin : (String, String, Int32) -> Int32
+  mut kp_append : (Int32, Bytes) -> Int32
+  mut kp_finish : (Int32) -> Unit
+  mut kp_state : (Int32) -> Int32
+  mut kp_where : (Int32) -> String
+  mut kp_end : (Int32) -> Unit
+  mut ga_access : () -> Int32
+  mut ga_ask : () -> Unit
+  mut ga_answers : () -> Int32
+  mut ga_read : () -> Int32
+  mut ga_read_state : (Int32) -> Int32
+  mut ga_read_rows : (Int32) -> String
+  mut ga_read_end : (Int32) -> Unit
+  mut pk_photo : (String) -> Int32
+  mut cs_known : (String) -> Int32
+  mut cs_decode : (Bytes, String) -> String
+  mut mk_start : (Bytes, String) -> Int32
+  mut mk_state : (Int32) -> Int32
+  mut mk_png : (Int32) -> Bytes
+  mut nt_show : (String, String, String, String, String) -> Unit
+  mut rn_dirty : (Double, Double, Double, Double) -> Unit
+  mut rn_glass_light_angle : (Double) -> Unit
+  mut nv_bar : (String) -> Int32
+  mut nv_able : () -> Bool
+  mut nt_cancel : (String) -> Unit
+  mut nt_state : (Int32) -> Int32
+  mut nt_text : (Int32) -> String
+  mut st_audio_here : () -> Int32
+  mut st_audio : (Int32, Bytes) -> Unit
+  mut st_audio_played : (Int32) -> Double
+  mut st_audio_queued : (Int32) -> Double
+  mut st_audio_wanted : (Int32) -> Double
+  mut st_audio_volume : (Int32, Double) -> Unit
+  mut st_frame_shown : ((Int32, Bytes, Int32, Double, Int32) -> Int32)?
+  mut st_flush : (Int32, Int32) -> Unit
+  mut st_layers : () -> Int32
+  mut st_pointer : (Int32, Bytes, Double, Double, Double, Double) -> Unit
+  mut st_pointer_named : ((Int32, String, () -> Bytes, Double, Double, Double, Double) -> Unit)?
+  mut st_pointer_at : (Int32, Double, Double, Int32) -> Unit
+  mut st_direct : (Int32, Double, Double, Int32) -> Unit
+  mut st_h265_here : () -> Int32
+  mut st_hevc : (Int32, Bytes, Int32, Int32) -> Unit
+  mut st_av1_here : () -> Int32
+  mut st_av1 : (Int32, Bytes, Int32, Int32) -> Unit
+  mut st_open : () -> Int32
+  mut st_h264 : (Int32, Bytes, Int32, Int32) -> Unit
+  mut st_frame : (Int32, Bytes, Int32, Double) -> Unit
+  mut st_jpeg : (Int32, Bytes, Double) -> Unit
+  mut st_next : (Int32) -> String
+  mut st_show : (Int32, Double) -> Unit
+  mut st_close : (Int32) -> Unit
+  mut st_h264_here : () -> Int32
+  mut st_feeds : () -> Int32
+  mut st_codec : (Int32, String, Bytes) -> Unit
+  mut cl_read : () -> Int32
+  mut cl_state : (Int32) -> Int32
+  mut cl_picture : (Int32) -> Int32
+  mut tm_open : (Int32, Int32) -> Int32
+  mut tm_write : (Int32, Bytes) -> Unit
+  mut tm_resize : (Int32, Int32, Int32, Int32, Int32) -> Unit
+  mut tm_frame : (Int32, Int32) -> Bytes
+  mut tm_modes : (Int32) -> Int32
+  mut tm_scroll : (Int32, Int32, Int32) -> Unit
+  mut tm_select : (Int32, Int32, Int32, Int32, Int32, Int32) -> Int32
+  mut tm_text : (Int32, Int32) -> String
+  mut tm_mouse : (Int32, Int32, Int32, Int32, Int32, Int32, Int32, Int32, Int32, Int32) -> Bytes
+  mut tm_close : (Int32) -> Unit
+  mut cl_text : (Int32) -> String
+  mut cl_png : (Int32) -> Bytes
+  mut cl_files : (Int32) -> Int32
+  mut cl_file_name : (Int32, Int32) -> String
+  mut cl_file : (Int32, Int32) -> Bytes
+  mut cl_end : (Int32) -> Unit
+  mut cl_set : (String, Bytes, String) -> Unit
+  mut dv_copy_shown : () -> Int32
+  mut dv_key_catch : (Int32) -> Unit
+  mut dv_ime_inset : () -> Double
+  mut dv_keep_awake : (Int32) -> Unit
+  mut dv_haptic : (Int32) -> Unit
+  mut dv_ime_action : (Int32) -> Unit
+  mut dv_ime_let_go : () -> Unit
+  mut ncall_call : (String, String) -> Int32
+  mut ncall_state : (Int32) -> Int32
+  mut ncall_result : (Int32) -> String
+  mut ncall_end : (Int32) -> Unit
+  mut words_spaced : (() -> Int32)?
+  mut window_set_title : (Int32, String) -> Unit
+  mut auto_launch : () -> Bool
+  mut set_auto_launch : (Bool) -> Bool
+  mut hotkey_set : (String, String) -> Bool
+  mut hotkey_clear : (String) -> Unit
+  mut pointer_lock : (Bool) -> Unit
+  mut pointer_locked : () -> Bool
+  mut pointer_delta : (FixedArray[Double]) -> Unit
+  mut gamepads : (FixedArray[Double]) -> Int32
+  mut glyphs_ahead_able : () -> Bool
+  mut has_local_fonts : () -> Bool
+  mut face_set_ligatures : (Int32, Bool) -> Unit
+  mut set_host_autospace : (Bool) -> Unit
+  mut local_font_info : () -> String
+  mut has_async_local_font_info : () -> Bool
+}
+pub fn Host::clipboard_set_html(Self, String, String) -> Unit
+pub fn Host::clock_at_wall(Self, Double) -> Double
+pub fn Host::frames_paced(Self, Double) -> Unit
+pub fn Host::lines_on_pixels(Self) -> Bool
+pub fn Host::noop() -> Self
+pub fn Host::request_frame_on(Self) -> Unit
+pub fn Host::st_frame_shown(Self, Int32, Bytes, Int32, Double, Int32) -> Int32
+pub fn Host::st_pointer_named(Self, Int32, String, () -> Bytes, Double, Double, Double, Double) -> Unit
+pub fn Host::window_corner_at(Self, Int32) -> Double
+pub fn Host::words_spaced(Self) -> Int32
 
 pub struct Keep {
   // private fields
@@ -937,6 +1269,7 @@ pub(all) enum SystemSaid {
   SizeClasses(width~ : SizeClass, height~ : SizeClass)
   Fold(hinge~ : Hinge, divisions~ : Array[(Double, Double, Double, Double)])
   Network
+  Cellular(Bool)
   InstallAllow(name~ : String)
   InstallFailed(name~ : String, error~ : String)
   Menu(String)
@@ -961,291 +1294,3 @@ pub fn Terminal::write(Self, Bytes) -> Unit
 // Type aliases
 
 // Traits
-pub(open) trait Host {
-  fn set_window_zoom(Self, Double) -> Unit = _
-  fn set_window_key(Self, FuncRef[(Int32, Int32) -> Int32]) -> Unit = _
-  fn wheel_kept(Self, Bool) -> Unit = _
-  fn window_setup(Self, Double, Double, Double, Double, Bool) -> Unit = _
-  fn window_inset(Self) -> Bool = _
-  fn window_buttons_down(Self, Double, Double) -> Unit = _
-  fn window_hold(Self) -> Unit = _
-  fn window_show(Self) -> Unit = _
-  fn full_screen(Self) -> Bool = _
-  fn set_full_screen(Self, Bool) -> Unit = _
-  fn window_corner(Self) -> Double = _
-  fn window_corner_at(Self, Int32) -> Double = _
-  fn window_drag(Self) -> Unit = _
-  fn window_act(Self, Int32) -> Unit = _
-  fn window_zoomed(Self) -> Bool = _
-  fn window_snap(Self, Double, Double, Double, Double) -> Unit = _
-  fn window_snap_state(Self) -> Int32 = _
-  fn window_opens(Self) -> Bool = _
-  fn window_open(Self, String) -> Bool = _
-  fn window_front(Self, String) -> Bool = _
-  fn windows_in_process(Self) -> Bool = _
-  fn window_open_id(Self, String) -> Int32 = _
-  fn window_front_id(Self, Int32) -> Bool = _
-  fn window_close_id(Self, Int32) -> Unit = _
-  fn window_current(Self) -> Int32 = _
-  fn set_cursor(Self, Int32) -> Unit = _
-  fn set_badge(Self, Int32) -> Unit = _
-  fn menu_setup(Self, String) -> Unit = _
-  fn app_said(Self, String) -> String = _
-  fn app_tell(Self, String, String) -> Unit = _
-  fn set_site_name(Self, String) -> Unit = _
-  fn mods_held(Self) -> Int32 = _
-  fn run(Self, String, FuncRef[(Double, Double, Double, Double) -> Unit], FuncRef[(Int32, Double, Double, Int32) -> Unit], FuncRef[(Double, Double, Double, Double, Int32) -> Unit], FuncRef[(Int32, Int32) -> Unit], FuncRef[(Int32, String, Int32, Int32) -> Unit]) -> Unit = _
-  fn now(Self) -> Double = _
-  fn wall_ms(Self) -> Double = _
-  fn clock_at_wall(Self, Double) -> Double = _
-  fn utc_offset_min(Self, Double) -> Int32 = _
-  fn event_time(Self) -> Double = _
-  fn event_finger(Self) -> Int32 = _
-  fn frame_late(Self) -> Double = _
-  fn platform(Self) -> Int32 = _
-  fn request_frame(Self) -> Unit = _
-  fn request_frame_on(Self) -> Unit = _
-  fn frames_paced(Self, Double) -> Unit = _
-  fn wake_after(Self, Double) -> Unit = _
-  fn font_metrics(Self, Double, Int32, Int32, FixedArray[Double]) -> Unit = _
-  fn shape(Self, String, Double, Int32, Int32, FixedArray[Double]) -> Int32 = _
-  fn text_key(Self, String, Double, Int32, Int32) -> Int32 = _
-  fn glyph(Self, Int32, FixedArray[Double]) -> Unit = _
-  fn glyph_put(Self, Int32, Int32, Int32) -> Unit = _
-  fn atlas_size(Self, Bool) -> Int32 = _
-  fn glyphs_ahead(Self, FixedArray[Int32], Int32) -> Unit = _
-  fn glyph_picture(Self, Int32, FixedArray[Byte]) -> Bool = _
-  fn atlas_put(Self, Int32, Int32, Int32, Int32, FixedArray[Byte]) -> Bool = _
-  fn face_add(Self, Int32, String, Int32) -> Bool = _
-  fn face_add_bytes(Self, Int32, Bytes, Int32) -> Bool = _
-  fn face_clear(Self, Int32) -> Unit = _
-  fn face_add_family(Self, Int32, String) -> Bool = _
-  fn local_font_families(Self) -> String = _
-  fn atlas_generation(Self) -> Int32 = _
-  fn present(Self, FixedArray[Double], Int32, Double, Double, Double) -> Unit = _
-  fn groups_here(Self) -> Bool = _
-  fn group_set(Self, Int32, FixedArray[Double], FixedArray[Double], Int32) -> Unit = _
-  fn group_drop(Self, Int32) -> Unit = _
-  fn set_ime(Self, Bool, Double, Double, Double, Double, String, Int32, Int32) -> Unit = _
-  fn text_menu(Self, Bool, Double, Double, Double, Double, Int32) -> Unit = _
-  fn text_menu_own(Self, String) -> Unit = _
-  fn edit_can(Self, Int32) -> Unit = _
-  fn clipboard_set(Self, String) -> Unit = _
-  fn clipboard_set_secret(Self, String, Double) -> Unit = _
-  fn clipboard_secret_off(Self) -> Unit = _
-  fn clipboard_set_image(Self, Bytes) -> Unit = _
-  fn log(Self, String) -> Unit = _
-  fn bench_mode(Self) -> Int32 = _
-  fn set_outside(Self, FuncRef[(Int32, Int32, Int32) -> Unit]) -> Bool = _
-  fn answers_by_frame(Self, Int32) -> Bool = _
-  fn script_step(Self, String, String) -> String = _
-  fn rows_on_pixels(Self) -> Bool = _
-  fn keeps_sources(Self) -> Bool = _
-  fn lines_on_pixels(Self) -> Bool = _
-  fn frame_awaiting(Self, Int32, String) -> Unit = _
-  fn own_clock(Self) -> Bool = _
-  fn reduce_motion(Self) -> Bool = _
-  fn keys_platform(Self) -> Int32 = _
-  fn exit(Self, Int32) -> Unit = _
-  fn mem_bytes(Self) -> Double = _
-  fn set_back(Self, FuncRef[(Int32, Double, Double, Int32) -> Unit]) -> Unit = _
-  fn back_enabled(Self, Bool) -> Unit = _
-  fn reduce_transparency(Self) -> Bool = _
-  fn increase_contrast(Self) -> Bool = _
-  fn thermal_throttled(Self) -> Bool = _
-  fn gpu_ms(Self) -> Double = _
-  fn frames_dropped(Self) -> Int32 = _
-  fn cpu_ms(Self) -> Double = _
-  fn thread_cpu_ms(Self) -> Double = _
-  fn display_hz(Self) -> Double = _
-  fn env(Self, String) -> String = _
-  fn set_app_state(Self, FuncRef[(Int32) -> Unit]) -> Unit = _
-  fn system_dark(Self) -> Bool = _
-  fn font_scale(Self) -> Double = _
-  fn native_pointing(Self) -> Int32 = _
-  fn pointing(Self) -> Int32 = _
-  fn keyboard(Self) -> Int32 = _
-  fn a11y_on(Self) -> Bool = _
-  fn a11y_tree(Self, String) -> Unit = _
-  fn set_dark(Self, Bool) -> Unit = _
-  fn set_sideways(Self, Bool) -> Unit = _
-  fn set_turnable(Self, Bool) -> Bool = _
-  fn share(Self, String, String, String, Bytes) -> Bool = _
-  fn perf_state(Self) -> Int32 = _
-  fn set_perf(Self, Bool) -> Unit = _
-  fn perf_line(Self, String) -> Unit = _
-  fn perf_where(Self) -> String = _
-  fn perf_size(Self) -> Double = _
-  fn perf_read(Self) -> Bytes = _
-  fn perf_open(Self, Bool) -> Bool = _
-  fn reveal_file(Self, String, Bool) -> Bool = _
-  fn shared_in(Self) -> String = _
-  fn shared_in_file(Self, Int32) -> Bytes = _
-  fn app_version(Self) -> Int32 = _
-  fn update_fetch(Self, String, String, Double, String, Bool, String) -> Unit = _
-  fn update_apply(Self, String) -> Unit = _
-  fn update_state(Self) -> String = _
-  fn install_package(Self, String, Bytes) -> Unit = _
-  fn drive(Self, Int32, String) -> Bool = _
-  fn image_load(Self, String, Int32) -> Int32 = _
-  fn image_load_bytes(Self, Bytes, Int32) -> Int32 = _
-  fn image_info(Self, Int32, FixedArray[Double]) -> Int32 = _
-  fn image_free(Self, Int32) -> Unit = _
-  fn image_pixels(Self, Int32, FixedArray[Byte]) -> Bool = _
-  fn drawn_pixels(Self, Int32, Int32, Int32, Int32, FixedArray[Byte]) -> Bool = _
-  fn drawn_pixels_of(Self, FixedArray[Double], Int32, Double, Double, Double, Double, Int32, Int32, FixedArray[Byte]) -> Bool = _
-  fn view_site_next(Self, Int32) -> String = _
-  fn view_site_body(Self, Int32, Int32) -> Bytes = _
-  fn view_site_head(Self, Int32, Int32, Int32, String) -> Unit = _
-  fn view_site_chunk(Self, Int32, Int32, Bytes) -> Unit = _
-  fn view_site_end(Self, Int32, Int32, String) -> Unit = _
-  fn view_site_state(Self, Int32) -> String = _
-  fn view_site_load(Self, Int32, String) -> Unit = _
-  fn view_tell(Self, Int32, Int32, String) -> Unit = _
-  fn view_open(Self, Int32, String) -> Int32 = _
-  fn view_place(Self, Int32, Double, Double, Double, Double, Double, Double, Double, Double, Double, Double, Double, Double, Bool) -> Unit = _
-  fn view_close(Self, Int32) -> Unit = _
-  fn view_control(Self, Int32, Int32, Double) -> Unit = _
-  fn view_info(Self, Int32, FixedArray[Double]) -> Int32 = _
-  fn view_read_next(Self, Int32, FixedArray[Double]) -> Int32 = _
-  fn view_read_answer(Self, Int32, Int32, Bytes, Double, Bool) -> Unit = _
-  fn pdf_open(Self, Bytes) -> Int32 = _
-  fn pdf_pages(Self, Int32) -> Int32 = _
-  fn pdf_page_size(Self, Int32, Int32, FixedArray[Double]) -> Unit = _
-  fn pdf_page_load(Self, Int32, Int32, Int32) -> Int32 = _
-  fn pdf_close(Self, Int32) -> Unit = _
-  fn view_text(Self, Int32, Int32) -> String? = _
-  fn view_still(Self, Int32) -> Bytes = _
-  fn save_file(Self, String, Bytes) -> Bool = _
-  fn word_at(Self, String, Int32) -> (Int32, Int32) = _
-  fn open_url(Self, String) -> Bool = _
-  fn over_done(Self, Bool) -> Unit = _
-  fn open_tab(Self, String) -> Bool = _
-  fn hold_words(Self, String, String, String) -> Unit = _
-  fn post_take(Self) -> Int32 = _
-  fn post_next(Self) -> (String, String, Bytes)? = _
-  fn ref_begin(Self, Double, Double, Double, Int32) -> Unit = _
-  fn ref_text(Self, String, Double, Int32, Int32, Double, Double, Int32, FixedArray[Double]) -> Unit = _
-  fn ref_end(Self, String) -> Bool = _
-  fn ref_frame(Self, String) -> Bool = _
-  fn bl_start(Self, String, String) -> Int32 = _
-  fn bl_port(Self, Int32) -> Int32 = _
-  fn bl_open(Self, Int32, String) -> Int32 = _
-  fn bl_back(Self, Int32) -> String = _
-  fn bl_end(Self, Int32) -> Unit = _
-  fn pw_able(Self) -> Bool = _
-  fn pw_run(Self, String) -> Int32 = _
-  fn pw_out(Self, Int32) -> String = _
-  fn pw_end(Self, Int32) -> Unit = _
-  fn af_able(Self) -> Bool = _
-  fn af_ask(Self, String) -> Int32 = _
-  fn af_take(Self) -> String = _
-  fn af_end(Self) -> Unit = _
-  fn wa_able(Self) -> Bool = _
-  fn wa_get(Self, String) -> Int32 = _
-  fn wa_out(Self, Int32) -> String = _
-  fn wa_end(Self, Int32) -> Unit = _
-  fn pk_start(Self, Int32) -> Int32 = _
-  fn pk_state(Self, Int32) -> Int32 = _
-  fn pk_count(Self, Int32) -> Int32 = _
-  fn pk_name(Self, Int32, Int32) -> String = _
-  fn pk_bytes(Self, Int32, Int32) -> Bytes = _
-  fn pk_info(Self, Int32, Int32) -> String = _
-  fn pk_end(Self, Int32) -> Unit = _
-  fn kp_begin(Self, String, String, Int32) -> Int32 = _
-  fn kp_append(Self, Int32, Bytes) -> Int32 = _
-  fn kp_finish(Self, Int32) -> Unit = _
-  fn kp_state(Self, Int32) -> Int32 = _
-  fn kp_where(Self, Int32) -> String = _
-  fn kp_end(Self, Int32) -> Unit = _
-  fn ga_access(Self) -> Int32 = _
-  fn ga_ask(Self) -> Unit = _
-  fn ga_answers(Self) -> Int32 = _
-  fn ga_read(Self) -> Int32 = _
-  fn ga_read_state(Self, Int32) -> Int32 = _
-  fn ga_read_rows(Self, Int32) -> String = _
-  fn ga_read_end(Self, Int32) -> Unit = _
-  fn pk_photo(Self, String) -> Int32 = _
-  fn cs_known(Self, String) -> Int32 = _
-  fn cs_decode(Self, Bytes, String) -> String = _
-  fn mk_start(Self, Bytes, String) -> Int32 = _
-  fn mk_state(Self, Int32) -> Int32 = _
-  fn mk_png(Self, Int32) -> Bytes = _
-  fn nt_show(Self, String, String, String, String, String) -> Unit = _
-  fn rn_dirty(Self, Double, Double, Double, Double) -> Unit = _
-  fn rn_glass_light_angle(Self, Double) -> Unit = _
-  fn nv_bar(Self, String) -> Int32 = _
-  fn nv_able(Self) -> Bool = _
-  fn nt_cancel(Self, String) -> Unit = _
-  fn nt_state(Self, Int32) -> Int32 = _
-  fn nt_text(Self, Int32) -> String = _
-  fn st_audio_here(Self) -> Int32 = _
-  fn st_audio(Self, Int32, Bytes) -> Unit = _
-  fn st_audio_played(Self, Int32) -> Double = _
-  fn st_audio_queued(Self, Int32) -> Double = _
-  fn st_audio_wanted(Self, Int32) -> Double = _
-  fn st_audio_volume(Self, Int32, Double) -> Unit = _
-  fn st_frame_shown(Self, Int32, Bytes, Int32, Double, Int32) -> Int32 = _
-  fn st_flush(Self, Int32, Int32) -> Unit = _
-  fn st_layers(Self) -> Int32 = _
-  fn st_pointer(Self, Int32, Bytes, Double, Double, Double, Double) -> Unit = _
-  fn st_pointer_named(Self, Int32, String, () -> Bytes, Double, Double, Double, Double) -> Unit = _
-  fn st_pointer_at(Self, Int32, Double, Double, Int32) -> Unit = _
-  fn st_direct(Self, Int32, Double, Double, Int32) -> Unit = _
-  fn st_h265_here(Self) -> Int32 = _
-  fn st_hevc(Self, Int32, Bytes, Int32, Int32) -> Unit = _
-  fn st_av1_here(Self) -> Int32 = _
-  fn st_av1(Self, Int32, Bytes, Int32, Int32) -> Unit = _
-  fn st_open(Self) -> Int32 = _
-  fn st_h264(Self, Int32, Bytes, Int32, Int32) -> Unit = _
-  fn st_frame(Self, Int32, Bytes, Int32, Double) -> Unit = _
-  fn st_jpeg(Self, Int32, Bytes, Double) -> Unit = _
-  fn st_next(Self, Int32) -> String = _
-  fn st_show(Self, Int32, Double) -> Unit = _
-  fn st_close(Self, Int32) -> Unit = _
-  fn st_h264_here(Self) -> Int32 = _
-  fn st_feeds(Self) -> Int32 = _
-  fn st_codec(Self, Int32, String, Bytes) -> Unit = _
-  fn cl_read(Self) -> Int32 = _
-  fn cl_state(Self, Int32) -> Int32 = _
-  fn cl_picture(Self, Int32) -> Int32 = _
-  fn tm_open(Self, Int32, Int32) -> Int32 = _
-  fn tm_write(Self, Int32, Bytes) -> Unit = _
-  fn tm_resize(Self, Int32, Int32, Int32, Int32, Int32) -> Unit = _
-  fn tm_frame(Self, Int32, Int32) -> Bytes = _
-  fn tm_modes(Self, Int32) -> Int32 = _
-  fn tm_scroll(Self, Int32, Int32, Int32) -> Unit = _
-  fn tm_select(Self, Int32, Int32, Int32, Int32, Int32, Int32) -> Int32 = _
-  fn tm_text(Self, Int32, Int32) -> String = _
-  fn tm_mouse(Self, Int32, Int32, Int32, Int32, Int32, Int32, Int32, Int32, Int32, Int32) -> Bytes = _
-  fn tm_close(Self, Int32) -> Unit = _
-  fn cl_text(Self, Int32) -> String = _
-  fn cl_png(Self, Int32) -> Bytes = _
-  fn cl_files(Self, Int32) -> Int32 = _
-  fn cl_file_name(Self, Int32, Int32) -> String = _
-  fn cl_file(Self, Int32, Int32) -> Bytes = _
-  fn cl_end(Self, Int32) -> Unit = _
-  fn cl_set(Self, String, Bytes, String) -> Unit = _
-  fn dv_copy_shown(Self) -> Int32 = _
-  fn dv_key_catch(Self, Int32) -> Unit = _
-  fn dv_ime_inset(Self) -> Double = _
-  fn dv_keep_awake(Self, Int32) -> Unit = _
-  fn dv_haptic(Self, Int32) -> Unit = _
-  fn dv_ime_action(Self, Int32) -> Unit = _
-  fn dv_ime_let_go(Self) -> Unit = _
-  fn ncall_call(Self, String, String) -> Int32 = _
-  fn ncall_state(Self, Int32) -> Int32 = _
-  fn ncall_result(Self, Int32) -> String = _
-  fn ncall_end(Self, Int32) -> Unit = _
-  fn words_spaced(Self) -> Int32 = _
-  fn window_set_title(Self, Int32, String) -> Unit = _
-  fn auto_launch(Self) -> Bool = _
-  fn set_auto_launch(Self, Bool) -> Bool = _
-  fn hotkey_set(Self, String, String) -> Bool = _
-  fn hotkey_clear(Self, String) -> Unit = _
-  fn pointer_lock(Self, Bool) -> Unit = _
-  fn pointer_locked(Self) -> Bool = _
-  fn pointer_delta(Self, FixedArray[Double]) -> Unit = _
-  fn gamepads(Self, FixedArray[Double]) -> Int32 = _
-  fn glyphs_ahead_able(Self) -> Bool = _
-}

@@ -19,15 +19,10 @@ pub fn language_from_prefs(prefs : Json?) -> Unit {
 }
 
 ///|
-/// Experimental switches on this device (实验性功能: `farviewNative`, `board`), told their signals as the
+/// Experimental switches on this device (实验性功能: `board`, `selectionIntent`, `cmdQuote`), told their signals as the
 /// kept choices change and as the app's tree is made, before any page of nodes; turning `board` off puts away any
 /// active board state and returns Home to the ordinary chat list.
 pub fn features_from_prefs(prefs : Json?) -> Unit {
-  let fv = @settings.feature_from(prefs, "farviewNative")
-  if fv != farview_told.val {
-    farview_told.val = fv
-    farview_native.set(fv)
-  }
   let bd = @settings.feature_from(prefs, "board")
   if bd != board_told.val {
     let was_on = board_told.val
@@ -52,9 +47,6 @@ pub fn features_from_prefs(prefs : Json?) -> Unit {
 
 ///|
 /// The experimental switches last told from `prefs`: none on as a run begins.
-let farview_told : Ref[Bool] = Ref(false)
-
-///|
 let board_told : Ref[Bool] = Ref(false)
 
 ///|
@@ -449,7 +441,6 @@ fn app_frame_reset() -> Unit {
   badge_told.set(-1)
   told_bars.val = None
   told_dark.val = None
-  farview_told.val = false
   board_told.val = false
   selection_intent_told.val = false
   cmd_quote_told.val = false

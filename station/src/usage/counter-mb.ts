@@ -6,7 +6,8 @@
 import { sep } from "node:path";
 import { wall } from "../ops/fibers.ts";
 import { log } from "../ops/log.ts";
-import { MbProcess } from "../read/mb-reader.ts";
+import { MbProcess, resolveReaderSelectionAsync, resolveReaderSelectionOrPending } from "../read/mb-reader.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import type { TranscriptLocationHints } from "../read/transcript.ts";
 
 /// How long a program with nothing asked of it is kept.
@@ -29,10 +30,12 @@ type Waiting = { resolve: (answer: MbReadAnswer) => void; reject: (error: Error)
 export class MbCounterStopped extends Error {}
 
 export class MbUsageCounter {
-  readonly #binary: string;
+  readonly #binary: string | undefined;
   readonly #db: string;
   readonly #after: (ms: number, f: () => void) => () => void;
+  readonly #readers: ReaderSelectConfig | (() => ReaderSelectConfig) | undefined;
   #process: MbProcess | null = null;
+  #starting: Promise<MbProcess> | null = null;
   #termination: Promise<number> | null = null;
   #next = 0;
   #waiting = new Map<number, Waiting>();
@@ -42,10 +45,15 @@ export class MbUsageCounter {
   started = 0;
 
   /// `after`: the timer of IDLE_MS (a test's own; else the wall's).
-  constructor(binary: string, db: string, options: { after?: (ms: number, f: () => void) => () => void } = {}) {
+  constructor(
+    binary: string | undefined,
+    db: string,
+    options: { after?: (ms: number, f: () => void) => () => void; readers?: ReaderSelectConfig | (() => ReaderSelectConfig) } = {},
+  ) {
     this.#binary = binary;
     this.#db = db;
     this.#after = options.after ?? wall.after;
+    this.#readers = options.readers;
   }
 
   /// Whether a program runs now.
@@ -58,18 +66,75 @@ export class MbUsageCounter {
       this.#waiting.set(id, { resolve, reject });
       this.#idle?.();
       this.#idle = null;
+      const send = (proc: MbProcess) => {
+        if (this.#closed) {
+          this.#waiting.delete(id);
+          reject(new MbCounterStopped("station stopping"));
+          return;
+        }
+        try {
+          proc.postMessage({ id, op: "read", ...ask });
+        } catch (error) {
+          this.#waiting.delete(id);
+          reject(error as Error);
+        }
+      };
+      if (this.#process !== null) {
+        send(this.#process);
+        return;
+      }
+      if (this.#starting !== null) {
+        this.#starting.then(send, (error) => {
+          this.#waiting.delete(id);
+          reject(error as Error);
+        });
+        return;
+      }
+      if (this.#binary !== undefined) {
+        try {
+          send(this.#startWith(this.#binary));
+        } catch (error) {
+          this.#waiting.delete(id);
+          reject(error as Error);
+        }
+        return;
+      }
+      let syncSel;
       try {
-        this.#start().postMessage({ id, op: "read", ...ask });
+        syncSel = resolveReaderSelectionOrPending("usage-counter", { config: this.#readers, logAt: "usage" });
       } catch (error) {
         this.#waiting.delete(id);
         reject(error as Error);
+        return;
       }
+      if (!syncSel.pending) {
+        try {
+          send(this.#startWith(syncSel.primaryBinary));
+        } catch (error) {
+          this.#waiting.delete(id);
+          reject(error as Error);
+        }
+        return;
+      }
+      const pending = resolveReaderSelectionAsync("usage-counter", { config: this.#readers, logAt: "usage" }).then(
+        (resolved) => {
+          if (this.#closed) throw new MbCounterStopped("station stopping");
+          return this.#startWith(resolved.primaryBinary);
+        },
+      ).finally(() => {
+        if (this.#starting === pending) this.#starting = null;
+      });
+      this.#starting = pending;
+      pending.then(send, (error) => {
+        this.#waiting.delete(id);
+        reject(error as Error);
+      });
     });
   }
 
-  #start(): MbProcess {
+  #startWith(binary: string): MbProcess {
     if (this.#process !== null) return this.#process;
-    const child = new MbProcess(this.#binary, ["--builder", "usage-counter", "--db", this.#db, "--sep", sep]);
+    const child = new MbProcess(binary, ["--builder", "usage-counter", "--db", this.#db, "--sep", sep]);
     this.started++;
     this.#process = child;
     child.on("message", (answer: MbReadAnswer & { id?: number; error?: string }) => {

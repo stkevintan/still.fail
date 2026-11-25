@@ -48,6 +48,7 @@ import { log } from "../ops/log.ts";
 import { platform } from "../platform/index.ts";
 import { knownOf, localOf } from "../connects/remote.ts";
 import { type CarriedJob, type CarriedSession, type CarryIndex, type Gathered, gatherSoon, placeSoon, previewSoon } from "./carry.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import { GEN, HASH, STATION, WORKSPACE } from "./format.ts";
 import { FolderPlace } from "./places.ts";
 import type { Ask } from "./peers.ts";
@@ -201,6 +202,8 @@ export type RetireDeps = {
   /// carry.ts's gathering, placing and preview (the MoonBit program's, a gathering stopped by `signal`, unless a test
   /// says otherwise).
   work?: { gather: typeof gatherSoon; place: typeof placeSoon; preview?: typeof previewSoon };
+  /// Live `config.json` `readers` snapshot or getter for `replica-carry` engine selection.
+  readers?: ReaderSelectConfig | (() => ReaderSelectConfig);
   /// The jobs and services of `ws`'s chats up now (what `quiet` stops), and its connects as the app names them.
   jobsIn: (ws: string) => CarriedJob[];
   connectsNamed: (ws: string) => { id: string; name: string; kind: string }[];
@@ -394,7 +397,13 @@ export class Retire {
     this.#d = d;
     this.#carried = new FolderPlace(carryRoot(d.data));
     this.#git = d.git ?? gitRun;
-    this.#work = d.work ?? { gather: gatherSoon, place: placeSoon };
+    this.#work = d.work ?? {
+      gather: (dataDir, db, ws, home, scratch, signal, agent = null, keys = null) =>
+        gatherSoon(dataDir, db, ws, home, scratch, signal, agent, keys, d.readers),
+      place: (dataDir, index, from, made = null, aside = null, placed = null, projects = false) =>
+        placeSoon(dataDir, index, from, made, aside, placed, projects, d.readers),
+      preview: (dataDir, db, ws, home) => previewSoon(dataDir, db, ws, home, d.readers),
+    };
     this.#room = d.room ?? roomHere(d.data);
     this.#hasGit = d.hasGit ?? gitHere;
     this.#lackMost = d.lackMost ?? LACK_MOST;
@@ -1227,7 +1236,12 @@ export class Retire {
   /// What retiring this station from `ws` would move (GET /retire/preview).
   async preview(ws: string): Promise<Preview> {
     const home = this.#d.home() === ws;
-    const counts = await (this.#work.preview ?? previewSoon)(this.#d.data, join(this.#d.data, "stillfail.db"), ws, home);
+    const counts = await (this.#work.preview ?? ((dataDir, db, wsName, isHome) => previewSoon(dataDir, db, wsName, isHome, this.#d.readers)))(
+      this.#d.data,
+      join(this.#d.data, "stillfail.db"),
+      ws,
+      home,
+    );
     const own = this.#d.accounts.own().map((p) => ({ id: p.id, name: p.name }));
     return {
       home, chats: counts.chats, archived: counts.archived, outside: counts.outside,

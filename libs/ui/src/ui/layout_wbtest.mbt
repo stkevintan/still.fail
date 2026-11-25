@@ -809,7 +809,6 @@ test "a list's running sums are its rows' heights added up" {
     over: 0.0,
     over_edge: 0,
     over_state: 0,
-    over_v: 0.0,
     back: BackPath::new(),
         ease: 0.0,
         ease_v: 0.0,

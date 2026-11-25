@@ -2,8 +2,8 @@
 
 ## Adding a host call
 
-- Add the method (with default fallback) and wrapper to `Host` in `libs/ui/src/hostapi/host.mbt`.
-- Implement the platform side in `libs/ui/src/host/native_host.mbt` and override `libs/ui/src/ui/fake_host.mbt` if tests need non-default behavior.
+- Add the field to `Host` (and its default in `Host::noop()`, or `Option` + `Host::<method>` self-dispatch if derived from other primitives) plus the package-level forwarder in `libs/ui/src/hostapi/host.mbt`.
+- Wire the platform side in `make_native_host` (`libs/ui/src/host/native_host.mbt`), and add the `FakeHost` method + wire it in `FakeHost::as_host` (`libs/ui/src/ui/fake_host.mbt`) if tests need non-default behavior.
 - Regenerate the Wasm side of `extern "C"` declarations (`*_wasm.mbt` and `libs/ui/src/host/wasm_shell.c`) via `libs/ui/tools/wasmhost` (run `apps/mbui/scripts/wasm-app.sh build`, verified by `check`).
 
 ## Between-frame delivery

@@ -2,7 +2,7 @@
 // word says they came (hostcall.mbt's outside_take, kinds outside_op and outside_autofill), into signals what waits on
 // them reads (@hostapi.OpRun::done, @hostapi.autofill_take): a node's binding or `reacts` told at that moment, at any
 // frame rate; while it waits, nothing of it asks for a frame, nothing is built again (they were read as the clock is,
-// @hostapi.polled: what read them was built again each frame). The host's word is said here as a host says it
+// @hostapi.call_polled: what read them was built again each frame). The host's word is said here as a host says it
 // (on_outside, between frames), what it keeps given it the moment before.
 
 ///|

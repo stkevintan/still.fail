@@ -1,0 +1,260 @@
+// Pure-Pion unit tests for `builders_usage` (`parse_iso`, `usage_turns` arg coercion,
+// `calls_of`, `speed`, `files` raw-byte line buffering & `sections_of`, and wire formatting).
+
+import "base_codec"
+import "js_json"
+import "sql_db"
+
+fn expect_u(cond : Bool, msg : String) -> Unit {
+  if !cond {
+    panic(msg)
+  }
+}
+
+fn expect_opt_d(got : Option[Double], want : Option[Double], msg : String) -> Unit {
+  match (got, want) {
+    (Some(a), Some(b)) => expect_u(a == b, msg + ": got=" + a.to_string() + " want=" + b.to_string())
+    (None, None) => ()
+    _ => panic(msg + ": Option mismatch")
+  }
+}
+
+test "parse_iso reads UTF-8 byte positions independently of js_parse_iso" {
+  expect_opt_d(parse_iso("2026-11-24T12:34:56.789Z"), Some(1795523696789.0), "3-digit ms")
+  expect_opt_d(parse_iso("2026-11-24T12:34:56.5Z"), Some(1795523696500.0), "1-digit ms")
+  expect_opt_d(parse_iso("2026-11-24T12:34:56.05Z"), Some(1795523696050.0), "2-digit ms")
+  expect_opt_d(parse_iso("2026-11-24T12:34:56.789999Z"), Some(1795523696789.0), "6-digit ms truncated")
+  expect_opt_d(parse_iso("1970-01-01T00:00:00Z"), Some(0.0), "epoch")
+  expect_opt_d(parse_iso("2024-02-29T00:00:00Z"), Some(1709164800000.0), "leap day")
+  // Position-based: accepts non-standard separators (unlike js_parse_iso)
+  expect_opt_d(parse_iso("1970/01/01 00:00:01"), Some(1000.0), "non-standard sep")
+  expect_opt_d(js_json::js_parse_iso("1970/01/01 00:00:01"), None, "js_parse_iso rejects slash")
+  expect_opt_d(parse_iso("2026-11-24"), None, "too short")
+  expect_opt_d(parse_iso("xxxx-11-24T00:00:00Z"), None, "non-digits")
+}
+
+test "readops arg_number and text_arg coercion preserves NaN without JSON round-trip" {
+  let nan_v = arg_number(None)
+  match nan_v {
+    base_codec::Json::Num(d, _) => expect_u(d != d, "None -> NaN")
+    _ => panic("expected Num(NaN)")
+  }
+  match arg_number(Some(base_codec::json_str("not-a-num"))) {
+    base_codec::Json::Num(d, _) => expect_u(d != d, "bad str -> NaN")
+    _ => panic("expected Num(NaN)")
+  }
+  match arg_number(Some(base_codec::json_str("42"))) {
+    base_codec::Json::Num(d, _) => expect_u(d == 42.0, "42")
+    _ => panic("expected 42")
+  }
+  match arg_number(Some(base_codec::json_null())) {
+    base_codec::Json::Num(d, _) => expect_u(d == 0.0, "null -> 0")
+    _ => panic("expected 0")
+  }
+  match arg_number(Some(base_codec::json_bool(true))) {
+    base_codec::Json::Num(d, _) => expect_u(d == 1.0, "true -> 1")
+    _ => panic("expected 1")
+  }
+  expect_u(text_arg_with(Some(base_codec::json_str("abc")), base_codec::json_stringify) == "abc", "text str")
+  expect_u(text_arg_with(Some(base_codec::json_num(123.0)), base_codec::json_stringify) == "123", "text num")
+  expect_u(
+    text_arg_with(Some(base_codec::json_num(1.0e20)), base_codec::json_stringify) == "9223372036854775807",
+    "text 1e20 saturates to Int64::MAX matching MB",
+  )
+  expect_u(
+    text_arg_with(Some(base_codec::json_num(-1.0e20)), base_codec::json_stringify) == "-9223372036854775808",
+    "text -1e20 saturates to Int64::MIN matching MB",
+  )
+  expect_u(
+    text_arg_with(Some(base_codec::Json::Num(1.0 / 0.0, "1e400")), base_codec::json_stringify) == "1e400",
+    "text 1e400 preserves raw JSON repr matching MB",
+  )
+  expect_u(text_arg_with(Some(base_codec::json_null()), base_codec::json_stringify) == "null", "text null")
+  expect_u(text_arg_with(Some(base_codec::json_bool(true)), base_codec::json_stringify) == "true", "text true")
+  expect_u(text_arg_with(None, base_codec::json_stringify) == "undefined", "text none")
+  expect_u(js_number(1.0e20) == "9223372036854775807", "js_number 1e20 saturates matching MB")
+  expect_u(js_number(-1.0e20) == "-9223372036854775808", "js_number -1e20 saturates matching MB")
+}
+
+test "Lines buffers incomplete trailing line and genuinely splits UTF-8 multi-byte sequence across chunks" {
+  // 'a' (0x61) + first 2 bytes of '中' (E4 B8 AD)
+  let c1 = Bytes::new(3)
+  c1[0] = 0x61 as Byte // 'a'
+  c1[1] = 0xE4 as Byte
+  c1[2] = 0xB8 as Byte
+  // final byte of '中' (0xAD) + '\n' + incomplete trailing "tail"
+  let c2 = Bytes::new(6)
+  c2[0] = 0xAD as Byte
+  c2[1] = 0x0A as Byte // '\n'
+  c2[2] = 0x74 as Byte // 't'
+  c2[3] = 0x61 as Byte // 'a'
+  c2[4] = 0x69 as Byte // 'i'
+  c2[5] = 0x6C as Byte // 'l' (no trailing '\n')
+
+  let lines = Lines::new(10.to_int64())
+  let got : Array[(String, Int64, Int64)] = []
+  let r1 = lines.add(c1, fn(p : Part) -> Result[Bool, String] {
+    got.push((sql_db::decode_utf8_lossy_bytes(p.bytes), p.from, p.offset))
+    Ok(true)
+  })
+  match r1 {
+    Ok(true) => ()
+    _ => panic("r1 failed")
+  }
+  expect_u(got.length() == 0, "no complete line yet")
+
+  let r2 = lines.add(c2, fn(p : Part) -> Result[Bool, String] {
+    got.push((sql_db::decode_utf8_lossy_bytes(p.bytes), p.from, p.offset))
+    Ok(true)
+  })
+  match r2 {
+    Ok(true) => ()
+    _ => panic("r2 failed")
+  }
+  expect_u(got.length() == 1, "one complete line")
+  let (text, from, off) = got[0]
+  expect_u(text == "a中\n", "decoded utf8")
+  expect_u(from == 10.to_int64(), "from offset")
+  expect_u(off == 15.to_int64(), "end offset")
+}
+
+test "sections_of splits at cutoff keeping line begun at cutoff in old section" {
+  let raw = "aaa\nbbb\nccc\n".to_bytes()
+  let part = Part::{ bytes: raw, from: 0.to_int64(), offset: 12.to_int64() }
+  let secs = sections_of(part, 5.0)
+  expect_u(secs.length() == 2, "two sections")
+  let (b0, f0, o0, fol0) = secs[0]
+  let (b1, f1, o1, fol1) = secs[1]
+  expect_u(sql_db::decode_utf8_lossy_bytes(b0) == "aaa\nbbb\n", "old bytes")
+  expect_u(f0 == 0.to_int64(), "old from")
+  expect_u(o0 == 8.to_int64(), "old end")
+  expect_u(!fol0, "old not followed")
+  expect_u(sql_db::decode_utf8_lossy_bytes(b1) == "ccc\n", "new bytes")
+  expect_u(f1 == 8.to_int64(), "new from")
+  expect_u(o1 == 12.to_int64(), "new end")
+  expect_u(fol1, "new followed")
+}
+
+test "claude_project replaces non-ASCII-alnum code points with single dashes" {
+  expect_u(claude_project("/Users/a/中文/ws_1") == "-Users-a----ws-1", "claude_project unicode")
+}
+
+test "calls_of parses Claude and Agy with speed settlement" {
+  let claude_text = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"},\"timestamp\":\"2026-11-24T00:00:00.000Z\"}\n{\"type\":\"assistant\",\"timestamp\":\"2026-11-24T00:00:02.500Z\",\"message\":{\"id\":\"m1\",\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":20,\"cache_creation_input_tokens\":5,\"output_tokens\":30}}}\n"
+  let st = CallState::{ model: None, codex_id: None, window: None, speed: no_speed() }
+  let cs = calls_of("claude", claude_text.to_bytes(), false, st)
+  expect_u(cs.length() == 1, "claude len")
+  expect_u(cs[0].id == "m1", "claude id")
+  expect_u(cs[0].input == 10.0, "claude input")
+  expect_u(cs[0].cache_read == 20.0, "claude cache_read")
+  expect_u(cs[0].cache_write == 5.0, "claude cache_write")
+  expect_u(cs[0].output == 30.0, "claude output")
+  expect_u(cs[0].gen_ms == 2500.0, "claude gen_ms")
+
+  let agy_text = "{\"type\":\"user\",\"time\":1000}\n{\"type\":\"tool\",\"startedAt\":1200,\"time\":1700}\n{\"type\":\"usage\",\"run\":\"r1\",\"time\":2500,\"model\":\"gemini-4-neon\",\"usage\":{\"inputTokens\":50,\"outputTokens\":100}}\n{\"type\":\"end\",\"time\":2600}\n"
+  let st_agy = CallState::{ model: None, codex_id: None, window: None, speed: no_speed() }
+  let cs_agy = calls_of("agy", agy_text.to_bytes(), false, st_agy)
+  expect_u(cs_agy.length() == 1, "agy len")
+  expect_u(cs_agy[0].id == "agy:r1", "agy id")
+  expect_u(cs_agy[0].gen_ms == 1000.0, "agy gen_ms")
+  expect_u(kept_speed_for("agy", st_agy.speed) == "v1:", "agy speed cleared")
+}
+
+test "format_wire_answer matches main.mbt:616-624 for object, non-object, and error" {
+  let id_arr = base_codec::json_arr([base_codec::json_int(1), base_codec::json_str("a")])
+  let ans1 = format_wire_answer(id_arr, Ok(base_codec::json_obj([("added", base_codec::json_int(3))])))
+  expect_u(base_codec::json_stringify(ans1) == "{\"added\":3,\"id\":[1,\"a\"]}", "append array id")
+
+  let ans2 = format_wire_answer(
+    base_codec::json_str("req-9"),
+    Ok(base_codec::json_obj([("id", base_codec::json_int(0)), ("ok", base_codec::json_bool(true))])),
+  )
+  expect_u(base_codec::json_stringify(ans2) == "{\"id\":\"req-9\",\"ok\":true}", "overwrite id")
+
+  let ans3 = format_wire_answer(base_codec::json_int(7), Ok(base_codec::json_arr([base_codec::json_int(42)])))
+  expect_u(base_codec::json_stringify(ans3) == "[42]", "non-object passthrough")
+
+  let ans4 = format_wire_answer(base_codec::json_null(), Err("no data directory"))
+  expect_u(base_codec::json_stringify(ans4) == "{\"id\":null,\"error\":\"no data directory\"}", "error envelope")
+}
+
+test "calls_of handles Pi answers (port of pi_wbtest.mbt) and huge Codex total" {
+  let pi_text = "{\"type\":\"session\",\"version\":3,\"id\":\"s1\",\"timestamp\":\"2026-11-16T09:56:41.832Z\",\"cwd\":\"/w\"}\n" +
+  "{\"type\":\"message\",\"id\":\"a1\",\"parentId\":null,\"timestamp\":\"2026-11-16T09:56:41.882Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"what is \\\"usage\\\"?\"}]}}\n" +
+  "{\"type\":\"message\",\"id\":\"a2\",\"parentId\":\"a1\",\"timestamp\":\"2026-11-16T09:56:41.907Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Let me look.\"}],\"provider\":\"stillfail\",\"model\":\"m1\",\"usage\":{\"input\":100,\"output\":7,\"cacheRead\":20,\"cacheWrite\":5,\"totalTokens\":132},\"stopReason\":\"toolUse\"}}\n" +
+  "{\"type\":\"message\",\"id\":\"a3\",\"parentId\":\"a2\",\"timestamp\":\"2026-11-16T09:56:42.000Z\",\"message\":{\"role\":\"assistant\",\"content\":[],\"provider\":\"stillfail\",\"model\":\"m1\",\"usage\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":0},\"stopReason\":\"aborted\"}}\n"
+  let st_pi = CallState::{ model: None, codex_id: None, window: None, speed: no_speed() }
+  let pi_calls = calls_of("pi", pi_text.to_bytes(), false, st_pi)
+  expect_u(pi_calls.length() == 1, "pi len")
+  expect_u(pi_calls[0].id == "pi:a2", "pi id")
+  expect_u(pi_calls[0].at == 1794823001907.0, "pi at")
+  expect_u(opt_str_eq(pi_calls[0].model, "m1"), "pi model")
+  expect_u(pi_calls[0].input == 100.0, "pi input")
+  expect_u(pi_calls[0].cache_read == 20.0, "pi cache_read")
+  expect_u(pi_calls[0].cache_write == 5.0, "pi cache_write")
+  expect_u(pi_calls[0].output == 7.0, "pi output")
+  expect_u(pi_calls[0].calls == 1.0, "pi calls")
+  expect_opt_d(pi_calls[0].context, Some(125.0), "pi context")
+
+  // Huge Codex total_tokens (1e20) saturates via builders_core::double_to_i64_saturating matching MB
+  let codex_text = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"cs1\"}}\n" +
+  "{\"type\":\"event_msg\",\"timestamp\":\"2026-11-24T00:00:01.000Z\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":100000000000000000000},\"last_token_usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5}}}}\n"
+  let st_cx = CallState::{ model: None, codex_id: None, window: None, speed: no_speed() }
+  let cx_calls = calls_of("codex", codex_text.to_bytes(), false, st_cx)
+  expect_u(cx_calls.length() == 1, "codex len")
+  expect_u(cx_calls[0].id == "codex:cs1:9223372036854775807", "codex huge total id: " + cx_calls[0].id)
+}
+
+fn counted_at(offset : Double, speed : Option[String]) -> Counted {
+  Counted::{
+    session: Some("k"),
+    offset: offset,
+    model: Some("m"),
+    speed: speed,
+    cutoff: Some(10.0),
+    anchor: Some("ab"),
+    path: "/t/r.jsonl",
+  }
+}
+
+test "read_out whitebox tests (port of read_out_wbtest.mbt)" {
+  let w = counted_at(100.0, Some("1,2,3,4"))
+  expect_u(read_out(true, Some(w), 100.0, "/t/r.jsonl", None, "claude"), "read_out 1")
+  expect_u(read_out(true, Some(w), 100.0, "/t/r.jsonl", Some(5.0), "pi"), "read_out 2")
+  expect_u(read_out(true, Some(w), 100.0, "/t/r.jsonl", Some(5.0), "claude"), "read_out 3")
+  expect_u(read_out(true, Some(w), 100.0, "/t/r.jsonl", Some(5.0), "codex"), "read_out 4")
+  expect_u(read_out(true, Some(counted_at(100.0, Some("v1:"))), 100.0, "/t/r.jsonl", Some(5.0), "agy"), "read_out 5")
+  let untimed = counted_at(100.0, None)
+  expect_u(read_out(true, Some(untimed), 100.0, "/t/r.jsonl", None, "pi"), "read_out 6")
+  expect_u(read_out(true, Some(untimed), 100.0, "/t/r.jsonl", None, "agy"), "read_out 7")
+  expect_u(!read_out(true, Some(untimed), 100.0, "/t/r.jsonl", Some(5.0), "claude"), "read_out 8")
+  expect_u(!read_out(true, Some(untimed), 100.0, "/t/r.jsonl", Some(5.0), "codex"), "read_out 9")
+  expect_u(!read_out(true, Some(untimed), 100.0, "/t/r.jsonl", Some(5.0), "agy"), "read_out 10")
+  expect_u(!read_out(true, Some(counted_at(100.0, Some(",,,"))), 100.0, "/t/r.jsonl", Some(5.0), "agy"), "read_out 11")
+
+  // Grown, cut short, not put away, or never read
+  expect_u(!read_out(true, Some(w), 120.0, "/t/r.jsonl", None, "claude"), "read_out grown")
+  expect_u(!read_out(true, Some(w), 80.0, "/t/r.jsonl", None, "claude"), "read_out shortened")
+  expect_u(!read_out(false, Some(w), 100.0, "/t/r.jsonl", None, "claude"), "read_out live")
+  expect_u(!read_out(true, None, 100.0, "/t/r.jsonl", None, "claude"), "read_out never read")
+
+  // Lacking boundary, anchor, place, or non-timed backfill
+  let no_cut = Counted::{ session: w.session, offset: w.offset, model: w.model, speed: w.speed, cutoff: None, anchor: w.anchor, path: w.path }
+  let no_anc = Counted::{ session: w.session, offset: w.offset, model: w.model, speed: w.speed, cutoff: w.cutoff, anchor: None, path: w.path }
+  expect_u(!read_out(true, Some(no_cut), 100.0, "/t/r.jsonl", None, "claude"), "read_out no cutoff")
+  expect_u(!read_out(true, Some(no_anc), 100.0, "/t/r.jsonl", None, "claude"), "read_out no anchor")
+  expect_u(!read_out(true, Some(w), 100.0, "/u/r.jsonl", None, "claude"), "read_out other path")
+  expect_u(!read_out(true, Some(untimed), 100.0, "/t/r.jsonl", Some(5.0), "pi"), "read_out untimed pi")
+}
+
+test "sort_strings_by_bytes sorts lexicographically by UTF-8 bytes in O(n log n)" {
+  let items = ["z", "b", "中", "a", "🚀", "aa", ""]
+  sort_strings_by_bytes(items)
+  expect_u(items[0] == "", "s0")
+  expect_u(items[1] == "a", "s1")
+  expect_u(items[2] == "aa", "s2")
+  expect_u(items[3] == "b", "s3")
+  expect_u(items[4] == "z", "s4")
+  expect_u(items[5] == "中", "s5")
+  expect_u(items[6] == "🚀", "s6")
+}

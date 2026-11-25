@@ -9,7 +9,7 @@ import { Fibers } from "../ops/fibers.ts";
 import { log } from "../ops/log.ts";
 import { restarter } from "../ops/restart.ts";
 import { managesStation } from "../mesh/credential.ts";
-import { ControlPlane, Events, Key, MeshSide, Parts, Paths, Peers, Store } from "../services.ts";
+import { ControlPlane, Events, Key, MeshSide, Parts, Paths, Peers, ReaderConfig, Store } from "../services.ts";
 import { Agents } from "../sessions/agents.ts";
 import { retiredWs } from "../sessions/hub.ts";
 import { Copies } from "./copies.ts";
@@ -40,9 +40,10 @@ export const CopiesLive = Layer.effectDiscard(
     const key = yield* Key;
     const agents = yield* Agents;
     const meshSide = yield* MeshSide;
+    const readerConfig = yield* ReaderConfig;
     const fibers = yield* Effect.acquireRelease(Effect.sync(() => new Fibers("copies")), (f) => Effect.promise(() => f.close()));
     const runner = yield* Effect.acquireRelease(
-      Effect.sync(() => new ProgramRunner({ db: join(data, "stillfail.db"), replica: join(data, "replica"), dataDir: data, origin: key.id })),
+      Effect.sync(() => new ProgramRunner({ db: join(data, "stillfail.db"), replica: join(data, "replica"), dataDir: data, origin: key.id, readers: readerConfig })),
       (r) => Effect.promise(() => r.close()),
     );
     const copies = new Copies({
@@ -79,6 +80,7 @@ export const CopiesLive = Layer.effectDiscard(
     // A station retired from a workspace, its chats going on another of it; or another's taken here (retire.ts).
     const retire: Retire = new Retire({
       data,
+      readers: readerConfig,
       here: () => key.id,
       home: () => cloud.home(),
       roster: (ws) => {

@@ -9,7 +9,22 @@ export const UI_FAULTS: readonly { said: string; whole: boolean; category: strin
   { said: "field: one Field given to two fields of the tree's: a Field is one editor's", whole: true, category: "tree field reused" },
   { said: "scene: a frame put together round layers drawn again where they were not kept: ", whole: false, category: "scene layer conflict" },
   { said: "presented beside a node of the tree, drawn by the old frame: a kind of panel panel_node does not take yet", whole: true, category: "panel cannot be presented" },
+  // Which step of a chat's list lost what was sent from here (the app's chat_sent_unseen_said): each set of its flags is
+  // a category of its own, and anything else after the same words is the one below.
+  ...chatSentUnseen(),
+  { said: "chat sent unseen: ", whole: false, category: "chat sent unseen" },
 ];
+
+/** Each set of the flags chat_sent_unseen_said gives (listed, row, staged, held, sending): words of its own alone. */
+function chatSentUnseen(): { said: string; whole: boolean; category: string }[] {
+  const out: { said: string; whole: boolean; category: string }[] = [];
+  for (let i = 0; i < 32; i++) {
+    const b = (bit: number) => (i >> bit) & 1;
+    const said = `chat sent unseen: listed=${b(4)} row=${b(3)} staged=${b(2)} held=${b(1)} sending=${b(0)}`;
+    out.push({ said, whole: true, category: said });
+  }
+  return out;
+}
 
 /** Any other fault. */
 export const UI_FAULT_OTHER = "UI fault";

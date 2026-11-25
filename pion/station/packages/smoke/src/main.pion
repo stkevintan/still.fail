@@ -13,11 +13,14 @@ import "builders_index"
 import "builders_legacy"
 import "builders_recent"
 import "builders_requested"
+import "builders_search"
 import "builders_stateful"
+import "builders_usage"
 import "builders_vault"
 import "footprint"
 import "host_shim"
 import "js_json"
+import "locate"
 import "memory"
 import "packed"
 import "sql_db"
@@ -100,6 +103,9 @@ fn advertised_modes() -> Array[String] {
     "said",
     "cc-index",
     "usage-check",
+    "live-locator",
+    "usage-counter",
+    "search",
   ]
 }
 
@@ -663,6 +669,91 @@ fn run_smoke_shell_round(dir : String, round : Int) -> (Int, Int) {
     }
   }
 
+  // 3. Real Rust shell ShellClient::write_atomic + read_bytes / read_bytes_range round-trip:
+  //    (a) initial longer file -> overwrite with shorter file,
+  //    (b) binary payload containing NUL bytes,
+  //    (c) empty file,
+  //    (d) ranged async read_bytes_range(from, length).
+  let client = builders_core::ShellClient::new()
+  let atomic_path = dir + "/nested-r" + round.to_string() + "/atomic.bin"
+  let long_data = "0123456789abcdefghijklmnopqrstuvwxyz-long-initial-payload".to_bytes()
+  match client.write_atomic(atomic_path, long_data) {
+    Ok(()) => ()
+    Err(e) => {
+      host_shim::stop()
+      panic("write_atomic long failed: " + e.message)
+    }
+  }
+  match client.read_bytes_range(atomic_path, from=10, length=6) {
+    Ok(Some(slice)) => {
+      if !bytes_equal(slice, "abcdef".to_bytes()) {
+        host_shim::stop()
+        panic("read_bytes_range slice mismatch")
+      }
+    }
+    Ok(None) => {
+      host_shim::stop()
+      panic("read_bytes_range returned None")
+    }
+    Err(e) => {
+      host_shim::stop()
+      panic("read_bytes_range failed: " + e.message)
+    }
+  }
+  let nul_data = Bytes::new(5)
+  nul_data[0] = 0x41 as Byte
+  nul_data[1] = 0x00 as Byte
+  nul_data[2] = 0x42 as Byte
+  nul_data[3] = 0x00 as Byte
+  nul_data[4] = 0xFF as Byte
+  match client.write_atomic(atomic_path, nul_data) {
+    Ok(()) => ()
+    Err(e) => {
+      host_shim::stop()
+      panic("write_atomic nul overwrite failed: " + e.message)
+    }
+  }
+  match client.read_bytes(atomic_path) {
+    Ok(Some(got_nul)) => {
+      if !bytes_equal(got_nul, nul_data) {
+        host_shim::stop()
+        panic("read_bytes nul overwrite mismatch: got len=" + got_nul.length().to_string())
+      }
+    }
+    Ok(None) => {
+      host_shim::stop()
+      panic("read_bytes nul returned None")
+    }
+    Err(e) => {
+      host_shim::stop()
+      panic("read_bytes nul failed: " + e.message)
+    }
+  }
+  let empty_data = Bytes::new(0)
+  match client.write_atomic(atomic_path, empty_data) {
+    Ok(()) => ()
+    Err(e) => {
+      host_shim::stop()
+      panic("write_atomic empty failed: " + e.message)
+    }
+  }
+  match client.read_bytes_range(atomic_path) {
+    Ok(Some(got_empty)) => {
+      if got_empty.length() != 0 {
+        host_shim::stop()
+        panic("read_bytes_range empty expected 0 bytes, got " + got_empty.length().to_string())
+      }
+    }
+    Ok(None) => {
+      host_shim::stop()
+      panic("read_bytes_range empty returned None")
+    }
+    Err(e) => {
+      host_shim::stop()
+      panic("read_bytes_range empty failed: " + e.message)
+    }
+  }
+
   host_shim::stop()
   if host_shim::shell_active() {
     panic("expected shell_active() == false after stop")
@@ -998,6 +1089,17 @@ fn main(world : World) -> Unit {
   } else if cmd == "--smoke-rc-soak" {
     let iters = if argv.length() >= 3 { parse_positive_int(argv[2], 50000) } else { 50000 }
     run_smoke_rc_soak(world, iters)
+  } else if cmd == "--smoke-history-marks" {
+    match (flag_value(argv, "--data"), flag_value(argv, "--path"), flag_value(argv, "--runtime")) {
+      (Some(data_dir), Some(tpath), Some(rt)) => {
+        let sep = match flag_value(argv, "--sep") {
+          Some(s) => s
+          None => "/"
+        }
+        host_shim::exit_process(builders_search::run_smoke_history_marks(data_dir, tpath, rt, sep))
+      }
+      _ => usage_exit()
+    }
   } else {
     match flag_value(argv, "--builder") {
       Some("footprint") => {
@@ -1179,6 +1281,42 @@ fn main(world : World) -> Unit {
         match flag_value(argv, "--db") {
           Some(db_path) => host_shim::exit_process(builders_requested::run_usage_check(db_path))
           None => usage_exit()
+        }
+      }
+      Some("live-locator") => {
+        match (flag_value(argv, "--db"), flag_value(argv, "--data")) {
+          (Some(db_path), Some(data_dir)) => {
+            let sep = match flag_value(argv, "--sep") {
+              Some(s) => s
+              None => "/"
+            }
+            host_shim::exit_process(locate::run_live_locator(db_path, data_dir, sep))
+          }
+          _ => usage_exit()
+        }
+      }
+      Some("usage-counter") => {
+        match flag_value(argv, "--db") {
+          Some(db_path) => {
+            let sep = match flag_value(argv, "--sep") {
+              Some(s) => s
+              None => "/"
+            }
+            host_shim::exit_process(builders_usage::run_usage_counter(db_path, sep))
+          }
+          None => usage_exit()
+        }
+      }
+      Some("search") => {
+        match (flag_value(argv, "--db"), flag_value(argv, "--data")) {
+          (Some(db_path), Some(data_dir)) => {
+            let sep = match flag_value(argv, "--sep") {
+              Some(s) => s
+              None => "/"
+            }
+            host_shim::exit_process(builders_search::run_search(db_path, data_dir, sep))
+          }
+          _ => usage_exit()
         }
       }
       _ => usage_exit()

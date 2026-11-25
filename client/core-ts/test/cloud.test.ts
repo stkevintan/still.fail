@@ -8,11 +8,11 @@ import { Cloud } from "../src/cloud.ts";
 import { CoreError } from "../src/error.ts";
 import { holdLanguage } from "../src/i18n.ts";
 import { request } from "../src/ops.ts";
-import { Runner } from "../src/runtime.ts";
+import { laterSleep, Runner } from "../src/runtime.ts";
 import { RELAY, Status, stationWhat, value } from "../src/status.ts";
 import { FakeHost, jsonResponse } from "../src/testing.ts";
 import { TRACES, route } from "../src/route.ts";
-import { EXPORT_MS, Kind, Tracer } from "../src/trace.ts";
+import { EXPORT_MS, Kind, RETRY_MAX_MS, Tracer } from "../src/trace.ts";
 import { ofAddress, Workspaces } from "../src/workspace.ts";
 import * as brand from "../src/brand.ts";
 import { cloudError } from "../src/cloud.ts";
@@ -303,6 +303,93 @@ test("spans_nest_and_go_out_in_one_batch", async () => {
   const [start, end] = [BigInt(r.startTimeUnixNano as string), BigInt(r.endTimeUnixNano as string)];
   assert.ok(end >= start && start > 1_700_000_000_000_000_000n);
   assert.equal(context.traceparent(), `00-${r.traceId}-${r.spanId}-01`);
+});
+
+/// The settings' 发送使用统计和错误报告 off: this device sends no trace of its own, waiting ones dropped, and its requests
+/// say they are not recorded; on again, they go out again.
+test("traces_follow_the_reports_switch", async () => {
+  const host = new FakeHost();
+  const tracer = new Tracer(host, new Runner(host.time.clock), 1);
+  const bodies: unknown[] = [];
+  tracer.setExport((b) => Effect.sync(() => void bodies.push(parseJson(b))));
+  tracer.root("waiting", Kind.Internal).end();
+  tracer.setOn(false);
+  const root = tracer.root("chat.open", Kind.Internal);
+  tracer.span("GET /admin/api/threads", Kind.Client, root.context).end();
+  root.end();
+  tracer.always("client.wake", Kind.Internal).end();
+  assert.match(root.context.traceparent(), /-00$/);
+  await host.time.pass(EXPORT_MS + 20, 100);
+  assert.equal(bodies.length, 0);
+  tracer.setOn(true);
+  tracer.root("mesh.connect", Kind.Internal).end();
+  await host.time.pass(EXPORT_MS + 20, 100);
+  assert.deepEqual(exported(bodies).map((s) => s.name), ["mesh.connect"]);
+});
+
+/// A batch already on its way as the switch goes off, and failing: never sent again, nor what failed before it.
+test("a_batch_that_failed_as_the_switch_went_off_is_never_sent_again", async () => {
+  const host = new FakeHost();
+  const tracer = new Tracer(host, new Runner(host.time.clock), 1);
+  let tried = 0;
+  // (each try takes a second and fails: the network down)
+  tracer.setExport(() => Effect.andThen(Effect.sync(() => void tried++), Effect.andThen(laterSleep(1_000), Effect.fail("offline"))));
+  tracer.root("station.reconnect", Kind.Internal).end();
+  await host.time.pass(EXPORT_MS + 20, 100);
+  assert.equal(tried, 1, "on its way");
+  tracer.setOn(false);
+  await host.time.pass(RETRY_MAX_MS * 3, 1_000);
+  assert.equal(tried, 1, "failed, it is let go, not tried again");
+  // Failed while on, then off before its retry: not sent either.
+  const again = new Tracer(host, new Runner(host.time.clock), 1);
+  let sent = 0;
+  again.setExport(() => Effect.andThen(Effect.sync(() => void sent++), Effect.fail("offline")));
+  again.root("station.reconnect", Kind.Internal).end();
+  await host.time.pass(EXPORT_MS + 20, 100);
+  assert.equal(sent, 1);
+  again.setOn(false);
+  await host.time.pass(RETRY_MAX_MS * 3, 1_000);
+  assert.equal(sent, 1);
+  // On again: what was dropped stays dropped.
+  const bodies: unknown[] = [];
+  again.setExport((b) => Effect.sync(() => void bodies.push(parseJson(b))));
+  again.setOn(true);
+  again.root("mesh.connect", Kind.Internal).end();
+  await host.time.pass(RETRY_MAX_MS + EXPORT_MS, 100);
+  assert.deepEqual(exported(bodies).map((s) => s.name), ["mesh.connect"]);
+});
+
+/// A core just started, its app not yet having said what its settings say (`client.reports`): its spans are kept here,
+/// its requests ask nothing to be recorded (`-00`); told on, what was kept goes; told off, it is dropped.
+test("before_it_is_told_a_device_keeps_its_traces_and_its_requests_say_unrecorded", async () => {
+  for (const told of [true, false]) {
+    const host = new FakeHost();
+    const tracer = new Tracer(host, new Runner(host.time.clock), 1, TRACES, null);
+    const bodies: unknown[] = [];
+    tracer.setExport((b) => Effect.sync(() => void bodies.push(parseJson(b))));
+    const root = tracer.root("station.connect", Kind.Internal);
+    const child = tracer.span("GET /admin/api/threads", Kind.Client, root.context);
+    assert.match(child.context.traceparent(), /-00$/, "its requests say they are not recorded");
+    child.end();
+    root.end();
+    const wake = tracer.always("client.wake", Kind.Internal);
+    assert.match(wake.context.traceparent(), /-00$/);
+    wake.end();
+    await host.time.pass(EXPORT_MS * 4, 100);
+    assert.equal(bodies.length, 0, "kept, not sent, before it is told");
+    tracer.setOn(told);
+    await host.time.pass(EXPORT_MS + 20, 100);
+    if (told) {
+      assert.deepEqual(exported(bodies).map((s) => s.name), ["GET /admin/api/threads", "station.connect", "client.wake"]);
+      assert.match(tracer.root("chat.open", Kind.Internal).context.traceparent(), /-01$/, "told on: recorded where they go too");
+    }
+    else {
+      assert.equal(bodies.length, 0, "told off: dropped");
+      tracer.setOn(true);
+      await host.time.pass(EXPORT_MS + 20, 100);
+      assert.equal(bodies.length, 0, "dropped for good");
+    }
+  }
 });
 
 /// 2026-11-07: a phone's failed reconnects, sent as its network was down, never reached the traces.

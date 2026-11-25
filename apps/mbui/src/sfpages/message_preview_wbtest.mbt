@@ -19,7 +19,7 @@
 //     viewer_fade_words, viewer_fly_words, viewer_outer, viewer_pick, viewer_viz, viewers_desk, zoom_flight,
 //     pic_flight, quote_flight, flight_seen, sfbase/flight_room, viewer_first_frame, sf/viewer_bar_corner,
 //     viewer_bar_gone, viewer_head_node.
-//   a tab beside the page (no thumbnail): sfapp/view_beside, files_tab, tape_tab, sfpages/farview_tab.
+//   a tab beside the page (no thumbnail): sfapp/view_beside, files_tab, tape_tab.
 //   a drive's (its folder's others, a subtitle beside it: the old player alone, player_node has none):
 //     sf/player, player_told, sfapp/play, sfpages/drive_play.
 //   the motion drives (scripts/motion: viewer, viewer-open, viewer-video, viewer-video-medium, picture-lift,

@@ -173,6 +173,8 @@ fn transport(congestion: &str) -> napi::Result<QuicTransportConfig> {
     Ok(QuicTransportConfig::builder()
         .congestion_controller_factory(controller)
         .stream_receive_window(iroh::endpoint::VarInt::from_u32(4 * 1024 * 1024))
+        .datagram_send_buffer_size(4 * 1024 * 1024)
+        .datagram_receive_buffer_size(Some(4 * 1024 * 1024))
         .default_path_keep_alive_interval(PATH_KEEP_ALIVE)
         .default_path_max_idle_timeout(PATH_IDLE)
         .max_idle_timeout(Some(iroh::endpoint::VarInt::from_u32(CONNECTION_IDLE_MS).into()))
@@ -987,6 +989,9 @@ pub struct Stream {
     media_out: Arc<Mutex<Option<screen_dgram::MediaOut>>>,
     /// One this end receives: its frames that come as datagrams, put back among the stream's (`receiveMediaDatagrams`).
     media_in: Arc<Mutex<Option<screen_dgram::MediaRx>>>,
+    /// Datagram ACKs arriving for a view this end sends (`mediaDatagrams`), injected at stream frame boundaries.
+    ack_in: Arc<Mutex<Option<screen_dgram::AckRx>>>,
+    ack_ready: tokio::sync::watch::Sender<bool>,
     /// What a read took of the stream and of the datagrams and has not given yet (a frame of datagrams waits for the
     /// stream to be between two frames).
     pending: Arc<StdMutex<Vec<u8>>>,
@@ -1002,7 +1007,46 @@ impl Stream {
             demux: conn.demux.clone(),
             media_out: Arc::default(),
             media_in: Arc::default(),
+            ack_in: Arc::default(),
+            ack_ready: tokio::sync::watch::channel(false).0,
             pending: Arc::default(),
+        }
+    }
+
+    /// `read` of a view's stream that sends media datagrams: reads client frames from the stream and injects
+    /// unreliable datagram ACKs (`KIND_ACK`) at frame boundaries without splitting any stream frame.
+    async fn read_with_acks(&self, acks: &mut screen_dgram::AckRx, mut reset: tokio::sync::watch::Receiver<bool>) -> napi::Result<Option<Buffer>> {
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut out = std::mem::take(&mut *self.pending.lock().unwrap());
+        loop {
+            if acks.at_boundary() {
+                acks.drain_into(&mut out);
+            }
+            if !out.is_empty() {
+                return Ok(Some(out.into()));
+            }
+            let mut recv = self.recv.lock().await;
+            tokio::select! {
+                read = recv.read(&mut buf) => match read.map_err(failed)? {
+                    Some(n) => {
+                        let chunk = &buf[..n];
+                        match acks.stream(chunk) {
+                            Some(b) => {
+                                out.extend_from_slice(&chunk[..b]);
+                                acks.drain_into(&mut out);
+                                out.extend_from_slice(&chunk[b..]);
+                            }
+                            None => out.extend_from_slice(chunk),
+                        }
+                    }
+                    None => return Ok(None),
+                },
+                d = acks.next() => acks.take_waiting(d),
+                _ = reset.changed() => {
+                    *self.pending.lock().unwrap() = out;
+                    return Ok(None);
+                }
+            }
         }
     }
 
@@ -1068,18 +1112,37 @@ impl Stream {
                 return self.read_with_datagrams(media, reset).await;
             }
         }
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut recv = self.recv.lock().await;
-        let read = tokio::select! {
-            read = recv.read(&mut buf) => read.map_err(failed)?,
-            _ = reset.changed() => None,
-        };
-        match read {
-            Some(n) => {
-                buf.truncate(n);
-                Ok(Some(buf.into()))
+        {
+            let mut acks = self.ack_in.lock().await;
+            if let Some(acks) = acks.as_mut() {
+                return self.read_with_acks(acks, reset).await;
             }
-            None => Ok(None),
+        }
+        let mut ack_ready = self.ack_ready.subscribe();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            if *ack_ready.borrow() {
+                let mut acks = self.ack_in.lock().await;
+                if let Some(acks) = acks.as_mut() {
+                    return self.read_with_acks(acks, reset).await;
+                }
+            }
+            let read = {
+                let mut recv = self.recv.lock().await;
+                tokio::select! {
+                    read = recv.read(&mut buf) => Some(read.map_err(failed)?),
+                    _ = ack_ready.changed() => None,
+                    _ = reset.changed() => return Ok(None),
+                }
+            };
+            let Some(read) = read else { continue };
+            match read {
+                Some(n) => {
+                    buf.truncate(n);
+                    return Ok(Some(buf.into()));
+                }
+                None => return Ok(None),
+            }
         }
     }
 
@@ -1098,7 +1161,11 @@ impl Stream {
     #[napi]
     pub async fn media_datagrams(&self, token: u32) -> bool {
         match screen_dgram::MediaOut::new(self.conn.clone(), token) {
-            Some(media) => {
+            Some(mut media) => {
+                if let Some(acks) = media.take_ack_rx() {
+                    *self.ack_in.lock().await = Some(acks);
+                    let _ = self.ack_ready.send(true);
+                }
                 *self.media_out.lock().await = Some(media);
                 true
             }

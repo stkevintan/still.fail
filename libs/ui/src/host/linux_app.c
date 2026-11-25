@@ -153,15 +153,27 @@ double mb_host_mem_bytes(void);
 // ---- frames: GTK's frame clock ticks while one is wanted, and each tick has the area drawn ----
 
 static void canvas_queue_render(GtkWidget *w);
+static void schedule_all(void);
+int mb_linux_stream_tick(int *wake_out);
 
 // (each window's frame clock its own: data, the window's number)
+static gint64 last_stream_tick_ft;
 static gboolean on_tick(GtkWidget *w, GdkFrameClock *clock, gpointer data) {
-  (void)w, (void)clock;
+  (void)w;
   WinSlot *o = &win_slots[GPOINTER_TO_INT(data)];
+  gint64 ft = clock ? gdk_frame_clock_get_frame_time(clock) : 0;
+  int stream_more = 0;
+  if (!ft || ft != last_stream_tick_ft) {
+    last_stream_tick_ft = ft;
+    int stream_wake = 0;
+    stream_more = mb_linux_stream_tick(&stream_wake);
+    if (stream_wake) schedule_all();
+  }
   if (o->want_frame) {
     canvas_queue_render(o->area);
     return G_SOURCE_CONTINUE;
   }
+  if (stream_more) return G_SOURCE_CONTINUE;
   o->tick_id = 0;
   return G_SOURCE_REMOVE;
 }

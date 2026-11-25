@@ -36,6 +36,9 @@ void mb_core_stop(void);
 /// Android's (android_core.c).
 int mb_core_screen_ack(double call, double ts);
 
+/// Same as mb_core_screen_ack, reporting `wait_us` microseconds spent in the client jitter buffer.
+int mb_core_screen_ack_wait(double call, double ts, uint32_t wait_us);
+
 /// The app's input to a remote screen (`json`: what `screen.input` says in `input`, UTF-8, `len` bytes) sent straight
 /// to its station by the shell, in order, where it reads the view of the app's call `call` itself (client/shell
 /// `sf_shell_screen_input`): 1, else 0 (the app asks the core). Apple's, Windows' and Android's, as mb_core_screen_ack.

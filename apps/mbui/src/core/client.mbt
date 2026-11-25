@@ -221,6 +221,10 @@ pub struct Client {
   priv mut focus : Json?
   /// the chat shown, as told last (`client.focus {chat}`; none once it is left): told again after `focus`
   priv mut focus_chat : Json?
+  /// whether the device sends its usage statistics, error reports and traces, as told last (`client.reports`): told
+  /// again to a core started anew, which else keeps its traces waiting to be told, and the app's own telling of it
+  /// (sfapp's app.mbt) runs again only as the settings change
+  priv mut reports : Json?
   /// While the device's performance record is kept (@hostapi.perf_recording): each call's name by its id until it is
   /// answered, so what the core says of it is put to its name (Client::perf_name)
   priv perf_calls : Map[Int, String]
@@ -278,6 +282,7 @@ pub fn Client::new(
     end_wait: fn(_) {  },
     focus: None,
     focus_chat: None,
+    reports: None,
     call_waits: {},
     sub_waits: {},
     echo_waits: {},
@@ -776,6 +781,9 @@ pub fn Client::call(
   bytes? : Bytes? = None,
   on_done? : (Result[Json, Json]) -> Unit,
 ) -> Int {
+  if name == "client.reports" {
+    self.reports = Some(params)
+  }
   if name == "client.focus" {
     match params {
       Object(o) if o.contains("chat") => self.focus_chat = Some(params)
@@ -1538,6 +1546,10 @@ pub fn Client::restarted(self : Client) -> Unit {
     s.from = None
     self.ask(s)
   }
+  match self.reports {
+    Some(p) => self.call("client.reports", params=p) |> ignore
+    None => ()
+  }
   for focus in [self.focus, self.focus_chat] {
     match focus {
       Some(p) => self.call("client.focus", params=p) |> ignore
@@ -1587,6 +1599,7 @@ pub fn Client::reset(self : Client) -> Unit {
   self.sub_waits.clear()
   self.focus = None
   self.focus_chat = None
+  self.reports = None
   self.kept.clear()
   self.next_id = 1
   self.beside = None

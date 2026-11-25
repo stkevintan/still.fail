@@ -2512,20 +2512,28 @@ fn profile_fusion_node(
       tip(item, uid, true)
     })
     heading(sec, "web-pages.profiles.fusionLead")
-    sec.box(fn(chips) {
-      @sf.style_node(chips, fn() { pf_fusion_leads })
-      chips.wraps(Is(Some(pf_fusion_line_gap))) |> ignore
-      chips.each(leads, fn(l) { text(Some(l), "id") }, fn(chip, l) {
-        let lv = @signals.untracked(fn() { Some(l.get()) })
-        let lead_id = text(lv, "id")
-        let lead_name = text(lv, "name")
-        let active = fn() { text(picked_lead(), "id") == lead_id }
-        profile_fusion_chip_node(chip, text(field(lv, "maker"), "id"), @signals.untracked(runtime), lead_name, "", active, fn() {
-          fusion_lead.set(lead_id)
-        }, Radio, fn() { false })
-        |> ignore
-      })
-    })
+    @sf.radio_chip_group(
+      sec,
+      fn() { @sf.t("web-pages.profiles.fusionLead") },
+      fn() { text(picked_lead(), "id") },
+      fn(id) { fusion_lead.set(id) },
+      fn(chips, rg) {
+        @sf.style_node(chips, fn() { pf_fusion_leads })
+        chips.wraps(Is(Some(pf_fusion_line_gap))) |> ignore
+        chips.each(leads, fn(l) { text(Some(l), "id") }, fn(chip, l) {
+          let lv = @signals.untracked(fn() { Some(l.get()) })
+          let lead_id = text(lv, "id")
+          let lead_name = text(lv, "name")
+          let maker_id = text(field(lv, "maker"), "id")
+          let rt = @signals.untracked(runtime)
+          let active = fn() { text(picked_lead(), "id") == lead_id }
+          @sf.radio_chip_item(rg, chip, fn() { lead_id }, fn() { lead_name }, fn(b) {
+            profile_fusion_chip_content(b, maker_id, rt, lead_name, "", active)
+          })
+          |> ignore
+        })
+      },
+    )
     |> ignore
     heading(sec, "web-pages.profiles.fusionSidekick")
     sec.box(fn(chips) {
@@ -2537,12 +2545,20 @@ fn profile_fusion_node(
           Some(at) => (side_name.exact_view(start=0, end=at).to_owned(), side_name.exact_view(start=at + 3).to_owned())
           None => (side_name, "")
         }
+        let rt = @signals.untracked(runtime)
         let on = fn() { named().contains(uid) }
-        let b = profile_fusion_chip_node(chip, maker_id, @signals.untracked(runtime), name_part, eff_part, on, fn() {
-          if !@signals.untracked(busy) {
-            toggle_pair(uid, !@signals.untracked(on))
-          }
-        }, Checkbox, busy, label=side_name)
+        let b = @sf.check_chip_node(
+          chip,
+          fn() { side_name },
+          on,
+          fn(want) {
+            if !@signals.untracked(busy) {
+              toggle_pair(uid, want)
+            }
+          },
+          fn(v) { profile_fusion_chip_content(v, maker_id, rt, name_part, eff_part, on) },
+          disabled=busy,
+        )
         tip(b, uid, false)
       })
     })
@@ -2551,33 +2567,21 @@ fn profile_fusion_node(
 }
 
 ///|
-/// A chip of the Fusion section in `parent` (a lead to choose, a sidekick to pin): its maker's mark, its name (`more`
-/// after it, quiet, where it says how hard it thinks), a tick while `on`, on the tint's ground (stronger while on or
-/// pointed at); pressed, `press`, read out as `role` (a radio, a checkbox) named `label` (its name where not said), on
-/// or off. Its node.
-fn profile_fusion_chip_node(
-  parent : @view.View,
+/// Content slot for a Fusion selectable chip (`radio_chip_item` / `check_chip_node`): its maker mark,
+/// its name (semibold while `on`), and optional quieter `more` (effort label).
+fn profile_fusion_chip_content(
+  b : @view.View,
   maker : String,
   runtime : String,
   name : String,
   more : String,
   on : () -> Bool,
-  press : () -> Unit,
-  role : @view.Role,
-  disabled : () -> Bool,
-  label? : String = name,
-) -> @view.View {
-  parent.box(fn(b) {
-    @sf.style_node(b, fn() { if on() || @sf.hovered_node(b) { pf_fusion_lead_on } else { pf_fusion_lead_chip } })
-    @sf.presses_node(b, press, on=fn() { !disabled() })
-    b.says(By(fn() { Some(@view.said(role, label~, check=if on() { On } else { Off })) })) |> ignore
-    @sf.maker_mark_node(b, maker, runtime, pf_fusion_mark) |> ignore
-    @sf.words_node(b, fn() { name }, fn() { if on() { pf_fusion_lead_words_on } else { pf_fusion_lead_words } }) |> ignore
-    if more != "" {
-      @sf.words_node(b, fn() { more }, fn() { pf_series_words }) |> ignore
-    }
-    b.show(at_once=true, on, fn(t) { @sf.icon_node(t, "check", pf_fusion_mark, By(fn() { @sf.theme().p.accent })) |> ignore })
-  })
+) -> Unit {
+  @sf.maker_mark_node(b, maker, runtime, pf_fusion_mark) |> ignore
+  @sf.words_node(b, fn() { name }, fn() { if on() { pf_fusion_lead_words_on } else { pf_fusion_lead_words } }) |> ignore
+  if more != "" {
+    @sf.words_node(b, fn() { more }, fn() { pf_series_words }) |> ignore
+  }
 }
 
 ///|
@@ -2787,14 +2791,6 @@ let pf_fusion_head : @ui.Style = @ui.css("w=Full px=S2_5 pt=S3 pb=S1 gap=S0_5")
 ///|
 // kept across runs: a value (no field of it changes)
 let pf_fusion_leads : @ui.Style = @ui.css("row w=Full px=S2_5 pb=S1 gap=S1_5 align=ACenter")
-
-///|
-// kept across runs: a value (no field of it changes)
-let pf_fusion_lead_chip : @ui.Style = @ui.css("row h=S7 px=S2_5 gap=S1_5 align=ACenter radius=Full bg=Tint hovered{bg=TintStrong}")
-
-///|
-// kept across runs: a value (no field of it changes)
-let pf_fusion_lead_on : @ui.Style = @ui.css("row h=S7 px=S2_5 gap=S1_5 align=ACenter radius=Full bg=TintStrong")
 
 ///|
 // kept across runs: a value (no field of it changes)

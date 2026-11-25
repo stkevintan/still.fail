@@ -4,7 +4,7 @@ import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { after, test } from "node:test";
-import { AGY_CATALOG_RETRY_MS, AGY_FILE_TOKENS, AGY_TOOL_BUDGET, AGY_TOOL_CEILING, AGY_TOOL_WRAP, AgyDriver, AgyNoCatalog, SESSIONS, agyAccountFile, agyBringIn, agyLentFile, agyPlan, agyPlanIn, agyRenew, agySessionPlan, agyTokenReady, agyKeychain, goKeyringValue, agyBaseModel, agyCatalog, agyConversations, agyEnv, agyHome, agyToken, agyVariant, classifyFailure, geminiDir, noticeFailure } from "../src/agents/agy.ts";
+import { AGY_CATALOG_RETRY_MS, AGY_FILE_TOKENS, AGY_TOOL_BUDGET, AGY_TOOL_CEILING, AGY_TOOL_WRAP, AgyDriver, AgyNoCatalog, SESSIONS, agyAccountFile, agyBringIn, agyLentFile, agyPlan, agyPlanIn, agyRenew, agySessionPlan, agyTakeBack, agyTokenReady, agyKeychain, goKeyringValue, readLinuxAgyKeyring, agyBaseModel, agyCatalog, agyConversations, agyEnv, agyHome, agyToken, agyVariant, classifyFailure, geminiDir, noticeFailure } from "../src/agents/agy.ts";
 import { REPO_RULES_HOOK } from "../src/agents/repo-rules.ts";
 import type { OpenOptions, RuntimeEvent } from "../src/agents/runtime.ts";
 import { allLeft } from "../src/agents/runner.ts";
@@ -1247,7 +1247,7 @@ test("a Google account's sign-in: refused at once where there is no terminal; wi
   }
   const q = await checkQuota({ id: "p", runtime: "agy", home: join(data, "no-signin"), access: { kind: "subscription" } } as never, {}, undefined, undefined, "en");
   assert.deepEqual([q.state, q.detail], ["unavailable", tr("en", "station.quota.signInExpired")]);
-  assert.equal(loginCommand("agy", "/h"), "HOME=/h/agy agy");
+  assert.equal(loginCommand("agy", "/h"), `SSH_CLIENT='${AGY_FILE_TOKENS.SSH_CLIENT}' HOME=/h/agy agy`);
 });
 
 test("an Antigravity CLI account's Gemini and Claude / GPT windows weigh only on their own models in the pool", () => {
@@ -1620,6 +1620,126 @@ test("go-keyring's stored values, as `agy` left them in the keychain", () => {
   assert.equal(goKeyringValue(`go-keyring-base64:${Buffer.from(text).toString("base64")}`), text);
   assert.equal(goKeyringValue(`go-keyring-encoded:${Buffer.from(text).toString("hex")}`), text);
   assert.equal(goKeyringValue(text), text);
+});
+
+test("Linux and Windows keep `agy` on file tokens, and Linux takes back a matching Secret Service item", async () => {
+  const dir = join(data, "linux-keyring");
+  const notedHome = join(dir, "noted");
+  const otherHome = join(dir, "other");
+  const unsignedHome = join(dir, "unsigned");
+  const windowsHome = join(dir, "windows");
+  mkdirSync(agyHome(notedHome), { recursive: true });
+  mkdirSync(agyHome(otherHome), { recursive: true });
+  mkdirSync(agyHome(unsignedHome), { recursive: true });
+  mkdirSync(agyHome(windowsHome), { recursive: true });
+  const token = JSON.stringify({ token: { access_token: "ya29.linux" }, auth_method: "consumer", id_token_email: "linux@gmail.com" });
+  writeFileSync(agyAccountFile(notedHome), JSON.stringify({ email: "linux@gmail.com" }));
+  writeFileSync(agyAccountFile(otherHome), JSON.stringify({ email: "other@gmail.com" }));
+  writeFileSync(agyAccountFile(windowsHome), JSON.stringify({ email: "linux@gmail.com" }));
+
+  const hadKeychain = platform.hasKeychain;
+  const hadOs = platform.os;
+  const read = agyKeychain.read;
+  let reads = 0;
+  agyKeychain.read = async () => {
+    reads++;
+    return token;
+  };
+  try {
+    // Non-keychain platforms (Linux and Windows) always pass AGY_FILE_TOKENS so `agy` stays on file storage.
+    const { options } = setup();
+    platform.hasKeychain = false;
+    platform.os = "linux";
+    assert.equal(agyEnv(options).SSH_CLIENT, AGY_FILE_TOKENS.SSH_CLIENT);
+
+    // Matching Linux Secret Service item is taken back into the profile's token file.
+    const back = await checkProfile({ runtime: "agy", kind: "subscription", key: "", via: {}, home: notedHome, env: {}, machine: false, lang: "en" });
+    assert.equal(back.state, "ok");
+    assert.match(back.detail, /linux@gmail\.com/);
+    assert.equal(readFileSync(agyToken(notedHome), "utf8"), token);
+    assert.equal(reads, 1);
+
+    // Another account's profile and an unsigned profile do not claim the shared keyring item.
+    const other = await checkProfile({ runtime: "agy", kind: "subscription", key: "", via: {}, home: otherHome, env: {}, machine: false, lang: "en" });
+    assert.equal(other.state, "login");
+    assert.equal(existsSync(agyToken(otherHome)), false);
+    assert.equal(reads, 2);
+
+    const unsigned = await checkProfile({ runtime: "agy", kind: "subscription", key: "", via: {}, home: unsignedHome, env: {}, machine: false, lang: "en" });
+    assert.equal(unsigned.state, "login");
+    assert.equal(reads, 2, "unsigned profile skips keyring lookup");
+
+    // Windows also passes AGY_FILE_TOKENS, while agyTakeBack skips macOS/Linux keyring lookup.
+    platform.os = "windows";
+    assert.equal(agyEnv(options).SSH_CLIENT, AGY_FILE_TOKENS.SSH_CLIENT);
+    assert.equal(await agyTakeBack(windowsHome), false);
+    assert.equal(reads, 2);
+  } finally {
+    platform.hasKeychain = hadKeychain;
+    platform.os = hadOs;
+    agyKeychain.read = read;
+  }
+});
+
+test("readLinuxAgyKeyring skips headless environments, reads unlocked items via Gio, and falls back to secret-tool only when python3 or gi is missing", async () => {
+  const calls: Array<{ file: string; args: readonly string[] }> = [];
+  const token = JSON.stringify({ id_token_email: "linux@gmail.com" });
+
+  // No session D-Bus address and no XDG_RUNTIME_DIR/bus socket -> skips spawning any helper.
+  assert.equal(
+    await readLinuxAgyKeyring({}, async (file, args) => {
+      calls.push({ file, args });
+      return { error: null, stdout: token };
+    }),
+    null,
+  );
+  assert.equal(calls.length, 0);
+
+  // With DBUS_SESSION_BUS_ADDRESS, queries python3 Gio helper first.
+  const busEnv = { DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus" };
+  assert.equal(
+    await readLinuxAgyKeyring(busEnv, async (file, args) => {
+      calls.push({ file, args });
+      return { error: null, stdout: `${token}\n` };
+    }),
+    token,
+  );
+  assert.deepEqual(calls.map((c) => c.file), ["python3"]);
+
+  // Item absent or keyring locked (python3 exits 1): returns null without falling back to secret-tool.
+  calls.length = 0;
+  assert.equal(
+    await readLinuxAgyKeyring(busEnv, async (file, args) => {
+      calls.push({ file, args });
+      return { error: Object.assign(new Error("not found"), { code: 1 }), stdout: "" };
+    }),
+    null,
+  );
+  assert.deepEqual(calls.map((c) => c.file), ["python3"]);
+
+  // Missing python3 (ENOENT) or missing gi (exit code 3): falls back to secret-tool.
+  for (const code of ["ENOENT", 3] as const) {
+    calls.length = 0;
+    assert.equal(
+      await readLinuxAgyKeyring(busEnv, async (file, args) => {
+        calls.push({ file, args });
+        if (file === "python3") return { error: Object.assign(new Error("missing"), { code }), stdout: "" };
+        return { error: null, stdout: `  ${token}\n` };
+      }),
+      token,
+    );
+    assert.deepEqual(calls.map((c) => c.file), ["python3", "secret-tool"]);
+    assert.deepEqual(calls[1]!.args, ["lookup", "service", "gemini", "username", "antigravity"]);
+  }
+
+  // Blank output or failed secret-tool returns null.
+  assert.equal(
+    await readLinuxAgyKeyring(busEnv, async (file) => {
+      if (file === "python3") return { error: Object.assign(new Error("no gi"), { code: 3 }), stdout: "" };
+      return { error: null, stdout: "   \n" };
+    }),
+    null,
+  );
 });
 
 test("uncheckOutdated migrates legacy tiered agy model IDs in config.json to base models", () => {

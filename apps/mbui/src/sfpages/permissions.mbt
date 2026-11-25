@@ -329,13 +329,85 @@ pub fn station_archiving_node(
   }
   let days_offered = fn() { items(view(), "daysOffered").map(fn(n) { (if n is Number(n, ..) { Some(n) } else { None }).unwrap_or(0.0) }) }
   let slack_offered = fn() { items(view(), "slackDaysOffered").map(fn(n) { (if n is Number(n, ..) { Some(n) } else { None }).unwrap_or(0.0) }) }
+  let station_ver = fn() { @settings.station_read(core, here(), station).version }
+  let in_flight : @signals.Signal[(String, Double, Double, Bool)?] = @signals.signal(None)
+  // Bridges the brief window between an acknowledged PUT and the station overview topic catching up.
+  let receipt : @signals.Signal[((String, Double, Double, Bool), Int)?] = @signals.signal(None)
+  let save_seq : Ref[Int] = Ref(0)
+  let server_state = fn() {
+    (mode(), number(view(), "days"), number(view(), "slackDays"), flag(view(), "reviewed"))
+  }
+  let effective_state = fn() {
+    match in_flight.get() {
+      Some(w) => w
+      None =>
+        match receipt.get() {
+          Some((acked, _)) => acked
+          None => server_state()
+        }
+    }
+  }
+  let state_matches = fn(
+    srv : (String, Double, Double, Bool),
+    want : (String, Double, Double, Bool),
+  ) {
+    if want.0 == "off" {
+      srv.0 == "off" && srv.2 == want.2 && srv.3 == want.3
+    } else {
+      srv == want
+    }
+  }
+  let topic_includes_write = fn(
+    srv : (String, Double, Double, Bool),
+    before : (String, Double, Double, Bool),
+    acked : (String, Double, Double, Bool),
+  ) {
+    let ok_mode = acked.0 == before.0 || srv.0 == acked.0
+    let ok_days = acked.0 == "off" || acked.1 == before.1 || srv.1 == acked.1
+    let ok_slack = acked.2 == before.2 || srv.2 == acked.2
+    let ok_rev = acked.3 == before.3 || srv.3 == acked.3
+    ok_mode && ok_days && ok_slack && ok_rev
+  }
+  let parse_receipt = fn(v : Json) -> (String, Double, Double, Bool)? {
+    let ar = match field(Some(v), "archiving") {
+      Some(Object(_)) as a => a
+      _ =>
+        match field(field(Some(v), "overview"), "archiving") {
+          Some(Object(_)) as a => a
+          _ => return None
+        }
+    }
+    let d = number(ar, "days")
+    let sl = number(ar, "slackDays")
+    let rev = flag(ar, "reviewed")
+    let m = match text(ar, "mode") {
+      "" => if d <= 0.0 { "off" } else if rev { "reviewed" } else { "idle" }
+      x => x
+    }
+    Some((m, d, sl, rev))
+  }
+  v.reacts(at_start=false, fn() { (station_ver(), server_state()) }, fn(pair) {
+    let (ver, _) = pair
+    match @signals.untracked(fn() { receipt.get() }) {
+      Some((_, ok_ver)) if ver > ok_ver => receipt.set(None)
+      _ => ()
+    }
+  })
   // (as it is when a choice is made: what it reads not followed by what chose)
   let locked = fn() {
     @signals.untracked(fn() {
-      !flag(view(), "canEdit") || is_doing(core, ["archiving.save"], [("station", station)])
+      !flag(view(), "canEdit") ||
+      in_flight.get() is Some(_) ||
+      is_doing(core, ["archiving.save"], [("station", station)])
     })
   }
-  let save = fn(days : Double, slack : Double, reviewed : Bool) {
+  let submit = fn(target_mode : String, days : Double, slack : Double, reviewed : Bool) {
+    save_seq.val += 1
+    let seq = save_seq.val
+    let before = @signals.untracked(effective_state)
+    let submit_ver = @signals.untracked(station_ver)
+    let want = (target_mode, days, slack, reviewed)
+    in_flight.set(Some(want))
     @settings.act(
       core,
       @sf.t("web-pages.archiving.saveWhat"),
@@ -347,6 +419,29 @@ pub fn station_archiving_node(
         ("reviewed", Json::boolean(reviewed)),
       ]),
       done=@sf.t("web-pages.archiving.saved"),
+      then=fn(ans) {
+        if save_seq.val == seq {
+          let acked = parse_receipt(ans).unwrap_or(want)
+          let cur_ver = @signals.untracked(station_ver)
+          let cur_srv = @signals.untracked(server_state)
+          in_flight.set(None)
+          if (cur_ver > submit_ver && (state_matches(cur_srv, acked) || topic_includes_write(cur_srv, before, acked))) ||
+            (cur_ver == submit_ver && state_matches(cur_srv, acked)) {
+            receipt.set(None)
+          } else {
+            receipt.set(Some((acked, cur_ver)))
+          }
+        }
+      },
+      failed=fn() {
+        if save_seq.val == seq {
+          in_flight.set(None)
+          match @signals.untracked(fn() { receipt.get() }) {
+            Some((_, ok_ver)) if @signals.untracked(station_ver) > ok_ver => receipt.set(None)
+            _ => ()
+          }
+        }
+      },
     )
   }
   // (each choice's block by how many ways it offers: a choice is made for as many as it has, made again for another
@@ -360,7 +455,7 @@ pub fn station_archiving_node(
         }
         out.push("review")
         out.push("mode/" + items(v, "modes").length().to_string())
-        if mode() != "off" {
+        if effective_state().0 != "off" {
           out.push("idle/" + strings(v, "daysOfferedText").length().to_string())
         }
         out.push("slack/" + strings(v, "slackDaysOfferedText").length().to_string())
@@ -383,12 +478,20 @@ pub fn station_archiving_node(
         @sf.section_node(b, fn() { @sf.t("web-pages.archiving.mode") }, fn(sec) {
           let modes = fn() { items(view(), "modes") }
           let at = fn() { modes().search_by(fn(m) { text(Some(m), "mode") == mode() }).unwrap_or(0) }
-          @sf.page_choice_node(sec, fn() { modes().map(fn(m) { text(Some(m), "label") }) }, at, fn(i) {
-            let now = @signals.untracked(at)
+          let chosen = fn() {
+            let eff = effective_state()
+            modes().search_by(fn(m) { text(Some(m), "mode") == eff.0 }).unwrap_or(at())
+          }
+          @sf.page_choice_node(sec, fn() { modes().map(fn(m) { text(Some(m), "label") }) }, chosen, fn(i) {
+            let now = @signals.untracked(chosen)
             if i != now && !locked() {
               match @signals.untracked(modes).get(i) {
-                Some(m) if flag(Some(m), "allowed") =>
-                  save(number(Some(m), "days"), @signals.untracked(fn() { number(view(), "slackDays") }), flag(Some(m), "reviewed"))
+                Some(m) if flag(Some(m), "allowed") => {
+                  let eff = @signals.untracked(effective_state)
+                  let next_mode = text(Some(m), "mode")
+                  let next_days = if next_mode == "off" { 0.0 } else if eff.1 > 0.0 { eff.1 } else { 1.0 }
+                  submit(next_mode, next_days, eff.2, flag(Some(m), "reviewed"))
+                }
                 _ => ()
               }
             }
@@ -398,22 +501,32 @@ pub fn station_archiving_node(
       "idle" =>
         @sf.section_node(b, fn() { @sf.t("web-pages.archiving.idle") }, fn(sec) {
           let at = fn() { days_offered().search(number(view(), "days")).unwrap_or(0) }
-          @sf.page_choice_node(sec, fn() { strings(view(), "daysOfferedText") }, at, fn(i) {
-            let now = @signals.untracked(at)
+          let chosen = fn() {
+            let eff = effective_state()
+            days_offered().search(eff.1).unwrap_or(at())
+          }
+          @sf.page_choice_node(sec, fn() { strings(view(), "daysOfferedText") }, chosen, fn(i) {
+            let now = @signals.untracked(chosen)
             let offered = @signals.untracked(days_offered)
-            if i != now && !locked() && i < offered.length() {
-              @signals.untracked(fn() { save(offered[i], number(view(), "slackDays"), flag(view(), "reviewed")) })
+            let eff = @signals.untracked(effective_state)
+            if i != now && !locked() && eff.0 != "off" && i < offered.length() {
+              submit(eff.0, offered[i], eff.2, eff.3)
             }
           })
         })
       "slack" =>
         @sf.section_node(b, fn() { @sf.t("web-pages.archiving.slack") }, fn(sec) {
           let at = fn() { slack_offered().search(number(view(), "slackDays")).unwrap_or(0) }
-          @sf.page_choice_node(sec, fn() { strings(view(), "slackDaysOfferedText") }, at, fn(i) {
-            let now = @signals.untracked(at)
+          let chosen = fn() {
+            let eff = effective_state()
+            slack_offered().search(eff.2).unwrap_or(at())
+          }
+          @sf.page_choice_node(sec, fn() { strings(view(), "slackDaysOfferedText") }, chosen, fn(i) {
+            let now = @signals.untracked(chosen)
             let offered = @signals.untracked(slack_offered)
             if i != now && !locked() && i < offered.length() {
-              @signals.untracked(fn() { save(number(view(), "days"), offered[i], flag(view(), "reviewed")) })
+              let eff = @signals.untracked(effective_state)
+              submit(eff.0, eff.1, offered[i], eff.3)
             }
           })
           @sf.page_note_node(sec, fn() { @sf.t("web-pages.archiving.slackHint") })

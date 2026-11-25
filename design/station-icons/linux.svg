@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 1.8C15.2 1.8 17.2 4.1 17.5 7.7C17.8 10.8 21.8 13.1 21.6 16.6C21.5 17.8 20 17.2 18.8 16.1C17.1 14.6 16.4 12.1 15.3 10.9C16.3 9.5 16 6.4 14.4 6C13.1 5.7 12.2 7 12.2 8.8C11.8 7.1 11.3 6.1 10.3 6.1C8.8 6.1 8.5 8.8 9.1 10.6C7.5 12.4 7 14.7 5.2 16.3C3.9 17.5 2.3 18 2.4 16.5C2.5 13.2 6.3 10.8 6.6 7.9C6.9 4.9 8.2 1.8 12 1.8Z" fill="currentColor" stroke="none"/>
+  <circle cx="10.4" cy="8.5" r=".75" fill="currentColor" stroke="none"/>
+  <circle cx="14.1" cy="8.4" r=".8" fill="currentColor" stroke="none"/>
+  <path d="M9.1 10.6Q11.8 8.7 14.9 10.3Q15.2 10.6 14.7 11Q13.5 11.8 12.3 12.2Q11.5 12.4 10.9 12L9.1 11Q8.8 10.8 9.1 10.6Z" fill="currentColor" stroke="none"/>
+  <path d="M6.3 13.6C4.9 17.8 7.8 20.4 11.8 20.5C16 20.6 19.1 18.2 17.7 13.7"/>
+  <path d="M8.1 17.2C7.5 16.3 6.5 16.5 5.9 17.3L5.1 18.2L3.4 18.8Q2.1 19.4 3.1 20.4L7.6 22Q9.9 22.6 9.6 20.5Q9.3 18.9 8.1 17.2Z" fill="currentColor" stroke="none"/>
+  <path d="M16.1 17.2Q17 15.9 18 17L19 18.1L20.7 18.6Q22 19.1 21.1 20.2L16.6 21.9Q14.3 22.6 14.5 20.6Q14.8 18.7 16.1 17.2Z" fill="currentColor" stroke="none"/>
+</svg>

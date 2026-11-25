@@ -44,7 +44,7 @@ export class InlineRunner implements Runner {
   #queue: Promise<unknown> = Promise.resolve();
 
   constructor(o: RunnerOptions & { now: () => number; chunkBytes?: number }) {
-    this.work = new ExportWork(o);
+    this.work = new ExportWork({ ...o, compactHeads: true });
   }
 
   #one<T>(f: () => T | Promise<T>): Promise<T> {

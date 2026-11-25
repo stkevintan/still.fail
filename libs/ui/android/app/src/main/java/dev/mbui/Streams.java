@@ -16,6 +16,7 @@ import android.opengl.GLUtils;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.view.Choreographer;
 import android.view.Surface;
 
 import java.nio.ByteBuffer;
@@ -332,6 +333,7 @@ final class Streams {
     /** Whether route `route`'s frames go to stream `id` now (android_host.c), and frame `ts` of it acknowledged. */
     static native boolean routed(long route, int id);
     static native void routeAck(long route, double ts);
+    static native void routeAckWait(long route, double ts, int waitUs);
 
     /** Its own decoders, by stream id (any thread: a route's frames come on the engine's). */
     private static final java.util.concurrent.ConcurrentHashMap<Integer, Own> owns = new java.util.concurrent.ConcurrentHashMap<>();
@@ -1262,6 +1264,142 @@ final class Streams {
 
         // ---- its thread ----
 
+        /** Adaptive P95 jitter-absorbing presentation clock for routed streams (aligned with host/stream_pace.h). */
+        private static final class JitterPace {
+            private static final int WINDOW = 40;
+            private static final double WINDOW_MS = 2000.0;
+            private static final double MAX_HOLD_MS = 60.0;
+            private static final double HOLD_DECAY = 0.03;
+            private static final double SILENCE_MS = 200.0;
+            private static final double CLOCK_JUMP_MS = 500.0;
+
+            private boolean hasClock;
+            private double baseMs;
+            private double holdMs;
+            private double lastArrivalMs;
+            private double lastHoldAtMs;
+            private final double[] sampleAt = new double[WINDOW];
+            private final double[] sampleLate = new double[WINDOW];
+            private int sampleCount;
+            private int sampleNext;
+
+            void reset() {
+                hasClock = false;
+                baseMs = 0.0;
+                holdMs = 0.0;
+                lastArrivalMs = 0.0;
+                lastHoldAtMs = 0.0;
+                sampleCount = 0;
+                sampleNext = 0;
+            }
+
+            /** Returns desired presentation time in ms (>= nowMs, capped at nowMs + MAX_HOLD_MS). */
+            double targetMs(double tsUs, double nowMs) {
+                double tsMs = tsUs / 1000.0;
+                double offset = nowMs - tsMs;
+                if (!hasClock || Math.abs(offset - baseMs) > CLOCK_JUMP_MS) {
+                    reset();
+                    hasClock = true;
+                    baseMs = offset;
+                    lastArrivalMs = nowMs;
+                    lastHoldAtMs = nowMs;
+                    return nowMs;
+                }
+                boolean immediate = (nowMs - lastArrivalMs) >= SILENCE_MS;
+                lastArrivalMs = nowMs;
+                if (offset < baseMs) baseMs = offset;
+                double late = Math.max(0.0, offset - baseMs);
+                sampleAt[sampleNext] = nowMs;
+                sampleLate[sampleNext] = late;
+                sampleNext = (sampleNext + 1) % WINDOW;
+                if (sampleCount < WINDOW) sampleCount++;
+
+                double[] tmp = new double[sampleCount];
+                int n = 0;
+                double cutoff = nowMs - WINDOW_MS;
+                for (int i = 0; i < sampleCount; i++) {
+                    if (sampleAt[i] >= cutoff) tmp[n++] = sampleLate[i];
+                }
+                double p95 = 0.0;
+                if (n > 0) {
+                    java.util.Arrays.sort(tmp, 0, n);
+                    int idx = Math.min(n - 1, (int) Math.floor(0.95 * (n - 1)));
+                    p95 = Math.min(MAX_HOLD_MS, tmp[idx]);
+                }
+                double dt = Math.max(0.0, nowMs - lastHoldAtMs);
+                lastHoldAtMs = nowMs;
+                if (p95 >= holdMs) holdMs = p95;
+                else holdMs = Math.max(p95, holdMs - dt * HOLD_DECAY);
+
+                if (immediate || holdMs < 1.0) return nowMs;
+                double due = tsMs + baseMs + holdMs;
+                if (due <= nowMs) return nowMs;
+                return Math.min(due, nowMs + MAX_HOLD_MS);
+            }
+        }
+
+        private static final class PacedImage {
+            final Image image;
+            final long route;
+            final double ts;
+            final double arrivedMs;
+            final double targetMs;
+            PacedImage(Image image, long route, double ts, double arrivedMs, double targetMs) {
+                this.image = image;
+                this.route = route;
+                this.ts = ts;
+                this.arrivedMs = arrivedMs;
+                this.targetMs = targetMs;
+            }
+        }
+
+        private final JitterPace pace = new JitterPace();
+        private final ArrayDeque<PacedImage> pacedImages = new ArrayDeque<>();
+        private boolean pacedVsyncPending;
+        private final Choreographer.FrameCallback pacedVsync = this::onChoreographerFrame;
+
+        private void onChoreographerFrame(long frameTimeNanos) {
+            handler.post(this::onPacedVsync);
+        }
+
+        private void schedulePacedVsync() {
+            if (pacedVsyncPending) return;
+            pacedVsyncPending = true;
+            Host.main.post(() -> Choreographer.getInstance().postFrameCallback(pacedVsync));
+        }
+
+        private void onPacedVsync() {
+            pacedVsyncPending = false;
+            if (released || !imaging) {
+                clearPacedImages();
+                return;
+            }
+            double nowMs = System.nanoTime() / 1_000_000.0;
+            // Drop stale overrun frames while preserving the newest ready frame so ImageReader never starves.
+            while (pacedImages.size() > IMAGES_HELD) {
+                PacedImage old = pacedImages.pollFirst();
+                int w = (int) Math.min(250_000L, Math.max(0L, Math.round((nowMs - old.arrivedMs) * 1000.0)));
+                old.image.close();
+                routeAckWait(old.route, old.ts, w);
+            }
+            PacedImage head = pacedImages.peekFirst();
+            if (head != null && nowMs + 2.0 >= head.targetMs) {
+                pacedImages.pollFirst();
+                int w = (int) Math.min(250_000L, Math.max(0L, Math.round((nowMs - head.arrivedMs) * 1000.0)));
+                StreamLayer.show(sid, head.image, false);
+                routeAckWait(head.route, head.ts, w);
+            }
+            if (!pacedImages.isEmpty()) schedulePacedVsync();
+        }
+
+        private void clearPacedImages() {
+            while (!pacedImages.isEmpty()) {
+                PacedImage p = pacedImages.pollFirst();
+                p.image.close();
+                routeAck(p.route, p.ts);
+            }
+        }
+
         /** Output buffer `index` put on the layer. */
         private void put(int index) {
             try {
@@ -1269,6 +1407,16 @@ final class Streams {
                 StreamLayer.rendered(sid);
             } catch (RuntimeException e) {
                 Host.log("stream " + sid + ": a frame not put on its layer: " + e);
+            }
+        }
+
+        /** Output buffer `index` scheduled on SurfaceFlinger for hardware VSync presentation at `renderTimestampNs`. */
+        private void putAt(int index, long renderTimestampNs) {
+            try {
+                codec.releaseOutputBuffer(index, renderTimestampNs);
+                StreamLayer.rendered(sid);
+            } catch (RuntimeException e) {
+                Host.log("stream " + sid + ": a frame not scheduled on its layer: " + e);
             }
         }
 
@@ -1302,9 +1450,23 @@ final class Streams {
                     continue;
                 }
                 if ((Boolean) f[0]) {
-                    // a route's: shown at once (nothing of the app's moves for it), acknowledged
-                    StreamLayer.show(sid, im, false);
-                    routeAck((Long) f[1], ts);
+                    // a route's: adaptively paced onto Choreographer VSync so same-city jitter never stutters
+                    long route = (Long) f[1];
+                    double nowMs = System.nanoTime() / 1_000_000.0;
+                    double targetMs = pace.targetMs(ts, nowMs);
+                    if (pacedImages.isEmpty() && targetMs <= nowMs + 1.0) {
+                        StreamLayer.show(sid, im, false);
+                        routeAckWait(route, ts, 0);
+                    } else {
+                        while (pacedImages.size() >= IMAGES_HELD) {
+                            PacedImage old = pacedImages.pollFirst();
+                            int w = (int) Math.min(250_000L, Math.max(0L, Math.round((nowMs - old.arrivedMs) * 1000.0)));
+                            old.image.close();
+                            routeAckWait(old.route, old.ts, w);
+                        }
+                        pacedImages.addLast(new PacedImage(im, route, ts, nowMs, targetMs));
+                        schedulePacedVsync();
+                    }
                     continue;
                 }
                 synchronized (images) {
@@ -1474,6 +1636,8 @@ final class Streams {
         /** Its reader let go, with the images it holds (the one on the layer stays there: the system holds its buffer). */
         private void closeReader() {
             imaging = false;
+            clearPacedImages();
+            pace.reset();
             drawing.clear();
             synchronized (images) {
                 for (Image im : images.values()) im.close();
@@ -1546,11 +1710,20 @@ final class Streams {
                         }
                         long route = directRoute;
                         if (routed(route, sid)) {
-                            // shown at once, and acknowledged: what the app said decoded before it passed over
+                            // adaptively paced via SurfaceFlinger render timestamp and acknowledged with exact hold time
                             passOver(ts, true);
-                            put(index);
+                            long nowNs = System.nanoTime();
+                            double nowMs = nowNs / 1_000_000.0;
+                            double targetMs = pace.targetMs(ts, nowMs);
+                            double holdMs = Math.max(0.0, targetMs - nowMs);
+                            if (holdMs >= 1.0) {
+                                putAt(index, nowNs + Math.round(holdMs * 1_000_000.0));
+                            } else {
+                                put(index);
+                            }
                             directAt = ts;
-                            routeAck(route, ts);
+                            int waitUs = (int) Math.min(250_000L, Math.round(holdMs * 1000.0));
+                            routeAckWait(route, ts, waitUs);
                             return;
                         }
                     }

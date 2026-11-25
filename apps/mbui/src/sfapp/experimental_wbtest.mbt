@@ -1,7 +1,6 @@
 // 设置 › 实验性功能 (sfpages' experimental.mbt, settings' features.mbt over the core's features.ts): the device's last
 // row, saying how many are on; found by the settings' search by each switch's words; each switch taking effect at once
-// where what it changes is shown (看板 put back to the list on 小屏, 中屏 and 大屏; a Farview tab back to its pictures),
-// what still replaces a working path offered on the test channel alone, and a station's own features (远程终端, 迁移)
+// where what it changes is shown (看板 put back to the list on 小屏, 中屏 and 大屏), and a station's own features (远程终端, 迁移)
 // as that station's channel says, whatever the app's. (A mode's -stable is an app and Willow both on stable.)
 
 ///|
@@ -63,7 +62,7 @@ test "设置: 实验性功能 the device's last row, under 本机缓存 and over
     assert_true(exp_top(t, "本机缓存") < exp_top(t, "实验性功能"), msg="\{at}: under 本机缓存")
     assert_true(exp_top(t, "实验性功能") < exp_top(t, "关于"), msg="\{at}: over 关于")
     assert_true(t.find("已开 2 项") is None && t.find("已开 1 项") is None, msg="\{at}: none on, no count")
-    exp_set(t, src, ["board", "farviewNative"], true)
+    exp_set(t, src, ["board", "selectionIntent"], true)
     assert_true(t.find("已开 2 项") is Some(_), msg="\{at}: two on")
     exp_set(t, src, ["board"], false)
     assert_true(t.find("已开 1 项") is Some(_), msg="\{at}: one on")
@@ -77,14 +76,14 @@ test "实验性功能's page: its switches, each off by default and on and off a
     let (t, src) = exp_at("settings-experimental", w, h, platform~)
     let at = "\{w}"
     let kept = fn(id : String) { field(field(src.topic("prefs", {}).get().value, "experimental"), id) is Some(True) }
-    for label in ["Farview 原生标签页渲染", "对话列表看板视图", "戳一下", "按住 ⌘/Ctrl 点击引用文本"] {
+    for label in ["对话列表看板视图", "戳一下", "按住 ⌘/Ctrl 点击引用文本"] {
       assert_true(t.query(Switch, label~) is Some(_), msg="\{at}: \{label}")
     }
-    // (those four alone: the new chat page, its composer and the new-chat page are the only ones, no switch of their own)
-    assert_eq(t.all(Switch).length(), 4, msg="\{at}: \{Repr(t.all(Switch).map(fn(n) { n.label }))}")
+    // (those three alone: the new chat page, its composer and the new-chat page are the only ones, no switch of their own)
+    assert_eq(t.all(Switch).length(), 3, msg="\{at}: \{Repr(t.all(Switch).map(fn(n) { n.label }))}")
     assert_true(t.query(Switch, label="试用新对话页") is None, msg="\{at}: no 试用新对话页")
     assert_true(t.query(Switch, label="试用新输入框") is None, msg="\{at}: no 试用新输入框")
-    assert_true(!kept("farviewNative") && !kept("board") && !kept("selectionIntent") && !kept("cmdQuote"), msg="\{at}: all off by default")
+    assert_true(!kept("board") && !kept("selectionIntent") && !kept("cmdQuote"), msg="\{at}: all off by default")
     // (but the wide frame's own: the sidebar's edge over what its pane shows by 6, sfdesk/pane_view.mbt's, as
     // station_move_wbtest's move_audit has it)
     let faults = t.audit().filter(fn(f) { !f.contains("ui/src/controls/edge_node.mbt:37, in what was asked for at stillfail/src/sfdesk/pane_view.mbt:") })
@@ -100,7 +99,7 @@ test "实验性功能's page: its switches, each off by default and on and off a
 
 ///|
 test "settings search finds each experimental switch by its words, on 实验性功能; 外观 no longer has 试用新对话页" {
-  for words in ["对话列表看板视图", "Farview 原生标签页渲染"] {
+  for words in ["对话列表看板视图", "戳一下"] {
     let t = settings_search_tester(390.0, 2)
     t.tap_text("搜索设置")
     t.type_text(words)
@@ -115,7 +114,7 @@ test "settings search finds each experimental switch by its words, on 实验性�
   assert_true(t.find("主题") is Some(_), msg="外观")
   assert_true(t.find("试用新对话页") is None, msg="外观 without it")
   let (t, _) = exp_at("settings-experimental", 390.0, 2400.0, platform=2)
-  assert_true(t.find("Farview 原生标签页渲染") is Some(_), msg="实验性功能")
+  assert_true(t.find("对话列表看板视图") is Some(_), msg="实验性功能")
   assert_true(t.find("试用新对话页") is None, msg="实验性功能 without it")
 }
 
@@ -158,76 +157,6 @@ test "看板 off by default on 小屏, 中屏 and 大屏: no key to it (none in 
     assert_true(t.find("整理发布清单") is Some(_), msg="\{at}: the chats' list shown")
     let faults = board_faults(t)
     assert_true(faults.is_empty(), msg="\{at}: " + faults.join("\n"))
-  }
-}
-
-///|
-/// The app over `mode` as exp_at's, the Farview tabs it draws itself counted: the core's `farview.view` asked and not
-/// let go of (each one drawn here, farview_tab.mbt).
-fn exp_farview_at(mode : String, w : Double, h : Double, platform : Int) -> (@ui.Tester, Source, Ref[Int]) {
-  new_run()
-  let base = fixture(mode)
-  let open : Map[Int, Bool] = Map([])
-  let live = Ref(0)
-  let src : Source = {
-    ..base,
-    stream: fn(name, params, bytes, on_value, done) {
-      let id = (base.stream)(name, params, bytes, on_value, done)
-      if name == "farview.view" {
-        open[id] = true
-        live.val = open.length()
-      }
-      id
-    },
-    cancel: fn(id) {
-      open.remove(id)
-      live.val = open.length()
-      (base.cancel)(id)
-    },
-  }
-  open_fixture_over(mode, src)
-  let t = @ui.Tester::new(fn(c) { view(c, src) }, tree=app_tree(src), w~, h~, platform~)
-  t.run_for(@ui.move_most_ms)
-  (t, src, live)
-}
-
-///|
-test "Farview 原生标签页渲染 off by default: a Farview tab is its station's pictures; on, drawn here; turned off while it shows, its pictures again at once" {
-  // 小屏: the tab's own page
-  let (t, src, live) = exp_farview_at("chat", 390.0, 844.0, 2)
-  @sfbase.open_page(Screen({ station: "ws1/st1", screen: "browser:fv_t1", title: "邮箱", until_gone: false }))
-  t.run_for(@ui.move_most_ms)
-  assert_eq(live.val, 0, msg="small: pictures by default")
-  exp_set(t, src, ["farviewNative"], true)
-  assert_true(app.nav.top() is Screen(_), msg="small: the tab's page still")
-  assert_eq(live.val, 1, msg="small: drawn here once on")
-  exp_set(t, src, ["farviewNative"], false)
-  assert_true(app.nav.top() is Screen(_), msg="small: the tab's page still")
-  assert_eq(live.val, 0, msg="small: its pictures once off")
-  // 大屏 and 中屏: beside the chat (on the tape its panel brought in, as side_tab_at does)
-  for win in [side_tab_windows[0], side_tab_windows[1]] {
-    let (t, src, _) = exp_farview_at("chat-jobs-side", win.1, win.2, win.3)
-    open_chat(side_tab_chat)
-    t.run_for(@ui.move_most_ms)
-    if @sf.layout(win.1) is Medium {
-      for _ in 0..<2 {
-        if @sfdesk.wide.tape_at.get() != @sfdesk.TapePane::Panel {
-          t.tap(win.1 - @sfdesk.tape_shows / 2.0, 400.0)
-          t.run_for(@ui.move_most_ms)
-        }
-      }
-    }
-    let tab = "screen:" + Json::array([Json::string("ws1/st1"), Json::string("browser:fv_t1")]).stringify()
-    side_change(side_tab_chat, "open", Some(tab))
-    t.run_for(@ui.move_most_ms)
-    assert_eq(side_now(side_tab_chat).1, tab)
-    // (the made-up tab's page, 登录 · 继续前往邮箱, laid out and drawn here a glyph at a time: Farview's stage)
-    let drawn = fn() { t.words().iter().any(fn(w) { w.0 == "邮" }) }
-    assert_false(drawn(), msg="\{win.0}: pictures by default")
-    exp_set(t, src, ["farviewNative"], true)
-    assert_true(drawn(), msg="\{win.0}: drawn here once on")
-    exp_set(t, src, ["farviewNative"], false)
-    assert_false(drawn(), msg="\{win.0}: its pictures once off")
   }
 }
 
@@ -280,11 +209,10 @@ test "a station's terminals are as the station's channel says, never the app's, 
 }
 
 ///|
-test "a stable app's 实验性功能: 对话列表看板视图 alone, not what still replaces a working path (Farview 原生标签页渲染)" {
+test "a stable app's 实验性功能: 对话列表看板视图 present, graduated/removed switches absent" {
   let (t, _) = exp_at("settings-experimental-stable", 390.0, 844.0, platform=2)
   assert_true(t.query(Switch, label="对话列表看板视图") is Some(_), msg="stable: " + t.words().map(fn(x) { x.0 }).join("|"))
   assert_true(t.query(Switch, label="试用新对话页") is None, msg="stable: no 试用新对话页")
-  assert_true(t.query(Switch, label="Farview 原生标签页渲染") is None, msg="stable: no Farview 原生标签页渲染")
 }
 
 ///|

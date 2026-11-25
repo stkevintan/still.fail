@@ -58,9 +58,7 @@ pub fn remote_close_tab_clean(src : Source, ws : String, key : String) -> Unit {
   match @sfbase.remote_tab_parse(key) {
     Some(Screen(at)) => {
       @sfbase.remote_tab_close(src, ws, key)
-      if !farview_screen(at.screen) {
-        screen_left(src, at.station, at.screen)
-      }
+      screen_left(src, at.station, at.screen)
     }
     Some(Terminal(at)) => {
       @sfbase.remote_tab_close(src, ws, key)
@@ -931,11 +929,11 @@ fn remote_station_head_node(
 }
 
 ///|
-/// Whether the workspace's `Place("remote")` holds or fronts `station`'s `screen` (not a Farview tab).
+/// Whether the workspace's `Place("remote")` holds or fronts `station`'s `screen`.
 pub fn remote_has_screen(src : Source, station : String, screen : String) -> Bool {
   guard @signals.untracked(fn() { @sfbase.workspace_in_view(src).0 }) is Some(w) else { return false }
   let matches = fn(t : @sfbase.RemoteTab) {
-    t is Screen(x) && x.station == station && x.screen == screen && !farview_screen(x.screen)
+    t is Screen(x) && x.station == station && x.screen == screen
   }
   let front = @signals.untracked(fn() { remote_front_in(src, w.id, remote_lines(src, w.id, (src.asks_terminals)())) })
   if front is Some((_, t)) && matches(t) {
@@ -978,7 +976,7 @@ pub fn remote_workbench_node(
     fn(cur) {
       let (now, tabs, is_shown) = cur
       match prev_front.val {
-        Some((old_k, Screen(old_at))) if !farview_screen(old_at.screen) => {
+        Some((old_k, Screen(old_at))) => {
           let still_same = is_shown && (match now {
             Some((_, Screen(now_at))) => now_at.station == old_at.station && now_at.screen == old_at.screen
             _ => false
@@ -998,7 +996,7 @@ pub fn remote_workbench_node(
         }
         _ => ()
       }
-      if is_shown && now is Some((_, Screen(now_at))) && !farview_screen(now_at.screen) {
+      if is_shown && now is Some((_, Screen(now_at))) {
         screen_covered(src, now_at.station, now_at.screen, false)
       }
       prev_front.val = if is_shown { now } else { prev_front.val }
@@ -1007,7 +1005,7 @@ pub fn remote_workbench_node(
   v.owns(fn() {
     let seen : Array[(String, String)] = []
     let take = fn(at : ScreenAt) {
-      if !farview_screen(at.screen) && !seen.contains((at.station, at.screen)) {
+      if !seen.contains((at.station, at.screen)) {
         seen.push((at.station, at.screen))
       }
     }
@@ -1069,10 +1067,7 @@ pub fn remote_workbench_node(
     true
   })
   |> ignore
-  // (a Farview tab drawn by Farview's client while 实验性功能's Farview 原生标签页渲染 is on, else its pictures: made
-  // again as it is turned on or off)
-  v.pick(at_once=true, fn() { (front_key(), @sfbase.farview_native.get()) }, fn(body, shown) {
-    let (key, native) = shown
+  v.pick(at_once=true, front_key, fn(body, key) {
     body.grow(Is(1.0)).shrink(Is(1.0)).basis(Is(Some(0.0))).min_height(Is(Some(0.0))) |> ignore
     guard @sfbase.remote_tab_parse(key) is Some(tab) else {
       // (nothing to show: none online, the stations' illustration and where to add one; else nothing till the
@@ -1095,20 +1090,6 @@ pub fn remote_workbench_node(
       }
     }
     match tab {
-      Screen(at) if native && farview_screen(at.screen) =>
-        farview_pane_node(
-          body,
-          src,
-          at.station,
-          at.screen,
-          title=at.title,
-          on_switch=switch_in_workbench,
-          on_close=close_tab,
-          in_remote=true,
-          bar_pads=pads,
-          on_window=to_window,
-          tips~,
-        )
       Screen(at) =>
         screen_pane_node(
           body,

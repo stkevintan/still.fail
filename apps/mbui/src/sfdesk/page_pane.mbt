@@ -121,7 +121,7 @@ fn pane_shows(k : Int) -> () -> Bool {
 }
 
 ///|
-/// Pause non-Farview remote screens when `Place("remote")` is parked on the nav shelf (`keeps_holds=false` pauses
+/// Pause remote screens when `Place("remote")` is parked on the nav shelf (`keeps_holds=false` pauses
 /// `remote_workbench_node`'s own `v.reacts` while shelved) and resume the active screen when returning to it.
 fn remote_shelf_pause_node(v : @view.View, src : Source) -> Unit {
   let was_shelved = Ref(false)
@@ -144,7 +144,7 @@ fn remote_shelf_pause_node(v : @view.View, src : Source) -> Unit {
         let top = @signals.untracked(fn() { app.nav.top() })
         for tab in tabs {
           match tab.1 {
-            @sfbase.RemoteTab::Screen(at) if !@sfpages.farview_screen(at.screen) => {
+            @sfbase.RemoteTab::Screen(at) => {
               let shown_aside = @signals.untracked(fn() { side_screen_shown(src, at.station, at.screen) })
               let shown_full = top is Screen(t) && t.station == at.station && t.screen == at.screen
               if !shown_aside && !shown_full {
@@ -157,7 +157,7 @@ fn remote_shelf_pause_node(v : @view.View, src : Source) -> Unit {
       } else if @signals.untracked(fn() { app.nav.top() }) == Place("remote") {
         for tab in tabs {
           if tab.0 == active {
-            if tab.1 is @sfbase.RemoteTab::Screen(at) && !@sfpages.farview_screen(at.screen) {
+            if tab.1 is @sfbase.RemoteTab::Screen(at) {
               @sfpages.screen_covered(src, at.station, at.screen, false)
             }
             break

@@ -136,5 +136,5 @@ pub fn nav_bar_none() -> Unit {
 /// Whether the host lays out the system's controls itself in every pose of its screens (nav_bar shows them: an iPhone
 /// Duo's), whatever the frame asks of it now: the app's frame then the same on each.
 pub fn nav_bar_able() -> Bool {
-  current.val.nv_able()
+  (current.val.nv_able)()
 }

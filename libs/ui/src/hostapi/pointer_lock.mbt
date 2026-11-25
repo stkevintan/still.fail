@@ -4,13 +4,13 @@
 /// the mouse with no edge to stop it). The host lets go of it by itself as the window goes out of focus (or the app out
 /// of the front); a host with nothing for it holds nothing.
 pub fn set_pointer_lock(on : Bool) -> Unit {
-  current.val.pointer_lock(on)
+  (current.val.pointer_lock)(on)
 }
 
 ///|
 /// Whether the window holds the pointer now (set_pointer_lock; let go of by the host as the window went out of focus).
 pub fn pointer_locked() -> Bool {
-  current.val.pointer_locked()
+  (current.val.pointer_locked)()
 }
 
 ///|
@@ -19,7 +19,7 @@ pub fn pointer_locked() -> Bool {
 /// asked, while the pointer is held (set_pointer_lock); taken, so the next asks from now. (0, 0) where it is not held.
 pub fn pointer_delta_take() -> (Double, Double) {
   let out : FixedArray[Double] = FixedArray::make(2, 0.0)
-  current.val.pointer_delta(out)
+  (current.val.pointer_delta)(out)
   (out[0], out[1])
 }
 
@@ -81,7 +81,7 @@ fn gamepad_trigger(v : Double) -> Double {
 /// The game controllers connected now, by slot (none where the host reads none).
 pub fn gamepads() -> Array[Gamepad] {
   let out : FixedArray[Double] = FixedArray::make(gamepads_most * gamepad_fields, 0.0)
-  let n = current.val.gamepads(out)
+  let n = (current.val.gamepads)(out)
   let pads : Array[Gamepad] = []
   for i in 0..<(if n < gamepads_most { n } else { gamepads_most }) {
     let o = i * gamepad_fields

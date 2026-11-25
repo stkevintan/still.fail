@@ -59,6 +59,8 @@ fn one_rich(run : Run, spacing? : Double = 0.0, line? : Double = 0.0) -> Rich {
     max_lines: 0,
     faces: 0,
     shaped_in: 0,
+    cjk_override: None,
+    code_cjk_override: None,
   }
 }
 

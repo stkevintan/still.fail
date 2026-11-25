@@ -56,6 +56,7 @@ __attribute__((constructor)) static void use_hermes_engine(void) {
   // (mbui's apple_stream.m), acknowledged to the station through the shell
   mb_core_route_media(mb_stream_route_take);
   mb_stream_route_acks(mb_core_screen_ack);
+  mb_stream_route_acks_wait(mb_core_screen_ack_wait);
 }
 
 #if TARGET_OS_IPHONE && !defined(STILLFAIL_CORE_PION)

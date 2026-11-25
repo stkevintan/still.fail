@@ -9,7 +9,7 @@
 let ctrl_seg_pad : Double = 3.0
 
 ///|
-let ctrl_seg_held_scale : Double = 1.15
+pub let ctrl_seg_held_scale : Double = 1.15
 
 ///|
 let ctrl_seg_px : Double = 12.0
@@ -31,23 +31,31 @@ let ctrl_type_seg : Double = 14.0
 // ---------------------------------------------------------------------------
 
 ///|
-/// iOS 26 lifted opaque pill fill at rest for `glass_track=true` segmented controls
-/// (pure white in Light, lifted medium grey in Dark).
+/// Native iOS 27.0 lifted opaque pill fill at rest for segmented controls
+/// (pure white in Light, lifted medium grey `0x68686EFF` in Dark matching native `(105..111)`).
+/// Resting pills use zero border and zero shadow in both themes.
 fn ctrl_seg_thumb_idle() -> Int64 {
   if is_dark() {
-    0x5A5A60FFL
+    0x68686EFFL
   } else {
     0xFFFFFFFFL
   }
 }
 
 ///|
-/// Subtle outer drop shadow for the resting lifted pill in `glass_track=true` segmented controls.
-let ctrl_seg_thumb_idle_shadow : (Double, Double, Int64) = (2.0, 1.0, 0x0000001FL)
-
-///|
 fn ctrl_seg_inactive_ink() -> Int64 {
   colors().content
+}
+
+///|
+/// Translucent neutral track ground for embedded segmented controls (`glass_track=false`)
+/// and narrow menu disclosures, ensuring zero visual jump between side-by-side and menu modes.
+pub fn ctrl_seg_embedded_track_ink() -> Int64 {
+  if is_dark() {
+    0xFFFFFF18L
+  } else {
+    0x7878801FL
+  }
 }
 
 // ---------------------------------------------------------------------------

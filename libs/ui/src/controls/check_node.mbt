@@ -37,11 +37,30 @@ pub fn check_node_of(
   edge? : () -> Int64,
   loc~ : SourceLoc,
 ) -> @view.View {
+  check_box_node_by(loc~, parent, on, turn, label, disabled, fn() { side }, fn() { corner }, edge)
+}
+
+///|
+/// Package-internal shared checkbox box with reactive `side` and `corner` (used by `check_node_of` and
+/// `check_row_node`). Keeps `@headless.toggle(..., Checkbox, ...)`, `field_hover` edge when unchecked and hovered,
+/// `@motion.press_feel`, stroke tick, disabled fade, and `focus_ring_node`.
+#callsite(autofill(loc))
+fn check_box_node_by(
+  parent : @view.View,
+  on : () -> Bool,
+  turn : (Bool) -> Unit,
+  label : () -> String,
+  disabled : () -> Bool,
+  side : () -> Double,
+  corner : () -> Double,
+  edge : (() -> Int64)?,
+  loc~ : SourceLoc,
+) -> @view.View {
   @headless.toggle(made_for=loc, parent, Checkbox, label, on, turn, disabled~, fn(b, _) {
     b
-    .width(Is(Some(side)))
-    .height(Is(Some(side)))
-    .radius(Is(corner))
+    .width(By(fn() { Some(side()) }))
+    .height(By(fn() { Some(side()) }))
+    .radius(By(corner))
     .lines_up(Is(Some(Middle)))
     .lies_along(Is(Middle))
     .ground(By(fn() {
@@ -65,8 +84,9 @@ pub fn check_node_of(
     .alpha(By(fn() { if disabled() { check_disabled_alpha } else { 1.0 } }))
     |> ignore
     // (pressed, sunk a little and springing back as it is let go; its tick drawn by its stroke as it is ticked)
-    @motion.press_feel(b, live=fn() { !disabled() }, hovers=false, size=(side, side)) |> ignore
-    check_tick_node(b, on, fn() { side }, fn() { @ui.tree_theme().on_primary })
+    let s = @signals.untracked(side)
+    @motion.press_feel(b, live=fn() { !disabled() }, hovers=false, size=(s, s)) |> ignore
+    check_tick_node(b, on, side, fn() { @ui.tree_theme().on_primary })
     // (the keyboard's focus on it: a concentric ring round it, its gap and width the theme's)
     focus_ring_node(b)
   })

@@ -106,7 +106,7 @@ final class Daemon {
     }
     switch request["op"] as? String {
     case "hello":
-      channel.line(["ok": true, "v": 1, "pid": Int(getpid()), "app": Bundle.main.bundlePath, "capabilities": ["screen", "files", "simulator", "ui", "resolution"]])
+      channel.line(["ok": true, "v": 1, "pid": Int(getpid()), "app": Bundle.main.bundlePath, "capabilities": ["screen", "files", "simulator", "ui", "resolution", "encode"]])
     case "status":
       var status = Status.fresh() ?? Status.now()
       // (the display a view captures: still.fail's own where there is one, which a new process knows nothing of)
@@ -162,6 +162,9 @@ final class Daemon {
         return
       }
       SimulatorView(channel: channel, options: request, udid: udid).run()
+    case "frames.encode":
+      // Pure JPEG -> H.264 hardware encoder (FrameEncoder.swift): no Screen Recording permission needed.
+      FrameEncoder(channel: channel, options: request).run()
     case "watch":
       // The station's watch: open for as long as this process is (its end is how the station learns this one ended).
       channel.line(["ok": true])

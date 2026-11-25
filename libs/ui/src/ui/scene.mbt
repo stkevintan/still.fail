@@ -324,10 +324,10 @@ fn clip_has_outer(k : Int) -> Bool {
 /// a corner it shares, as round or rounder (sd_clip draws a corner where its box has it): only a curve that reaches
 /// into its shape where it is not that corner, a band brushed across a frame's foot, a frame scrolled into a pane's
 /// corner.
-fn[A : ClipNumbers] clip_cutting(
+fn clip_cutting(
   c0 : Int,
   c1 : Int,
-  at : A,
+  at : Array[Double],
   x0 : Double,
   y0 : Double,
   x1 : Double,
@@ -344,22 +344,6 @@ fn[A : ClipNumbers] clip_cutting(
   } else {
     None
   }
-}
-
-///|
-/// What a clip's 12 numbers are read from: clip_stack, an instance list, a kept clip's.
-priv trait ClipNumbers {
-  clip_number(Self, Int) -> Double
-}
-
-///|
-impl ClipNumbers for Array[Double] with clip_number(self, k) {
-  self[k]
-}
-
-///|
-impl ClipNumbers for FixedArray[Double] with clip_number(self, k) {
-  self[k]
 }
 
 ///|
@@ -415,8 +399,8 @@ let clip_arc_sin_e : FixedArray[Double] = FixedArray::make(clip_arc_steps + 1, 0
 /// shape it is most on its edge, along a straight one at its ends; so the shape's corners are what is measured, a
 /// square one its point, a round one along its curve (clip_arc_steps; a smooth one as sd_corner draws it, |x|^n + |y|^n
 /// = R^n). A corner of the shape outside the square a curve of that clip lies in is not measured against it.
-fn[A : ClipNumbers] clip_cut_depth(
-  at : A,
+fn clip_cut_depth(
+  at : Array[Double],
   o : Int,
   x0 : Double,
   y0 : Double,
@@ -425,19 +409,77 @@ fn[A : ClipNumbers] clip_cut_depth(
   r : (Double, Double, Double, Double),
   sm : (Double, Double, Double, Double),
 ) -> Double {
-  let ox0 = at.clip_number(o)
-  let oy0 = at.clip_number(o + 1)
-  let ox1 = at.clip_number(o + 2)
-  let oy1 = at.clip_number(o + 3)
+  clip_cut_depth_of(
+    (at[o], at[o + 1], at[o + 2], at[o + 3]),
+    (at[o + 4], at[o + 5], at[o + 6], at[o + 7]),
+    (at[o + 8], at[o + 9], at[o + 10], at[o + 11]),
+    x0,
+    y0,
+    x1,
+    y1,
+    r,
+    sm,
+  )
+}
+
+///|
+/// As clip_cut_depth, the clip's 12 numbers read from a fixed list (an instance's, a kept clip's).
+fn clip_cut_depth_fixed(
+  at : FixedArray[Double],
+  o : Int,
+  x0 : Double,
+  y0 : Double,
+  x1 : Double,
+  y1 : Double,
+  r : (Double, Double, Double, Double),
+  sm : (Double, Double, Double, Double),
+) -> Double {
+  clip_cut_depth_of(
+    (at[o], at[o + 1], at[o + 2], at[o + 3]),
+    (at[o + 4], at[o + 5], at[o + 6], at[o + 7]),
+    (at[o + 8], at[o + 9], at[o + 10], at[o + 11]),
+    x0,
+    y0,
+    x1,
+    y1,
+    r,
+    sm,
+  )
+}
+
+///|
+/// clip_cut_depth's body: the clip's rect `orect`, its corners `ors` as smooth as `oss`.
+fn clip_cut_depth_of(
+  orect : (Double, Double, Double, Double),
+  ors : (Double, Double, Double, Double),
+  oss : (Double, Double, Double, Double),
+  x0 : Double,
+  y0 : Double,
+  x1 : Double,
+  y1 : Double,
+  r : (Double, Double, Double, Double),
+  sm : (Double, Double, Double, Double),
+) -> Double {
+  let (ox0, oy0, ox1, oy1) = orect
   let ohx = dmax((ox1 - ox0) / 2.0, 0.0)
   let ohy = dmax((oy1 - oy0) / 2.0, 0.0)
   let mut most = -1.0e9
   for j in 0..<4 {
-    let rr = at.clip_number(o + 4 + j)
+    let rr = match j {
+      0 => ors.0
+      1 => ors.1
+      2 => ors.2
+      _ => ors.3
+    }
     if rr <= 0.0 {
       continue
     }
-    let ss = at.clip_number(o + 8 + j)
+    let ss = match j {
+      0 => oss.0
+      1 => oss.1
+      2 => oss.2
+      _ => oss.3
+    }
     let reach = rr * (1.0 + (smooth_scale - 1.0) * ss)
     let left = j == 0 || j == 3
     let top = j < 2

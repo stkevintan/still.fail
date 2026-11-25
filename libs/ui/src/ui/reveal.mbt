@@ -89,10 +89,16 @@ priv struct RevealRun {
 }
 
 ///|
-impl Moving for RevealRun with rest_at(self, now, frame) {
+fn RevealRun::rest_at(self : RevealRun, now : Double, frame : Int) -> Double {
   ignore(now)
   ignore(frame)
   self.end
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn RevealRun::as_moving(self : RevealRun) -> Moving {
+  Moving::new(fn(now, frame) { self.rest_at(now, frame) })
 }
 
 ///|
@@ -155,7 +161,7 @@ fn Ctx::revealed(self : Ctx, w : Double, h : Double, view : () -> Unit) -> Unit 
   if reveal.start < 0.0 && (reveal.dark_now)() != reveal.dark {
     reveal.start = self.clock
     let run : RevealRun = { end: self.clock + reveal_ms }
-    self.moving(reveal.mover, run as &Moving, what="the theme's reveal")
+    self.moving(reveal.mover, run.as_moving(), what="the theme's reveal")
   }
   if reveal.start < 0.0 {
     // not set out: the view as it is, till its theme changes or it has waited too long (a frame then, to let it go)

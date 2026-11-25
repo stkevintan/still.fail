@@ -50,10 +50,16 @@ fn settings_core_of(
   }
   // (概览 switched to from the accounts' list once what it shows is answered, the list meanwhile, and what was asked
   // handed to it as the list's pages hand theirs: the shells' shown_read of "profiles-list")
-  @settings.overview_switch.val = fn(ws, go) {
+  @settings.overview_switch.val = fn(ws, go, on_cancel) {
     let scope = { "scope": Json::string(ws) }
-    switch_answered(src, [station_rows_ask(ws), ("profiles", scope), ("profilesOverview", scope)], "profiles-list\u{1}" + ws, go)
-    |> ignore
+    let wait = switch_answered(
+      src,
+      [station_rows_ask(ws), ("profiles", scope), ("profilesOverview", scope)],
+      "profiles-list\u{1}" + ws,
+      go,
+      let_go=on_cancel,
+    )
+    fn() { wait.give_up() }
   }
   {
     topic: fn(name, params) {
@@ -193,15 +199,26 @@ pub fn core_counts(src : Source) -> Bool {
 }
 
 ///|
+/// Whether this device's core sends its traces (the prefs' `traced`, client/core-ts/src/trace.ts), on any cloud: one on
+/// monoid's sends them as one on still.fail's does, so the switch is shown and told there too. Not so under a Tester or
+/// a replay, whose core says nothing of it (a recorded trace's calls stay as recorded).
+pub fn core_traces(src : Source) -> Bool {
+  match src.topic("prefs", {}).get().value {
+    Some(Object(m)) => m.get("traced") is Some(True)
+    _ => false
+  }
+}
+
+///|
 /// Whether usage statistics and error reports go out from this device: as the host's switch is, where it keeps one;
-/// else, where the core sends what people use, as the prefs' `reports` say (on unless `off`); None where nothing is
-/// sent (no settings row then).
+/// else, where the core sends what people use or its traces, as the prefs' `reports` say (on unless `off`); None where
+/// nothing is sent (no settings row then).
 pub fn reporting_on(src : Source) -> Bool? {
   reporting_said.get() |> ignore
   match reporting_host.get() {
     Some(h) => Some((h.get)())
     None =>
-      if core_counts(src) {
+      if core_counts(src) || core_traces(src) {
         Some(@settings.pref_from(src.topic("prefs", {}).get().value, "reports") != "off")
       } else {
         None
@@ -210,14 +227,16 @@ pub fn reporting_on(src : Source) -> Bool? {
 }
 
 ///|
-/// What the app tells a core that counts what people use (core_counts; use-counts.ts): whether to, as the settings say
-/// (reporting_on), and, while it does, what it shows by its kind alone; None while nothing is to be told.
-pub fn counts_told(src : Source, shown : String) -> (Bool, String)? {
-  if !core_counts(src) {
+/// What the app tells a core that counts what people use or sends its traces (core_counts, core_traces): whether to,
+/// as the settings say (reporting_on), and, while it counts, what it shows by its kind alone ("" where it does not
+/// count, or is not to); None while nothing is to be told.
+pub fn reports_told(src : Source, shown : String) -> (Bool, String)? {
+  let counts = core_counts(src)
+  if !counts && !core_traces(src) {
     return None
   }
   let on = reporting_on(src).unwrap_or(true)
-  Some((on, if on { shown } else { "" }))
+  Some((on, if on && counts { shown } else { "" }))
 }
 
 ///|

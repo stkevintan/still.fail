@@ -18,9 +18,7 @@
 /// Where what a part's or a row's paint said is said again: `dx` across and `dy` down the window from where it was said,
 /// put in the clip it is drawn in (`cut`, its place in clip_stack: a row's list's, a part's), what of a clip was its
 /// recording's band (its own clip as recorded, band_l to band_r across and band_t to band_b down) left as far off as
-/// nothing cuts. `cut` -1: as it was said. What its build said of a node, said of `node` (its box's now: what it built
-/// is not built; -1, as it was said), or of the node `by` on from it (a list's row kept as its nodes, put back
-/// elsewhere among the frame's: kept_nodes.mbt).
+/// nothing cuts. `cut` -1: as it was said.
 priv struct Moved {
   dx : Double
   dy : Double
@@ -29,8 +27,6 @@ priv struct Moved {
   band_t : Double
   band_r : Double
   band_b : Double
-  node : Int
-  by : Int
 }
 
 ///|
@@ -44,8 +40,6 @@ let unmoved : Moved = {
   band_t: 0.0,
   band_r: 0.0,
   band_b: 0.0,
-  node: -1,
-  by: 0,
 }
 
 ///|
@@ -110,40 +104,111 @@ fn Moved::clip(self : Moved, a : Array[Double], at : Int) -> Unit {
 ///|
 /// A list the frame's paint adds to (paint_lists): how long it is; what was added to it from `from` on, taken to be
 /// said again; cut back to `len` (taken back, to be said again moved).
-priv trait SaidList {
-  said_len(Self, Ctx) -> Int
-  said_take(Self, Ctx, from : Int) -> &SaidAgain
-  said_cut(Self, Ctx, len : Int) -> Unit
+priv enum SaidList {
+  MouseDrags
+  Tells
+  Hits
+  Scrolls
+  Sels
+  Bars
+  Runs
 }
 
 ///|
 /// What a part's or a row's paint added to a list (SaidList::said_take): said again, moved.
-priv trait SaidAgain {
-  said_again(Self, Ctx, Moved) -> Unit
-  /// what it holds, a line each, lengths in 64ths of a point (a Tester's: Tester::said)
-  said_show(Self, StringBuilder) -> Unit
+priv enum SaidAgain {
+  Bools(BoolsTaken)
+  Tells(TellsTaken)
+  Hits(HitsTaken)
+  Scrolls(ScrollsTaken)
+  Sels(SelsTaken)
+  Bars(BarsTaken)
+  Runs(RunsTaken)
+}
+
+///|
+fn SaidList::said_len(self : SaidList, c : Ctx) -> Int {
+  match self {
+    MouseDrags => mouse_drags_len(c)
+    Tells => tells_len(c)
+    Hits => hits_len(c)
+    Scrolls => scrolls_len(c)
+    Sels => sels_len(c)
+    Bars => bars_len(c)
+    Runs => runs_len(c)
+  }
+}
+
+///|
+fn SaidList::said_take(self : SaidList, c : Ctx, from : Int) -> SaidAgain {
+  match self {
+    MouseDrags => SaidAgain::Bools(mouse_drags_take(c, from))
+    Tells => SaidAgain::Tells(tells_take(c, from))
+    Hits => SaidAgain::Hits(hits_take(c, from))
+    Scrolls => SaidAgain::Scrolls(scrolls_take(c, from))
+    Sels => SaidAgain::Sels(sels_take(c, from))
+    Bars => SaidAgain::Bars(bars_take(c, from))
+    Runs => SaidAgain::Runs(runs_take(c, from))
+  }
+}
+
+///|
+fn SaidList::said_cut(self : SaidList, c : Ctx, len : Int) -> Unit {
+  match self {
+    MouseDrags => mouse_drags_cut(c, len)
+    Tells => tells_cut(c, len)
+    Hits => hits_said_cut(c, len)
+    Scrolls => scrolls_cut(c, len)
+    Sels => sels_cut(c, len)
+    Bars => bars_cut(c, len)
+    Runs => runs_cut(c, len)
+  }
+}
+
+///|
+fn SaidAgain::said_again(self : SaidAgain, c : Ctx, m : Moved) -> Unit {
+  match self {
+    Bools(t) => t.said_again(c, m)
+    Tells(t) => t.said_again(c, m)
+    Hits(t) => t.said_again(c, m)
+    Scrolls(t) => t.said_again(c, m)
+    Sels(t) => t.said_again(c, m)
+    Bars(t) => t.said_again(c, m)
+    Runs(t) => t.said_again(c, m)
+  }
+}
+
+///|
+/// what it holds, a line each, lengths in 64ths of a point (a Tester's: Tester::said)
+fn SaidAgain::said_show(self : SaidAgain, sb : StringBuilder) -> Unit {
+  match self {
+    Bools(t) => t.said_show(sb)
+    Tells(t) => t.said_show(sb)
+    Hits(t) => t.said_show(sb)
+    Scrolls(t) => t.said_show(sb)
+    Sels(t) => t.said_show(sb)
+    Bars(t) => t.said_show(sb)
+    Runs(t) => t.said_show(sb)
+  }
 }
 
 ///|
 /// The lists the frame's paint adds to, each said again by what is kept: the targets (where presses go, and which are
 /// only pointed at), what scrolls, the words that can be picked, the scroll bars, a Tester's lines of words.
 // kept across runs: never written
-let paint_lists : Array[&SaidList] = [
-  HitsSaid::{  },
-  ScrollsSaid::{  },
-  SelsSaid::{  },
-  BarsSaid::{  },
-  RunsSaid::{  },
+let paint_lists : Array[SaidList] = [
+  SaidList::Hits,
+  SaidList::Scrolls,
+  SaidList::Sels,
+  SaidList::Bars,
+  SaidList::Runs,
 ]
 
 ///|
 /// The lists the frame's builds add to, each said again by what is kept: whether the mouse drags lists, what is told
 /// once the builds are over.
 // kept across runs: never written
-let build_lists : Array[&SaidList] = [
-  MouseDragsSaid::{  },
-  TellsSaid::{  },
-]
+let build_lists : Array[SaidList] = [SaidList::MouseDrags, SaidList::Tells]
 
 ///|
 /// Where each of the frame's build lists stands now (`marks`, filled).
@@ -157,7 +222,7 @@ fn Ctx::build_marks(self : Ctx, marks : Array[Int]) -> Unit {
 ///|
 /// What the builds added to each list since `marks`, taken into `into` (what was there let go); with `cut`, each list
 /// cut back to where it stood (to be said again where it belongs: a list's row, in its rows' order).
-fn Ctx::build_take(self : Ctx, marks : Array[Int], into : Array[&SaidAgain], cut~ : Bool) -> Unit {
+fn Ctx::build_take(self : Ctx, marks : Array[Int], into : Array[SaidAgain], cut~ : Bool) -> Unit {
   into.clear()
   for j, l in build_lists {
     into.push(l.said_take(self, marks[j]))
@@ -178,7 +243,7 @@ fn Ctx::paint_marks(self : Ctx, marks : Array[Int]) -> Unit {
 
 ///|
 /// What the paint added to each list since `marks`, taken into `into` (what was there let go).
-fn Ctx::paint_take(self : Ctx, marks : Array[Int], into : Array[&SaidAgain]) -> Unit {
+fn Ctx::paint_take(self : Ctx, marks : Array[Int], into : Array[SaidAgain]) -> Unit {
   into.clear()
   for j, l in paint_lists {
     into.push(l.said_take(self, marks[j]))
@@ -195,7 +260,7 @@ fn Ctx::paint_cut(self : Ctx, marks : Array[Int]) -> Unit {
 
 ///|
 /// What was taken (of the builds' lists or the paint's) said again, moved (`m`).
-fn Ctx::say_again(self : Ctx, said : Array[&SaidAgain], m : Moved) -> Unit {
+fn Ctx::say_again(self : Ctx, said : Array[SaidAgain], m : Moved) -> Unit {
   for s in said {
     s.said_again(self, m)
   }
@@ -282,9 +347,7 @@ fn said_num(v : Double) -> Int64 {
 
 // ── the builds' lists ───────────────────────────────────────────────────
 
-///|
-/// Whether the mouse drags lists as a finger does (Ctx::mouse_drags_lists): the last said holds.
-priv struct MouseDragsSaid {}
+// SaidList::MouseDrags: Whether the mouse drags lists as a finger does (Ctx::mouse_drags_lists): the last said holds.
 
 ///|
 priv struct BoolsTaken {
@@ -292,40 +355,38 @@ priv struct BoolsTaken {
 }
 
 ///|
-impl SaidList for MouseDragsSaid with said_len(_, c) {
+fn mouse_drags_len(c : Ctx) -> Int {
   ignore(c)
   desk.next_mouse_drags.length()
 }
 
 ///|
-impl SaidList for MouseDragsSaid with said_take(_, c, from) {
+fn mouse_drags_take(c : Ctx, from : Int) -> BoolsTaken {
   ignore(c)
   BoolsTaken::{ all: desk.next_mouse_drags[from:].to_owned() }
 }
 
 ///|
-impl SaidList for MouseDragsSaid with said_cut(_, c, len) {
+fn mouse_drags_cut(c : Ctx, len : Int) -> Unit {
   ignore(c)
   desk.next_mouse_drags.truncate(len)
 }
 
 ///|
-impl SaidAgain for BoolsTaken with said_again(self, c, _) {
+fn BoolsTaken::said_again(self : BoolsTaken, c : Ctx, _m : Moved) -> Unit {
   ignore(c)
   desk.next_mouse_drags.append(self.all)
 }
 
 ///|
-impl SaidAgain for BoolsTaken with said_show(self, sb) {
+fn BoolsTaken::said_show(self : BoolsTaken, sb : StringBuilder) -> Unit {
   for on in self.all {
     sb.write_string("mouse_drags \{on}\n")
   }
 }
 
-///|
-/// What is told outside once the frame's builds are over (Ctx::after_build): by its id, once (the last said). What a
-/// build alone saw (Ctx::tell: an input it took) is told once, never again as what said it is drawn again.
-priv struct TellsSaid {}
+// SaidList::Tells: What is told outside once the frame's builds are over (Ctx::after_build): by its id, once (the last
+// said). What a build alone saw (Ctx::tell: an input it took) is told once, never again as what said it is drawn again.
 
 ///|
 priv struct TellsTaken {
@@ -333,27 +394,27 @@ priv struct TellsTaken {
 }
 
 ///|
-impl SaidList for TellsSaid with said_len(_, c) {
+fn tells_len(c : Ctx) -> Int {
   c.tells.length()
 }
 
 ///|
-impl SaidList for TellsSaid with said_take(_, c, from) {
+fn tells_take(c : Ctx, from : Int) -> TellsTaken {
   TellsTaken::{ all: c.tells[from:].to_owned() }
 }
 
 ///|
-impl SaidList for TellsSaid with said_cut(_, c, len) {
+fn tells_cut(c : Ctx, len : Int) -> Unit {
   c.tells.truncate(len)
 }
 
 ///|
-impl SaidAgain for TellsTaken with said_again(self, c, _) {
+fn TellsTaken::said_again(self : TellsTaken, c : Ctx, _m : Moved) -> Unit {
   c.tells.append(self.all)
 }
 
 ///|
-impl SaidAgain for TellsTaken with said_show(self, sb) {
+fn TellsTaken::said_show(self : TellsTaken, sb : StringBuilder) -> Unit {
   for t in self.all {
     sb.write_string("tells \{said_id(t.0)}\n")
   }
@@ -361,10 +422,8 @@ impl SaidAgain for TellsTaken with said_show(self, sb) {
 
 // ── the paint's lists ───────────────────────────────────────────────────
 
-///|
-/// The targets (Ctx::push_hit): ids, how many of those from each are drawn in it (its end), their rects, their clips;
-/// those only pointed at (Ctx::point_said), by their place among them.
-priv struct HitsSaid {}
+// SaidList::Hits: The targets (Ctx::push_hit): ids, how many of those from each are drawn in it (its end), their rects,
+// their clips; those only pointed at (Ctx::point_said), by their place among them.
 
 ///|
 priv struct HitsTaken {
@@ -402,12 +461,12 @@ fn points_from(p : Array[Int], h : Int) -> Int {
 }
 
 ///|
-impl SaidList for HitsSaid with said_len(_, c) {
+fn hits_len(c : Ctx) -> Int {
   c.next_hit_ids.length()
 }
 
 ///|
-impl SaidList for HitsSaid with said_take(_, c, from) {
+fn hits_take(c : Ctx, from : Int) -> HitsTaken {
   let t : HitsTaken = { ids: [], marks: [], ends: [], rects: [], clips: [], points: [] }
   for h in from..<c.next_hit_ids.length() {
     t.ids.push(c.next_hit_ids[h])
@@ -428,7 +487,7 @@ impl SaidList for HitsSaid with said_take(_, c, from) {
 }
 
 ///|
-impl SaidList for HitsSaid with said_cut(_, c, len) {
+fn hits_said_cut(c : Ctx, len : Int) -> Unit {
   c.hits_cut(len)
 }
 
@@ -438,7 +497,7 @@ impl SaidList for HitsSaid with said_cut(_, c, len) {
 let hits_before : Array[Int] = []
 
 ///|
-impl SaidAgain for HitsTaken with said_again(self, c, m) {
+fn HitsTaken::said_again(self : HitsTaken, c : Ctx, m : Moved) -> Unit {
   let h0 = c.next_hit_ids.length()
   let n = self.ids.length()
   let rects = self.rects
@@ -478,10 +537,8 @@ impl SaidAgain for HitsTaken with said_again(self, c, m) {
   }
 }
 
-///|
-/// What the wheel and a finger scroll (a list, what is dragged or paged, a box scrolled sideways, what stops the
-/// wheel): ids, rects.
-priv struct ScrollsSaid {}
+// SaidList::Scrolls: What the wheel and a finger scroll (a list, what is dragged or paged, a box scrolled sideways,
+// what stops the wheel): ids, rects.
 
 ///|
 priv struct ScrollsTaken {
@@ -490,12 +547,12 @@ priv struct ScrollsTaken {
 }
 
 ///|
-impl SaidList for ScrollsSaid with said_len(_, c) {
+fn scrolls_len(c : Ctx) -> Int {
   c.next_scroll_ids.length()
 }
 
 ///|
-impl SaidList for ScrollsSaid with said_take(_, c, from) {
+fn scrolls_take(c : Ctx, from : Int) -> ScrollsTaken {
   let t : ScrollsTaken = { ids: [], rects: [] }
   for j in from..<c.next_scroll_ids.length() {
     t.ids.push(c.next_scroll_ids[j])
@@ -507,13 +564,13 @@ impl SaidList for ScrollsSaid with said_take(_, c, from) {
 }
 
 ///|
-impl SaidList for ScrollsSaid with said_cut(_, c, len) {
+fn scrolls_cut(c : Ctx, len : Int) -> Unit {
   c.next_scroll_ids.truncate(len)
   c.next_scroll_rects.truncate(len * 4)
 }
 
 ///|
-impl SaidAgain for ScrollsTaken with said_again(self, c, m) {
+fn ScrollsTaken::said_again(self : ScrollsTaken, c : Ctx, m : Moved) -> Unit {
   for j in 0..<self.ids.length() {
     let v = j * 4
     let (x0, y0, x1, y1) = m.rect(self.rects[v], self.rects[v + 1], self.rects[v + 2], self.rects[v + 3])
@@ -528,9 +585,7 @@ impl SaidAgain for ScrollsTaken with said_again(self, c, m) {
   }
 }
 
-///|
-/// The paragraphs whose words can be picked (selectable_painted).
-priv struct SelsSaid {}
+// SaidList::Sels: The paragraphs whose words can be picked (selectable_painted).
 
 ///|
 priv struct SelsTaken {
@@ -538,13 +593,13 @@ priv struct SelsTaken {
 }
 
 ///|
-impl SaidList for SelsSaid with said_len(_, c) {
+fn sels_len(c : Ctx) -> Int {
   ignore(c)
   desk.next_sels.length()
 }
 
 ///|
-impl SaidList for SelsSaid with said_take(_, c, from) {
+fn sels_take(c : Ctx, from : Int) -> SelsTaken {
   ignore(c)
   let t : SelsTaken = { sels: [] }
   for j in from..<desk.next_sels.length() {
@@ -554,13 +609,13 @@ impl SaidList for SelsSaid with said_take(_, c, from) {
 }
 
 ///|
-impl SaidList for SelsSaid with said_cut(_, c, len) {
+fn sels_cut(c : Ctx, len : Int) -> Unit {
   ignore(c)
   desk.next_sels.truncate(len)
 }
 
 ///|
-impl SaidAgain for SelsTaken with said_again(self, c, m) {
+fn SelsTaken::said_again(self : SelsTaken, c : Ctx, m : Moved) -> Unit {
   ignore(c)
   for t in self.sels {
     let (x0, y0, x1, y1) = m.rect(t.x0, t.y0, t.x1, t.y1)
@@ -571,9 +626,7 @@ impl SaidAgain for SelsTaken with said_again(self, c, m) {
   }
 }
 
-///|
-/// The scroll bars drawn (scroll_bar.mbt).
-priv struct BarsSaid {}
+// SaidList::Bars: The scroll bars drawn (scroll_bar.mbt).
 
 ///|
 priv struct BarsTaken {
@@ -581,12 +634,12 @@ priv struct BarsTaken {
 }
 
 ///|
-impl SaidList for BarsSaid with said_len(_, c) {
+fn bars_len(c : Ctx) -> Int {
   c.next_bars.length()
 }
 
 ///|
-impl SaidList for BarsSaid with said_take(_, c, from) {
+fn bars_take(c : Ctx, from : Int) -> BarsTaken {
   let t : BarsTaken = { bars: [] }
   for j in from..<c.next_bars.length() {
     t.bars.push(c.next_bars[j])
@@ -595,12 +648,12 @@ impl SaidList for BarsSaid with said_take(_, c, from) {
 }
 
 ///|
-impl SaidList for BarsSaid with said_cut(_, c, len) {
+fn bars_cut(c : Ctx, len : Int) -> Unit {
   c.next_bars.truncate(len)
 }
 
 ///|
-impl SaidAgain for BarsTaken with said_again(self, c, m) {
+fn BarsTaken::said_again(self : BarsTaken, c : Ctx, m : Moved) -> Unit {
   for b in self.bars {
     let b = {
       ..b,
@@ -630,9 +683,7 @@ impl SaidAgain for BarsTaken with said_again(self, c, m) {
   }
 }
 
-///|
-/// A Tester's lines of words drawn (text_runs.mbt).
-priv struct RunsSaid {}
+// SaidList::Runs: A Tester's lines of words drawn (text_runs.mbt).
 
 ///|
 priv struct RunsTaken {
@@ -640,13 +691,13 @@ priv struct RunsTaken {
 }
 
 ///|
-impl SaidList for RunsSaid with said_len(_, c) {
+fn runs_len(c : Ctx) -> Int {
   ignore(c)
   text_runs.runs.length()
 }
 
 ///|
-impl SaidList for RunsSaid with said_take(_, c, from) {
+fn runs_take(c : Ctx, from : Int) -> RunsTaken {
   ignore(c)
   let t : RunsTaken = { runs: [] }
   for j in from..<text_runs.runs.length() {
@@ -656,13 +707,13 @@ impl SaidList for RunsSaid with said_take(_, c, from) {
 }
 
 ///|
-impl SaidList for RunsSaid with said_cut(_, c, len) {
+fn runs_cut(c : Ctx, len : Int) -> Unit {
   ignore(c)
   text_runs.runs.truncate(len)
 }
 
 ///|
-impl SaidAgain for RunsTaken with said_again(self, c, m) {
+fn RunsTaken::said_again(self : RunsTaken, c : Ctx, m : Moved) -> Unit {
   ignore(c)
   for t in self.runs {
     let t = {
@@ -684,7 +735,7 @@ impl SaidAgain for RunsTaken with said_again(self, c, m) {
 // ── shown (Tester::said) ────────────────────────────────────────────────
 
 ///|
-impl SaidAgain for HitsTaken with said_show(self, sb) {
+fn HitsTaken::said_show(self : HitsTaken, sb : StringBuilder) -> Unit {
   for j in 0..<self.ids.length() {
     sb.write_string("hit \{said_id(self.ids[j])} \{self.ends[j]}")
     if self.marks[j] != 0 {
@@ -705,7 +756,7 @@ impl SaidAgain for HitsTaken with said_show(self, sb) {
 }
 
 ///|
-impl SaidAgain for ScrollsTaken with said_show(self, sb) {
+fn ScrollsTaken::said_show(self : ScrollsTaken, sb : StringBuilder) -> Unit {
   for j in 0..<self.ids.length() {
     sb.write_string("scrolls \{said_id(self.ids[j])}")
     for v in 0..<4 {
@@ -716,7 +767,7 @@ impl SaidAgain for ScrollsTaken with said_show(self, sb) {
 }
 
 ///|
-impl SaidAgain for SelsTaken with said_show(self, sb) {
+fn SelsTaken::said_show(self : SelsTaken, sb : StringBuilder) -> Unit {
   for t in self.sels {
     sb.write_string(
       "sel \{said_sel(t.base)} \{list_text(t.at)} \{said_num(t.ox)} \{said_num(t.oy)} \{said_num(t.x0)} \{said_num(t.y0)} \{said_num(t.x1)} \{said_num(t.y1)} \{t.text.length()}\n",
@@ -725,7 +776,7 @@ impl SaidAgain for SelsTaken with said_show(self, sb) {
 }
 
 ///|
-impl SaidAgain for BarsTaken with said_show(self, sb) {
+fn BarsTaken::said_show(self : BarsTaken, sb : StringBuilder) -> Unit {
   for b in self.bars {
     sb.write_string(
       "bar \{said_id(b.id)} \{b.foot} \{said_num(b.x0)} \{said_num(b.y0)} \{said_num(b.x1)} \{said_num(b.y1)} \{said_num(b.tx)} \{said_num(b.ty)} \{said_num(b.tw)} \{said_num(b.th)} \{said_num(b.ratio)} \{said_id(b.thumb)}\n",
@@ -734,7 +785,7 @@ impl SaidAgain for BarsTaken with said_show(self, sb) {
 }
 
 ///|
-impl SaidAgain for RunsTaken with said_show(self, sb) {
+fn RunsTaken::said_show(self : RunsTaken, sb : StringBuilder) -> Unit {
   for t in self.runs {
     sb.write_string(
       "run \{said_num(t.x0)} \{said_num(t.x1)} \{said_num(t.base)} \{said_num(t.top)} \{said_num(t.bottom)} \{t.text}\n",

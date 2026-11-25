@@ -25,6 +25,8 @@ pub fn profiles_list_node(
   bar_actions? : ((@view.View) -> Unit, (@sf.Look) -> Double) -> Unit,
   bar_add? : Bool = true,
   on_show_overview? : () -> Unit = fn() { @settings.profiles_narrow_overview.set(true) },
+  on_show_accounts? : () -> Unit = fn() {  },
+  tab_chosen? : () -> Int = fn() { 0 },
   tabs_thumb? : @sf.SegThumb,
   batch? : ProfilesBatch = ProfilesBatch::new(),
 ) -> Unit {
@@ -141,7 +143,11 @@ pub fn profiles_list_node(
           profile_share_node(g, core, here, fn() { !frame().named }, Some(tips))
         }
         g.show(select_here, fn(a) {
-          @sf.icon_button_node(a, "check-circle", select_label, fn() { batch.toggle() }, tips~, on=fn() { batch.on.get() }) |> ignore
+          @sf.icon_button_node(a, "check-circle", select_label, fn() {
+            on_show_accounts()
+            batch.toggle()
+          }, tips~, on=fn() { batch.on.get() })
+          |> ignore
         })
         g.show(fn() { add() && !frame().named }, fn(a) { @sf.page_add_node(a, label, adding) })
       },
@@ -154,7 +160,12 @@ pub fn profiles_list_node(
           if only == "" {
             profile_share_node(l, core, here, fn() { true }, Some(tips), bar=true)
           }
-          l.show(select_shown, fn(a) { @sf.bar_icon_node(a, "check-circle", select_label, fn() { batch.toggle() }, tips~) })
+          l.show(select_shown, fn(a) {
+            @sf.bar_icon_node(a, "check-circle", select_label, fn() {
+              on_show_accounts()
+              batch.toggle()
+            }, tips~)
+          })
           if bar_add {
             l.show(add, fn(a) { @sf.page_add_node(a, label, adding) })
           }
@@ -261,10 +272,12 @@ pub fn profiles_list_node(
           @sf.page_choice_node(
             b,
             fn() { if @sf.language() == "en" { ["Accounts", "Overview"] } else { ["账号", "概览"] } },
-            fn() { 0 },
+            tab_chosen,
             fn(i) {
               if i == 1 {
                 on_show_overview()
+              } else if i == 0 {
+                on_show_accounts()
               }
             },
             thumb?=tabs_thumb,
@@ -1116,7 +1129,23 @@ pub fn profiles_page_node(
   let scope = { "scope": Json::string(ws) }
   held.prefetch("profiles", scope) |> ignore
   held.prefetch("stations", scope) |> ignore
-  let tabs_thumb = @sf.SegThumb::new(v, fn() { if overview.get() { 1 } else { 0 } })
+  let tab_pending : @signals.Signal[Int?] = @signals.signal(None)
+  let tab_chosen = fn() { tab_pending.get().unwrap_or(if overview.get() { 1 } else { 0 }) }
+  let switch_seq : Ref[Int] = Ref(0)
+  let pending_cancel : Ref[(() -> Unit)?] = Ref(None)
+  let cancel_switch = fn() {
+    switch_seq.val += 1
+    match pending_cancel.val {
+      Some(cancel) => {
+        pending_cancel.val = None
+        cancel()
+      }
+      None => ()
+    }
+    tab_pending.set(None)
+  }
+  v.on_leaving(cancel_switch) |> ignore
+  let tabs_thumb = @sf.SegThumb::new(v, tab_chosen)
   // (the list's 多选, its bar's to begin: over as 概览 is shown)
   let batch = ProfilesBatch::new()
   v.reacts(fn() { overview.get() }, fn(shown) { if shown { batch.stop() } }, at_start=false)
@@ -1143,6 +1172,7 @@ pub fn profiles_page_node(
         profiles_batch_offered(fn() { flag(listed(), "manages") }, fn() { items(listed(), "items") })
       }
       let select = fn() {
+        cancel_switch()
         if @signals.untracked(fn() { overview.get() }) {
           overview.set(false)
           batch.start()
@@ -1165,23 +1195,77 @@ pub fn profiles_page_node(
     }
     None => ()
   }
+  let show_overview = fn() {
+    if @signals.untracked(fn() { overview.get() }) {
+      cancel_switch()
+      return
+    }
+    cancel_switch()
+    let seq = switch_seq.val
+    tab_pending.set(Some(1))
+    let cancel = (@settings.overview_switch.val)(
+      ws,
+      fn() {
+        if switch_seq.val == seq {
+          pending_cancel.val = None
+          tab_pending.set(None)
+          overview.set(true)
+          @ui.after_drawn_frame(fn() { @sfbase.shown_read("profiles-list\u{1}" + ws) })
+        }
+      },
+      fn() {
+        if switch_seq.val == seq {
+          pending_cancel.val = None
+          tab_pending.set(None)
+        }
+      },
+    )
+    if switch_seq.val == seq && @signals.untracked(fn() { tab_pending.get() }) is Some(_) {
+      pending_cancel.val = Some(cancel)
+    }
+  }
   v.each(fn() { [overview.get()] }, fn(x) { x }, keeps=fn() { [true, false] }, at_once=true, fn(p, shown_sig) {
     p.grow(Is(1.0)).min_height(Is(Some(0.0))) |> ignore
     if @signals.untracked(fn() { shown_sig.get() }) {
-      profiles_overview_node(p, core, here, on_back~, frame~, said?, width?, tips?, bar_add~, tabs_thumb~, on_show_accounts=fn() {
-        overview.set(false)
-      })
+      profiles_overview_node(
+        p,
+        core,
+        here,
+        on_back~,
+        frame~,
+        said?,
+        width?,
+        tips?,
+        bar_add~,
+        tab_chosen~,
+        tabs_thumb~,
+        on_show_accounts=fn() {
+          cancel_switch()
+          overview.set(false)
+        },
+      )
       // (what the switch asked ahead, its pools, read anew by the overview just made: overview_switch)
       @sfbase.shown_read("profiles-list\u{1}" + ws)
     } else {
       // (概览 once what it shows is answered, the list meanwhile: overview_switch; release the ahead read after the
       // overview frame draws so both initial build and subsequent wake-ups hand over cleanly without leaking)
-      profiles_list_node(p, core, here, "", on_back~, frame~, said?, width?, tips?, bar_add~, tabs_thumb~, batch~, on_show_overview=fn() {
-        (@settings.overview_switch.val)(ws, fn() {
-          overview.set(true)
-          @ui.after_drawn_frame(fn() { @sfbase.shown_read("profiles-list\u{1}" + ws) })
-        })
-      })
+      profiles_list_node(
+        p,
+        core,
+        here,
+        "",
+        on_back~,
+        frame~,
+        said?,
+        width?,
+        tips?,
+        bar_add~,
+        tab_chosen~,
+        tabs_thumb~,
+        batch~,
+        on_show_overview=show_overview,
+        on_show_accounts=cancel_switch,
+      )
     }
   })
 }

@@ -1,0 +1,317 @@
+// Lightweight transcript hashing & segmented zstd seek-table reader shared across
+// `locate`, `builders_search`, `builders_usage`, and `builders_replica`.
+// Uses locked `crypto` (`crypto-v0.4.1`) and `builders_core::ShellClient` — never depends on
+// `--builder packed` worker package.
+
+import "base_codec"
+import "builders_core"
+import "crypto"
+import "js_json"
+
+pub let FOOTER_SIZE : Int64 = 9.to_int64()
+
+fn u32_const(hi : Int, lo : Int) -> Int64 {
+  ((hi.to_int64() & 0xFFFF.to_int64()) << 16.to_int64()) | (lo.to_int64() & 0xFFFF.to_int64())
+}
+
+fn skippable_magic() -> Int64 {
+  u32_const(0x184D, 0x2A5E)
+}
+
+fn seekable_magic() -> Int64 {
+  u32_const(0x8F92, 0xEAB1)
+}
+
+pub struct PackedFrame {
+  pub at : Int64
+  pub packed : Int64
+  pub from : Int64
+  pub size : Int64
+}
+
+/// SHA-1 hex digest of `s`'s UTF-8 bytes (via locked `crypto-v0.4.1`).
+pub fn sha1_utf8_hex(s : String) -> String {
+  crypto::sha1_hex(js_json::utf8_bytes(s))
+}
+
+/// SHA-256 hex digest of `s`'s UTF-8 bytes (via locked `crypto-v0.4.1`).
+pub fn sha256_utf8_hex(s : String) -> String {
+  crypto::sha256_hex(js_json::utf8_bytes(s))
+}
+
+/// SHA-256 hex digest of raw `Bytes` (via locked `crypto-v0.4.1`).
+pub fn sha256_bytes_hex(b : Bytes) -> String {
+  crypto::sha256_hex(b)
+}
+
+fn le32(b : Bytes, at : Int) -> Int64 {
+  let b0 = b[at].to_int().to_int64() & 0xFF.to_int64()
+  let b1 = b[at + 1].to_int().to_int64() & 0xFF.to_int64()
+  let b2 = b[at + 2].to_int().to_int64() & 0xFF.to_int64()
+  let b3 = b[at + 3].to_int().to_int64() & 0xFF.to_int64()
+  b0 | (b1 << 8.to_int64()) | (b2 << 16.to_int64()) | (b3 << 24.to_int64())
+}
+
+/// Parse seek-table footer (`FOOTER_SIZE` bytes) -> `Some((table_length, entry_size))` or `None`.
+pub fn parse_footer(size : Int64, foot : Bytes) -> Option[(Int64, Int64)] {
+  let min_len = 8.to_int64() + FOOTER_SIZE
+  if size < min_len || foot.length() < FOOTER_SIZE.to_int() || le32(foot, 5) != seekable_magic() {
+    return None
+  }
+  let desc = foot[4].to_int() & 0xFF
+  if (desc & 0x7F) != 0 {
+    return None
+  }
+  let entry = if (desc & 0x80) != 0 { 12.to_int64() } else { 8.to_int64() }
+  let length = 8.to_int64() + le32(foot, 0) * entry + FOOTER_SIZE
+  if length > size {
+    None
+  } else {
+    Some((length, entry))
+  }
+}
+
+/// Parse seek-table bytes into `PackedFrame` entries; `None` if magic/length/sum does not match `size`.
+pub fn parse_frames(size : Int64, table : Bytes, entry : Int64) -> Option[Array[PackedFrame]] {
+  let length = table.length().to_int64()
+  let min_len = 8.to_int64() + FOOTER_SIZE
+  if length < min_len || le32(table, 0) != skippable_magic() || le32(table, 4) != length - 8.to_int64() {
+    return None
+  }
+  let n = (length - 8.to_int64() - FOOTER_SIZE) / entry
+  let frames : Array[PackedFrame] = []
+  let mut at = 0.to_int64()
+  let mut from = 0.to_int64()
+  let mut i = 0.to_int64()
+  while i < n {
+    let off = (8.to_int64() + i * entry).to_int()
+    let packed = le32(table, off)
+    let each = le32(table, off + 4)
+    frames.push(PackedFrame::{ at: at, packed: packed, from: from, size: each })
+    at = at + packed
+    from = from + each
+    i = i + 1.to_int64()
+  }
+  if at == size - length {
+    Some(frames)
+  } else {
+    None
+  }
+}
+
+fn decode_hex_bytes(hex : String) -> Option[Bytes] {
+  let n = hex.length()
+  if (n % 2) != 0 {
+    return None
+  }
+  let out = Bytes::new(n / 2)
+  let mut i = 0
+  while i < n {
+    let hi = match base_codec::hex_digit(hex.code_unit_at(i)) {
+      Some(v) => v
+      None => return None
+    }
+    let lo = match base_codec::hex_digit(hex.code_unit_at(i + 1)) {
+      Some(v) => v
+      None => return None
+    }
+    out[i / 2] = ((hi << 4) | lo) as Byte
+    i = i + 2
+  }
+  Some(out)
+}
+
+fn slice_bytes(b : Bytes, start : Int, end : Int) -> Bytes {
+  if start >= end || start < 0 || end > b.length() {
+    return Bytes::new(0)
+  }
+  let n = end - start
+  let out = Bytes::new(n)
+  for i in 0..<n {
+    out[i] = b[start + i]
+  }
+  out
+}
+
+fn meta_size(client : builders_core::ShellClient, path : String) -> Option[Int64] {
+  match client.shell_sync_json("fs.meta", base_codec::json_obj([("path", base_codec::json_str(path))])) {
+    Ok(v) => {
+      match builders_core::json_get_last(v, "size") {
+        Some(base_codec::Json::Num(sz, _)) => Some(sz.to_int64())
+        _ => None
+      }
+    }
+    Err(_) => None
+  }
+}
+
+fn bytes_of(
+  client : builders_core::ShellClient,
+  path : String,
+  from : Int64,
+  length : Option[Int64],
+  zstd : Bool,
+  exact : Bool,
+) -> Result[Option[Bytes], String] {
+  let fields : Array[(String, base_codec::Json)] = [
+    ("path", base_codec::json_str(path)),
+    ("from", base_codec::json_num(from.to_double())),
+  ]
+  match length {
+    Some(n) => fields.push(("length", base_codec::json_num(n.to_double())))
+    None => ()
+  }
+  if zstd {
+    fields.push(("zstd", base_codec::json_bool(true)))
+  }
+  if exact {
+    fields.push(("exact", base_codec::json_bool(true)))
+  }
+  match client.shell_sync_json("fs.bytes", base_codec::json_obj(fields)) {
+    Ok(base_codec::Json::Str(hex)) => {
+      match decode_hex_bytes(hex) {
+        Some(b) => Ok(Some(b))
+        None => Err("invalid hex in fs.bytes response")
+      }
+    }
+    Ok(_) => Ok(None)
+    Err(e) => Err(e.message)
+  }
+}
+
+fn bytes_at(client : builders_core::ShellClient, path : String, at : Int64, n : Int64) -> Result[Bytes, String] {
+  match bytes_of(client, path, at, Some(n), false, true) {
+    Ok(Some(b)) => Ok(b)
+    Ok(None) => Err("a put-away transcript ended early")
+    Err(e) => Err(e)
+  }
+}
+
+/// Read seek-table frames of a put-away `.zst` transcript (1:1 `history/transcripts.mbt:178-208`).
+/// Distinguishes "no seek table" (`Ok(None)`) from missing file / truncated IO / shell error (`Err(msg)`).
+pub fn packed_frames_of(
+  client : builders_core::ShellClient,
+  path : String,
+) -> Result[Option[Array[PackedFrame]], String] {
+  let size = match meta_size(client, path) {
+    Some(s) => s
+    None => return Err("a put-away transcript is not there")
+  }
+  if size < 8.to_int64() + FOOTER_SIZE {
+    return Ok(None)
+  }
+  let footer = match bytes_at(client, path, size - FOOTER_SIZE, FOOTER_SIZE) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  let (length, entry) = match parse_footer(size, footer) {
+    Some(pair) => pair
+    None => return Ok(None)
+  }
+  let table = match bytes_at(client, path, size - length, length) {
+    Ok(b) => b
+    Err(e) => return Err(e)
+  }
+  Ok(parse_frames(size, table, entry))
+}
+
+/// Total uncompressed size of a seekable `.zst` transcript (`Ok(None)` when no seek table).
+pub fn packed_written_size(
+  client : builders_core::ShellClient,
+  path : String,
+) -> Result[Option[Int64], String] {
+  let frames = match packed_frames_of(client, path) {
+    Ok(Some(fs)) => fs
+    Ok(None) => return Ok(None)
+    Err(e) => return Err(e)
+  }
+  let mut total = 0.to_int64()
+  for i in 0..<frames.length() {
+    total = total + frames[i].size
+  }
+  Ok(Some(total))
+}
+
+/// Stream decompressed segments from `from` (up to `end` if `Some`), calling `take` for each slice
+/// until `take` returns `Ok(false)` (early stop) or all frames finish.
+/// Returns `Ok(false)` when the file has no seek table, `Ok(true)` when read via seek table,
+/// or `Err(msg)` on missing/corrupt frame (`check_size`) or IO error.
+/// 1:1 aligned with `history/transcripts.mbt:224-275`.
+pub fn packed_read_segments(
+  client : builders_core::ShellClient,
+  path : String,
+  from : Int64,
+  end : Option[Int64],
+  check_size : Bool,
+  take : (Bytes) -> Result[Bool, String],
+) -> Result[Bool, String] {
+  let frames = match packed_frames_of(client, path) {
+    Ok(Some(fs)) => fs
+    Ok(None) => return Ok(false)
+    Err(e) => return Err(e)
+  }
+  if frames.length() == 0 {
+    return Ok(true)
+  }
+  let mut lo = 0
+  let mut hi = frames.length() - 1
+  while lo < hi {
+    let mid = (lo + hi + 1) / 2
+    if frames[mid].from <= from {
+      lo = mid
+    } else {
+      hi = mid - 1
+    }
+  }
+  for i in lo..<frames.length() {
+    let f = frames[i]
+    if f.from + f.size <= from {
+      continue
+    }
+    match end {
+      Some(e) => {
+        if f.from >= e {
+          break
+        }
+      }
+      None => ()
+    }
+    let bytes = match bytes_of(client, path, f.at, Some(f.packed), true, true) {
+      Ok(Some(b)) => b
+      Ok(None) => {
+        if check_size {
+          return Err("not there")
+        }
+        Bytes::new(0)
+      }
+      Err(e) => return Err(e)
+    }
+    if check_size && bytes.length().to_int64() != f.size {
+      return Err("a put-away transcript frame has the wrong size")
+    }
+    match end {
+      Some(e) => {
+        let a64 = if from - f.from > 0.to_int64() { from - f.from } else { 0.to_int64() }
+        let b_lim = bytes.length().to_int64()
+        let b64 = if e - f.from < b_lim { e - f.from } else { b_lim }
+        let slice = if a64 < b64 { slice_bytes(bytes, a64.to_int(), b64.to_int()) } else { Bytes::new(0) }
+        match take(slice) {
+          Ok(true) => ()
+          Ok(false) => break
+          Err(err) => return Err(err)
+        }
+      }
+      None => {
+        let skip = if from > f.from { (from - f.from).to_int() } else { 0 }
+        if skip < bytes.length() {
+          match take(slice_bytes(bytes, skip, bytes.length())) {
+            Ok(true) => ()
+            Ok(false) => break
+            Err(err) => return Err(err)
+          }
+        }
+      }
+    }
+  }
+  Ok(true)
+}

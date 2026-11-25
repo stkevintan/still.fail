@@ -30,6 +30,9 @@ pub fn colors() -> Colors
 pub let dark : Colors
 
 #callsite(autofill(loc))
+pub fn fluid_scrubber_look(@view.View, (@view.View) -> Double, (@view.View) -> Double, ScrubberLook, loc~ : SourceLoc) -> Unit
+
+#callsite(autofill(loc))
 pub fn glass_symbol_node(@view.View, String, Double, () -> Int64, loc~ : SourceLoc) -> @view.View
 
 pub fn glass_symbol_shapes(String, Double, Int64) -> Array[@paint.Shape]
@@ -66,7 +69,7 @@ pub fn liquid_floating_glass(tint? : Int64?, solid? : Int64, spot? : (Double, Do
 pub fn liquid_knob_glass(solid? : Int64) -> @paint.Glass
 
 #callsite(autofill(loc))
-pub fn liquid_lens_overlay_node(@view.View, () -> Double, () -> Double, rect? : () -> (Double, Double, Double, Double)?, ground_drawn? : (@view.View) -> @view.GroundShape, width? : () -> Double, radius? : Double, solid? : () -> Int64, shadow_color? : () -> Int64, shadow_blur? : Double, shadow_y? : Double, jelly? : (@view.View) -> (Double, Double), grow? : Double, overhang_x? : Double, overhang_y? : Double, active? : () -> Bool, droplet_role? : Int, loc~ : SourceLoc) -> Unit
+pub fn liquid_lens_overlay_node(@view.View, () -> Double, () -> Double, rect? : () -> (Double, Double, Double, Double)?, ground_drawn? : (@view.View) -> @view.GroundShape, width? : () -> Double, radius? : Double, solid? : () -> Int64, shadow_color? : () -> Int64, shadow_blur? : Double, shadow_y? : Double, jelly? : (@view.View) -> (Double, Double), grow? : Double, overhang_x? : Double, overhang_y? : Double, active? : () -> Bool, droplet_role? : Int32, loc~ : SourceLoc) -> Unit
 
 #callsite(autofill(loc))
 pub fn liquid_lift_shell_decorate(@view.View, () -> Double, flat_ground? : (() -> Int64)?, glass? : () -> @paint.Glass, solid? : () -> Int64, radius? : Double?, shadow? : () -> (Double, Double, Int64), solid_edge? : () -> (Double, Int64), loc~ : SourceLoc) -> Unit
@@ -107,10 +110,10 @@ pub fn liquid_prominent_glass(accent~ : Int64, spot? : (Double, Double)?, solid?
 
 pub fn liquid_scroll_edge_fill_decorate(@view.View, () -> Int64, active? : () -> Bool) -> @view.View
 
-pub fn liquid_scroll_edge_glass(bg? : Int64) -> @paint.Glass
+pub fn liquid_scroll_edge_glass(bg? : Int64, pure? : Bool) -> @paint.Glass
 
 #callsite(autofill(loc))
-pub fn liquid_scroll_edge_node(@view.View, (@view.View) -> Double, (@view.View) -> Double, side? : ScrollEdgeSide, bg? : () -> Int64, bg_by? : (@view.View) -> Int64, from_top? : Bool, shield? : Bool, loc~ : SourceLoc) -> @view.View
+pub fn liquid_scroll_edge_node(@view.View, (@view.View) -> Double, (@view.View) -> Double, side? : ScrollEdgeSide, bg? : () -> Int64, bg_by? : (@view.View) -> Int64, from_top? : Bool, shield? : Bool, pure? : Bool, loc~ : SourceLoc) -> @view.View
 
 #callsite(autofill(loc))
 pub fn liquid_segmented_node(@view.View, () -> Array[String], () -> Int32, (Int32) -> Unit, width? : Double, height? : Double, drag? : DampedDrag, glass_track? : Bool, pad? : Double, gap? : Double, widths? : () -> Array[Double], height_by? : () -> Double, text_size? : () -> Double, kind? : @headless.GroupKind, said? : String, shown? : () -> Bool, in_node? : Bool, render_item? : (@view.View, Int32, () -> Bool) -> Unit, loc~ : SourceLoc) -> @view.View
@@ -120,7 +123,10 @@ pub fn liquid_sheet_glass(solid? : Int64) -> @paint.Glass
 pub fn liquid_sheet_surface_decorate(@view.View, radius? : Double, active? : () -> Bool, solid? : () -> Int64, shadow? : () -> (Double, Double, Int64), solid_edge? : () -> (Double, Int64)) -> @view.View
 
 #callsite(autofill(loc))
-pub fn liquid_slider_node(@view.View, () -> Double, (Double) -> Unit, () -> String, least? : Double, most? : Double, step? : Double, threshold? : Double, disabled? : () -> Bool, track_h? : Double, track_held_grow? : Double, thumb_w_px? : Double, thumb_h_px? : Double, track_color? : () -> Int64, fill_color? : () -> Int64, stops? : Int32, thumb_label? : (Double) -> String, stop_labels? : () -> Array[String], value_text? : (Double) -> String, flush? : Bool, value_bubble? : ((Double) -> String)?, drag? : DampedDrag, loc~ : SourceLoc) -> @view.View
+pub fn liquid_slider_look(@view.View, (@view.View) -> Double, (@view.View) -> Double, SliderLook, velocity? : (@view.View) -> Double, loc~ : SourceLoc) -> Unit
+
+#callsite(autofill(loc))
+pub fn liquid_slider_node(@view.View, () -> Double, (Double) -> Unit, () -> String, least? : Double, most? : Double, step? : Double, threshold? : Double, disabled? : () -> Bool, track_h? : Double, track_held_grow? : Double, thumb_w_px? : Double, thumb_h_px? : Double, track_color? : () -> Int64, fill_color? : () -> Int64, stops? : Int32, thumb_label? : (Double) -> String, stop_labels? : () -> Array[String], value_text? : (Double) -> String, flush? : Bool, value_bubble? : ((Double) -> String)?, drag? : DampedDrag, on_commit? : (Double) -> Unit, loc~ : SourceLoc) -> @view.View
 
 pub fn liquid_solid_edge() -> (Double, Int64)
 
@@ -128,7 +134,7 @@ pub fn liquid_tab_bar_glass(spot? : (Double, Double)?, merge? : Double, solid? :
 
 pub fn liquid_tab_bar_surface_decorate(@view.View, () -> ((Double, Double)?, Double), share_when_unmerged? : Bool) -> @view.View
 
-pub fn liquid_tab_lens_glass(Double, solid? : Int64, sharing? : Bool, droplet_role? : Int) -> @paint.Glass
+pub fn liquid_tab_lens_glass(Double, solid? : Int64, sharing? : Bool, droplet_role? : Int32) -> @paint.Glass
 
 pub fn liquid_tab_lens_surface_decorate(@view.View, () -> Double, solid? : () -> Int64, shadow? : (Double, Double, Int64)) -> @view.View
 
@@ -390,6 +396,43 @@ pub(all) enum ScrollEdgeSide {
   Top
   Bottom
 }
+
+pub(all) struct ScrubberLook {
+  rest_h : Double
+  hover_h : Double
+  active_h : Double
+  track_color : () -> Int64
+  fill_color : () -> Int64
+  buffered : (() -> Double)?
+  buffered_color : (() -> Int64)?
+  focus_shown : (() -> Bool)?
+  focus_color : (() -> Int64)?
+  disabled : () -> Bool
+}
+pub fn ScrubberLook::new(heights? : (Double, Double, Double), track_color? : () -> Int64, fill_color? : () -> Int64, buffered? : (() -> Double)?, buffered_color? : (() -> Int64)?, focus_shown? : (() -> Bool)?, focus_color? : (() -> Int64)?, disabled? : () -> Bool) -> Self
+
+pub(all) struct SliderLook {
+  track_h : Double
+  track_held_grow : Double
+  track_inset : Double
+  travel_inset : Double?
+  thumb_w : Double
+  thumb_h : Double
+  flush : Bool
+  track_color : () -> Int64
+  fill_color : (() -> Int64)?
+  track_image : (() -> (String, String, Int32)?)?
+  buffered : (() -> Double)?
+  buffered_color : (() -> Int64)?
+  thumb_color : (() -> Int64)?
+  thumb_edge : (() -> (Double, Int64))?
+  focus_shown : (() -> Bool)?
+  focus_color : (() -> Int64)?
+  lens_enabled : Bool
+  held_mark : ((@view.View) -> Unit)?
+  disabled : () -> Bool
+}
+pub fn SliderLook::new(track_h? : Double, track_held_grow? : Double, track_inset? : Double, travel_inset? : Double?, thumb_w? : Double, thumb_h? : Double, flush? : Bool, track_color? : () -> Int64, fill_color? : (() -> Int64)?, track_image? : (() -> (String, String, Int32)?)?, buffered? : (() -> Double)?, buffered_color? : (() -> Int64)?, thumb_color? : (() -> Int64)?, thumb_edge? : (() -> (Double, Int64))?, focus_shown? : (() -> Bool)?, focus_color? : (() -> Int64)?, lens_enabled? : Bool, held_mark? : ((@view.View) -> Unit)?, disabled? : () -> Bool) -> Self
 
 // Type aliases
 

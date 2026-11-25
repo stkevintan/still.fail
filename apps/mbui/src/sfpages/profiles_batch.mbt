@@ -279,8 +279,8 @@ pub fn profiles_batch_foot_node(
   side? : Double = 0.0,
 ) -> Unit {
   // (a page's card, its buttons at its foot concentric with its corners: page_card's footed)
-  let card = fn(c : @view.View) {
-    @sf.page_card_node(c, footed=true, layered=true, fn(k) { profiles_batch_bar_node(k, core, batch, rows, stations) })
+  let card = fn(c : @view.View, glass : Bool) {
+    @sf.page_card_node(c, footed=true, layered=true, glass~, fn(k) { profiles_batch_bar_node(k, core, batch, rows, stations) })
   }
   v.show(fn() { batch.on.get() }, fn(w) {
     w.padding(By(fn() { (0.0, pb_gap, 0.0, pb_gap + foot()) })) |> ignore
@@ -288,23 +288,12 @@ pub fn profiles_batch_foot_node(
       // (a page's: over its foot, its list kept clear of it by the room it keeps there, profiles_batch_room)
       true => {
         w.over(Is(true), edges=(Some(0.0), None, Some(0.0), Some(0.0))) |> ignore
-        // (lifted off the rows going under it, as a toast is: its card's corner its shadow's)
-        let lifted = fn(c : @view.View) {
-          c.box(fn(k) {
-            k
-            .radius(By(fn() { @ui.tree_theme().corner(Xl3) }))
-            .shadow(By(fn() { (@sf.toast_shadow, @sf.toast_shadow_y, @ui.tree_theme().color(ShadowC)) }))
-            |> ignore
-            card(k)
-          })
-          |> ignore
-        }
-        @sf.page_lane_node(w, width, lifted)
+        @sf.page_lane_node(w, width, fn(c) { card(c, true) })
       }
       false =>
         w.box(fn(x) {
           x.padding(Is((side, 0.0, side, 0.0))) |> ignore
-          card(x)
+          card(x, false)
         })
         |> ignore
     }

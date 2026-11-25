@@ -70,7 +70,7 @@ test("the_graduated_chat_page_switch_is_no_feature", () => {
   // 试用新对话页 graduated: neither its older prefs field nor its switch turns anything on
   assert.deepEqual(experimentalOf({ chatPage: "nodes" }), {});
   assert.deepEqual(experimentalOf({ chatPage: "nodes", experimental: { chatPage: true, board: true } }), { board: true });
-  assert.deepEqual(Object.keys(FEATURES), ["farviewNative", "board", "selectionIntent", "cmdQuote", "terminal"]);
+  assert.deepEqual(Object.keys(FEATURES), ["board", "selectionIntent", "cmdQuote", "terminal"]);
   assert.deepEqual(stationFeatureIds(), ["terminal"]);
 });
 
@@ -87,27 +87,29 @@ test("the_switches_are_kept_on_the_device_and_shown_with_the_prefs", async () =>
   assert.equal(v(values, 1).features.board, false);
   // a station's own are its overview's to say, never the prefs'
   assert.equal("terminal" in v(values, 1).features, false);
-  assert.deepEqual(v(values, 1).experimentalItems.map((i: J) => i.id), test ? ["farviewNative", "board", "selectionIntent", "cmdQuote"] : ["board", "selectionIntent", "cmdQuote"]);
+  assert.deepEqual(v(values, 1).experimentalItems.map((i: J) => i.id), ["board", "selectionIntent", "cmdQuote"]);
 
-  assert.ok((await ask(host, core, ui, 2, "prefs.set", { experimental: { board: true, farviewNative: true } })).ok !== undefined);
+  assert.ok((await ask(host, core, ui, 2, "prefs.set", { experimental: { board: true, selectionIntent: true } })).ok !== undefined);
   apply(host, values);
-  assert.deepEqual(v(values, 1).experimental, { board: true, farviewNative: true });
+  assert.deepEqual(v(values, 1).experimental, { board: true, selectionIntent: true });
   assert.equal(v(values, 1).features.board, true);
-  assert.equal(v(values, 1).features.farviewNative, test);
-  assert.deepEqual(v(values, 1).experimentalItems.filter((i: J) => i.enabled).map((i: J) => i.id), test ? ["farviewNative", "board"] : ["board"]);
+  assert.equal(v(values, 1).features.selectionIntent, true);
+  assert.deepEqual(v(values, 1).experimentalItems.filter((i: J) => i.enabled).map((i: J) => i.id), ["board", "selectionIntent"]);
 
   // refused: an id not registered, a beta one, a value not a switch
   assert.equal((await ask(host, core, ui, 3, "prefs.set", { experimental: { gone: true } })).error.code, "invalid_params");
   assert.equal((await ask(host, core, ui, 4, "prefs.set", { experimental: { terminal: true } })).error.code, "invalid_params");
   assert.equal((await ask(host, core, ui, 8, "prefs.set", { experimental: { chatPage: true } })).error.code, "invalid_params");
+  assert.equal((await ask(host, core, ui, 9, "prefs.set", { experimental: { farviewNative: true } })).error.code, "invalid_params");
   assert.equal((await ask(host, core, ui, 5, "prefs.set", { experimental: { board: "on" } })).error.code, "invalid_params");
 
   // off: let go of (null or false), the map gone with its last
   await ask(host, core, ui, 6, "prefs.set", { experimental: { board: null } });
-  await ask(host, core, ui, 7, "prefs.set", { experimental: { farviewNative: false } });
+  await ask(host, core, ui, 7, "prefs.set", { experimental: { selectionIntent: false } });
   apply(host, values);
   assert.deepEqual(v(values, 1).experimental, {});
   assert.equal(v(values, 1).features.board, false);
+  assert.equal(v(values, 1).features.selectionIntent, false);
   core.close();
 });
 

@@ -100,6 +100,13 @@ pub fn[K] toggle_group_node(
     for item in items {
       g.item(track, item.key, item.label, disabled=item.disabled, made_for=loc, fn(b, t) {
         let lit = fn() { !t.disabled() && (t.hovered() || t.pressed()) }
+        let pressed = fn() { !t.disabled() && t.pressed() }
+        let on_way = @motion.NodeWay::new(if @signals.untracked(fn() { t.on() }) { 1.0 } else { 0.0 })
+        let lit_way = @motion.NodeWay::new(if @signals.untracked(lit) { 1.0 } else { 0.0 })
+        let press_way = @motion.NodeWay::new(if @signals.untracked(pressed) { 1.0 } else { 0.0 })
+        b.reacts(at_start=false, fn() { t.on() }, fn(on) { on_way.go_ms(b, if on { 1.0 } else { 0.0 }, dur_ms) })
+        b.reacts(at_start=false, lit, fn(on) { lit_way.go_ms(b, if on { 1.0 } else { 0.0 }, dur_ms) })
+        b.reacts(at_start=false, pressed, fn(on) { press_way.go_ms(b, if on { 1.0 } else { 0.0 }, dur_ms) })
         style_node(b, fn() { if item.icon_only { toggle_group_icon_button } else { toggle_group_button } })
         b
         .focus_ring_theme()
@@ -107,31 +114,41 @@ pub fn[K] toggle_group_node(
         .min_width(By(fn() { Some(h_now()) }))
         .radius(By(inner))
         .ground(By(fn() {
-          if t.on() {
+          let on_w = dclamp(on_way.shown(b), 0.0, 1.0)
+          let lit_w = dclamp(lit_way.shown(b), 0.0, 1.0)
+          if on_w >= 0.999 {
             @ui.tree_theme().lifted
-          } else if lit() {
-            alpha(theme().p.text, toggle_group_lit)
+          } else if on_w <= 0.001 {
+            if lit_w > 0.001 {
+              alpha(theme().p.text, toggle_group_lit * lit_w)
+            } else {
+              0L
+            }
           } else {
-            0L
+            let under = if lit_w > 0.001 { alpha(theme().p.text, toggle_group_lit * lit_w) } else { 0L }
+            @glass.over(under, alpha(@ui.tree_theme().lifted, on_w))
           }
         }))
-        .edge(By(fn() { (0.5, if t.on() { theme().p.line } else { 0L }) }))
-        .shadow(By(fn() { (if t.on() { 1.0 } else { 0.0 }, 0.0, theme().p.shadow) }))
+        .scale(By(fn() { 1.0 - toggle_group_press_dip * dclamp(press_way.shown(b), 0.0, 1.0) }))
         .alpha(By(fn() { if (item.disabled)() && !g.disabled() { toggle_group_off_alpha } else { 1.0 } }))
         |> ignore
-        let ink = fn() {
-          if t.on() || lit() {
+        let ink = fn(n : @view.View) {
+          let w = dmax(dclamp(on_way.shown(n), 0.0, 1.0), dclamp(lit_way.shown(n), 0.0, 1.0))
+          if w >= 0.999 {
             theme().p.text
-          } else {
+          } else if w <= 0.001 {
             theme().p.muted
+          } else {
+            @glass.lerp_color(theme().p.muted, theme().p.text, w)
           }
         }
         if item.icon != "" {
-          icon_node(b, item.icon, toggle_group_icon, By(ink)) |> ignore
+          let ic = icon_node(b, item.icon, toggle_group_icon, Is(0L))
+          ic.tint(By(fn() { ink(ic) })) |> ignore
         }
         if !item.icon_only {
-          words_node(b, item.label, fn() { if t.on() || lit() { toggle_group_words_on } else { toggle_group_words } })
-          |> ignore
+          let wn = words_node(b, item.label, fn() { toggle_group_words })
+          wn.ink(By(fn() { ink(wn) })) |> ignore
         }
       })
       |> ignore
@@ -161,6 +178,10 @@ let toggle_group_lit : Double = 0.06
 let toggle_group_off_alpha : Double = 0.55
 
 ///|
+/// Gentle paint-only scale dip while a toggle button is pressed.
+let toggle_group_press_dip : Double = 0.03
+
+///|
 /// The track: a row, its buttons 2 apart, 4 in, on a quiet ground.
 // kept across runs: a value (no field of it changes)
 let toggle_group_track : @ui.Style = @ui.css("row p=S1 gap=S0_5 bg=A(Fg,O5) align=ACenter")
@@ -178,7 +199,3 @@ let toggle_group_icon_button : @ui.Style = @ui.css("row align=ACenter justify=JC
 ///|
 // kept across runs: a value (no field of it changes)
 let toggle_group_words : @ui.TextStyle = @ui.text_style(size=Ui, weight=Medium, color=Muted, wrap=false)
-
-///|
-// kept across runs: a value (no field of it changes)
-let toggle_group_words_on : @ui.TextStyle = toggle_group_words.then(@ui.text_style(color=Fg))

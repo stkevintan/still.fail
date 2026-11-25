@@ -107,12 +107,30 @@ fn chat_intent_of(
     // (where the list has the room for a margin beside its column: kept on the words picked, lit there, its answer a
     // note in the margin beside their message (intent_note_room); else in a panel beside where it was pressed)
     if intent_notes_fit(width) && p.of.length() == 1 {
-      @sfbase.intent_note_ask(src, draft, p.of[0], r.station, thread, text, m.ts, author) |> ignore
+      // (which of the times its words are in the message was picked: by what its paragraph shows before them)
+      let before = if whole { None } else { Some(p.first_before) }
+      let at = chat_pick_at(m.text, p.first_before, text)
+      @sfbase.intent_note_ask(src, draft, p.of[0], at, before, r.station, thread, text, m.ts, author) |> ignore
     } else {
       open_selection_intent(src, r, thread, draft, text, m.ts, author, role, from~)
     }
   }
   @ui.picked_let_go()
+}
+
+///|
+/// Where in message text `text` words `picked` stand, shown after `before` (what their paragraph shows before them):
+/// found with as much of its end as the text has just before them (Markdown's marks are not shown), so that of the
+/// times they are in it, the one picked. -1 where it has them nowhere.
+fn chat_pick_at(text : String, before : String, picked : String) -> Int {
+  let cs = before.to_array()
+  for n = cs.length().min(16); n >= 0; n = n - 1 {
+    let tail = String::from_array(cs[cs.length() - n:])
+    if text.find(tail + picked) is Some(i) {
+      return i + tail.length()
+    }
+  }
+  -1
 }
 
 ///|
@@ -327,61 +345,34 @@ fn chat_quote_node(
         guard @ui.view_tree().bind(fn(tree) { tree.view_of(p.ends_in) }) is Some(end) && !end.shown_nowhere() else {
           return
         }
-        if !with_intent {
-          @sf.action_box_node(holds, fn() { @sf.t("web-main.chat.quote") }, fn(_) { chat_quote_take(v, src, draft, rows) }, fn(b) {
-            let gone = fn() { chat_pick_gone(p) }
-            let unkept = end.owns_while(gone)
-            b.owns(unkept) |> ignore
-            end.on_reused(gone)
-            @sf.style_node(b, fn() { chat_quote_pill })
-            @sf.glass_capsule_node(@ui.keeps_picked(b), interactive=true)
-            .beside(p.ends_in, side=Top, offset=8.0, piece=@ui.picked_end_piece(p), while_seen=true)
-            |> ignore
-            @sf.hover_ground_node(b)
-            @sf.icon_node(b, if p.ends_at_start { "quote-open" } else { "quote" }, chat_quote_icon, By(fn() { @sf.theme().p.text }))
-            |> ignore
-            @sf.words_node(b, fn() { @sf.t("web-main.chat.quote") }, fn() { chat_quote_words }) |> ignore
-          })
-          |> ignore
-        } else {
-          holds.box(fn(pill) {
-            let gone = fn() { chat_pick_gone(p) }
-            let unkept = end.owns_while(gone)
-            pill.owns(unkept) |> ignore
-            end.on_reused(gone)
-            @sf.style_node(pill, fn() { chat_quote_bar })
-            @sf.glass_capsule_node(@ui.keeps_picked(pill), interactive=true)
-            .beside(p.ends_in, side=Top, offset=8.0, piece=@ui.picked_end_piece(p), while_seen=true)
-            |> ignore
-            @sf.action_box_node(pill, fn() { @sf.t("web-main.chat.quote") }, fn(_) { chat_quote_take(v, src, draft, rows) }, fn(b) {
-              @sf.style_node(b, fn() { chat_quote_part })
-              @sf.hover_ground_node(b)
-              @sf.icon_node(b, if p.ends_at_start { "quote-open" } else { "quote" }, chat_quote_icon, By(fn() { @sf.theme().p.text }))
-              |> ignore
-              @sf.words_node(b, fn() { @sf.t("web-main.chat.quote") }, fn() { chat_quote_words }) |> ignore
-            })
-            |> ignore
-            pill.box(fn(sep) { @sf.style_node(sep, fn() { chat_quote_sep }) }) |> ignore
-            @sf.action_box_node(
-              pill,
+        let actions : Array[@sf.PickBarAction] = [
+          @sf.pick_bar_action(
+            fn() { @sf.t("web-main.chat.quote") },
+            icon=if p.ends_at_start { "quote-open" } else { "quote" },
+            fn(_) { chat_quote_take(v, src, draft, rows) },
+          ),
+        ]
+        if with_intent {
+          actions.push(
+            @sf.pick_bar_action(
               fn() { @sf.t("web-main.chat.inferIntent") },
+              icon="poke",
               // (beside the pill where it was pressed, as a menu opens from its key: the pill goes as the words are let
               // go, so where it was is taken now)
-              fn(at) {
-                let (x, y, w, h) = at.placed_window_now()
-                chat_intent_take(v, src, r, here, draft, rows, At(x, y, w, h))
+              fn(rect) {
+                chat_intent_take(v, src, r, here, draft, rows, At(rect.0, rect.1, rect.2, rect.3))
               },
-              fn(b) {
-                @sf.style_node(b, fn() { chat_quote_part })
-                @sf.hover_ground_node(b)
-                @sf.icon_node(b, "poke", chat_quote_icon, By(fn() { @sf.theme().p.text })) |> ignore
-                @sf.words_node(b, fn() { @sf.t("web-main.chat.inferIntent") }, fn() { chat_quote_words }) |> ignore
-              },
-            )
-            |> ignore
-          })
-          |> ignore
+            ),
+          )
         }
+        let pill = @sf.pick_bar_desk_node(holds, actions)
+        let gone = fn() { chat_pick_gone(p) }
+        let unkept = end.owns_while(gone)
+        pill.owns(unkept) |> ignore
+        end.on_reused(gone)
+        @ui.keeps_picked(pill)
+        .beside(p.ends_in, side=Top, offset=chat_pick_bar_over, piece=@ui.picked_end_piece(p), while_seen=true)
+        |> ignore
       },
     )
   }
@@ -396,54 +387,6 @@ fn chat_quote_node(
   }
   v.reacts(fn() { chat_quotable(v, rows) is Some(_) }, fn(on) { if on { make_quote() } })
 }
-
-///|
-/// The pill (quotePop: 26 high, 10 in, its mark 4 before its words, round; single-layer liquid glass as the finger's
-/// pick bar and the floating buttons are (`glass_menu()`, falling back to `panel_ground()` + hairline `control_edge_w`
-/// border under `MBUI_GLASS=solid`) with outside-only `float_shadow()`, the hover ground where the hand is on it), its
-/// mark 12 and its words in the ink.
-// kept across runs: a value (no field of it changes)
-let chat_quote_pill : @ui.Style = @ui.style(
-  row=true,
-  h=@sf.quote_pop_h,
-  px=S2_5,
-  gap=S1,
-  radius=Full,
-  align=ACenter,
-)
-
-///|
-// kept across runs: a value (no field of it changes)
-let chat_quote_bar : @ui.Style = @ui.style(
-  row=true,
-  h=@sf.quote_pop_h,
-  px=S0_5,
-  radius=Full,
-  align=ACenter,
-)
-
-///|
-// kept across runs: a value (no field of it changes)
-let chat_quote_part : @ui.Style = @ui.style(
-  row=true,
-  h=@sf.quote_pop_h,
-  px=S2_5,
-  gap=S1,
-  radius=Full,
-  align=ACenter,
-)
-
-///|
-// kept across runs: a value (no field of it changes)
-/// (the one faint hairline down between a capsule's segments, as the finger's pick bar has: @sf.rule_down)
-let chat_quote_sep : @ui.Style = @sf.rule_down.then(@ui.css("h=S3"))
-
-///|
-let chat_quote_icon : Double = 12.0
-
-///|
-// kept across runs: a value (no field of it changes)
-let chat_quote_words : @ui.TextStyle = @ui.text_style(size=Caption, weight=Medium, color=Fg, wrap=false)
 
 ///|
 /// How far over where a finger's pick ends its bar stands (pick_bar's: 52 over the line's top, the bar 40 high).

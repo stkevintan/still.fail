@@ -3,7 +3,7 @@
 // here, as a native view under it cannot be blurred), a timeline, the buttons in its corners, the speed as a figure.
 
 ///|
-/// The controls' bar (vvBar): as wide as 1080 allows less 16 either side, 16 off the foot, 2 over its timeline and the
+/// The controls' bar (vvBar): as wide as 1080 allows less 16 either side, 16 off the foot, 6 over its timeline and the
 /// ladder's inset round the rest, a card of the ladder's (its round buttons in its corners concentric with it); on the
 /// raised ground at 72%. It fades out in 320 ms, back in 120.
 pub let media_bar_most : Double = 1080.0
@@ -18,7 +18,7 @@ pub let media_bar_pad : Double = @ui.capsule_in(card_corner, media_key_d)
 ///|
 /// Over its timeline, in the bar; its buttons' size (vvBtn: 32 across); so the bar is this tall, its timeline and a row
 /// of its buttons between its pads: what a picture fitted clear of it keeps off (player.mbt desk_play_room).
-pub let media_bar_top : Double = 2.0
+pub let media_bar_top : Double = 6.0
 
 ///|
 pub let media_key_d : Double = 32.0
@@ -57,14 +57,10 @@ pub let media_track_share : Double = 0.2
 pub let media_came_share : Double = 0.22
 
 ///|
-/// The timeline (vvTimeline): 22 high (web/ui viewer/media.css.ts), its track in its
-/// middle, 10 in from the bar's sides; its head (vvHead) 12 across, centred on where it is.
+/// The timeline (vvTimeline): 22 high (web/ui viewer/media.css.ts), with a thumb-free fluid scrubber track in its middle.
 pub fn media_timeline_h() -> Double {
   22.0
 }
-
-///|
-let media_head_r : Double = 6.0
 
 ///|
 /// The bar's ground over `canvas` (the picture's glass, solid).
@@ -119,10 +115,6 @@ let media_lit_share : Double = 0.16
 ///|
 /// What is said in the code face in the bar (vvInfo, vvNow): the time where it is in 600.
 pub let media_strong : Int = 600
-
-///|
-/// A smaller head (the volume's).
-let media_small_head_r : Double = 5.0
 
 ///|
 let media_rate_w : Double = 46.0

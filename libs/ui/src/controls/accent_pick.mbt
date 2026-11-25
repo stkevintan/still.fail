@@ -64,7 +64,7 @@ pub fn accent_pick_node(
       let a_dot = fn(key : () -> String, ink : () -> Int64?, name : () -> String, wheel : Bool) {
         rg.item(row, key, name, fn(d, item) {
           let on = fn() { item.chosen() }
-          let side = dot_side(theme())
+          let side = dot_side(@signals.untracked(theme))
           let mark = side * accent_check_part
           let ring = fn() {
             if !wheel && ink() is None {
@@ -149,11 +149,11 @@ pub fn accent_pick_node(
 }
 
 ///|
-/// The hues' slider (@kit.slider's geometry, the look the old view's hue_look gave it), as wide as the dots over it: a track 6 high of every hue's
-/// accent as the theme draws it, 10 in from each end, round; the knob, 24 across, the hue's accent ringed 2 in the
-/// card's ground, its middle running from half the slider's thumb room in to as far from the end. A drag along it, an
-/// arrow with the keyboard's focus on it, a screen reader's step (View::on_step) each `step_to` a hue (0 to 355, 5
-/// apart), read out as `label`'s slider.
+/// The hues' slider (@headless.slider + @glass.liquid_slider_look), as wide as the dots over it: a track 6 high of
+/// every hue's accent as the theme draws it, 10 in from each end, round; the knob, 24 across, the hue's accent ringed
+/// 2 in the card's ground, its middle running from half the slider's thumb room in to as far from the end, lifting
+/// into a clear liquid glass droplet loupe while held. A drag along it, an arrow with the keyboard's focus on it, a
+/// screen reader's step (View::on_step) each `step_to` a hue (0 to 355, 5 apart), read out as `label`'s slider.
 #callsite(autofill(loc))
 fn hue_slider_node(
   parent : @view.View,
@@ -167,6 +167,48 @@ fn hue_slider_node(
     let side = dot_side(theme())
     n * side + (n - 1.0) * 8.0
   }
+  let dd = @glass.DampedDrag::new(
+    @signals.untracked(fn() { now().to_double() }),
+    lo=0.0,
+    hi=custom_hue_most,
+    held_scale=@glass.slider_thumb_held_scale,
+  )
+  let drag = fn(d : @view.Drag) {
+    match d.kind {
+      Down => {
+        dd.press()
+        if d.w > hue_thumb_room {
+          let frac = dclamp((d.x - hue_thumb_room / 2.0) / (d.w - hue_thumb_room), 0.0, 1.0)
+          let snapped = @headless.slider_snap(frac * custom_hue_most, 0.0, custom_hue_most, custom_hue_step)
+          let h = snapped.round().to_int()
+          if h != @signals.untracked(now) {
+            step_to(h)
+          }
+          dd.update_value(@signals.untracked(fn() { now().to_double() }))
+        }
+      }
+      Moved =>
+        if d.w > hue_thumb_room {
+          let frac = dclamp((d.x - hue_thumb_room / 2.0) / (d.w - hue_thumb_room), 0.0, 1.0)
+          let snapped = @headless.slider_snap(frac * custom_hue_most, 0.0, custom_hue_most, custom_hue_step)
+          let h = snapped.round().to_int()
+          if h != @signals.untracked(now) {
+            step_to(h)
+          }
+          let actual = @signals.untracked(fn() { now().to_double() })
+          if actual != dd.target() {
+            dd.update_value(actual)
+          }
+        }
+      Up | Off => {
+        let actual = @signals.untracked(fn() { now().to_double() })
+        if actual != dd.target() {
+          dd.update_value(actual)
+        }
+        dd.release()
+      }
+    }
+  }
   @headless.slider(
     made_for=loc,
     parent,
@@ -176,40 +218,70 @@ fn hue_slider_node(
     max=custom_hue_most,
     step=custom_hue_step,
     thumb_room=hue_thumb_room,
+    drag~,
     fn(h) { step_to(h.round().to_int()) },
     fn(s, sl) {
-      let at = fn() { sl.part() }
+      dd.attach(s)
+      s.reacts(at_start=false, fn() { now().to_double() }, fn(v) {
+        if dd.target() != v {
+          dd.update_value(v)
+        }
+      })
       s
       .width(By(fn() { Some(wide()) }))
       .height(Is(Some(hue_slider_h)))
       .lies_along(Is(Middle))
       |> ignore
-      // its track, every hue's accent
-      s.box(fn(t) {
-        t
-        .height(Is(Some(hue_track_h)))
-        .margin(Is((hue_track_in, 0.0, hue_track_in, 0.0)))
-        .radius(Is(hue_track_h / 2.0))
-        .clips(Is(true))
-        .image(By(fn() { Some((hue_strip(theme().dark), "", hue_strip_most)) }))
-        |> ignore
-      })
-      |> ignore
-      // its knob, over the track where the hue is along it
-      s.box(fn(o) {
-        o.over(Is(true)).row(Is(true)).lines_up(Is(Some(Middle))) |> ignore
-        o.box(fn(b) { b.grow(By(at)) |> ignore }) |> ignore
-        o.box(fn(k) {
-          k
-          .width(Is(Some(hue_knob_d)))
-          .height(Is(Some(hue_knob_d)))
-          .radius(Is(hue_knob_d / 2.0))
-          .ground(By(fn() { ink_of_hue(now()) }))
-          .edge(By(fn() { (2.0, theme().p.canvas) }))
+      let look = @glass.SliderLook::new(
+        track_h=hue_track_h,
+        track_inset=hue_track_in,
+        travel_inset=None,
+        thumb_w=@glass.slider_thumb_w,
+        thumb_h=@glass.slider_thumb_h,
+        flush=true,
+        track_color=fn() { 0L },
+        fill_color=None,
+        track_image=Some(fn() {
+          let tw = dmax(1.0, wide() - 2.0 * hue_track_in)
+          Some((hue_strip(theme().dark, tw, hue_thumb_room / 2.0 - hue_track_in), "", hue_strip_most))
+        }),
+        thumb_color=None,
+        thumb_edge=None,
+        focus_shown=Some(fn() { sl.focus_shown() }),
+        focus_color=Some(fn() { @ui.tree_theme().focus }),
+        lens_enabled=true,
+        held_mark=Some(fn(m) {
+          m.box(fn(bar) {
+            bar
+            .width(Is(Some(5.0)))
+            .height(Is(Some(16.0)))
+            .radius(Is(2.5))
+            .ground(By(fn() {
+              let h = (dd.progress(bar) * custom_hue_most).round().to_int()
+              let a = custom_tone(h)
+              if theme().dark {
+                a.dark
+              } else {
+                a.light
+              }
+            }))
+            .edge(Is((1.0, 0xFFFFFFFFL)))
+            .shadow(Is((2.0, 0.0, 0x00000044L)))
+            |> ignore
+          })
           |> ignore
-        })
-        |> ignore
-        o.box(fn(b) { b.grow(By(fn() { 1.0 - at() })) |> ignore }) |> ignore
+        }),
+      )
+      s.box(fn(slot) {
+        slot.height(Is(Some(@glass.slider_thumb_h))) |> ignore
+        @glass.liquid_slider_look(
+          slot,
+          fn(n) { dd.progress(n) },
+          fn(n) { dd.pressed(n) },
+          look,
+          velocity=fn(n) { dd.velocity(n) },
+          loc~,
+        )
       })
       |> ignore
     },
@@ -218,33 +290,19 @@ fn hue_slider_node(
 }
 
 ///|
-/// Hue `h`'s accent as the theme draws it now (light or dark).
-fn ink_of_hue(h : Int) -> Int64 {
-  let a = custom_tone(h)
-  if theme().dark {
-    a.dark
-  } else {
-    a.light
-  }
-}
+/// How much of the slider's width its capsule thumb's middle does not run along (matches flush=true: half a thumb at
+/// each end).
+let hue_thumb_room : Double = @glass.slider_thumb_w
 
 ///|
-/// How much of the slider's width its knob's middle does not run along (@kit.slider's thumb_room: half at each end).
-let hue_thumb_room : Double = 22.0
-
-///|
-/// The slider's height (h=S7), its track's (h=S1_5) and how far in from each end it is (mx=S2_5), the knob's side
-/// (w=S6).
+/// The slider's layout height (h=S7), its track's height (6pt capsule) and end inset (4pt, tucked under flush capsule).
 let hue_slider_h : Double = 28.0
 
 ///|
-let hue_track_h : Double = 6.0
+let hue_track_h : Double = @glass.slider_track_h
 
 ///|
-let hue_track_in : Double = 10.0
-
-///|
-let hue_knob_d : Double = 24.0
+let hue_track_in : Double = @glass.slider_track_h / 2.0 + 1.0
 
 ///|
 /// The check on the chosen dot (and 自定义's ＋): 0.6 of its side.
@@ -281,18 +339,29 @@ let custom_hue_most : Double = 355.0
 let custom_hue_step : Double = 5.0
 
 ///|
-/// How many pixels across the hues' track's picture is made, each its hue's accent, stretched over the track.
-let hue_cells : Int = 72
+/// How many pixels across the hues' track's picture is made (1px ≈ 1pt on desktop 208pt track), mapping 0°..355°
+/// linearly across the thumb center travel `[cap_in, track_w - cap_in]` and clamping both end caps to 0° / 355°.
+let hue_cells : Int = 208
 
 ///|
-/// The picture of every hue's accent by day or by night (hue_strip_px across, 1 high), by the key the host keeps it at:
-/// made the first time it is asked for (gradient.mbt's way: mbui fills no gradient itself).
-fn hue_strip(dark : Bool) -> String {
-  let key = "mem:sf-hues/\{dark}/\{hue_cells}"
+/// Hue in degrees [0, 355] at track-local position `x` in `[0, track_w]` when thumb centers travel `[cap_in, track_w - cap_in]`.
+fn hue_strip_hue_at(x : Double, track_w : Double, cap_in : Double) -> Int {
+  let span = dmax(1.0, track_w - 2.0 * cap_in)
+  let frac = dclamp((x - cap_in) / span, 0.0, 1.0)
+  (frac * custom_hue_most).round().to_int()
+}
+
+///|
+/// The picture of every hue's accent by day or by night (hue_cells across, 1 high), aligned to the flush capsule
+/// thumb's center travel `[cap_in, track_w - cap_in]` so the color under the droplet center matches the selected hue.
+fn hue_strip(dark : Bool, track_w : Double, cap_in : Double) -> String {
+  let tw_key = dmax(1.0, track_w.round()).to_int()
+  let key = "mem:sf-hues/\{dark}/\{tw_key}/\{hue_cells}"
   if !@ui.has_image(key) {
     let px = FixedArray::make(hue_cells * 4, b'\x00')
     for i in 0..<hue_cells {
-      let a = custom_tone((i.to_double() * 360.0 / hue_cells.to_double()).to_int())
+      let x = (i.to_double() + 0.5) / hue_cells.to_double() * track_w
+      let a = custom_tone(hue_strip_hue_at(x, track_w, cap_in))
       let ink = if dark { a.dark } else { a.light }
       for k in 0..<4 {
         px[i * 4 + k] = ((ink >> (24 - k * 8)) & 0xFFL).to_int().to_byte()

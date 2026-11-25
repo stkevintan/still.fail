@@ -8,53 +8,37 @@ priv struct SquareHost {
 }
 
 ///|
-impl @hostapi.Host for SquareHost with font_metrics(_, size, _, _, out) {
-  out[0] = size * 0.75
-  out[1] = size * 0.25
-  out[2] = size * 1.25
-}
-
-///|
-impl @hostapi.Host for SquareHost with shape(_, text, _, _, _, out) {
-  let n = text.length()
-  for i in 0..<n {
-    out[i * 4] = i.to_double()
-    out[i * 4 + 1] = 1.0
-    out[i * 4 + 2] = 7.0
-    out[i * 4 + 3] = text.at(i).to_int().to_double()
+fn SquareHost::as_host(self : SquareHost) -> @hostapi.Host {
+  let h = @hostapi.Host::noop()
+  h.font_metrics = fn(size, _, _, out) {
+    out[0] = size * 0.75
+    out[1] = size * 0.25
+    out[2] = size * 1.25
   }
-  n
-}
-
-///|
-impl @hostapi.Host for SquareHost with text_key(_, text, _, _, _) {
-  text.at(0).to_int()
-}
-
-///|
-impl @hostapi.Host for SquareHost with glyph(self, key, out) {
-  self.drawn.push(key)
-  out[0] = 0.0
-  out[1] = 0.0
-  out[2] = square_glyph
-  out[3] = square_glyph
-  out[4] = 0.0
-  out[5] = -square_glyph
-  out[6] = 0.0
-}
-
-///|
-impl @hostapi.Host for SquareHost with glyph_put(self, key, x, y) {
-  self.put[(x, y)] = key
-}
-
-///|
-impl @hostapi.Host for SquareHost with atlas_size(_, colour) {
-  if colour {
-    0
-  } else {
-    1024
+  h.shape = fn(text, _, _, _, out) {
+    let n = text.length()
+    for i in 0..<n {
+      out[i * 4] = i.to_double()
+      out[i * 4 + 1] = 1.0
+      out[i * 4 + 2] = 7.0
+      out[i * 4 + 3] = text.at(i).to_int().to_double()
+    }
+    n
   }
+  h.text_key = fn(text, _, _, _) { text.at(0).to_int() }
+  h.glyph = fn(key, out) {
+    self.drawn.push(key)
+    out[0] = 0.0
+    out[1] = 0.0
+    out[2] = square_glyph
+    out[3] = square_glyph
+    out[4] = 0.0
+    out[5] = -square_glyph
+    out[6] = 0.0
+  }
+  h.glyph_put = fn(key, x, y) { self.put[(x, y)] = key }
+  h.atlas_size = fn(colour) { if colour { 0 } else { 1024 } }
+  h
 }
 
 ///|
@@ -69,7 +53,7 @@ test "words scrolled through, more than the atlas holds: what stays on the scree
     fn(c) { c.text(words.val, wrap=false) |> ignore },
     w=4000.0,
     scale=1.0,
-    live={ host, turn: fn() {  } },
+    live={ host: host.as_host(), turn: fn() {  } },
   )
   // "AB" on the screen all along, 30 words of its own beside it on each page: 362 glyphs in all, the atlas 256
   for page in 0..<12 {
@@ -130,7 +114,7 @@ test "a glyph of what is on the screen on every shelf of a full atlas: a new wor
     fn(c) { c.text(words.val, wrap=false) |> ignore },
     w=4000.0,
     scale=1.0,
-    live={ host, turn: fn() {  } },
+    live={ host: host.as_host(), turn: fn() {  } },
   )
   // the atlas full, its 32 shelves of eight each: then one glyph from each with a new one after them
   t.draw()
@@ -154,7 +138,7 @@ test "more on the screen than a whole atlas holds: started over once, not every 
     fn(c) { c.text(square_words(Array::makei(257, fn(i) { 0x4E00 + i })), wrap=false) |> ignore },
     w=4000.0,
     scale=1.0,
-    live={ host, turn: fn() {  } },
+    live={ host: host.as_host(), turn: fn() {  } },
   )
   t.draw()
   t.draw()
@@ -179,7 +163,7 @@ test "words scrolled through, a glyph of each page kept on the screen: none draw
     fn(c) { c.text(words.val, wrap=false) |> ignore },
     w=4000.0,
     scale=1.0,
-    live={ host, turn: fn() {  } },
+    live={ host: host.as_host(), turn: fn() {  } },
   )
   let stay : Array[Int] = []
   for page in 0..<16 {

@@ -17,7 +17,7 @@ import { claudeOAuthToken, claudeToken as tokenOf } from "./oauth.ts";
 import { CONSOLE, RenewRefused } from "./console.ts";
 import { CURSOR, type CursorUrls, cursorMe, cursorModels, readCursor } from "./cursor.ts";
 import { type DevinFusion, devinCatalog, devinData } from "../agents/devin.ts";
-import { agyHome, agyPlanIn, agyTakeBack, agyToken, agyTokenReady, noteAgyEmail } from "../agents/agy.ts";
+import { AGY_FILE_TOKENS, agyHome, agyPlanIn, agyTakeBack, agyToken, agyTokenReady, noteAgyEmail } from "../agents/agy.ts";
 import { platform } from "../platform/index.ts";
 import { profileFetch } from "../ops/agent-env.ts";
 import { withShellCommand } from "../ops/shell-path.ts";
@@ -174,7 +174,7 @@ export const loginCommand = (runtime: Runtime | undefined, home: string, machine
   : runtime === "codex" ? `CODEX_HOME=${home} codex login`
   : runtime === "grok" ? `GROK_HOME=${join(home, "grok")} grok login --device-auth`
   : runtime === "devin" ? `XDG_DATA_HOME=${devinData(home)} devin auth login --force-manual-token-flow`
-  : runtime === "agy" ? `HOME=${agyHome(home)} agy`
+  : runtime === "agy" ? `SSH_CLIENT='${AGY_FILE_TOKENS.SSH_CLIENT}' HOME=${agyHome(home)} agy`
   : "";
 
 /// What a check is given: the account and where it lives.
@@ -432,7 +432,7 @@ async function checkInner(o: CheckOptions, lang: Lang): Promise<ProfileCheck> {
     return done;
   }
   if (o.kind === "subscription" && o.runtime === "agy") {
-    // Signed in when its sign-in's file is in the profile's (agents/agy.ts), taken back from the macOS keychain where
+    // Signed in when its sign-in's file is in the profile's (agents/agy.ts), taken back from the OS keyring where
     // `agy` had moved it (`agyTakeBack`); whether it works, and its models, a session opened only to ask says (index.ts).
     if (!(await agyTakeBack(o.home))) return check("login", t("station.profile.signedOut"), null);
     let email: string | null = null;

@@ -1,0 +1,441 @@
+// Text as JavaScript cases and splits it, 1:1 aligned with `station/mb/src/jscase/jscase.mbt`:
+// V8's `String.prototype.toLowerCase()` (U+0130 -> i + U+0307, U+03A3 -> final sigma by context),
+// JS RegExp `\s` whitespace, Unicode White_Space, and `\p{L}\p{N}` words.
+// Note: Pion `String` is UTF-8; all code-point operations decode UTF-8 (WHATWG lossy).
+
+pub fn in_ranges(ranges : Array[Int], c : Int) -> Bool {
+  let mut lo = 0
+  let mut hi = ranges.length() / 2
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if c < ranges[mid * 2] {
+      hi = mid
+    } else if c > ranges[mid * 2 + 1] {
+      lo = mid + 1
+    } else {
+      return true
+    }
+  }
+  false
+}
+
+fn lowered(c : Int) -> Int {
+  let mut lo = 0
+  let mut hi = lower_from.length()
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if lower_from[mid] < c {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+  if lo < lower_from.length() && lower_from[lo] == c {
+    lower_to[lo]
+  } else {
+    c
+  }
+}
+
+fn is_utf8_cont(b : Int) -> Bool {
+  (b & 0xC0) == 0x80
+}
+
+/// Decode one Unicode scalar value at byte offset `i`, returning `(code_point, next_offset)`.
+fn decode_utf8_at(raw : Bytes, i : Int, end : Int) -> (Int, Int) {
+  let b0 = raw[i].to_int() & 0xFF
+  if b0 < 0x80 {
+    return (b0, i + 1)
+  }
+  if b0 >= 0xC2 && b0 <= 0xDF {
+    if i + 1 < end {
+      let b1 = raw[i + 1].to_int() & 0xFF
+      if is_utf8_cont(b1) {
+        return (((b0 & 0x1F) << 6) | (b1 & 0x3F), i + 2)
+      }
+    }
+    return (0xFFFD, i + 1)
+  }
+  if b0 >= 0xE0 && b0 <= 0xEF {
+    let lo1 = if b0 == 0xE0 { 0xA0 } else { 0x80 }
+    let hi1 = if b0 == 0xED { 0x9F } else { 0xBF }
+    if i + 1 < end {
+      let b1 = raw[i + 1].to_int() & 0xFF
+      if b1 >= lo1 && b1 <= hi1 {
+        if i + 2 < end {
+          let b2 = raw[i + 2].to_int() & 0xFF
+          if is_utf8_cont(b2) {
+            return (((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F), i + 3)
+          }
+        }
+        return (0xFFFD, i + 2)
+      }
+    }
+    return (0xFFFD, i + 1)
+  }
+  if b0 >= 0xF0 && b0 <= 0xF4 {
+    let lo1 = if b0 == 0xF0 { 0x90 } else { 0x80 }
+    let hi1 = if b0 == 0xF4 { 0x8F } else { 0xBF }
+    if i + 1 < end {
+      let b1 = raw[i + 1].to_int() & 0xFF
+      if b1 >= lo1 && b1 <= hi1 {
+        if i + 2 < end {
+          let b2 = raw[i + 2].to_int() & 0xFF
+          if is_utf8_cont(b2) {
+            if i + 3 < end {
+              let b3 = raw[i + 3].to_int() & 0xFF
+              if is_utf8_cont(b3) {
+                let cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+                return (cp, i + 4)
+              }
+            }
+            return (0xFFFD, i + 3)
+          }
+        }
+        return (0xFFFD, i + 2)
+      }
+    }
+    return (0xFFFD, i + 1)
+  }
+  (0xFFFD, i + 1)
+}
+
+fn points(s : String) -> Array[Int] {
+  let raw = s.to_bytes()
+  let end = raw.length()
+  let out : Array[Int] = []
+  let mut i = 0
+  while i < end {
+    let (cp, next) = decode_utf8_at(raw, i, end)
+    out.push(cp)
+    i = next
+  }
+  out
+}
+
+fn write_point(out : StringBuilder, cp : Int) -> Unit {
+  if cp < 0x80 {
+    out.write_byte(cp as Byte)
+  } else if cp < 0x800 {
+    out.write_byte((0xC0 | (cp >> 6)) as Byte)
+    out.write_byte((0x80 | (cp & 0x3F)) as Byte)
+  } else if cp < 0x10000 {
+    out.write_byte((0xE0 | (cp >> 12)) as Byte)
+    out.write_byte((0x80 | ((cp >> 6) & 0x3F)) as Byte)
+    out.write_byte((0x80 | (cp & 0x3F)) as Byte)
+  } else {
+    out.write_byte((0xF0 | (cp >> 18)) as Byte)
+    out.write_byte((0x80 | ((cp >> 12) & 0x3F)) as Byte)
+    out.write_byte((0x80 | ((cp >> 6) & 0x3F)) as Byte)
+    out.write_byte((0x80 | (cp & 0x3F)) as Byte)
+  }
+}
+
+fn slice_bytes_str(raw : Bytes, start : Int, end : Int) -> String {
+  if start >= end {
+    return ""
+  }
+  let sb = StringBuilder::new()
+  for i in start..<end {
+    sb.write_byte(raw[i])
+  }
+  sb.to_string()
+}
+
+fn is_cased(c : Int) -> Bool {
+  in_ranges(cased_ranges, c)
+}
+
+fn is_ignorable(c : Int) -> Bool {
+  in_ranges(ignorable_ranges, c)
+}
+
+/// Unicode's Final_Sigma: a cased letter before (case-ignorables between), none after.
+fn final_sigma(cs : Array[Int], at : Int) -> Bool {
+  let mut i = at - 1
+  while i >= 0 && is_ignorable(cs[i]) {
+    i = i - 1
+  }
+  if i < 0 || !is_cased(cs[i]) {
+    return false
+  }
+  let mut j = at + 1
+  while j < cs.length() && is_ignorable(cs[j]) {
+    j = j + 1
+  }
+  j >= cs.length() || !is_cased(cs[j])
+}
+
+/// `s.toLowerCase()` as V8 makes it.
+pub fn lower(s : String) -> String {
+  let raw = s.to_bytes()
+  let mut plain = true
+  for i in 0..<raw.length() {
+    let c = raw[i].to_int() & 0xFF
+    if c >= 0x80 || (c >= 0x41 && c <= 0x5A) {
+      plain = false
+      break
+    }
+  }
+  if plain {
+    return s
+  }
+  let cs = points(s)
+  let out = StringBuilder::new()
+  for i in 0..<cs.length() {
+    let c = cs[i]
+    if c == 0x130 {
+      out.write_byte(0x69 as Byte) // 'i'
+      write_point(out, 0x0307)
+    } else if c == 0x3A3 {
+      write_point(out, if final_sigma(cs, i) { 0x03C2 } else { 0x03C3 })
+    } else {
+      write_point(out, lowered(c))
+    }
+  }
+  out.to_string()
+}
+
+/// Whether a code point is white space as JS RegExp `\s` has it (WhiteSpace and LineTerminator).
+pub fn is_space(c : Int) -> Bool {
+  c == 0x09 ||
+  c == 0x0A ||
+  c == 0x0B ||
+  c == 0x0C ||
+  c == 0x0D ||
+  c == 0x20 ||
+  c == 0xA0 ||
+  c == 0x1680 ||
+  (c >= 0x2000 && c <= 0x200A) ||
+  c == 0x2028 ||
+  c == 0x2029 ||
+  c == 0x202F ||
+  c == 0x205F ||
+  c == 0x3000 ||
+  c == 0xFEFF
+}
+
+/// Whether a code point is Unicode's White_Space (`\p{White_Space}`, Rust's `char::is_whitespace`).
+pub fn is_white_space(c : Int) -> Bool {
+  c == 0x09 ||
+  c == 0x0A ||
+  c == 0x0B ||
+  c == 0x0C ||
+  c == 0x0D ||
+  c == 0x20 ||
+  c == 0x85 ||
+  c == 0xA0 ||
+  c == 0x1680 ||
+  (c >= 0x2000 && c <= 0x200A) ||
+  c == 0x2028 ||
+  c == 0x2029 ||
+  c == 0x202F ||
+  c == 0x205F ||
+  c == 0x3000
+}
+
+fn trim_by(s : String, space : (Int) -> Bool) -> String {
+  let raw = s.to_bytes()
+  let n = raw.length()
+  let mut start = 0
+  while start < n {
+    let (cp, next) = decode_utf8_at(raw, start, n)
+    if space(cp) {
+      start = next
+    } else {
+      break
+    }
+  }
+  let mut last_non_space_end = start
+  let mut cur = start
+  while cur < n {
+    let (cp, next) = decode_utf8_at(raw, cur, n)
+    if !space(cp) {
+      last_non_space_end = next
+    }
+    cur = next
+  }
+  slice_bytes_str(raw, start, last_non_space_end)
+}
+
+fn trim_start_by(s : String, space : (Int) -> Bool) -> String {
+  let raw = s.to_bytes()
+  let n = raw.length()
+  let mut start = 0
+  while start < n {
+    let (cp, next) = decode_utf8_at(raw, start, n)
+    if space(cp) {
+      start = next
+    } else {
+      break
+    }
+  }
+  slice_bytes_str(raw, start, n)
+}
+
+fn trim_end_by(s : String, space : (Int) -> Bool) -> String {
+  let raw = s.to_bytes()
+  let n = raw.length()
+  let mut last_non_space_end = 0
+  let mut cur = 0
+  while cur < n {
+    let (cp, next) = decode_utf8_at(raw, cur, n)
+    if !space(cp) {
+      last_non_space_end = next
+    }
+    cur = next
+  }
+  slice_bytes_str(raw, 0, last_non_space_end)
+}
+
+/// String.prototype.trim.
+pub fn trim(s : String) -> String {
+  trim_by(s, is_space)
+}
+
+/// String.prototype.trimStart.
+pub fn trim_start(s : String) -> String {
+  trim_start_by(s, is_space)
+}
+
+/// String.prototype.trimEnd.
+pub fn trim_end(s : String) -> String {
+  trim_end_by(s, is_space)
+}
+
+/// core-ts whitespace.ts `trim` (Rust's: White_Space).
+pub fn trim_white(s : String) -> String {
+  trim_by(s, is_white_space)
+}
+
+/// Leading White_Space trimmed off.
+pub fn trim_start_white(s : String) -> String {
+  trim_start_by(s, is_white_space)
+}
+
+/// Trailing White_Space trimmed off.
+pub fn trim_end_white(s : String) -> String {
+  trim_end_by(s, is_white_space)
+}
+
+fn to_utf16_units(s : String) -> Array[Int] {
+  let raw = s.to_bytes()
+  let n = raw.length()
+  let units : Array[Int] = []
+  let mut i = 0
+  while i < n {
+    let b0 = raw[i].to_int() & 0xFF
+    if b0 == 0xED && i + 2 < n {
+      let b1 = raw[i + 1].to_int() & 0xFF
+      let b2 = raw[i + 2].to_int() & 0xFF
+      if b1 >= 0xA0 && b1 <= 0xBF && is_utf8_cont(b2) {
+        units.push(((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F))
+        i = i + 3
+        continue
+      }
+    }
+    let (cp, next) = decode_utf8_at(raw, i, n)
+    if cp < 0x10000 {
+      units.push(cp)
+    } else {
+      let v = cp - 0x10000
+      units.push(0xD800 + (v >> 10))
+      units.push(0xDC00 + (v & 0x3FF))
+    }
+    i = next
+  }
+  units
+}
+
+fn from_utf16_slice(units : Array[Int], start : Int, end : Int) -> String {
+  let sb = StringBuilder::new()
+  let mut i = start
+  while i < end {
+    let u = units[i]
+    if u >= 0xD800 && u <= 0xDBFF && i + 1 < end {
+      let lo = units[i + 1]
+      if lo >= 0xDC00 && lo <= 0xDFFF {
+        let cp = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00)
+        write_point(sb, cp)
+        i = i + 2
+        continue
+      }
+    }
+    // Encode BMP code units (including lone surrogates in WTF-8) losslessly.
+    if u < 0x80 {
+      sb.write_byte(u as Byte)
+    } else if u < 0x800 {
+      sb.write_byte((0xC0 | (u >> 6)) as Byte)
+      sb.write_byte((0x80 | (u & 0x3F)) as Byte)
+    } else {
+      sb.write_byte((0xE0 | (u >> 12)) as Byte)
+      sb.write_byte((0x80 | ((u >> 6) & 0x3F)) as Byte)
+      sb.write_byte((0x80 | (u & 0x3F)) as Byte)
+    }
+    i = i + 1
+  }
+  sb.to_string()
+}
+
+/// Split at runs of `space` advancing strictly one UTF-16 code unit at a time
+/// (1:1 aligned with `station/mb/src/jscase/jscase.mbt:219-237`),
+/// keeping empty parts at either end as JS split does.
+pub fn split_by(s : String, space : (Int) -> Bool) -> Array[String] {
+  let units = to_utf16_units(s)
+  let n = units.length()
+  let out : Array[String] = []
+  let mut start = 0
+  let mut i = 0
+  while i < n {
+    if space(units[i]) {
+      out.push(from_utf16_slice(units, start, i))
+      while i < n && space(units[i]) {
+        i = i + 1
+      }
+      start = i
+    } else {
+      i = i + 1
+    }
+  }
+  out.push(from_utf16_slice(units, start, n))
+  out
+}
+
+/// Whether a word has a character whose upper and lower case differ.
+pub fn has_cases(s : String) -> Bool {
+  let cs = points(s)
+  for i in 0..<cs.length() {
+    if in_ranges(changing_ranges, cs[i]) {
+      return true
+    }
+  }
+  false
+}
+
+/// Whether a code point is a letter or a number (`/[\p{L}\p{N}]/u`).
+pub fn is_word_point(c : Int) -> Bool {
+  in_ranges(word_ranges, c)
+}
+
+/// Whether `w` is one of the words of `s`: `s.split(/[^\p{L}\p{N}]+/u).includes(w)`.
+pub fn has_word(s : String, w : String) -> Bool {
+  has_word_by(s, w, is_word_point)
+}
+
+/// Whether `w` is one of the words of `s`, its words the runs of code points `in_word` takes.
+pub fn has_word_by(s : String, w : String, in_word : (Int) -> Bool) -> Bool {
+  let cs = points(s)
+  let mut word = StringBuilder::new()
+  for i in 0..<cs.length() {
+    let c = cs[i]
+    if in_word(c) {
+      write_point(word, c)
+    } else {
+      if word.to_string() == w {
+        return true
+      }
+      word = StringBuilder::new()
+    }
+  }
+  word.to_string() == w
+}

@@ -45,6 +45,7 @@ import type { Ask } from "./peers.ts";
 import { Gone, type Need, Said, UNANSWERED, sayOf } from "../move/module.ts";
 import type { KeptSend } from "../api/admin.ts";
 import { LACK_MOST, type MadeGit, RETRY_MOST_MS, RETRY_MS, connectsThere, gatherSoon, placeSoon, rebuildGits } from "./retire.ts";
+import type { ReaderSelectConfig } from "../read/reader-select.ts";
 import { PACK_ENCODING, flushOnce, flushesOnce, lackingIn, receiveFile, receivePack, sendGathered } from "./sending.ts";
 import { carriedTo, moved } from "./restore.ts";
 import type { Told } from "../move/told.ts";
@@ -222,6 +223,8 @@ export type HandoverDeps = {
   /// The work done here of a hand-over's files: gathered, placed; `drop`, a test's: waited for before a drop takes its
   /// files out.
   work?: { gather: typeof gatherSoon; place: typeof placeSoon; drop?: (id: string) => Promise<void> };
+  /// Live `config.json` `readers` snapshot or getter for `replica-carry` engine selection.
+  readers?: ReaderSelectConfig | (() => ReaderSelectConfig);
   /// The steps asked of another station that are told back, and those it asks of this one (move/told.ts).
   told: Told;
   /// Told as a hand-over's state changes (the scheduler, move/).
@@ -400,7 +403,12 @@ export class Handover {
   /// are taken up.
   constructor(d: HandoverDeps) {
     this.#d = d;
-    this.#work = d.work ?? { gather: gatherSoon, place: placeSoon };
+    this.#work = d.work ?? {
+      gather: (dataDir, db, ws, home, scratch, signal, agent = null, keys = null) =>
+        gatherSoon(dataDir, db, ws, home, scratch, signal, agent, keys, d.readers),
+      place: (dataDir, index, from, made = null, aside = null, placed = null, projects = false) =>
+        placeSoon(dataDir, index, from, made, aside, placed, projects, d.readers),
+    };
     this.#flush = d.flush !== undefined ? d.flush : flushesOnce ? flushOnce : null;
     this.#reads = {
       session: (k) => d.store.getSession(k),

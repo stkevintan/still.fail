@@ -22,15 +22,15 @@ test "glass_floating and glass_menu emit iOS 27 liquid glass recipes in light an
     let fl_tinted = glass_floating(tint=0x11223344L)
     let mn = glass_menu()
     let expected_floating_tint = if dark { 0x20202067L } else { 0xFDFCFD67L }
-    let expected_menu_tint = if dark { 0x202020BFL } else { 0xFDFCFDBFL }
+    let expected_menu_tint = if dark { 0x202020A8L } else { 0xFDFCFDBFL }
     assert_eq(
       (fl.liquid, fl.blur, fl.bezel, fl.refraction, fl.tint, fl.adaptive),
       (true, 2.2, 20.0, 28.0, expected_floating_tint, true),
     )
     assert_eq((fl_tinted.liquid, fl_tinted.tint, fl_tinted.adaptive), (true, 0x11223344L, true))
     assert_eq(
-      (mn.liquid, mn.blur, mn.bezel, mn.refraction, mn.tint, mn.solid),
-      (true, 8.0, 16.0, 22.0, expected_menu_tint, panel_ground()),
+      (mn.liquid, mn.blur, mn.bezel, mn.refraction, mn.chroma, mn.tint, mn.solid, mn.adaptive),
+      (true, 6.0, 20.0, 26.0, 0.03, expected_menu_tint, panel_ground(), false),
     )
   }
 }
@@ -46,7 +46,7 @@ test "glass_control_shadow, glass_overlay_shadow, and tab_bar_shadow emit exact 
     })
     t.draw()
     let expected_control = if dark { (6.0, 2.0, 0x00000038L) } else { (5.0, 2.0, 0x00000010L) }
-    let expected_overlay = if dark { (8.0, 4.0, 0x00000042L) } else { (8.0, 4.0, 0x00000014L) }
+    let expected_overlay = if dark { (16.0, 6.0, 0x00000048L) } else { (14.0, 6.0, 0x00000018L) }
     let tab = tab_bar_shadow()
     assert_eq(glass_control_shadow(), expected_control)
     assert_eq(glass_overlay_shadow(), expected_overlay)

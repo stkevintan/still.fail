@@ -40,7 +40,7 @@ pub(all) struct Tracks {
 /// let go of, or its block taken for another key's): what is asked anew of other cells, another room or another size
 /// of words is worked out anew.
 pub struct TracksKept {
-  priv mut measured : ((Array[Array[TrackCell]], Double, Int), Array[Array[TrackExtent]])?
+  priv mut measured : ((Array[Array[TrackCell]], Double, Int, Int), Array[Array[TrackExtent]])?
   priv mut shared : (Array[Array[TrackExtent]], Double, (Array[Double], Double))?
 }
 
@@ -85,7 +85,42 @@ pub fn View::tracks(
   // (worked out again only as what the cells say, their size of words or how words are shaped comes to be otherwise:
   // what they read told again the same, or this read anew after what read it let go of it as it was parked, measures
   // nothing again)
-  let extents = @signals.memo(fn() { (cells(), self.words_scale(), self.tree.words_redone.get()) }, fn(k) {
+  let extents = @signals.memo(fn() {
+    let rows = cells()
+    let mut mask = 0
+    for row in rows {
+      for cell in row {
+        match cell {
+          Said(runs, _, set) => {
+            match set.cjk {
+              Some(ov) if ov.face >= 7 && ov.face < 32 => mask = mask | (1 << ov.face)
+              _ => ()
+            }
+            match set.code_cjk {
+              Some(ov) if ov.face >= 7 && ov.face < 32 => mask = mask | (1 << ov.face)
+              _ => ()
+            }
+            for run in runs {
+              match run.face {
+                Some(f) if f >= 7 && f < 32 => mask = mask | (1 << f)
+                _ => ()
+              }
+            }
+          }
+          Wide(_) => ()
+        }
+      }
+    }
+    let mut face_rev = 0
+    if mask != 0 {
+      for f in 7..<32 {
+        if (mask & (1 << f)) != 0 {
+          face_rev = face_rev * 31 + tree.face_redone[f].get() + 1
+        }
+      }
+    }
+    (rows, self.words_scale(), self.tree.words_redone.get(), face_rev)
+  }, fn(k) {
     match kept {
       // (the same cells another piece had measured, at the same size and shaping: what they came to)
       Some({ measured: Some((was, e)), .. }) if was == k => e

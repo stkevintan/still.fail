@@ -773,6 +773,7 @@ export class AccountDb {
   // ── logs, search, eviction & slack_said ──
 
   findSaid(stations: string[], terms: string[], limit: number): { station: string; thread: number; seq: number; at: number | null; text: string }[] { return this.#logs.findSaid(stations, terms, limit); }
+  saidFoundKept(stations: string[], terms: string[], limit: number): ReturnType<LogsStore["saidFoundKept"]> { return this.#logs.saidFoundKept(stations, terms, limit); }
   findSaidInThreads(targets: readonly { station: string; thread: number }[], terms: string[]): Map<string, { seq: number; at: number | null; text: string }> { return this.#logs.findSaidInThreads(targets, terms); }
   messageAt(station: string, thread: number, ts: string): number | null { return this.#logs.messageAt(station, thread, ts); }
   findInThread(station: string, thread: number, terms: string[]): { seq: number; text: string }[] { return this.#logs.findInThread(station, thread, terms); }

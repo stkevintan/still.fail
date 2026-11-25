@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createSocket } from "node:dgram";
 import { once } from "node:events";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createTcp } from "node:net";
 import { createServer } from "node:https";
 import type { TLSSocket } from "node:tls";
@@ -114,14 +114,39 @@ test("the handoff reaches the releases Worker at CI's DNS addresses in turn, the
     assert.equal(requests.splice(0).length, 1);
   });
 
-  await t.test("with both addresses down, the usual route", async () => {
+  await t.test("with both addresses down, the usual route is remembered for later requests and falls back to direct if it fails", async () => {
     refuse = 2; connections = 0;
-    const { out, stderr } = await child(`${usual}
-      const get = await fetchHandoff("${worker}/releases/ci-natives/key", { redirect: "error" });
-      console.log(JSON.stringify({ text: await get.text(), usual }));`, env);
-    assert.deepEqual(out, { text: "usual route", usual: [[`${worker}/releases/ci-natives/key`, "error"]] });
-    assert.equal(connections, 2);
+    const { out, stderr } = await child(`
+      const usual = [];
+      let failUsual = false;
+      globalThis.fetch = async (at, init) => {
+        usual.push([String(at), init?.redirect ?? null]);
+        if (failUsual) throw new Error("proxy down");
+        return new Response("usual route");
+      };
+      const first = await fetchHandoff("${worker}/releases/ci-natives/key1", { redirect: "error" });
+      const t1 = await first.text();
+      const second = await fetchHandoff("${worker}/releases/ci-natives/key2", { redirect: "error" });
+      const t2 = await second.text();
+      failUsual = true;
+      const third = await fetchHandoff("${worker}/releases/ci-natives/key3", { redirect: "error" });
+      const len3 = (await third.arrayBuffer()).byteLength;
+      console.log(JSON.stringify({ t1, t2, len3, usual }));`, env);
+    assert.deepEqual(out, {
+      t1: "usual route",
+      t2: "usual route",
+      len3: archive.length,
+      usual: [
+        [`${worker}/releases/ci-natives/key1`, "error"],
+        [`${worker}/releases/ci-natives/key2`, "error"],
+        [`${worker}/releases/ci-natives/key3`, "error"],
+      ],
+    });
+    // Request 1 tried both direct connections (2 refused); request 2 skipped direct completely (0); request 3 fell back to direct (1).
+    assert.equal(connections, 3);
     assert.equal(stderr.match(/trying the next route/g)?.length, 2);
+    assert.match(stderr, /by the usual route failed \(proxy down\); trying direct routes/);
+    assert.equal(requests.splice(0).length, 1);
   });
 
   await t.test("a DNS server that cannot be used leaves it to the usual route", async () => {
@@ -185,4 +210,92 @@ test("the handoff runs copied out alone, as next-mac-cache.yml runs it, and impo
     assert.equal(imported.status, 0, imported.stderr);
     assert.equal(imported.stdout.trim(), "function");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the native handoff posts metadata and sends the archive directly to the signed R2 object", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "native-handoff-r2-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const natives = join(dir, "natives");
+  mkdirSync(natives);
+  const name = `reader-darwin-arm64-${"0".repeat(24)}.tar.gz`;
+  writeFileSync(join(natives, name), "part");
+  const sha = "a".repeat(40);
+  const receipt = `1700000000-${sha}/4c2b3e5d-e7a3-4c28-b7f1-fa96b9305844`;
+  const url = `https://${"b".repeat(32)}.r2.cloudflarestorage.com/stillfail-releases/staged/ci-natives/${receipt}?X-Amz-Signature=private-signature`;
+  const mock = `
+    import assert from "node:assert/strict";
+    let asked = false;
+    globalThis.fetch = async (at, init) => {
+      const url = new URL(at);
+      const scenario = process.env.SCENARIO;
+      if (url.origin === "https://oidc.example") {
+        const audience = asked ? "https://app.still.fail" : "https://app.monoid.build";
+        assert.equal(url.searchParams.get("audience"), audience);
+        return Response.json({ value: audience });
+      }
+      if (scenario === "restore-monoid" || scenario === "restore-stillfail" || scenario === "restore-corrupted") {
+        const host = scenario === "restore-stillfail" ? "app.still.fail" : "app.monoid.build";
+        assert.equal(url.href, "https://" + host + "/releases/ci-natives/" + ${JSON.stringify(receipt)});
+        assert.equal(init?.headers?.authorization, undefined);
+        return new Response(scenario === "restore-corrupted" ? "other bytes" : "part");
+      }
+      if (url.origin === "https://app.monoid.build") {
+        assert.equal(init.method, "POST");
+        assert.equal(init.headers.authorization, "Bearer https://app.monoid.build");
+        asked = true;
+        assert.deepEqual(JSON.parse(init.body), { length: 4 });
+        if (scenario === "old") return new Response(null, { status: 404 });
+        const upload = scenario === "invalid" ? "https://elsewhere.example/?X-Amz-Signature=private-signature" : ${JSON.stringify(url)};
+        return Response.json({ receipt: ${JSON.stringify(receipt)}, upload });
+      }
+      if (url.origin === "https://app.still.fail") {
+        assert.equal(init.headers.authorization, "Bearer https://app.still.fail");
+        assert.equal(scenario, "old");
+        assert.ok(asked);
+        assert.equal(init.method, "PUT");
+        assert.equal(init.body.toString(), "part");
+        return Response.json({ receipt: ${JSON.stringify(receipt)} });
+      }
+      assert.ok(asked);
+      assert.equal(url.href, ${JSON.stringify(url)});
+      assert.equal(init.method, "PUT");
+      assert.deepEqual(init.headers, { "content-length": "4", "if-none-match": "*" });
+      assert.equal(init.body.toString(), "part");
+      if (scenario === "denied") return new Response("private-signature", { status: 403 });
+      return new Response(null, { status: scenario === "already-written" ? 412 : 200 });
+    };`;
+  const env = { ...process.env, GITHUB_SHA: sha, STILLFAIL_NATIVE_DIRECT_R2: "1", STILLFAIL_DIRECT_DNS: "",
+    ACTIONS_ID_TOKEN_REQUEST_URL: "https://oidc.example/token", ACTIONS_ID_TOKEN_REQUEST_TOKEN: "identity-token" };
+  const args = ["--import", "data:text/javascript," + encodeURIComponent(mock), script];
+  for (const scenario of ["direct", "already-written", "old", "denied", "invalid"]) {
+    const manifest = join(dir, scenario + ".json");
+    const run = spawnSync(process.execPath, [...args, "put", natives, manifest], { encoding: "utf8", env: { ...env, SCENARIO: scenario }, timeout: 10_000 });
+    if (scenario === "denied" || scenario === "invalid") {
+      assert.equal(run.status, 1, run.stderr);
+      assert.match(run.stderr, scenario === "denied" ? /R2 upload returned HTTP 403/ : /Invalid R2 upload URL/);
+      assert.doesNotMatch(run.stderr, /private-signature/);
+      assert.throws(() => readFileSync(manifest), { code: "ENOENT" });
+    } else {
+      assert.equal(run.status, 0, run.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(manifest, "utf8"))[0].chunks, [scenario === "old" ? receipt : "monoid/" + receipt]);
+      assert.match(run.stdout, scenario === "old" ? /Staged in R2/ : /Staged directly in R2/);
+      assert.doesNotMatch(readFileSync(manifest, "utf8"), /private-signature/);
+    }
+  }
+  for (const [source, scenario] of [["direct", "restore-monoid"], ["old", "restore-stillfail"], ["direct", "restore-corrupted"]] as const) {
+    const destination = join(dir, scenario);
+    mkdirSync(destination);
+    copyFileSync(join(dir, source + ".json"), join(destination, "natives-mac.r2.json"));
+    const run = spawnSync(process.execPath, [...args, "get", destination, sha],
+      { encoding: "utf8", env: { ...env, SCENARIO: scenario }, timeout: 10_000 });
+    if (scenario === "restore-corrupted") {
+      assert.equal(run.status, 1, run.stderr);
+      assert.match(run.stderr, /Native archive failed SHA-256 verification/);
+      assert.throws(() => readFileSync(join(destination, name)), { code: "ENOENT" });
+    } else {
+      assert.equal(run.status, 0, run.stderr);
+      assert.match(run.stdout, /Verified from R2/);
+      assert.equal(readFileSync(join(destination, name), "utf8"), "part");
+    }
+  }
 });

@@ -1213,7 +1213,7 @@ pub fn list_keys(
             _ => {
               lm.lifted[k] = now
               // frames while it passes over the others (lift_ms from now)
-              c.moving(lm.lift_mover, (Lift::{ at: now }) as &@ui.Moving, what="a row lifted")
+              c.moving(lm.lift_mover, (Lift::{ at: now }).as_moving(), what="a row lifted")
             }
           }
         _ => ()
@@ -1298,10 +1298,16 @@ priv struct Lift {
 }
 
 ///|
-impl @ui.Moving for Lift with rest_at(self, now, frame) {
+fn Lift::rest_at(self : Lift, now : Double, frame : Int) -> Double {
   ignore(now)
   ignore(frame)
   self.at + lift_ms
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn Lift::as_moving(self : Lift) -> @ui.Moving {
+  @ui.Moving::new(fn(now, frame) { self.rest_at(now, frame) })
 }
 
 ///|

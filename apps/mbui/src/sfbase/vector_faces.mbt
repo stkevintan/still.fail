@@ -46,29 +46,6 @@ pub fn vector_faces(data : Bytes) -> Array[Bytes] {
 }
 
 ///|
-/// The faces a Farview tab's page is drawn in where it names none of its own (fvclient's stage): Inter, the code face,
-/// and 思源黑体 once here, asked for as a page is shown (a page's words are as often Chinese as not). Read in a
-/// reaction, it comes again as 思源黑体 comes.
-pub fn page_faces() -> Array[Bytes] {
-  if vector_cjk.untracked() is CjkUnwanted {
-    vector_cjk.set(CjkWanted)
-  }
-  let faces = []
-  match inter_face() {
-    Some(b) => faces.push(b)
-    None => ()
-  }
-  let code = @sf.code_face()
-  if code.length() > 0 {
-    faces.push(code)
-  }
-  if vector_cjk.get() is CjkHere(b) {
-    faces.append(b)
-  }
-  faces
-}
-
-///|
 /// 思源黑体 had from the core where a picture wants it (call each frame, with the prefs: its files are the list's), the
 /// pictures drawn again once it is here.
 fn vector_cjk_had(src : Source, prefs : Json?) -> Unit {

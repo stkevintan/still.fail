@@ -21,9 +21,6 @@ permissions:
   contents: read
   actions: read # the pipeline run's artifacts
 env:
-  # Farview's client, which the app draws a chat's Farview tab with (apps/mbui/scripts/farview.sh: a private repository,
-  # read by its deploy key)
-  FARVIEW_DEPLOY_KEY: ${{ secrets.FARVIEW_DEPLOY_KEY }}
   RUN: ${{ github.event.workflow_run.id || inputs.run }}
   GH_TOKEN: ${{ github.token }}
 jobs:
@@ -36,6 +33,7 @@ jobs:
       sha: ${{ steps.f.outputs.sha }}
       web: ${{ steps.f.outputs.web }}
       apk: ${{ steps.f.outputs.apk }}
+      apk_url: ${{ steps.f.outputs.apk_url }}
       mac: ${{ steps.f.outputs.mac }}
       demo: ${{ steps.f.outputs.demo }}
     steps:
@@ -44,12 +42,32 @@ jobs:
           sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN" --jq .head_sha)
           names=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN/artifacts?per_page=100" --jq '.artifacts[] | select(.expired | not) | .name')
           has() { printf '%s\n' "$names" | grep -qx "$1-$sha" && echo true || echo false; }
+          apk=$(has mbui-apk)
+          apk_url=""
+          if [ "$apk" = false ]; then
+            # (pipeline's android job puts android/stillfail-beta-<build>.apk straight into R2 instead of uploading
+            # mbui-apk-<sha> over Mini1's proxy; fall back to that public URL when the run's android job succeeded)
+            android_ok=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$RUN/jobs?per_page=100" \
+              --jq '[.jobs[] | select(.name == "android" and .conclusion == "success")] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
+            if [ "$android_ok" -gt 0 ]; then
+              owner=${GITHUB_REPOSITORY%%/*}
+              repo=${GITHUB_REPOSITORY#*/}
+              build=$(gh api graphql \
+                -f query='query($o:String!,$r:String!,$oid:GitObjectID!){repository(owner:$o,name:$r){object(oid:$oid){... on Commit{history{totalCount}}}}}' \
+                -f o="$owner" -f r="$repo" -f oid="$sha" \
+                --jq '.data.repository.object.history.totalCount // empty' 2>/dev/null || true)
+              if [ -n "$build" ] && curl -fs --retry 2 --connect-timeout 10 --max-time 15 -r 0-0 -o /dev/null "https://app.still.fail/releases/android/stillfail-beta-$build.apk"; then
+                apk=true
+                apk_url="https://app.still.fail/releases/android/stillfail-beta-$build.apk"
+              fi
+            fi
+          fi
           last_demo=$(gh api "repos/$GITHUB_REPOSITORY/contents/mbui-size.jsonl?ref=mbui-size" --jq '.content' 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null | grep '"demo_web":' | tail -1 | jq -r .sha 2>/dev/null || true)
           demo=false
           if [ -z "$last_demo" ] || gh api "repos/$GITHUB_REPOSITORY/compare/$last_demo...$sha" --jq '.files[].filename' 2>/dev/null | grep -q '^libs/ui/'; then
             demo=true
           fi
-          { echo "sha=$sha"; echo "web=$(has mbui-web)"; echo "apk=$(has mbui-apk)"; echo "mac=$(has mac-unsigned)"; echo "demo=$demo"; } | tee -a "$GITHUB_OUTPUT"
+          { echo "sha=$sha"; echo "web=$(has mbui-web)"; echo "apk=$apk"; echo "apk_url=$apk_url"; echo "mac=$(has mac-unsigned)"; echo "demo=$demo"; } | tee -a "$GITHUB_OUTPUT"
 
   sizes:
     needs: find
@@ -71,8 +89,20 @@ jobs:
       - run: command -v brotli || (sudo apt-get update -q && sudo apt-get install -yq brotli)
       - if: needs.find.outputs.web == 'true'
         run: bash scripts/download-artifact.sh --optional "$RUN" "mbui-web-${{ needs.find.outputs.sha }}" in/web
-      - if: needs.find.outputs.apk == 'true'
+      - if: needs.find.outputs.apk == 'true' && needs.find.outputs.apk_url == ''
         run: bash scripts/download-artifact.sh --optional "$RUN" "mbui-apk-${{ needs.find.outputs.sha }}" in/apk
+      - if: needs.find.outputs.apk_url != ''
+        env:
+          APK_URL: ${{ needs.find.outputs.apk_url }}
+        run: |
+          rm -rf in/apk && mkdir -p in/apk
+          name=${APK_URL##*/}
+          if ! curl -fsSL --retry 2 --connect-timeout 15 --max-time 60 -o "in/apk/$name.part" "$APK_URL" || [ ! -s "in/apk/$name.part" ]; then
+            echo "::warning::could not download $APK_URL: Android measurement left out"
+            rm -rf in/apk
+          else
+            mv "in/apk/$name.part" "in/apk/$name"
+          fi
       - if: needs.find.outputs.mac == 'true'
         run: bash scripts/download-artifact.sh --optional "$RUN" "mac-unsigned-${{ needs.find.outputs.sha }}" in/mac
       - run: |
@@ -143,8 +173,25 @@ jobs:
             apps/mbui/scripts
             libs/ui/scripts
             scripts
-      - if: needs.find.outputs.apk == 'true'
+      - if: needs.find.outputs.apk == 'true' && needs.find.outputs.apk_url == ''
         run: bash scripts/download-artifact.sh --optional "$RUN" "mbui-apk-${{ needs.find.outputs.sha }}" in/apk
+      - if: needs.find.outputs.apk_url != ''
+        env:
+          APK_URL: ${{ needs.find.outputs.apk_url }}
+        run: |
+          rm -rf in/apk && mkdir -p in/apk
+          name=${APK_URL##*/}
+          cap=$(( JOB_END - $(date +%s) - 200 ))
+          [ "$cap" -gt 60 ] && cap=60
+          if [ "$cap" -lt 10 ]; then
+            echo "::warning::not enough time left in idle job to download $APK_URL: Android measurement left out"
+            rm -rf in/apk
+          elif ! curl -fsSL --retry 2 --connect-timeout 15 --max-time "$cap" -o "in/apk/$name.part" "$APK_URL" || [ ! -s "in/apk/$name.part" ]; then
+            echo "::warning::could not download $APK_URL: Android measurement left out"
+            rm -rf in/apk
+          else
+            mv "in/apk/$name.part" "in/apk/$name"
+          fi
       - if: needs.find.outputs.mac == 'true'
         run: bash scripts/download-artifact.sh --optional "$RUN" "mac-unsigned-${{ needs.find.outputs.sha }}" in/mac
       - if: needs.demo.result == 'success'

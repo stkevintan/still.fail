@@ -533,9 +533,9 @@ class ViewSession {
     this.#address = addressShown(o.source.address?.());
   }
 
-  /// A frame went: once the screen has been still for STILL_MS (no frame after it), if the rate has gone up since, the
-  /// source sends its picture again as a key frame at the rate it is asked now (a source with a rate of its own: a
-  /// video's, not JPEG's). One wait at a time, gone on from the last frame. `key`: the frame was a key frame.
+  /// A frame went: once the screen has been still for STILL_MS and cooled down for SHARPEN_COOLDOWN_MS, if the link is
+  /// completely healthy and the last frame was encoded below SHARPEN_LOW_RATIO (< 60%) of the recovered rate, request a
+  /// gentle refresh keyframe without spiking bitrate.
   #still(key = false) {
     this.#sharpen.sent(this.#now(), this.view.rate && !this.#jpeg ? (this.#rate ?? this.#startRate) : null, key);
     if (this.#stillWait) return;
@@ -546,7 +546,7 @@ class ViewSession {
         const left = this.#sharpen.left(this.#now());
         if (left > 0) return wait(left);
         this.#stillWait = false;
-        if (this.#sharpen.due(this.#now(), this.#rate)) this.view.keyframe();
+        if (this.#sharpen.due(this.#now(), this.#rate, this.pacer.healthy())) this.view.keyframe();
       });
     wait(STILL_MS);
   }
@@ -808,7 +808,10 @@ class ViewSession {
       await Promise.race([this.#sleep(LOSS_EVERY_MS), this.#over]); // timer: a sample of this machine (the connection's packet counters)
       if (this.#closed) return;
       const loss = this.loss.step(this.#conn?.paths?.() ?? []);
-      if (loss !== null) void this.#state({ loss });
+      if (loss !== null) {
+        this.pacer.setLoss(loss);
+        void this.#state({ loss });
+      }
     }
   }
 
@@ -890,6 +893,7 @@ class ViewSession {
         if (next.config.codec !== "jpeg") {
           // A preview (a card, two pictures a second) no higher than the source's own.
           this.pacer.ceiling(this.peek ? ownRate(next.config.width, next.config.height) : rateCeiling(next.config.width, next.config.height, this.quality, this.fps));
+          this.pacer.setSize(next.config.width, next.config.height);
           this.#size = { width: next.config.width, height: next.config.height };
         } else if (!this.peek && this.view.rate) {
           this.pacer.ceiling(JPEG_RATE_CEILING);
@@ -909,9 +913,9 @@ class ViewSession {
       }
       await this.#send(KIND.video, videoPayload(next));
       this.#still(next.key);
-      // A screen that keeps changing: its pictures as sharp as the rate now once it went up well past its key frame's;
-      // never while frames wait in front of the link (a key frame then holds them back longer still).
-      if (!this.#closed && !this.#jpeg && this.view.rate && !this.pacer.backlogged() && this.#sharpen.dueMoving(this.#now(), this.#rate)) this.view.keyframe();
+      // A screen that keeps changing: gently refresh a key frame only when the link is healthy, cooled down, and the
+      // previous key frame was encoded below SHARPEN_LOW_RATIO of the recovered rate.
+      if (!this.#closed && !this.#jpeg && this.view.rate && this.#sharpen.dueMoving(this.#now(), this.#rate, this.pacer.healthy())) this.view.keyframe();
     }
   }
 
@@ -961,6 +965,7 @@ class ViewSession {
           case KIND.keyframe:
             this.pacer.lost();
             this.latency.lost();
+            this.#pace();
             this.view.keyframe();
             this.#wake();
             break;

@@ -603,6 +603,7 @@ test("back_on_screen_is_said_with_how_long_it_was_away", async () => {
     }),
   );
   const ui = core.connect();
+  call(core, ui, 8, "client.reports", { on: true });
   call(core, ui, 9, "client.wake", { away: 60_000 });
   call(core, ui, 10, "client.wake", { away: 0, network: true });
   await host.time.pass(0);
@@ -625,6 +626,7 @@ test("UI fault spans never include an arbitrary fault message", async () => {
   }));
   try {
     const ui = core.connect();
+    call(core, ui, 0, "client.reports", { on: true });
     call(core, ui, 1, "client.error", { source: "ui_fault", message: "Ctx::editor: /sentinel-private-folder/secret.txt" });
     call(core, ui, 2, "client.error", { source: "ui_fault", message: "editor field reused" });
     call(core, ui, 3, "client.error", { source: "android.decode", message: "a safe unrelated diagnostic" });
@@ -633,6 +635,8 @@ test("UI fault spans never include an arbitrary fault message", async () => {
     call(core, ui, 6, "client.error", { source: "ui_fault", message: "tree field reused" });
     call(core, ui, 7, "client.error", { source: "ui_fault", message: "scene layer conflict" });
     call(core, ui, 8, "client.error", { source: "ui_fault", message: "panel cannot be presented" });
+    call(core, ui, 9, "client.error", { source: "ui_fault", message: "chat sent unseen: listed=1 row=0 staged=1 held=0 sending=0" });
+    call(core, ui, 10, "client.error", { source: "ui_fault", message: "chat sent unseen" });
     await host.time.pass(0);
     core.inner.tracer.flush();
     await host.time.pass(0);
@@ -644,6 +648,8 @@ test("UI fault spans never include an arbitrary fault message", async () => {
       ["ui_fault", "tree field reused"],
       ["ui_fault", "scene layer conflict"],
       ["ui_fault", "panel cannot be presented"],
+      ["ui_fault", "chat sent unseen: listed=1 row=0 staged=1 held=0 sending=0"],
+      ["ui_fault", "chat sent unseen"],
     ]);
     assert.ok([...core.inner.reported.keys()].every((key) => !key.includes("sentinel-private-folder") && !key.includes("another-secret")));
   } finally { core.close(); }

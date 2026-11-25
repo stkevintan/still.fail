@@ -3,12 +3,13 @@
 // Where config.json names Farview (farview.ts), the tool gives each chat's Farview instead of its Chrome context.
 import { join } from "node:path";
 import { Effect, Layer } from "effect";
-import { Parts, Paths, ScreenRegistry, StationConfig, Store } from "../services.ts";
+import { Helper, Parts, Paths, ScreenRegistry, StationConfig, Store } from "../services.ts";
 import { BrowserAgentHold } from "./agent-hold.ts";
 import { browserTools } from "./tool.ts";
 import { browserDoor } from "./proxy.ts";
 import { Browser } from "./service.ts";
 import { FarviewTabs, farviewConfig } from "./farview.ts";
+import { setFarviewHelper } from "./farview-screen.ts";
 import { readOnly } from "../mesh/credential.ts";
 import { pipeTcp, reachLocal } from "../mesh/peer-forward.ts";
 import { writeLine } from "../mesh/wire.ts";
@@ -22,6 +23,18 @@ export const BrowserLive = Layer.effectDiscard(
     const { data } = yield* Paths;
     const screens = yield* ScreenRegistry;
     const store = yield* Store;
+    const helper = yield* Helper;
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        browser.useHelper(helper);
+        setFarviewHelper(helper);
+      }),
+      () =>
+        Effect.sync(() => {
+          browser.useHelper(null);
+          setFarviewHelper(null);
+        }),
+    );
     const hold = yield* Effect.acquireRelease(
       Effect.sync(() => {
         const h = new BrowserAgentHold({

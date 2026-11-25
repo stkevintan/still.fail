@@ -12,18 +12,24 @@ struct Way {
 }
 
 ///|
-impl @ui.Moving for Way with rest_at(self, now, frame) {
+fn Way::rest_at(self : Way, now : Double, frame : Int) -> Double {
   ignore(now)
   ignore(frame)
   self.start + self.dur
 }
 
 ///|
-impl @ui.Moving for Way with sample(self, now) {
+fn Way::sample(self : Way, now : Double) -> Unit {
   if self.start == @double.infinity {
     self.start = now
   }
   self.sampled.push(now)
+}
+
+///|
+/// What moves, as Ctx::moving is told it (Moving).
+fn Way::as_moving(self : Way) -> @ui.Moving {
+  @ui.Moving::new(fn(now, frame) { self.rest_at(now, frame) }, sample=fn(now) { self.sample(now) })
 }
 
 ///|
@@ -44,7 +50,7 @@ test "set out after a long rest: its start that frame's time, each frame handed 
   let t = @ui.Tester::new(fn(c) {
     if go.val {
       go.val = false
-      w.start = c.set_out(w.mover, w as &@ui.Moving, what="a way")
+      w.start = c.set_out(w.mover, w.as_moving(), what="a way")
     }
     if w.start >= 0.0 {
       seen.push((c.moment(), w.at(c.moment())))
@@ -88,7 +94,7 @@ test "set out between frames: from the moment it was told, a frame asked for to 
   let t = @ui.Tester::new(fn(c) { c.box(w=Px(10.0), h=Px(10.0), fn() {  }) |> ignore })
   t.draw()
   let told = t.time()
-  let at = t.ctx().set_out(w.mover, w as &@ui.Moving, what="a way")
+  let at = t.ctx().set_out(w.mover, w.as_moving(), what="a way")
   assert_eq(at, told)
   w.start = at
   // said to move, at rest at its own end; a frame owed to show it
