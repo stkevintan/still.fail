@@ -28,6 +28,7 @@ import { codexQuotaFailure } from "../../../client/core-ts/src/codex-quota.ts";
 import { claudeHeaders, claudeResets, type QuotaReset, USAGE_PATH } from "./claude-reset.ts";
 import { unanswered } from "../ops/unanswered.ts";
 import { agyQuota } from "./agy-quota.ts";
+import { copilotToken } from "../agents/copilot.ts";
 import { DEFAULT_SERVICES, serviceOf, type ServiceRegistry } from "./services.ts";
 
 type Json = any;
@@ -316,6 +317,7 @@ export async function checkQuota(profile: Profile, env: Env, codexRateLimits: Co
     // Nor does the Devin CLI say its account's quota to a program (only its own /usage shows it).
     if (kind === "subscription" && profile.runtime === "devin") return quota("unsupported", [], tr(lang, "station.quota.devinUnsupported"));
     if (kind === "subscription" && profile.runtime === "agy") return await agyQuota(profile.home, { ...env, ...(isObject(profile.env) ? profile.env : {}) }, urls, lang, "agy", profile.directQuota !== false);
+    if (kind === "subscription" && profile.runtime === "copilot") return await copilotQuota(profile, lang);
     if (kind === "subscription" && profile.runtime === "claude") {
       try {
         return await claudeWithRefresh(env, profile.machine === true ? null : profile.home, urls, lang, claudeVersion);
@@ -345,6 +347,30 @@ export async function checkQuota(profile: Profile, env: Env, codexRateLimits: Co
   } catch (e) {
     return failed(e, lang);
   }
+}
+
+
+/// GitHub Copilot's allowance: the premium-request window its account reports (chat and completions may be unlimited,
+/// which no window shows). `quota_reset_date` is a date, not a time: its end is when the month's requests come back.
+async function copilotQuota(profile: Profile, lang: Lang): Promise<ProfileQuota> {
+  const token = copilotToken(profile);
+  if (token === undefined) return quota("unsupported", [], tr(lang, "station.profile.signedOut"));
+  const answer = await fetch("https://api.github.com/copilot_internal/user", {
+    headers: { authorization: `token ${token}`, accept: "application/json", "user-agent": "stillfail-station" },
+  });
+  if (!answer.ok) return refused("GitHub Copilot", answer, lang);
+  const body = (await answer.json().catch(() => null)) as Json;
+  const snap = body?.quota_snapshots?.premium_interactions;
+  if (snap === undefined || snap === null) return quota("unsupported", [], null);
+  const left = typeof snap.percent_remaining === "number" ? Math.max(0, Math.min(100, snap.percent_remaining)) : null;
+  if (left === null) return quota("unsupported", [], null);
+  const date = typeof body.quota_reset_date === "string" ? Date.parse(`${body.quota_reset_date}T23:59:59Z`) : NaN;
+  const q = quota("ok", [{ label: tr(lang, "station.quota.copilotPremium"), usedPercent: 100 - left, resetsAt: Number.isFinite(date) ? date : null }], null);
+  if (typeof body.copilot_plan === "string" && body.copilot_plan !== "") q.plan = body.copilot_plan;
+  const remaining = typeof snap.quota_remaining === "number" ? snap.quota_remaining : typeof snap.remaining === "number" ? snap.remaining : null;
+  const entitlement = typeof snap.entitlement === "number" ? snap.entitlement : typeof snap.overage_entitlement === "number" ? snap.overage_entitlement : null;
+  if (remaining !== null) q.credits = { hasCredits: true, unlimited: snap.unlimited === true, balance: entitlement !== null ? `${remaining} / ${entitlement}` : String(remaining) };
+  return q;
 }
 
 async function planQuota(url: string, key: string, windowsOf: (body: unknown) => QuotaWindow[], lang: Lang): Promise<ProfileQuota> {
