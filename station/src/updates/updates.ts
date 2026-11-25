@@ -757,6 +757,8 @@ export class Updates {
 
   private async readRuntime(kind: Kind): Promise<Item> {
     if (kind === "cursor") return this.readCursor();
+    // Copilot runs in-process through the SDK bundled with the station: there is no CLI to find or install.
+    if (kind === "copilot") return { ...empty(), installed: true, version: null, latest: null, how: null, note: { key: "station.updates.copilotBundled" } };
     const env = await withShellCommand(kindCommand(kind), this.env);
     const found = await findCommandSoon(kindCommand(kind), env);
     let version: string | null = null;

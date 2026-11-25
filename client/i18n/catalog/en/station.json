@@ -889,5 +889,6 @@
   "station.updates.overrideAutoRefused": "Auto-update cannot be enabled while running a local override; set wait conditions or restore the official release first",
   "station.login.copilotFailed": "Couldn't sign in to GitHub Copilot: {error}",
   "station.login.copilotExpired": "The code has expired; sign in again",
-  "station.login.copilotDenied": "Authorization was denied"
+  "station.login.copilotDenied": "Authorization was denied",
+  "station.updates.copilotBundled": "Bundled with the station (GitHub Copilot SDK); no separate CLI is needed."
 }
