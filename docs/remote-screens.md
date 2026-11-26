@@ -310,7 +310,7 @@ input and output, ended as its input is). One that ends by itself (the display w
 graphics driver started again, a crash) is started again and the view goes on from a key frame with its config; past
 three times a minute the view ends. Windows.Graphics.Capture captures the main display (the cursor left out of a video, drawn in a JPEG; no
 yellow border on Windows 11; a picture where nothing changed, by its dirty regions on 11 24H2 on, is not a new one); the
-GPU's video processor scales it into `maxWidth`×`maxHeight` as NV12; Media Foundation encodes H.265 (when the client takes it and the
+GPU's video processor scales it into `maxWidth`×`maxHeight` as NV12 (pixel shaders where the driver has none: Microsoft's Basic Render Driver on a Windows 365 Cloud PC or a VM without a GPU); Media Foundation encodes H.265 (when the client takes it and the
 hardware has an HEVC encoder) or H.264 on the hardware encoder (its MFT given the D3D11 textures; Microsoft's software
 encoder where there is none) with low latency
 (constrained baseline, no B-frames, the parameter sets taken out of band into the avcC), a key frame on request; a view

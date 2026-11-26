@@ -46,7 +46,7 @@
 //
 // Windows.Graphics.Capture captures the main display (the cursor drawn in, no border), a picture only when the screen
 // changed (an HDR display's as FP16, made SDR by a pixel shader: hdr.rs); the GPU's video processor scales it into the
-// view's bounds as NV12 (or BGRA for a JPEG); Media Foundation encodes H.264 on the hardware encoder (the software one
+// view's bounds as NV12 (or BGRA for a JPEG), pixel shaders where it has none (shade.rs); Media Foundation encodes H.264 on the hardware encoder (the software one
 // where there is none), low latency, no B-frames; WIC makes the JPEGs. SendInput posts the input. While a view is open
 // the display is kept on.
 
@@ -79,6 +79,8 @@ mod region;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod resolution;
 mod scale;
+#[cfg(windows)]
+mod shade;
 #[cfg(windows)]
 mod view;
 

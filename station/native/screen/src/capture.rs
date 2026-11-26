@@ -22,8 +22,9 @@ use windows::core::{Interface, Result};
 pub struct Gpu {
     pub device: ID3D11Device,
     pub context: ID3D11DeviceContext,
-    video: ID3D11VideoDevice,
-    vcontext: ID3D11VideoContext,
+    /// The video processor's device and context: none where the driver has none (Microsoft's Basic Render Driver, a
+    /// Windows 365 Cloud PC's or a VM's without a GPU), where pixel shaders scale instead (shade.rs).
+    video: Option<(ID3D11VideoDevice, ID3D11VideoContext)>,
 }
 
 impl Gpu {
@@ -51,9 +52,25 @@ impl Gpu {
                 let _ = guarded.SetMultithreadProtected(true);
             }
         }
-        let video = device.cast::<ID3D11VideoDevice>()?;
-        let vcontext = context.cast::<ID3D11VideoContext>()?;
-        Ok(Gpu { device, context, video, vcontext })
+        let video = device.cast::<ID3D11VideoDevice>().and_then(|v| Ok((v, context.cast::<ID3D11VideoContext>()?))).ok();
+        Ok(Gpu { device, context, video })
+    }
+
+    /// Whether it is a GPU's, with a video processor (and so, it may be, an encoder): not Microsoft's software one.
+    #[cfg(test)]
+    pub fn hardware(&self) -> bool {
+        self.video.is_some()
+    }
+
+    /// A device on WARP (Windows' software GPU, no display needed) without its video processor: as a machine with none.
+    #[cfg(test)]
+    pub fn warp() -> Gpu {
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
+        let (mut device, mut context) = (None, None);
+        unsafe {
+            D3D11CreateDevice(None, D3D_DRIVER_TYPE_WARP, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, Some(&[D3D_FEATURE_LEVEL_11_0]), D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)).unwrap();
+        }
+        Gpu { device: device.unwrap(), context: context.unwrap(), video: None }
     }
 
     pub fn texture(&self, width: u32, height: u32, format: DXGI_FORMAT, bind: D3D11_BIND_FLAG) -> Result<ID3D11Texture2D> {
@@ -222,23 +239,44 @@ impl Drop for Capture {
     }
 }
 
-/// The video processor from a BGRA picture of one size to a texture of another, NV12 (BT.709, studio range: what the
-/// encoder takes) or BGRA.
+/// A BGRA picture of one size scaled into a texture of another, NV12 (BT.709, studio range: what the encoder takes) or
+/// BGRA: by the GPU's video processor, or where there is none by pixel shaders (shade.rs).
 pub struct Scaler {
     pub from: (u32, u32),
     /// The part of the picture scaled (left, top, width, height in its pixels): all of it, or a part framed alone.
     crop: (u32, u32, u32, u32),
     pub to: (u32, u32),
     pub format: DXGI_FORMAT,
-    enumerator: ID3D11VideoProcessorEnumerator,
-    processor: ID3D11VideoProcessor,
+    way: Way,
     /// Its outputs, used in turn (the encoder may still read the one before).
-    outputs: Vec<(ID3D11Texture2D, ID3D11VideoProcessorOutputView)>,
+    outputs: Vec<ID3D11Texture2D>,
     turn: usize,
+}
+
+enum Way {
+    Processor { enumerator: ID3D11VideoProcessorEnumerator, processor: ID3D11VideoProcessor, views: Vec<ID3D11VideoProcessorOutputView> },
+    Shader(super::shade::Shade),
 }
 
 impl Scaler {
     pub fn new(gpu: &Gpu, from: (u32, u32), to: (u32, u32), format: DXGI_FORMAT) -> Result<Scaler> {
+        let mut outputs = Vec::new();
+        for _ in 0..if format == DXGI_FORMAT_NV12 { 2 } else { 1 } {
+            // The encoder's own bind flag where the driver takes it (some hardware encoders want it), else without.
+            outputs.push(if format == DXGI_FORMAT_NV12 {
+                gpu.texture(to.0, to.1, format, D3D11_BIND_RENDER_TARGET | D3D11_BIND_VIDEO_ENCODER).or_else(|_| gpu.texture(to.0, to.1, format, D3D11_BIND_RENDER_TARGET))?
+            } else {
+                gpu.texture(to.0, to.1, format, D3D11_BIND_RENDER_TARGET)?
+            });
+        }
+        let way = match gpu.video.as_ref() {
+            Some((video, vcontext)) => Scaler::processor(video, vcontext, &outputs, from, to, format)?,
+            None => Way::Shader(super::shade::Shade::new(&gpu.device, format)?),
+        };
+        Ok(Scaler { from, crop: (0, 0, from.0, from.1), to, format, way, outputs, turn: 0 })
+    }
+
+    fn processor(video: &ID3D11VideoDevice, vcontext: &ID3D11VideoContext, outputs: &[ID3D11Texture2D], from: (u32, u32), to: (u32, u32), format: DXGI_FORMAT) -> Result<Way> {
         let rate = DXGI_RATIONAL { Numerator: 60, Denominator: 1 };
         let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
@@ -250,62 +288,63 @@ impl Scaler {
             OutputHeight: to.1,
             Usage: D3D11_VIDEO_USAGE_OPTIMAL_QUALITY,
         };
-        let enumerator = unsafe { gpu.video.CreateVideoProcessorEnumerator(&content)? };
-        let processor = unsafe { gpu.video.CreateVideoProcessor(&enumerator, 0)? };
+        let enumerator = unsafe { video.CreateVideoProcessorEnumerator(&content)? };
+        let processor = unsafe { video.CreateVideoProcessor(&enumerator, 0)? };
         unsafe {
             let whole = |w: u32, h: u32| RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 };
-            gpu.vcontext.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-            gpu.vcontext.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
-            gpu.vcontext.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&whole(from.0, from.1)));
-            gpu.vcontext.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&whole(to.0, to.1)));
-            gpu.vcontext.VideoProcessorSetOutputTargetRect(&processor, true, Some(&whole(to.0, to.1)));
-            if let Ok(spaces) = gpu.vcontext.cast::<ID3D11VideoContext1>() {
+            vcontext.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+            vcontext.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
+            vcontext.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&whole(from.0, from.1)));
+            vcontext.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&whole(to.0, to.1)));
+            vcontext.VideoProcessorSetOutputTargetRect(&processor, true, Some(&whole(to.0, to.1)));
+            if let Ok(spaces) = vcontext.cast::<ID3D11VideoContext1>() {
                 spaces.VideoProcessorSetStreamColorSpace1(&processor, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
                 spaces.VideoProcessorSetOutputColorSpace1(&processor, if format == DXGI_FORMAT_NV12 { DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709 } else { DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 });
             }
         }
-        let mut outputs = Vec::new();
-        for _ in 0..if format == DXGI_FORMAT_NV12 { 2 } else { 1 } {
-            // The encoder's own bind flag where the driver takes it (some hardware encoders want it), else without.
-            let texture = if format == DXGI_FORMAT_NV12 {
-                gpu.texture(to.0, to.1, format, D3D11_BIND_RENDER_TARGET | D3D11_BIND_VIDEO_ENCODER).or_else(|_| gpu.texture(to.0, to.1, format, D3D11_BIND_RENDER_TARGET))?
-            } else {
-                gpu.texture(to.0, to.1, format, D3D11_BIND_RENDER_TARGET)?
-            };
+        let mut views = Vec::new();
+        for texture in outputs {
             let desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
                 ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
                 Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } },
             };
             let mut view = None;
-            unsafe { gpu.video.CreateVideoProcessorOutputView(&texture, &enumerator, &desc, Some(&mut view))? };
-            outputs.push((texture, view.unwrap()));
+            unsafe { video.CreateVideoProcessorOutputView(texture, &enumerator, &desc, Some(&mut view))? };
+            views.push(view.unwrap());
         }
-        Ok(Scaler { from, crop: (0, 0, from.0, from.1), to, format, enumerator, processor, outputs, turn: 0 })
+        Ok(Way::Processor { enumerator, processor, views })
     }
 
     /// `crop` of `source` (left, top, width, height in its pixels) scaled into the next output, which it returns.
     pub fn run(&mut self, gpu: &Gpu, source: &ID3D11Texture2D, crop: (u32, u32, u32, u32)) -> Result<ID3D11Texture2D> {
-        if crop != self.crop {
-            self.crop = crop;
-            let (x, y, w, h) = crop;
-            let rect = RECT { left: x as i32, top: y as i32, right: (x + w) as i32, bottom: (y + h) as i32 };
-            unsafe { gpu.vcontext.VideoProcessorSetStreamSourceRect(&self.processor, 0, true, Some(&rect)) };
-        }
-        let desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
-            FourCC: 0,
-            ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
-            Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 } },
-        };
-        let mut input = None;
-        unsafe { gpu.video.CreateVideoProcessorInputView(source, &self.enumerator, &desc, Some(&mut input))? };
-        let (texture, view) = &self.outputs[self.turn];
+        let turn = self.turn;
         self.turn = (self.turn + 1) % self.outputs.len();
-        let stream = D3D11_VIDEO_PROCESSOR_STREAM { Enable: true.into(), pInputSurface: std::mem::ManuallyDrop::new(input), ..Default::default() };
-        let streams = [stream];
-        let done = unsafe { gpu.vcontext.VideoProcessorBlt(&self.processor, view, 0, &streams) };
-        let [stream] = streams;
-        drop(std::mem::ManuallyDrop::into_inner(stream.pInputSurface));
-        done?;
+        let texture = &self.outputs[turn];
+        match &mut self.way {
+            Way::Shader(shade) => shade.run(&gpu.device, &gpu.context, source, crop, texture, self.to)?,
+            Way::Processor { enumerator, processor, views } => {
+                let (video, vcontext) = gpu.video.as_ref().unwrap();
+                if crop != self.crop {
+                    self.crop = crop;
+                    let (x, y, w, h) = crop;
+                    let rect = RECT { left: x as i32, top: y as i32, right: (x + w) as i32, bottom: (y + h) as i32 };
+                    unsafe { vcontext.VideoProcessorSetStreamSourceRect(&*processor, 0, true, Some(&rect)) };
+                }
+                let desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                    FourCC: 0,
+                    ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                    Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 } },
+                };
+                let mut input = None;
+                unsafe { video.CreateVideoProcessorInputView(source, &*enumerator, &desc, Some(&mut input))? };
+                let stream = D3D11_VIDEO_PROCESSOR_STREAM { Enable: true.into(), pInputSurface: std::mem::ManuallyDrop::new(input), ..Default::default() };
+                let streams = [stream];
+                let done = unsafe { vcontext.VideoProcessorBlt(&*processor, &views[turn], 0, &streams) };
+                let [stream] = streams;
+                drop(std::mem::ManuallyDrop::into_inner(stream.pInputSurface));
+                done?;
+            }
+        }
         Ok(texture.clone())
     }
 }
